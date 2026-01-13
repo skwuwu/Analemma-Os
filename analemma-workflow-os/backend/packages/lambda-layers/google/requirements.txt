@@ -1,0 +1,5 @@
+## google-api-python-client has been moved to an image-based Lambda (layers/google_api_client)
+# to avoid inflating shared layers. Keep this file minimal for lightweight google helpers.
+# If you need additional google low-level libs here, add them carefully.
+
+

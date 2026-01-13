@@ -1,0 +1,119 @@
+import pytest
+import json
+import time
+from src.handlers.core.segment_runner_handler import _extract_segments_from_partial_json, SecurityError, _evaluate_condition
+
+def test_json_parsing_resilience():
+    """
+    Test _extract_segments_from_partial_json with fragmented JSON inputs.
+    """
+    # Complete JSON hidden in garbage
+    bad_prefix = "some garbage data... "
+    valid_json = '{"id": 1, "value": "test"}'
+    bad_suffix = " ...more garbage"
+    
+    content = bad_prefix + valid_json + bad_suffix
+    
+    # We are looking for index 0 (the first object found)
+    segments = _extract_segments_from_partial_json(content, target_index=0)
+    
+    assert len(segments) > 0
+    assert segments[0]['id'] == 1
+
+def test_json_parsing_fragmented():
+    """
+    Test partial JSON extraction where the object list is cut off.
+    """
+    # Simulate a cut-off streaming buffer
+    content = '[{"id": 1}, {"id": 2}, {"id": 3'
+    
+    # If we want index 1 ("id": 2)
+    segments = _extract_segments_from_partial_json(content, target_index=1)
+    
+    assert len(segments) > 0
+    # Since index 0 is also within range (abs(0-1)<=5), it might be returned first.
+    # We check if the target segment (id=2) is present.
+    found = any(s['id'] == 2 for s in segments)
+    assert found is True
+
+def test_deeply_nested_json():
+    """
+    [Edge Case] Validate parser resilience with deep nesting.
+    """
+    depth = 100
+    nested = {"data": "value"}
+    for _ in range(depth):
+        nested = {"level": nested}
+    
+    json_str = json.dumps(nested)
+    
+    # Although _extract_segments_from_partial_json looks for objects in a string,
+    # let's modify the input to match what the function expects (stream of chars).
+    # The function seems to count braces.
+    
+    segments = _extract_segments_from_partial_json(json_str, target_index=0)
+    assert len(segments) > 0
+    # It should extract the top level object
+    extracted = segments[0]
+    # Check depth
+    current = extracted
+    count = 0
+    while "level" in current:
+        current = current["level"]
+        count += 1
+    assert count == depth
+
+def test_security_checks():
+    """
+    Test security checks in _evaluate_condition (if used) or similar logic.
+    We simulate checking condition evaluation.
+    """
+    # Test valid condition
+    assert _evaluate_condition("$.score > 50", {"score": 60}) is True
+    
+    # Test invalid operator (should default to safe failure or return False)
+    assert _evaluate_condition("$.score >>> 50", {"score": 60}) is False
+    
+    # Test type mismatch handling
+    assert _evaluate_condition("$.score > 50", {"score": "not_a_number"}) is False
+
+def test_performance_large_payload(large_json_payload):
+    """
+    [Benchmark] Simulate 50MB+ dummy data parsing performance.
+    """
+    # We will test _extract_segments_from_partial_json performance on a large string
+    # or just json.loads if that's the bottleneck being tested.
+    # The user asked to ensure parsing time is within limits.
+    
+    start_time = time.time()
+    
+    # Since large_json_payload is a valid JSON list string
+    # Let's try to extract a segment from the middle of it using the partial parser
+    # This simulates the "Enhanced Fallback" partial processing logic
+    
+    target_idx = 10000 # Middle
+    
+    # To test the partial parser properly we might need a slice, but let's pass the whole thing
+    # warning: this might be slow if the Python loop implementation is inefficient
+    
+    # NOTE: The regex/loop based parser in _extract_segments_from_partial_json is O(N) but in Python.
+    # 50MB might take a few seconds.
+    
+    # Let's take a substring around the target to assume the logic that slices it first worked.
+    # Simulating what _load_partition_map_partial_processing does:
+    # "read_size = min(estimated_segment_size * 10, 5 * 1024 * 1024)" -> 5MB
+    
+    size_limit = 5 * 1024 * 1024
+    middle = len(large_json_payload) // 2
+    start = max(0, middle - size_limit // 2)
+    end = min(len(large_json_payload), middle + size_limit // 2)
+    
+    chunk = large_json_payload[start:end]
+    
+    # We don't know the exact index in this chunk relative to the start, but let's just assert it runs fast
+    _extract_segments_from_partial_json(chunk, target_index=0)
+    
+    duration = time.time() - start_time
+    
+    # Threshold: e.g., 2 seconds for 5MB chunk processing
+    assert duration < 2.0, f"Parsing took too long: {duration}s"

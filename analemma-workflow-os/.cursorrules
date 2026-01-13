@@ -1,0 +1,58 @@
+# Project Rules & System Prompt
+
+## 0. Documentation & Architecture Policy (CRITICAL)
+### 1. Documentation First
+*   **Must Read**: Before making any changes to the codebase, you MUST read the `backend/README.md` file.
+*   **Respect Architecture**: All modifications must align with the existing architecture and security implementation details documented in the README. Do NOT implement changes that contradict the documented patterns (e.g., Trust Model, Dual-Read Pattern) without explicit justification.
+
+### 2. Change Approval Process
+*   **Non-Destructive**: Changes that enhance or fix the code without altering the core architecture typically do not require special approval beyond standard review.
+*   **Destructive/Architectural Changes**: If a proposed change is unavoidable but conflicts with the existing implementation described in the README (e.g., changing auth flow, database schema, or key infrastructure), you **MUST** explicitly request user approval before proceeding.
+    *   Explain *why* the deviation is necessary.
+    *   Explain the potential impact on the existing system.
+
+## 1. Terminal & Environment
+- **OS**: Windows (PowerShell)
+- **Encoding**: You MUST prefix ALL terminal commands with `chcp 65001 &&` to prevent encoding issues (Mojibake).
+  - Example: `chcp 65001 && sam build`
+- **Python**: Always use `python -m pip` instead of `pip` to ensure the correct Python interpreter is used.
+  - Example: `chcp 65001 && python -m pip install -r requirements.txt`
+
+## 2. Git & Version Control
+- **Push Policy**: **STRICTLY FORBIDDEN** to `git push` without explicit, direct user permission in the current turn.
+- **Commits**: You may stage and commit changes locally (`git commit`) after verification.
+
+## 3. Deployment & SAM Usage
+- **GitHub Actions**: The project uses GitHub Actions for CI/CD. To prevent state conflicts, **DO NOT** attempt to deploy directly using `sam deploy` unless explicitly instructed.
+- **SAM Commands**: **DO NOT** execute arbitrary `sam` commands (e.g., `sam build`, `sam local invoke`) without explicit user permission.
+- **Backend**: AWS SAM (Serverless Application Model).
+- **Frontend**: React (Vite).
+
+## 4. Project Structure & Integration
+- **Root**: `analemma-fullstack-antigravity`
+- **Backend**: `backend/` (contains `template.yaml`)
+- **Frontend**: `frontend/apps/web/`
+- **Monorepo Awareness**: Always consider the impact of backend changes on the frontend (and vice versa). Ensure API contracts and types remain compatible across the monorepo.
+
+## 5. Communication & Workflow
+- **Language**: Korean (User's preferred language).
+- **Style**: Concise, professional, and helpful.
+- **Protocol**: When the user asks a question or requests a task, **ALWAYS** provide an answer or plan and **WAIT** for user confirmation before modifying code or executing commands. **DO NOT** jump straight into execution.
+- **Completion Report**: Upon completing a task, provide a summary explaining **WHAT** was changed, **HOW** it was implemented, and the **RATIONALE** (Why) behind the changes.
+
+## 6. Code Quality & Standards
+- **Python (Backend)**:
+  - Strictly follow **PEP 8**.
+  - Use **Type Hints** (`typing`) for all function arguments and return values.
+  - Use `boto3` for AWS interactions and handle `ClientError` explicitly.
+  - **No Hardcoding**: NEVER hardcode API Keys or Secrets. Always use `os.environ`.
+- **React (Frontend)**:
+  - Use **Functional Components** and Hooks only.
+  - **State Management**: Use `TanStack Query` (React Query) for server state and `Context API`/`Zustand` for global UI state.
+  - **Styling**: Use `Tailwind CSS`. Avoid inline styles.
+  - **Type Safety**: Ensure API response types in Frontend match Backend Pydantic models.
+
+## 7. Debugging & Error Handling
+- **Root Cause First**: When an error occurs, do not just provide a fix. Explain **WHY** it happened (Root Cause Analysis) first.
+- **Glass Box Philosophy**: Error messages and logs should be transparent and descriptive to help "Glass Box" observability.
+- **Verification**: After suggesting a fix, provide a specific CLI command or method to verify that the fix works.

@@ -1,0 +1,8 @@
+node_modules/
+.git/
+.venv/
+venv/
+.aws-sam/
+frontend/
+docs/
+test_local/

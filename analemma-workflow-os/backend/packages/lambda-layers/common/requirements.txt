@@ -1,0 +1,12 @@
+boto3
+botocore
+croniter
+
+# If additional common (small) libs are required by many functions, add
+# them here. Heavy ML/LLM-related packages were moved to layers/llm.
+
+# Runtime dependencies required by LFU handler for JWT validation and streaming
+# (placed here so they can be shared across functions via a Lambda Layer).
+requests
+python-jose
+aws-lambda-powertools

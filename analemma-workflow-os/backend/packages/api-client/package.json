@@ -1,0 +1,25 @@
+{
+  "name": "@skwuwu/api-client",
+  "version": "0.1.0",
+  "description": "Auto-generated Workflow API client from OpenAPI spec.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "generate": "openapi-generator-cli generate -i ../openapi.yaml -g typescript-axios -o src",
+    "build": "tsc",
+    "prepublishOnly": "npm run generate && npm run build"
+  },
+  "author": "skwuwu",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com/"
+  },
+  "dependencies": {
+    "@openapitools/openapi-generator-cli": "^2.25.0",
+    "axios": "^1.6.0"
+  },
+  "devDependencies": {
+    "openapi-generator-cli": "^1.0.0",
+    "typescript": "^5.3.3"
+  }
+}

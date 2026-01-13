@@ -1,1 +1,1014 @@
-{}
+{
+  "Comment": "Distributed Map 기반 대용량 워크플로우 처리 - 25,000개 Event History 제한 해결",
+  "StartAt": "CheckForInjectedConfig",
+  "States": {
+    "CheckForInjectedConfig": {
+      "Type": "Choice",
+      "Comment": "MOCK_MODE가 true이고 테스트 설정이 있으면 DynamoDB 우회",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.MOCK_MODE",
+              "StringEquals": "true"
+            },
+            {
+              "Variable": "$.test_workflow_config",
+              "IsPresent": true
+            }
+          ],
+          "Next": "InitializeStateData"
+        }
+      ],
+      "Default": "CheckForExistingExecution"
+    },
+    "CheckForExistingExecution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:getItem",
+      "Comment": "Direct SDK Integration: DynamoDB에서 직접 idempotency_key 조회",
+      "Parameters": {
+        "TableName": "${IdempotencyTable}",
+        "Key": {
+          "idempotency_key": {
+            "S.$": "$.idempotency_key"
+          }
+        },
+        "ProjectionExpression": "executionArn, #st",
+        "ExpressionAttributeNames": {
+          "#st": "status"
+        }
+      },
+      "ResultPath": "$.dynamodb_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "DynamoDB.ServiceException",
+            "DynamoDB.ThrottlingException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.idempotency_error",
+          "Next": "HandleIdempotencyFailure"
+        }
+      ],
+      "Next": "CheckIfItemExists"
+    },
+    "CheckIfItemExists": {
+      "Type": "Choice",
+      "Comment": "DynamoDB 응답에 Item이 있는지 확인 (없으면 새 실행)",
+      "Choices": [
+        {
+          "Variable": "$.dynamodb_result.Item",
+          "IsPresent": true,
+          "Next": "ExtractExistingExecutionInfo"
+        }
+      ],
+      "Default": "InitializeStateData"
+    },
+    "ExtractExistingExecutionInfo": {
+      "Type": "Pass",
+      "Comment": "기존 실행 정보 추출",
+      "Parameters": {
+        "idempotency_check_result": {
+          "existing_execution_arn.$": "$.dynamodb_result.Item.executionArn.S",
+          "existing_execution_status.$": "$.dynamodb_result.Item.status.S"
+        }
+      },
+      "ResultPath": "$.idempotency_check_result",
+      "Next": "HandleExistingExecution"
+    },
+    "HandleIdempotencyFailure": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.ALLOW_UNSAFE_EXECUTION",
+          "BooleanEquals": true,
+          "Next": "InitializeStateData"
+        }
+      ],
+      "Default": "FailIdempotencyUnavailable"
+    },
+    "FailIdempotencyUnavailable": {
+      "Type": "Fail",
+      "Error": "IdempotencyCheckFailed",
+      "Cause": "Unable to verify execution uniqueness"
+    },
+    "HandleExistingExecution": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.idempotency_check_result.existing_execution_arn",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.idempotency_check_result.existing_execution_status",
+              "StringEquals": "RUNNING"
+            }
+          ],
+          "Next": "FailDuplicateExecution"
+        },
+        {
+          "And": [
+            {
+              "Variable": "$.idempotency_check_result.existing_execution_arn",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.idempotency_check_result.existing_execution_status",
+              "StringEquals": "SUCCEEDED"
+            }
+          ],
+          "Next": "SucceedDuplicateExecution"
+        }
+      ],
+      "Default": "InitializeStateData"
+    },
+    "FailDuplicateExecution": {
+      "Type": "Fail",
+      "Error": "DuplicateExecution",
+      "Cause": "An execution with the same idempotency key is already running"
+    },
+    "SucceedDuplicateExecution": {
+      "Type": "Succeed",
+      "Comment": "An execution with the same idempotency key already succeeded"
+    },
+    "InitializeStateData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "워크플로우 상태 초기화 및 파티션 맵 생성",
+      "Parameters": {
+        "FunctionName": "${InitializeStateDataArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "input.$": "$"
+        }
+      },
+      "ResultSelector": {
+        "workflow_config.$": "$.Payload.workflow_config",
+        "current_state.$": "$.Payload.current_state",
+        "input.$": "$.Payload.input",
+        "state_s3_path.$": "$.Payload.state_s3_path",
+        "state_history.$": "$.Payload.state_history",
+        "ownerId.$": "$.Payload.ownerId",
+        "workflowId.$": "$.Payload.workflowId",
+        "segment_to_run.$": "$.Payload.segment_to_run",
+        "idempotency_key.$": "$.Payload.idempotency_key",
+        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
+        "total_segments.$": "$.Payload.total_segments",
+        "partition_map.$": "$.Payload.partition_map",
+        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
+        "segment_manifest.$": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode.$": "$.Payload.distributed_mode",
+        "state_durations.$": "$.Payload.state_durations",
+        "last_update_time.$": "$.Payload.last_update_time",
+        "start_time.$": "$.Payload.start_time",
+        "max_concurrency.$": "$.Payload.max_concurrency",
+        "loop_counter.$": "$.Payload.loop_counter",
+        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
+        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
+        "llm_segments.$": "$.Payload.llm_segments",
+        "hitp_segments.$": "$.Payload.hitp_segments"
+      },
+      "ResultPath": "$.state_data",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.init_error",
+          "Next": "HandleInitFailure"
+        }
+      ],
+      "Next": "CheckDistributedMapRequired"
+    },
+    "HandleInitFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "[Fix] InitializeStateData 실패 시 원본 입력에서 ownerId 추출",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow.lifecycle",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.ownerId",
+              "workflowId.$": "$.workflowId",
+              "status": "FAILED",
+              "notification_type": "execution_progress",
+              "message": "Workflow initialization failed",
+              "error.$": "$.init_error"
+            }
+          }
+        ]
+      },
+      "Next": "InitializationFailed"
+    },
+    "InitializationFailed": {
+      "Type": "Fail",
+      "Error": "InitializationFailed",
+      "Cause": "Failed to initialize workflow state data"
+    },
+    "CheckDistributedMapRequired": {
+      "Type": "Choice",
+      "Comment": "대용량 병렬 처리 필요 시 Distributed Map 사용",
+      "Choices": [
+        {
+          "Variable": "$.state_data.total_segments",
+          "NumericGreaterThan": 300,
+          "Next": "PrepareDistributedExecution"
+        },
+        {
+          "Variable": "$.state_data.max_concurrency",
+          "NumericGreaterThan": 50,
+          "Next": "PrepareDistributedExecution"
+        }
+      ],
+      "Default": "NotifyWorkflowStarted"
+    },
+    "PrepareDistributedExecution": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "Distributed Map을 위한 세그먼트 그룹화 및 S3 업로드",
+      "Parameters": {
+        "FunctionName": "${PrepareDistributedExecutionArn}",
+        "Payload": {
+          "state_data.$": "$.state_data",
+          "chunk_size": 100,
+          "max_chunks": 100,
+          "state_bucket": "${WorkflowStateBucket}"
+        }
+      },
+      "ResultSelector": {
+        "chunks_bucket.$": "$.Payload.chunks_bucket",
+        "chunks_key.$": "$.Payload.chunks_key",
+        "total_chunks.$": "$.Payload.total_chunks",
+        "use_s3_reader.$": "$.Payload.use_s3_reader"
+      },
+      "ResultPath": "$.distributed_config",
+      "Next": "NotifyDistributedWorkflowStarted"
+    },
+    "NotifyDistributedWorkflowStarted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "분산 워크플로우 시작 알림",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow.lifecycle",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "total_segments.$": "$.state_data.total_segments",
+              "total_chunks.$": "$.distributed_config.total_chunks",
+              "notification_type": "execution_progress",
+              "status": "DISTRIBUTED_EXECUTION_STARTED",
+              "message": "Large workflow started with Distributed Map processing"
+            }
+          }
+        ]
+      },
+      "ResultPath": "$.notification_result",
+      "Next": "ExecuteDistributedSegments"
+    },
+    "ExecuteDistributedSegments": {
+      "Type": "Map",
+      "Comment": "[Critical Fix] Distributed Map - 상태 연속성 및 ASL 규격 준수",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "LoadLatestStatePointer",
+        "States": {
+          "LoadLatestStatePointer": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "[Fix #1] 상태 연속성 - 이전 청크의 latest_state.json 로드",
+            "Parameters": {
+              "FunctionName": "${LoadLatestStateArn}",
+              "Payload": {
+                "chunk_data.$": "$",
+                "execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflow_id.$": "$$.Execution.Input.state_data.workflowId",
+                "state_bucket": "${WorkflowStateBucket}"
+              }
+            },
+            "ResultSelector": {
+              "previous_state.$": "$.Payload.previous_state",
+              "latest_segment_id.$": "$.Payload.latest_segment_id",
+              "state_loaded.$": "$.Payload.state_loaded"
+            },
+            "ResultPath": "$.state_continuity",
+            "Next": "ProcessSegmentChunk"
+          },
+          "ProcessSegmentChunk": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "청크 처리 - 이전 상태 주입으로 연속성 보장",
+            "Parameters": {
+              "FunctionName": "${ProcessSegmentChunkArn}",
+              "Payload": {
+                "chunk_data.$": "$",
+                "previous_state.$": "$.state_continuity.previous_state",
+                "workflow_config.$": "$$.Execution.Input.state_data.workflow_config",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflowId.$": "$$.Execution.Input.state_data.workflowId",
+                "execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                "parent_idempotency_key.$": "$$.Execution.Input.state_data.idempotency_key",
+                "state_bucket": "${WorkflowStateBucket}",
+                "max_concurrency.$": "$$.Execution.Input.state_data.max_concurrency",
+                "partition_map_s3_path.$": "$$.Execution.Input.state_data.partition_map_s3_path",
+                "segment_manifest_s3_path.$": "$$.Execution.Input.state_data.segment_manifest_s3_path",
+                "distributed_mode.$": "$$.Execution.Input.state_data.distributed_mode",
+                "loop_counter.$": "$$.Execution.Input.state_data.loop_counter",
+                "max_loop_iterations.$": "$$.Execution.Input.state_data.max_loop_iterations",
+                "max_branch_iterations.$": "$$.Execution.Input.state_data.max_branch_iterations",
+                "llm_segments.$": "$$.Execution.Input.state_data.llm_segments",
+                "hitp_segments.$": "$$.Execution.Input.state_data.hitp_segments",
+                "quota_reservation_id.$": "$$.Execution.Input.state_data.quota_reservation_id",
+                "state_durations.$": "$$.Execution.Input.state_data.state_durations",
+                "last_update_time.$": "$$.Execution.Input.state_data.last_update_time",
+                "start_time.$": "$$.Execution.Input.state_data.start_time"
+              }
+            },
+            "ResultSelector": {
+              "chunk_result.$": "$.Payload",
+              "chunk_id.$": "$.Payload.chunk_id",
+              "final_state.$": "$.Payload.final_state",
+              "paused_segment_id.$": "$.Payload.paused_segment_id"
+            },
+            "ResultPath": "$.processing_result",
+            "Next": "SaveLatestStatePointer"
+          },
+          "SaveLatestStatePointer": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "[Fix #1] 상태 연속성 - latest_state.json 덮어쓰기",
+            "Parameters": {
+              "FunctionName": "${SaveLatestStateArn}",
+              "Payload": {
+                "chunk_id.$": "$.processing_result.chunk_id",
+                "final_state.$": "$.processing_result.final_state",
+                "execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflow_id.$": "$$.Execution.Input.state_data.workflowId",
+                "state_bucket": "${WorkflowStateBucket}"
+              }
+            },
+            "ResultPath": "$.state_save_result",
+            "Next": "CheckChunkStatus"
+          },
+          "CheckChunkStatus": {
+            "Type": "Choice",
+            "Comment": "HITL 상태 분기",
+            "Choices": [
+              {
+                "Variable": "$.processing_result.chunk_result.status",
+                "StringEquals": "PAUSED_FOR_HITP",
+                "Next": "WaitForDistributedCallback"
+              }
+            ],
+            "Default": "ChunkCompleted"
+          },
+          "WaitForDistributedCallback": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+            "Comment": "[Fix #3] HITL - Standard 타입으로 15분+ 장기 대기 지원",
+            "Parameters": {
+              "FunctionName": "${StoreDistributedTaskTokenArn}",
+              "Payload": {
+                "TaskToken.$": "$$.Task.Token",
+                "chunk_result.$": "$.processing_result.chunk_result",
+                "distributed_context": {
+                  "is_child_execution": true,
+                  "parent_execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                  "chunk_id.$": "$.processing_result.chunk_id",
+                  "paused_segment_id.$": "$.processing_result.paused_segment_id"
+                }
+              }
+            },
+            "ResultPath": "$.callback_result",
+            "Next": "ResumeChunkAfterCallback"
+          },
+          "ResumeChunkAfterCallback": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "[Fix #3] 콜백 후 중단 지점 이후 세그먼트 재계산 및 실행",
+            "Parameters": {
+              "FunctionName": "${ResumeChunkProcessingArn}",
+              "Payload": {
+                "chunk_result.$": "$.processing_result.chunk_result",
+                "callback_result.$": "$.callback_result",
+                "chunk_data.$": "$",
+                "paused_segment_id.$": "$.processing_result.paused_segment_id",
+                "execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflow_id.$": "$$.Execution.Input.state_data.workflowId",
+                "workflow_config.$": "$$.Execution.Input.state_data.workflow_config",
+                "state_bucket": "${WorkflowStateBucket}",
+                "partition_map_s3_path.$": "$$.Execution.Input.state_data.partition_map_s3_path",
+                "segment_manifest_s3_path.$": "$$.Execution.Input.state_data.segment_manifest_s3_path",
+                "distributed_mode.$": "$$.Execution.Input.state_data.distributed_mode",
+                "loop_counter.$": "$$.Execution.Input.state_data.loop_counter",
+                "max_loop_iterations.$": "$$.Execution.Input.state_data.max_loop_iterations",
+                "max_branch_iterations.$": "$$.Execution.Input.state_data.max_branch_iterations",
+                "llm_segments.$": "$$.Execution.Input.state_data.llm_segments",
+                "hitp_segments.$": "$$.Execution.Input.state_data.hitp_segments",
+                "quota_reservation_id.$": "$$.Execution.Input.state_data.quota_reservation_id",
+                "state_durations.$": "$$.Execution.Input.state_data.state_durations",
+                "last_update_time.$": "$$.Execution.Input.state_data.last_update_time",
+                "start_time.$": "$$.Execution.Input.state_data.start_time"
+              }
+            },
+            "ResultSelector": {
+              "chunk_result.$": "$.Payload",
+              "chunk_id.$": "$.Payload.chunk_id",
+              "final_state.$": "$.Payload.final_state",
+              "paused_segment_id.$": "$.Payload.paused_segment_id"
+            },
+            "ResultPath": "$.resume_result",
+            "Next": "SaveResumedStatePointer"
+          },
+          "SaveResumedStatePointer": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "재개 후 상태 저장",
+            "Parameters": {
+              "FunctionName": "${SaveLatestStateArn}",
+              "Payload": {
+                "chunk_id.$": "$.resume_result.chunk_id",
+                "final_state.$": "$.resume_result.final_state",
+                "execution_id.$": "$$.Execution.Input.state_data.idempotency_key",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflow_id.$": "$$.Execution.Input.state_data.workflowId",
+                "state_bucket": "${WorkflowStateBucket}",
+                "is_resumed": true
+              }
+            },
+            "ResultPath": "$.resumed_state_save_result",
+            "Next": "CheckResumedChunkStatus"
+          },
+          "CheckResumedChunkStatus": {
+            "Type": "Choice",
+            "Comment": "재개 후 추가 HITL 필요 여부",
+            "Choices": [
+              {
+                "Variable": "$.resume_result.chunk_result.status",
+                "StringEquals": "PAUSED_FOR_HITP",
+                "Next": "WaitForDistributedCallback"
+              }
+            ],
+            "Default": "ChunkCompleted"
+          },
+          "ChunkCompleted": {
+            "Type": "Pass",
+            "Comment": "[Fix] 청크 처리 완료 - 상태 정보 포함",
+            "Parameters": {
+              "chunk_status": "COMPLETED",
+              "chunk_executed": true
+            },
+            "End": true
+          }
+        }
+      },
+      "ItemReader": {
+        "Resource": "arn:aws:states:::s3:getObject",
+        "ReaderConfig": {
+          "InputType": "JSON"
+        },
+        "Parameters": {
+          "Bucket.$": "$.distributed_config.chunks_bucket",
+          "Key.$": "$.distributed_config.chunks_key"
+        }
+      },
+      "ToleratedFailurePercentage": 5,
+      "MaxConcurrency": 1,
+      "ResultWriter": {
+        "Resource": "arn:aws:states:::s3:putObject",
+        "Parameters": {
+          "Bucket": "${WorkflowStateBucket}",
+          "Prefix": "distributed-results"
+        }
+      },
+      "ResultPath": "$.distributed_results",
+      "Next": "AggregateDistributedResults"
+    },
+    "AggregateDistributedResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "S3에서 분산 실행 결과 집계",
+      "Parameters": {
+        "FunctionName": "${AggregateDistributedResultsArn}",
+        "Payload": {
+          "distributed_results.$": "$.distributed_results",
+          "state_data.$": "$.state_data",
+          "use_s3_results": true
+        }
+      },
+      "ResultPath": "$.final_result",
+      "Next": "CheckAggregationResult"
+    },
+    "CheckAggregationResult": {
+      "Type": "Choice",
+      "Comment": "집계 결과 확인",
+      "Choices": [
+        {
+          "Variable": "$.final_result.Payload.status",
+          "StringEquals": "FAILED",
+          "Next": "NotifyExecutionFailure"
+        }
+      ],
+      "Default": "PrepareDistributedSuccessOutput"
+    },
+    "PrepareDistributedSuccessOutput": {
+      "Type": "Pass",
+      "Comment": "[Fix] 분산 실행 결과를 execution_result 형태로 정규화",
+      "Parameters": {
+        "status.$": "$.final_result.Payload.status",
+        "final_state.$": "$.final_result.Payload.final_state",
+        "final_state_s3_path.$": "$.final_result.Payload.final_state_s3_path",
+        "new_history_logs.$": "$.final_result.Payload.new_history_logs"
+      },
+      "ResultPath": "$.execution_result",
+      "Next": "PublishSucceededEvent"
+    },
+    "NotifyWorkflowStarted": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "일반 워크플로우 시작 알림",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow.lifecycle",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "notification_type": "execution_progress",
+              "status": "RUNNING",
+              "message": "Standard workflow started"
+            }
+          }
+        ]
+      },
+      "ResultPath": "$.notification_result",
+      "Next": "ExecuteSegment"
+    },
+    "ExecuteSegment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "소규모 워크플로우는 기존 방식 유지",
+      "Parameters": {
+        "FunctionName": "${ExecuteSegmentArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "workflow_config.$": "$.state_data.workflow_config",
+          "current_state.$": "$.state_data.current_state",
+          "state_history.$": "$.state_data.state_history",
+          "ownerId.$": "$.state_data.ownerId",
+          "workflowId.$": "$.state_data.workflowId",
+          "segment_to_run.$": "$.state_data.segment_to_run",
+          "idempotency_key.$": "$.state_data.idempotency_key",
+          "quota_reservation_id.$": "$.state_data.quota_reservation_id",
+          "total_segments.$": "$.state_data.total_segments",
+          "partition_map.$": "$.state_data.partition_map",
+          "partition_map_s3_path.$": "$.state_data.partition_map_s3_path",
+          "max_concurrency.$": "$.state_data.max_concurrency",
+          "state_durations.$": "$.state_data.state_durations",
+          "last_update_time.$": "$.state_data.last_update_time",
+          "start_time.$": "$.state_data.start_time"
+        }
+      },
+      "ResultSelector": {
+        "status.$": "$.Payload.status",
+        "final_state.$": "$.Payload.final_state",
+        "final_state_s3_path.$": "$.Payload.final_state_s3_path",
+        "next_segment_to_run.$": "$.Payload.next_segment_to_run",
+        "new_history_logs.$": "$.Payload.new_history_logs",
+        "error_info.$": "$.Payload.error_info",
+        "branches.$": "$.Payload.branches",
+        "segment_type.$": "$.Payload.segment_type"
+      },
+      "ResultPath": "$.execution_result",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 6,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL",
+          "Comment": "[Concurrency Protection] Lambda 429에 대한 강화된 재시도 - 동시성 슬롯 회복 대기"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "NotifyExecutionFailure"
+        }
+      ],
+      "Next": "CheckSegmentStatus"
+    },
+    "CheckSegmentStatus": {
+      "Type": "Choice",
+      "Comment": "세그먼트 실행 상태 확인",
+      "Choices": [
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "FAILED",
+          "Next": "NotifyExecutionFailure"
+        },
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "PARALLEL_GROUP",
+          "Next": "ProcessParallelSegmentsDistributed"
+        },
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "PAUSE",
+          "Next": "WaitForCallback"
+        },
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "PAUSED_FOR_HITP",
+          "Next": "WaitForCallback"
+        }
+      ],
+      "Default": "CheckForNextSegment"
+    },
+    "ProcessParallelSegmentsDistributed": {
+      "Type": "Map",
+      "Comment": "병렬 세그먼트도 Distributed Map으로 처리",
+      "ItemProcessor": {
+        "ProcessorConfig": {
+          "Mode": "DISTRIBUTED",
+          "ExecutionType": "STANDARD"
+        },
+        "StartAt": "ExecuteBranchDistributed",
+        "States": {
+          "ExecuteBranchDistributed": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+              "FunctionName": "${ExecuteBranchArn}",
+              "Payload": {
+                "branch_config.$": "$",
+                "workflow_config.$": "$$.Execution.Input.state_data.workflow_config",
+                "owner_id.$": "$$.Execution.Input.state_data.ownerId",
+                "workflowId.$": "$$.Execution.Input.state_data.workflowId",
+                "idempotency_key.$": "$$.Execution.Input.state_data.idempotency_key",
+                "quota_reservation_id.$": "$$.Execution.Input.state_data.quota_reservation_id",
+                "partition_map.$": "$$.Execution.Input.state_data.partition_map",
+                "partition_map_s3_path.$": "$$.Execution.Input.state_data.partition_map_s3_path",
+                "segment_manifest.$": "$$.Execution.Input.state_data.segment_manifest",
+                "segment_manifest_s3_path.$": "$$.Execution.Input.state_data.segment_manifest_s3_path",
+                "max_concurrency.$": "$$.Execution.Input.state_data.max_concurrency",
+                "distributed_mode.$": "$$.Execution.Input.state_data.distributed_mode",
+                "loop_counter.$": "$$.Execution.Input.state_data.loop_counter",
+                "max_loop_iterations.$": "$$.Execution.Input.state_data.max_loop_iterations",
+                "max_branch_iterations.$": "$$.Execution.Input.state_data.max_branch_iterations",
+                "llm_segments.$": "$$.Execution.Input.state_data.llm_segments",
+                "hitp_segments.$": "$$.Execution.Input.state_data.hitp_segments",
+                "state_durations.$": "$$.Execution.Input.state_data.state_durations",
+                "last_update_time.$": "$$.Execution.Input.state_data.last_update_time",
+                "start_time.$": "$$.Execution.Input.state_data.start_time"
+              }
+            },
+            "End": true
+          }
+        }
+      },
+      "ItemsPath": "$.execution_result.branches",
+      "MaxConcurrency": 1,
+      "ResultPath": "$.parallel_results",
+      "Next": "AggregateParallelResults"
+    },
+    "AggregateParallelResults": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "병렬 브랜치 결과 집계",
+      "Parameters": {
+        "FunctionName": "${SegmentRunnerArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "segment_type": "aggregator",
+          "parallel_results.$": "$.parallel_results",
+          "workflow_config.$": "$.state_data.workflow_config",
+          "current_state.$": "$.state_data.current_state",
+          "ownerId.$": "$.state_data.ownerId",
+          "workflowId.$": "$.state_data.workflowId",
+          "segment_to_run.$": "$.state_data.segment_to_run",
+          "idempotency_key.$": "$.state_data.idempotency_key"
+        }
+      },
+      "ResultSelector": {
+        "status.$": "$.Payload.status",
+        "final_state.$": "$.Payload.final_state",
+        "final_state_s3_path.$": "$.Payload.final_state_s3_path",
+        "next_segment_to_run.$": "$.Payload.next_segment_to_run",
+        "new_history_logs.$": "$.Payload.new_history_logs",
+        "workflow_config.$": "$.Payload.workflow_config",
+        "current_state.$": "$.Payload.current_state",
+        "state_s3_path.$": "$.Payload.state_s3_path",
+        "ownerId.$": "$.Payload.ownerId",
+        "workflowId.$": "$.Payload.workflowId",
+        "idempotency_key.$": "$.Payload.idempotency_key",
+        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
+        "total_segments.$": "$.Payload.total_segments",
+        "partition_map.$": "$.Payload.partition_map",
+        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
+        "segment_manifest.$": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode.$": "$.Payload.distributed_mode",
+        "max_concurrency.$": "$.Payload.max_concurrency",
+        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
+        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
+        "loop_counter.$": "$.Payload.loop_counter",
+        "llm_segments.$": "$.Payload.llm_segments",
+        "hitp_segments.$": "$.Payload.hitp_segments",
+        "state_durations.$": "$.Payload.state_durations"
+      },
+      "ResultPath": "$.execution_result",
+      "Next": "UpdateStateData"
+    },
+    "UpdateStateData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "상태 데이터 업데이트 및 S3 오프로딩",
+      "Parameters": {
+        "FunctionName": "${StateDataManagerArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "action": "update_and_compress",
+          "state_data.$": "$.state_data",
+          "execution_result.$": "$.execution_result",
+          "max_payload_size_kb": 200
+        }
+      },
+      "ResultSelector": {
+        "workflow_config.$": "$.Payload.workflow_config",
+        "current_state.$": "$.Payload.current_state",
+        "state_s3_path.$": "$.Payload.state_s3_path",
+        "state_history.$": "$.Payload.state_history",
+        "ownerId.$": "$.Payload.ownerId",
+        "workflowId.$": "$.Payload.workflowId",
+        "segment_to_run.$": "$.Payload.segment_to_run",
+        "idempotency_key.$": "$.Payload.idempotency_key",
+        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
+        "total_segments.$": "$.Payload.total_segments",
+        "partition_map.$": "$.Payload.partition_map",
+        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
+        "segment_manifest.$": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode.$": "$.Payload.distributed_mode",
+        "max_concurrency.$": "$.Payload.max_concurrency",
+        "state_durations.$": "$.Payload.state_durations",
+        "last_update_time.$": "$.Payload.last_update_time",
+        "start_time.$": "$.Payload.start_time",
+        "loop_counter.$": "$.Payload.loop_counter",
+        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
+        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
+        "llm_segments.$": "$.Payload.llm_segments",
+        "hitp_segments.$": "$.Payload.hitp_segments"
+      },
+      "ResultPath": "$.state_data",
+      "Next": "CheckForNextSegment"
+    },
+    "CheckForNextSegment": {
+      "Type": "Choice",
+      "Comment": "다음 세그먼트 확인",
+      "Choices": [
+        {
+          "And": [
+            {
+              "Variable": "$.execution_result.status",
+              "StringEquals": "COMPLETE"
+            },
+            {
+              "Variable": "$.execution_result.next_segment_to_run",
+              "IsNull": true
+            }
+          ],
+          "Next": "PublishSucceededEvent"
+        }
+      ],
+      "Default": "PrepareNextSegment"
+    },
+    "PrepareNextSegment": {
+      "Type": "Pass",
+      "Comment": "다음 세그먼트 준비",
+      "Parameters": {
+        "workflow_config.$": "$.state_data.workflow_config",
+        "current_state.$": "$.execution_result.final_state",
+        "state_s3_path.$": "$.execution_result.final_state_s3_path",
+        "partition_map.$": "$.state_data.partition_map",
+        "partition_map_s3_path.$": "$.state_data.partition_map_s3_path",
+        "segment_manifest.$": "$.state_data.segment_manifest",
+        "segment_manifest_s3_path.$": "$.state_data.segment_manifest_s3_path",
+        "total_segments.$": "$.state_data.total_segments",
+        "ownerId.$": "$.state_data.ownerId",
+        "segment_to_run.$": "$.execution_result.next_segment_to_run",
+        "idempotency_key.$": "$.state_data.idempotency_key",
+        "quota_reservation_id.$": "$.state_data.quota_reservation_id",
+        "workflowId.$": "$.state_data.workflowId",
+        "max_concurrency.$": "$.state_data.max_concurrency",
+        "distributed_mode.$": "$.state_data.distributed_mode",
+        "state_durations.$": "$.state_data.state_durations",
+        "last_update_time.$": "$.state_data.last_update_time",
+        "start_time.$": "$.state_data.start_time",
+        "state_history.$": "$.state_data.state_history",
+        "loop_counter.$": "States.MathAdd($.state_data.loop_counter, 1)",
+        "max_loop_iterations.$": "$.state_data.max_loop_iterations",
+        "max_branch_iterations.$": "$.state_data.max_branch_iterations",
+        "llm_segments.$": "$.state_data.llm_segments",
+        "hitp_segments.$": "$.state_data.hitp_segments"
+      },
+      "ResultPath": "$.state_data",
+      "Next": "ExecuteSegment"
+    },
+    "WaitForCallback": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Comment": "HITL 콜백 대기 (MOCK_MODE시 자동 resume)",
+      "Parameters": {
+        "FunctionName": "${StoreTaskTokenArn}",
+        "Payload": {
+          "TaskToken.$": "$$.Task.Token",
+          "conversation_id.$": "$$.Execution.Id",
+          "execution_id.$": "$$.Execution.Id",
+          "execution_name.$": "$$.Execution.Name",
+          "idempotency_key.$": "$.state_data.idempotency_key",
+          "workflow_config.$": "$.state_data.workflow_config",
+          "current_state.$": "$.execution_result.final_state",
+          "state_s3_path.$": "$.execution_result.final_state_s3_path",
+          "segment_to_run.$": "$.execution_result.next_segment_to_run",
+          "partition_map.$": "$.state_data.partition_map",
+          "total_segments.$": "$.state_data.total_segments",
+          "ownerId.$": "$.state_data.ownerId",
+          "workflowId.$": "$.state_data.workflowId",
+          "state_data.$": "$.state_data",
+          "MOCK_MODE.$": "$.MOCK_MODE"
+        }
+      },
+      "ResultPath": "$.callback_result",
+      "Next": "PrepareStateAfterPause"
+    },
+    "PrepareStateAfterPause": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${MergeCallbackArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "previous_final_state.$": "$.execution_result.final_state",
+          "previous_final_state_s3_path.$": "$.execution_result.final_state_s3_path",
+          "callback_result.$": "$.callback_result",
+          "state_data.$": "$.state_data",
+          "segment_to_run.$": "$.execution_result.next_segment_to_run",
+          "ownerId.$": "$.state_data.ownerId",
+          "workflowId.$": "$.state_data.workflowId"
+        }
+      },
+      "ResultPath": "$.current_state_merge",
+      "Next": "ApplyMergedState"
+    },
+    "ApplyMergedState": {
+      "Type": "Pass",
+      "Parameters": {
+        "workflow_config.$": "$.state_data.workflow_config",
+        "current_state.$": "$.current_state_merge.Payload.new_current_state",
+        "state_history.$": "$.current_state_merge.Payload.new_state_history",
+        "state_s3_path.$": "$.current_state_merge.Payload.new_state_s3_path",
+        "segment_to_run.$": "$.current_state_merge.Payload.segment_to_run",
+        "partition_map.$": "$.state_data.partition_map",
+        "partition_map_s3_path.$": "$.state_data.partition_map_s3_path",
+        "segment_manifest.$": "$.state_data.segment_manifest",
+        "segment_manifest_s3_path.$": "$.state_data.segment_manifest_s3_path",
+        "total_segments.$": "$.state_data.total_segments",
+        "ownerId.$": "$.state_data.ownerId",
+        "workflowId.$": "$.state_data.workflowId",
+        "idempotency_key.$": "$.state_data.idempotency_key",
+        "quota_reservation_id.$": "$.state_data.quota_reservation_id",
+        "max_concurrency.$": "$.state_data.max_concurrency",
+        "distributed_mode.$": "$.state_data.distributed_mode",
+        "state_durations.$": "$.state_data.state_durations",
+        "last_update_time.$": "$.state_data.last_update_time",
+        "start_time.$": "$.state_data.start_time",
+        "loop_counter.$": "$.state_data.loop_counter",
+        "max_loop_iterations.$": "$.state_data.max_loop_iterations",
+        "max_branch_iterations.$": "$.state_data.max_branch_iterations",
+        "llm_segments.$": "$.state_data.llm_segments",
+        "hitp_segments.$": "$.state_data.hitp_segments"
+      },
+      "ResultPath": "$.state_data",
+      "Next": "ExecuteSegment"
+    },
+    "PublishSucceededEvent": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "워크플로우 성공 이벤트 발행",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow.lifecycle",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "conversation_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "status": "COMPLETED",
+              "notification_type": "execution_progress",
+              "message": "Workflow completed successfully",
+              "distributed_execution": true
+            }
+          }
+        ]
+      },
+      "ResultPath": "$.event_publish_result",
+      "Next": "PrepareSuccessOutput"
+    },
+    "PrepareSuccessOutput": {
+      "Type": "Pass",
+      "Comment": "[Fix] 최종 출력에 execution_result 및 가드레일 메트릭 포함",
+      "Parameters": {
+        "status": "SUCCEEDED",
+        "execution_id.$": "$$.Execution.Id",
+        "ownerId.$": "$.state_data.ownerId",
+        "workflowId.$": "$.state_data.workflowId",
+        "final_state.$": "$.execution_result.final_state",
+        "final_state_s3_path.$": "$.execution_result.final_state_s3_path",
+        "state_s3_path.$": "$.execution_result.final_state_s3_path",
+        "execution_result.$": "$.execution_result",
+        "loop_counter.$": "$.state_data.loop_counter",
+        "max_loop_iterations.$": "$.state_data.max_loop_iterations",
+        "llm_segments.$": "$.state_data.llm_segments",
+        "hitp_segments.$": "$.state_data.hitp_segments",
+        "start_time.$": "$.state_data.start_time",
+        "state_durations.$": "$.state_data.state_durations",
+        "total_segments.$": "$.state_data.total_segments"
+      },
+      "Next": "WorkflowSucceeded"
+    },
+    "WorkflowSucceeded": {
+      "Type": "Succeed",
+      "Comment": "워크플로우 성공 완료 - 최종 출력에 S3 경로 포함"
+    },
+    "NotifyExecutionFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "[Fix] 워크플로우 실패 이벤트 발행 - 에러 정보 포함",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow.lifecycle",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "status": "FAILED",
+              "notification_type": "execution_progress",
+              "message": "Workflow execution failed",
+              "distributed_execution": true,
+              "error_info.$": "$.execution_result.error_info",
+              "final_result_error.$": "$.final_result.Payload.error"
+            }
+          }
+        ]
+      },
+      "Next": "WorkflowFailed"
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Comment": "워크플로우 실패"
+    }
+  }
+}

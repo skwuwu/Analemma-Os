@@ -1,0 +1,101 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    /* 
+      Slate Navy Palette 
+      Base Background: #020617 (Slate 950) -> 222 47% 5%
+      Surface: #0F172A (Slate 900) -> 222 47% 11%
+      Secondary Surface: #1E293B (Slate 800) -> 215 28% 17%
+      Primary Accent: #38BDF8 (Sky 400) -> 199 89% 48%
+      Neutral Text: #F8FAFC (Slate 50) -> 210 40% 98%
+      Muted Text: #64748B (Slate 500) -> 215 16% 47%
+    */
+    --background: 222 47% 5%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 47% 11%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 47% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 199 89% 48%;
+    --primary-foreground: 222 47% 5%;
+
+    --secondary: 215 28% 17%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 215 28% 17%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 199 89% 48%;
+    --accent-foreground: 222 47% 5%;
+
+    /* 블록별 색상 정의 - 유지하되 톤 조정 */
+    --ai-model: 244 75% 60%; /* Indigo-ish */
+    --operator: 25 95% 60%;
+    --trigger: 142 70% 45%; /* Green-ish */
+    --control: 48 90% 50%; /* Yellow-ish */
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 215 28% 17%;
+    --input: 215 28% 17%;
+    --ring: 199 89% 48%;
+
+    --radius: 0.5rem; /* 8px */
+
+    --gradient-ai: linear-gradient(135deg, hsl(244 75% 60%), hsl(260 75% 65%));
+    --gradient-operator: linear-gradient(135deg, hsl(25 95% 60%), hsl(40 95% 65%));
+    --gradient-canvas: radial-gradient(circle at 50% 50%, hsl(222 47% 7%), hsl(222 47% 5%));
+    
+    --shadow-glow: 0 0 30px hsl(199 89% 48% / 0.3);
+    --shadow-card: 0 1px 0 0 hsl(215 28% 25%); /* Top highlight style shadow */
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Custom scrollbar for streaming area */
+.streaming-scroll::-webkit-scrollbar {
+  width: 4px;
+}
+
+.streaming-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.streaming-scroll::-webkit-scrollbar-thumb {
+  background: rgba(107, 114, 128, 0.3);
+  border-radius: 2px;
+}
+
+.streaming-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(107, 114, 128, 0.5);
+}
+
+/* Custom animation for active edges */
+@keyframes dashdraw {
+  from {
+    stroke-dashoffset: 10;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}

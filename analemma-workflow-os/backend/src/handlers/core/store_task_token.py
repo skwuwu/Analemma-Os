@@ -1,1 +1,457 @@
-# 태스크 토큰 저장
+import json
+import os
+import time
+import logging
+import boto3
+from botocore.exceptions import ClientError
+import uuid
+
+# 공통 모듈에서 AWS 클라이언트 가져오기
+try:
+    from src.common.aws_clients import get_dynamodb_resource, get_stepfunctions_client
+    from src.common.constants import DynamoDBConfig
+    dynamodb = get_dynamodb_resource()
+    sfn_client = get_stepfunctions_client()
+except ImportError:
+    dynamodb = boto3.resource('dynamodb')
+    sfn_client = boto3.client('stepfunctions')
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# 환경 변수로 테이블명 지정
+TASK_TOKENS_TABLE = DynamoDBConfig.TASK_TOKENS_TABLE
+
+table = dynamodb.Table(TASK_TOKENS_TABLE)
+
+# 기본 TTL: 1 day (상수 사용)
+try:
+    from src.common.constants import TTLConfig, EnvironmentVariables
+    DEFAULT_TTL_SECONDS = int(os.environ.get(EnvironmentVariables.TASK_TOKEN_TTL_SECONDS, TTLConfig.TASK_TOKEN_DEFAULT))
+except ImportError:
+    DEFAULT_TTL_SECONDS = int(os.environ.get('TASK_TOKEN_TTL_SECONDS', 86400))
+
+
+def get_user_connection_ids(owner_id):
+    """
+    DynamoDB GSI를 쿼리하여 ownerId에 연결된 모든 connectionId를 반환합니다.
+    
+    Returns:
+        list: connectionId 목록, 비어있을 수 있음
+    """
+    table_name = DynamoDBConfig.WEBSOCKET_CONNECTIONS_TABLE
+    gsi_name = DynamoDBConfig.WEBSOCKET_OWNER_ID_GSI
+    
+    if not table_name or not owner_id:
+        return []
+    
+    try:
+        conn_table = dynamodb.Table(table_name)
+        from boto3.dynamodb.conditions import Key
+        
+        response = conn_table.query(
+            IndexName=gsi_name,
+            KeyConditionExpression=Key('ownerId').eq(owner_id)
+        )
+        
+        return [item['connectionId'] for item in response.get('Items', []) if 'connectionId' in item]
+    except Exception as e:
+        import logging
+        logger = logging.getLogger()
+        logger.error(f'Failed to query connections for owner={owner_id}: {e}')
+        return []
+
+
+def _send_hitp_notification(owner_id, conversation_id, execution_id, context_info, payload):
+    """
+    HITP 발생 시 사용자에게 알림을 전송합니다.
+    
+    3가지 알림 채널:
+    1. 실시간 Push (WebSocket) - 사용자가 접속 중일 때
+    2. 영구적 알림 저장 (DynamoDB PendingNotifications) - 알림 센터용
+    3. 이메일/SMS (옵션) - 완전 오프라인 사용자용
+    
+    Args:
+        owner_id: 사용자 ID (테넌트 격리)
+        conversation_id: 대화/실행 ID
+        execution_id: Step Functions 실행 ID
+        context_info: 워크플로우 컨텍스트 정보
+        payload: 전체 payload (segment_to_run 등 추가 정보 포함)
+    
+    Returns:
+        dict: 전송 결과 {'websocket': bool, 'persistent': bool, 'email': bool}
+    """
+    import logging
+    logger = logging.getLogger()
+    
+    result = {
+        'websocket': False,
+        'persistent': False,
+        'email': False
+    }
+    
+    # 알림 페이로드 구성
+    notification_payload = {
+        'type': 'hitp_pause',
+        'action': 'hitp_pause',
+        'conversation_id': conversation_id,
+        'execution_id': execution_id,
+        'workflowId': context_info.get('workflowId') or payload.get('workflowId'),
+        'workflow_name': context_info.get('workflow_name'),
+        'segment_to_run': context_info.get('segment_to_run') or payload.get('segment_to_run'),
+        'total_segments': context_info.get('total_segments') or payload.get('total_segments'),
+        'status': 'PAUSED_FOR_HITP',
+        'message': '워크플로우가 일시정지되었습니다. 사용자 입력을 기다립니다.',
+        'timestamp': int(time.time()),
+        'created_at': int(time.time())
+    }
+    
+    # --- 1. 실시간 Push (WebSocket) ---
+    try:
+        connection_ids = get_user_connection_ids(owner_id)
+        if connection_ids:
+            websocket_endpoint = os.environ.get('WEBSOCKET_ENDPOINT_URL')
+            if websocket_endpoint:
+                apigw = boto3.client('apigatewaymanagementapi', endpoint_url=websocket_endpoint)
+                payload_bytes = json.dumps({
+                    'type': 'workflow_status',
+                    'payload': notification_payload
+                }, ensure_ascii=False).encode('utf-8')
+                
+                for conn_id in connection_ids:
+                    try:
+                        apigw.post_to_connection(ConnectionId=conn_id, Data=payload_bytes)
+                        logger.info(f"📱 WebSocket HITP 알림 전송: owner={owner_id}, conn={conn_id}")
+                        result['websocket'] = True
+                    except apigw.exceptions.GoneException:
+                        logger.info(f"Stale connection {conn_id}, will be cleaned up later")
+                    except Exception as e:
+                        logger.warning(f"Failed to send WebSocket to {conn_id}: {e}")
+            else:
+                logger.debug("WEBSOCKET_ENDPOINT_URL not configured, skipping WebSocket push")
+    except Exception as e:
+        logger.warning(f"WebSocket notification failed: {e}")
+    
+    # --- 2. 영구적 알림 저장 (Persistent Notification for Inbox) ---
+    try:
+        pending_table_name = os.environ.get('PENDING_NOTIFICATIONS_TABLE')
+        if pending_table_name:
+            pending_table = dynamodb.Table(pending_table_name)
+            notification_item = {
+                'ownerId': owner_id,
+                'notificationId': str(uuid.uuid4()),
+                'timestamp': int(time.time()),
+                'notification': notification_payload,
+                'status': 'pending',  # pending = 미읽음, sent = 읽음
+                'type': 'hitp_pause',
+                'conversation_id': conversation_id,
+                'execution_id': execution_id,
+                'ttl': int(time.time()) + TTLConfig.PENDING_NOTIFICATION  # 30일 보관
+            }
+            pending_table.put_item(Item=notification_item)
+            logger.info(f"💾 영구 알림 저장 완료: owner={owner_id}, notification_id={notification_item['notificationId']}")
+            result['persistent'] = True
+        else:
+            logger.debug("PENDING_NOTIFICATIONS_TABLE not configured, skipping persistent notification")
+    except Exception as e:
+        logger.warning(f"Persistent notification storage failed: {e}")
+    
+    # --- 3. 이메일/SMS 알림 (옵션, 환경변수로 제어) ---
+    # 구현 예정: backend/backend_issues.md 참조
+    if os.environ.get('ENABLE_EMAIL_NOTIFICATIONS', 'false').lower() == 'true':
+        try:
+            # [ISSUE] SES/SNS 이메일 알림 미구현 - backend_issues.md 참조
+            logger.info(f"📧 이메일 알림은 향후 구현 예정: owner={owner_id}")
+            result['email'] = False
+        except Exception as e:
+            logger.warning(f"Email notification failed: {e}")
+    
+    return result
+
+
+from decimal import Decimal
+
+def _convert_floats_to_decimals(obj):
+    """Recursively convert float values to Decimal for DynamoDB."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    elif isinstance(obj, dict):
+        return {k: _convert_floats_to_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_convert_floats_to_decimals(v) for v in obj]
+    return obj
+
+
+def _mock_auto_resume(task_token: str, payload: dict, max_retries: int = 3) -> dict:
+    """
+    MOCK_MODE에서 HITP 자동 승인 - 테스트 시뮬레이터용.
+    
+    Step Functions의 waitForTaskToken 상태가 준비되기 전에
+    send_task_success를 호출하면 InvalidToken 에러가 발생할 수 있으므로
+    재시도 로직을 포함합니다.
+    
+    Args:
+        task_token: Step Functions TaskToken
+        payload: 원본 이벤트 페이로드
+        max_retries: 최대 재시도 횟수 (레이스 컨디션 대응)
+    
+    Returns:
+        dict: 자동 resume 결과
+    """
+    import logging
+    logger = logging.getLogger()
+    
+    # 자동 승인 페이로드 구성
+    resume_output = {
+        "status": "COMPLETED",
+        "hitp_result": {
+            "action": "APPROVED",
+            "comment": "Auto-approved by Mission Simulator (MOCK_MODE)",
+            "approved_at": int(time.time())
+        },
+        # PrepareStateAfterPause가 필요로 하는 필드들 전달
+        "final_state": payload.get('current_state', {}),
+        "segment_to_run": payload.get('segment_to_run'),
+        "workflow_config": payload.get('workflow_config'),
+        "partition_map": payload.get('partition_map'),
+        "total_segments": payload.get('total_segments'),
+        "ownerId": payload.get('ownerId') or payload.get('owner_id'),
+        "workflowId": payload.get('workflowId')
+    }
+    
+    for attempt in range(max_retries):
+        try:
+            # 레이스 컨디션 방지: Step Functions가 대기 상태 진입할 시간 확보
+            if attempt > 0:
+                wait_time = 1.0 * attempt  # 1초, 2초 점진적 대기
+                logger.info(f"⏳ Retry {attempt + 1}/{max_retries}: waiting {wait_time}s before send_task_success")
+                time.sleep(wait_time)
+            
+            sfn_client.send_task_success(
+                taskToken=task_token,
+                output=json.dumps(resume_output, ensure_ascii=False, default=str)
+            )
+            
+            logger.info(f"✅ MOCK_MODE: Auto-resumed HITP task successfully (attempt {attempt + 1})")
+            return {
+                "status": "MOCK_RESUMED",
+                "attempt": attempt + 1,
+                "hitp_result": resume_output.get("hitp_result")
+            }
+            
+        except sfn_client.exceptions.InvalidToken as e:
+            # 토큰이 아직 유효하지 않음 - Step Functions가 대기 상태 진입 전
+            logger.warning(f"⚠️ InvalidToken on attempt {attempt + 1}: {e}")
+            if attempt == max_retries - 1:
+                logger.error(f"❌ MOCK_MODE: Failed to auto-resume after {max_retries} attempts")
+                return {
+                    "status": "MOCK_RESUME_FAILED",
+                    "error": "InvalidToken after max retries",
+                    "attempts": max_retries
+                }
+        except sfn_client.exceptions.TaskTimedOut as e:
+            # 이미 타임아웃됨
+            logger.warning(f"⚠️ Task already timed out: {e}")
+            return {
+                "status": "MOCK_RESUME_SKIPPED",
+                "reason": "Task already timed out"
+            }
+        except Exception as e:
+            logger.error(f"❌ MOCK_MODE: Unexpected error in auto-resume: {e}")
+            return {
+                "status": "MOCK_RESUME_FAILED",
+                "error": str(e)
+            }
+    
+    return {"status": "MOCK_RESUME_FAILED", "error": "Unknown error"}
+
+def lambda_handler(event, context):
+    """
+    Step Functions WaitForCallback에서 호출되는 TaskToken 저장 Lambda.
+    
+    기능:
+    - TaskToken을 DynamoDB에 저장
+    - Step Functions 재시작을 위한 컨텍스트 보존
+    - resume_handler에서 사용할 수 있도록 execution context 저장
+    
+    중요: Step Functions 내부 호출이므로 HTTP 응답이 아닌 순수 JSON 반환
+    """
+    import logging
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    try:
+        # event may already be a dict or a JSON string inside 'Payload' when invoked by Step Functions
+        payload = event
+        if isinstance(event, dict) and 'Payload' in event:
+            # When invoked through Lambda Invoke, Step Functions wraps the original payload under 'Payload'
+            payload = event['Payload']
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (json.JSONDecodeError, ValueError):
+                    payload = {}
+
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (json.JSONDecodeError, ValueError):
+                payload = {}
+
+        # If caller used state-bag pattern, flatten state_data into payload
+        if isinstance(payload, dict) and isinstance(payload.get('state_data'), dict):
+            sd = payload.get('state_data') or {}
+            for k, v in sd.items():
+                if k not in payload:
+                    payload[k] = v
+
+        try:
+            task_token = payload.get('TaskToken') or payload.get('taskToken')
+            conversation_id = payload.get('conversation_id') or payload.get('conversationId')
+            
+            # execution_id는 SFN input에서 파싱 (body가 아닌)
+            # (이 람다는 SFN에 의해 호출되므로, SFN 페이로드에서 executionId를 가져와야 함)
+            execution_id = payload.get('execution_id') or payload.get('executionId') or payload.get('conversation_id') # SFN이 conversation_id를 execution_id로 사용함
+            
+            # --- [수정된 로직] ---
+            
+            # 이 람다는 SFN에 의해 내부적으로 호출되므로,
+            # SFN input(payload)에 포함된 ownerId를 신뢰합니다.
+            # 이 ownerId는 SFN을 시작시킨 run_workflow 람다에 의해 이미 검증되었습니다.
+            owner_id = payload.get('ownerId') or payload.get('owner_id')
+
+            
+            # 필수 값 검증
+            if not task_token or not conversation_id or not owner_id:
+                logger.error(f"Missing required fields: task_token={bool(task_token)}, conversation_id={bool(conversation_id)}, owner_id={bool(owner_id)}")
+                raise ValueError('Missing TaskToken, conversation_id or ownerId')
+
+            now = int(time.time())
+            ttl = now + DEFAULT_TTL_SECONDS
+
+            # Resume Handler가 사용할 수 있도록 추가 컨텍스트 정보 저장
+            # Store the full workflow_config and other state so resume can reconstruct
+            # the execution context reliably. Previously only 'workflow_name' was
+            # stored which caused resume to miss required fields like workflow_config.
+            context_info = {
+                'workflow_config': payload.get('workflow_config'),
+                'workflowId': payload.get('workflowId'),
+                'workflow_name': payload.get('workflow_config', {}).get('name'),
+                'segment_to_run': payload.get('segment_to_run'),
+                'total_segments': payload.get('total_segments'),
+                'partition_map': payload.get('partition_map'),
+                'current_state': payload.get('current_state'),
+                # preserve state history if present so resume can reconstruct past snapshots
+                'state_history': payload.get('state_history') or (payload.get('state_data') or {}).get('state_history'),
+                'state_s3_path': payload.get('state_s3_path'),
+                'idempotency_key': payload.get('idempotency_key'),
+                'execution_name': payload.get('execution_name')
+            }
+            if context and hasattr(context, 'aws_request_id'):
+                context_info['request_id'] = context.aws_request_id
+
+            item = {
+                # Scope the token to ownerId (tenant) as partition key and conversation_id as sort key
+                'ownerId': owner_id,
+                'conversation_id': conversation_id,
+                # execution_id is unique per execution/run and should be returned to callers so
+                # they can reference the execution directly when resuming.
+                'execution_id': execution_id,
+                'taskToken': task_token,
+                'createdAt': now,
+                'ttl': ttl,
+                # Resume Handler가 사용할 추가 컨텍스트 저장
+                'context': context_info
+            }
+
+            # [Fix] Convert floats to Decimals for DynamoDB
+            item = _convert_floats_to_decimals(item)
+
+            # Idempotent write: only create the item if conversation_id doesn't already exist.
+            # If this Lambda is retried by Step Functions the conditional put will fail
+            # with ConditionalCheckFailedException and we treat that as success (already stored).
+            try:
+                table.put_item(Item=item, ConditionExpression='attribute_not_exists(conversation_id)')
+                logger.info(f"TaskToken stored successfully: conversation_id={conversation_id}, owner_id={owner_id}")
+            except ClientError as e:
+                code = e.response.get('Error', {}).get('Code')
+                if code == 'ConditionalCheckFailedException':
+                    # Already stored by a previous attempt - this is OK (idempotent)
+                    logger.info(f"TaskToken already stored (retry detected): conversation_id={conversation_id}")
+                else:
+                    logger.exception(f"DynamoDB error storing TaskToken: {e}")
+                    raise
+
+            # --- 🆕 HITP 알림 전송 (실시간 Push + 영구 알림) ---
+            notification_sent = _send_hitp_notification(
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                execution_id=execution_id,
+                context_info=context_info,
+                payload=payload
+            )
+            logger.info(f"HITP notification sent: {notification_sent}")
+            
+            # --- 🆕 MOCK_MODE: 자동 Resume (시뮬레이터 E2E 테스트용) ---
+            # MOCK_MODE가 활성화된 경우 사람의 승인을 모킹하여 자동으로 워크플로우 재개
+            # MOCK_MODE는 payload 직접, state_data 내부, 또는 환경변수에서 찾을 수 있음
+            state_data = payload.get('state_data') or {}
+            mock_mode_value = (
+                payload.get('MOCK_MODE') or 
+                state_data.get('MOCK_MODE') or 
+                os.environ.get('MOCK_MODE', 'false')
+            )
+            mock_mode = str(mock_mode_value).lower() == 'true'
+            mock_resume_result = None
+            
+            logger.info(f"🔍 MOCK_MODE check: payload={payload.get('MOCK_MODE')}, state_data={state_data.get('MOCK_MODE')}, env={os.environ.get('MOCK_MODE')}, resolved={mock_mode}")
+            
+            if mock_mode:
+                logger.info(f"🤖 MOCK_MODE detected - initiating auto-resume for HITP")
+                mock_resume_result = _mock_auto_resume(
+                    task_token=task_token,
+                    payload=payload,
+                    max_retries=3
+                )
+                logger.info(f"🤖 MOCK auto-resume result: {mock_resume_result}")
+
+            # Step Functions expects pure JSON output (not HTTP response format)
+            # Return the payload with additional context for next states
+            # Important: Include state_data object for PrepareStateAfterPause to reference
+            return {
+                'message': 'TaskToken stored',
+                'conversation_id': conversation_id,
+                'ownerId': owner_id,
+                'execution_id': execution_id,
+                'taskToken': task_token,
+                'stored_at': now,
+                # MOCK_MODE 자동 resume 결과 포함 (디버깅용)
+                'mock_resume_result': mock_resume_result,
+                # Pass through important fields for next Step Functions states
+                'workflowId': payload.get('workflowId'),
+                'segment_to_run': payload.get('segment_to_run'),
+                'workflow_config': payload.get('workflow_config'),
+                'partition_map': payload.get('partition_map'),
+                'total_segments': payload.get('total_segments'),
+                'current_state': payload.get('current_state'),
+                'state_s3_path': payload.get('state_s3_path'),
+                # State bag pattern: wrap state data for consistent access pattern
+                'state_data': {
+                    'workflow_config': payload.get('workflow_config'),
+                    'partition_map': payload.get('partition_map'),
+                    'total_segments': payload.get('total_segments'),
+                    'state_history': payload.get('state_history') or (payload.get('state_data') or {}).get('state_history'),
+                    'ownerId': owner_id,
+                    'workflowId': payload.get('workflowId'),
+                    'segment_to_run': payload.get('segment_to_run'),
+                    'current_state': payload.get('current_state'),
+                    'state_s3_path': payload.get('state_s3_path'),
+                    'idempotency_key': payload.get('idempotency_key')
+                }
+            }
+        except Exception as e:
+            logger.exception(f"Error in store_task_token: {e}")
+            raise
+    except Exception as e:
+        logger.exception(f"Outer exception in store_task_token: {e}")
+        raise

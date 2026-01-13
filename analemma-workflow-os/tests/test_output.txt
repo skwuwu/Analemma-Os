@@ -1,0 +1,140 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\gimgy\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity
+configfile: pytest.ini
+plugins: mock-3.15.1
+collecting ... collected 0 items / 10 errors
+
+=================================== ERRORS ====================================
+_______ ERROR collecting tests/backend/integration/test_api_contract.py _______
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_api_contract.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_api_contract.py:26: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+______ ERROR collecting tests/backend/integration/test_core_features.py _______
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_core_features.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_core_features.py:21: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+__ ERROR collecting tests/backend/integration/test_correction_system_core.py __
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_correction_system_core.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_correction_system_core.py:25: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+_____ ERROR collecting tests/backend/integration/test_distributed_core.py _____
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_distributed_core.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_distributed_core.py:23: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+___ ERROR collecting tests/backend/integration/test_execution_lifecycle.py ____
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_execution_lifecycle.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_execution_lifecycle.py:38: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+_ ERROR collecting tests/backend/integration/test_infrastructure_edge_cases.py _
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_infrastructure_edge_cases.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_infrastructure_edge_cases.py:31: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+____ ERROR collecting tests/backend/integration/test_resume_system_core.py ____
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_resume_system_core.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_resume_system_core.py:23: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+_____ ERROR collecting tests/backend/integration/test_vector_sync_core.py _____
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\integration\test_vector_sync_core.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\integration\test_vector_sync_core.py:23: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+______ ERROR collecting tests/backend/unit/test_node_stats_collector.py _______
+backend\unit\test_node_stats_collector.py:11: in <module>
+    import handlers.node_stats_collector as nsc
+..\backend\src\handlers\node_stats_collector.py:35: in <module>
+    dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\boto3\__init__.py:102: in resource
+    return _get_default_session().resource(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\boto3\session.py:475: in resource
+    client = self.client(
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\boto3\session.py:337: in client
+    return self._session.create_client(
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\botocore\context.py:123: in wrapper
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\botocore\session.py:986: in create_client
+    credentials = self.get_credentials()
+                  ^^^^^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\botocore\session.py:522: in get_credentials
+    ).load_credentials()
+      ^^^^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\botocore\credentials.py:2239: in load_credentials
+    creds = provider.load()
+            ^^^^^^^^^^^^^^^
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\site-packages\botocore\credentials.py:2750: in load
+    raise MissingDependencyException(
+E   botocore.exceptions.MissingDependencyException: Missing Dependency: Using the login credential provider requires an additional dependency. You will need to pip install "botocore[crt]" before proceeding.
+__________ ERROR collecting tests/backend/unit/test_security_core.py __________
+ImportError while importing test module 'C:\Users\gimgy\OneDrive\바탕 화면\analemma-fullstack-antigravity\tests\backend\unit\test_security_core.py'.
+Hint: make sure your test modules/packages have valid Python names.
+Traceback:
+..\..\..\..\AppData\Local\Programs\Python\Python312\Lib\importlib\__init__.py:90: in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+backend\unit\test_security_core.py:23: in <module>
+    from moto import mock_aws
+E   ModuleNotFoundError: No module named 'moto'
+=========================== short test summary info ===========================
+ERROR backend\integration\test_api_contract.py
+ERROR backend\integration\test_core_features.py
+ERROR backend\integration\test_correction_system_core.py
+ERROR backend\integration\test_distributed_core.py
+ERROR backend\integration\test_execution_lifecycle.py
+ERROR backend\integration\test_infrastructure_edge_cases.py
+ERROR backend\integration\test_resume_system_core.py
+ERROR backend\integration\test_vector_sync_core.py
+ERROR backend\unit\test_node_stats_collector.py - botocore.exceptions.Missing...
+ERROR backend\unit\test_security_core.py
+!!!!!!!!!!!!!!!!!! Interrupted: 10 errors during collection !!!!!!!!!!!!!!!!!!!
+============================= 10 errors in 0.65s ==============================

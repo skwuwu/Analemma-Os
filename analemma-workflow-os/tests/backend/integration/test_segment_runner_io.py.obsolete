@@ -1,0 +1,99 @@
+import pytest
+import boto3
+import json
+from unittest.mock import MagicMock, patch
+from botocore.exceptions import ClientError
+from io import BytesIO
+
+# Import the handler functions directly
+# We rely on sys.path config in conftest.py to find 'backend' package
+from src.handlers.core.segment_runner_handler import _load_partition_map_from_s3_with_streaming
+
+@pytest.fixture
+def mock_s3_client():
+    with patch('boto3.client') as mock:
+        client = MagicMock()
+        mock.return_value = client
+        yield client
+
+def test_streaming_loading_success(mock_s3_client):
+    """
+    Test successful streaming loading of partition map using ijson mock.
+    """
+    # Create valid JSON stream
+    data = [{"id": 0}, {"id": 1}, {"id": 2}]
+    json_bytes = json.dumps(data).encode('utf-8')
+    stream = BytesIO(json_bytes)
+    
+    # Mock S3 response
+    mock_s3_client.head_object.return_value = {'ContentLength': 50 * 1024 * 1024} # 50MB
+    mock_s3_client.get_object.return_value = {'Body': stream}
+    
+    # Mock ijson (since we don't want to rely on real ijson in unit test if not present,
+    # but here we assume it enters streaming path)
+    # Actually, we should let it run with real ijson if available, or mock if we want to ensure specific path.
+    # The code checks for import ijson. Let's assume the env has it or we mock the import.
+    
+    with patch('src.handlers.core.segment_runner_handler.s3_client', mock_s3_client):
+        result = _load_partition_map_from_s3_with_streaming("s3://bucket/key", required_segment_index=1)
+        
+    assert result['memory_optimized'] is True
+    assert result['partition_map'] == {"id": 1}
+    assert result['segment_index'] == 1
+
+def test_load_partition_map_fallback(mock_s3_client):
+    """
+    Test fallback mechanism when ijson fails or is missing.
+    We simulate ijson ImportError.
+    """
+    data = [{"id": 0}, {"id": 1}]
+    json_bytes = json.dumps(data).encode('utf-8')
+    stream = BytesIO(json_bytes)
+    
+    mock_s3_client.head_object.return_value = {'ContentLength': 50 * 1024 * 1024} # 50MB
+    mock_s3_client.get_object.return_value = {'Body': stream}
+    
+    # Force ImportError for ijson
+    with patch.dict('sys.modules', {'ijson': None}):
+        with patch('src.handlers.core.segment_runner_handler.s3_client', mock_s3_client):
+            result = _load_partition_map_from_s3_with_streaming("s3://bucket/key", required_segment_index=0)
+            
+    # Assuming the fallback logic eventually works (by full read if fallback also sees small enough chunks or logic)
+    # The fallback code does chunk reading.
+    # With 50MB content length but small actual body (mock), it might hit partial processing logic if strict length check.
+    # But read() will return small bytes.
+    
+    # Actually, _load_partition_map_enhanced_fallback reads chunks.
+    assert result['partition_map'] == {"id": 0}
+
+def test_empty_stream_handling(mock_s3_client):
+    """
+    [Edge Case] Test handling of empty S3 stream.
+    """
+    mock_s3_client.head_object.return_value = {'ContentLength': 0}
+    # For small file path (regular)
+    
+    # Empty body
+    mock_s3_client.get_object.return_value = {'Body': BytesIO(b"")}
+    
+    with patch('src.handlers.core.segment_runner_handler.s3_client', mock_s3_client):
+        result = _load_partition_map_from_s3_with_streaming("s3://bucket/key")
+        
+    assert result['partition_map'] == []
+    assert result['total_segments'] == 0
+
+def test_s3_read_timeout(mock_s3_client):
+    """
+    Test S3 read timeout handling.
+    """
+    mock_s3_client.head_object.return_value = {'ContentLength': 100}
+    mock_s3_client.get_object.side_effect = ClientError(
+        {'Error': {'Code': 'TimeoutError', 'Message': 'Read timed out'}},
+        'GetObject'
+    )
+    
+    with patch('src.handlers.core.segment_runner_handler.s3_client', mock_s3_client):
+        result = _load_partition_map_from_s3_with_streaming("s3://bucket/key")
+        
+    assert 'error' in result
+    assert 'TimeoutError' in result['error']

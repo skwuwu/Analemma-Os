@@ -1,0 +1,515 @@
+openapi: 3.0.3
+info:
+  title: Workflow API (Security-Hardened)
+  version: 2.0.0
+  description: |
+    🔒 Security-hardened Step Functions 및 Lambda 핸들러를 위한 OpenAPI 명세.
+    
+    ## Security Features (v2.0.0):
+    - ✅ IDOR 취약점 패치: 모든 API가 JWT claims에서 ownerId 추출
+    - ✅ WebSocket JWT 검증: JWKS 기반 실제 서명 검증 구현
+    - ✅ Tenant 격리: 사용자는 본인의 데이터에만 접근 가능
+    - ✅ 내부 API 보호: Step Functions 전용 엔드포인트는 공개 노출 제거
+    
+    ## WebSocket Real-time Notifications:
+    WebSocket 연결은 JWT 토큰 검증이 필요하며, 연결 시 Authorization 헤더로 Bearer 토큰을 제공해야 합니다.
+    Notifications는 EventBridge → Notify Lambda를 통해 authenticated 사용자의 활성 연결로만 전송됩니다.
+    
+    ## Breaking Changes from v1.0.0:
+    - ownerId 쿼리 매개변수 제거: JWT에서 자동 추출
+    - /notify-hitp 엔드포인트 제거: 내부 Step Functions 전용으로 변경
+servers:
+  - url: https://wxis03rjce.execute-api.ap-northeast-2.amazonaws.com
+    description: Production API (AWS API Gateway)
+  - url: http://localhost:8000
+    description: Local development server
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ExecutionStatus:
+      type: object
+      properties:
+        executionArn:
+          type: string
+        status:
+          type: string
+          enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED]
+        startDate:
+          type: string
+          format: date-time
+        stopDate:
+          type: string
+          format: date-time
+        output:
+          type: object
+    ExecutionList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionStatus'
+        nextToken:
+          type: string
+    RunWorkflowRequest:
+      type: object
+      properties:
+        initial_state:
+          type: object
+          description: "Optional initial state for the workflow; large payloads should be offloaded to S3"
+        callback_url:
+          type: string
+          format: uri
+          description: "Optional callback URL to POST result when workflow completes"
+        idempotency_key:
+          type: string
+          description: "Optional client-provided idempotency key (will be tenant-scoped by backend)"
+    DesignAssistantRequest:
+      type: object
+      required: [request]
+      properties:
+        request:
+          type: string
+          description: User request for workflow design
+security:
+  - bearerAuth: []
+paths:
+  /workflows/{id}:
+    get:
+      summary: Get workflow by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflowId:
+                    type: string
+                  name:
+                    type: string
+                  createdAt:
+                    type: integer
+                  updatedAt:
+                    type: integer
+                  config:
+                    type: object
+                  is_scheduled:
+                    type: boolean
+                  next_run_time:
+                    type: integer
+        '404':
+          description: Workflow not found
+      security:
+        - bearerAuth: []
+    delete:
+      summary: Delete workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "deleted"
+      security:
+        - bearerAuth: []
+  /resume:
+    post:
+      summary: Resume workflow (HITP)
+      description: Resume a paused workflow with user input for Human-in-the-Loop processing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id, user_input]
+              properties:
+                conversation_id:
+                  type: string
+                  description: "Required: Conversation identifier for task token lookup"
+                user_input:
+                  type: object
+                  description: "Required: User input data for resuming the workflow"
+      responses:
+        '200':
+          description: Workflow resumed successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Workflow resumed"
+                  executionArn:
+                    type: string
+        '404':
+          description: TaskToken not found
+        '403':
+          description: Forbidden
+      security:
+        - bearerAuth: []
+  /workflows:
+    get:
+      summary: List workflows
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 100
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        workflowId:
+                          type: string
+                        nextToken:
+                          type: string
+                  nextToken:
+                    type: string
+      security:
+        - bearerAuth: []
+    post:
+      summary: Create or save workflow
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                name:
+                  type: string
+                config:
+                  type: object
+                  description: "Workflow configuration with nodes and edges"
+                is_scheduled:
+                  type: boolean
+                next_run_time:
+                  type: integer
+                workflowId:
+                  type: string
+      responses:
+        '200':
+          description: Workflow created or saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflowId:
+                    type: string
+                  message:
+                    type: string
+      security:
+        - bearerAuth: []
+  /by-name:
+    get:
+      summary: Get workflow by name
+      parameters:
+        - name: name
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflowId:
+                    type: string
+                  name:
+                    type: string
+                  createdAt:
+                    type: integer
+                  updatedAt:
+                    type: integer
+                  config:
+                    type: object
+      security:
+        - bearerAuth: []
+  /workflows/{id}/run:
+    post:
+      summary: Run workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                input_data:
+                  type: object
+                  description: "Input data or raw initial state"
+                test_keyword:
+                  type: string
+                Idempotency-Key:
+                  type: string
+      responses:
+        '200':
+          description: Workflow execution started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionArn:
+                    type: string
+                  startDate:
+                    type: string
+                    format: date-time
+      security:
+        - bearerAuth: []
+  /status:
+    get:
+      summary: Get execution status
+      parameters:
+        - name: executionArn
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Execution status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  type:
+                    type: string
+                    example: "workflow_status"
+                  payload:
+                    type: object
+        '404':
+          description: Not found or owner mismatch
+      security:
+        - bearerAuth: []
+  /executions:
+    get:
+      summary: List executions
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of executions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      description: "Full DynamoDB item"
+                  nextToken:
+                    type: string
+      security:
+        - bearerAuth: []
+  /executions/{id}:
+    get:
+      summary: Get execution details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Execution details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionArn:
+                    type: string
+                  status:
+                    type: string
+                    enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED]
+                  startDate:
+                    type: string
+                    format: date-time
+                  stopDate:
+                    type: string
+                    format: date-time
+                  input:
+                    type: object
+                  output:
+                    type: object
+                  error:
+                    type: string
+                  workflowId:
+                    type: string
+        '404':
+          description: Execution not found
+      security:
+        - bearerAuth: []
+  /executions/{id}/stop:
+    post:
+      summary: Stop execution
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Execution stopped
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Execution stopped"
+        '404':
+          description: Execution not found
+        '400':
+          description: Cannot stop execution
+      security:
+        - bearerAuth: []
+  /notifications:
+    get:
+      summary: Get notifications
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, sent]
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [hitp_pause, execution_progress]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of notifications
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notifications:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        notificationId:
+                          type: string
+                        ownerId:
+                          type: string
+                        timestamp:
+                          type: integer
+                        status:
+                          type: string
+                        notification:
+                          type: object
+                        ttl:
+                          type: integer
+                  nextToken:
+                    type: string
+      security:
+        - bearerAuth: []
+
+# ===========================================================================
+# WebSocket API Security Information (Non-OpenAPI)
+# ===========================================================================
+# 
+# WebSocket 연결 엔드포인트: wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+# 
+# Security Requirements:
+# 1. JWT Token Required: 연결 시 Authorization 헤더에 Bearer 토큰 필수
+# 2. JWKS Validation: 실제 Cognito JWKS 서명 검증 구현됨
+# 3. Tenant Isolation: 사용자는 본인의 알림만 수신 가능
+# 
+# Connection Examples:
+# 
+# JavaScript:
+# const ws = new WebSocket('wss://api-id.execute-api.region.amazonaws.com/stage', [], {
+#   headers: { 'Authorization': `Bearer ${jwtToken}` }
+# });
+# 
+# Python:
+# import websockets
+# headers = {"Authorization": f"Bearer {jwt_token}"}
+# async with websockets.connect("wss://...", extra_headers=headers) as websocket:
+#     ...
+# 
+# Security Improvements (v2.0.0):
+# - ✅ 실제 JWKS 서명 검증 (이전 가짜 검증에서 개선)
+# - ✅ TTL 기반 연결 정리로 stale 연결 방지
+# - ✅ ownerId 기반 알림 격리로 cross-tenant 접근 차단
+# ===========================================================================

@@ -1,0 +1,53 @@
+{
+  "family": "async-llm-worker",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::482421580372:role/ecsAsyncLLMExecutionRole",
+  "taskRoleArn": "arn:aws:iam::482421580372:role/ecsAsyncLLMTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "async-llm-worker-container",
+      "image": "482421580372.dkr.ecr.ap-northeast-2.amazonaws.com/async-llm-worker:${IMAGE_TAG:-latest}",
+      "essential": true,
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/async-llm-worker",
+          "awslogs-region": "ap-northeast-2",
+          "awslogs-stream-prefix": "ecs",
+          "awslogs-create-group": "true"
+        }
+      },
+      "environment": [
+        {
+          "name": "AWS_DEFAULT_REGION",
+          "value": "ap-northeast-2"
+        },
+        {
+          "name": "PYTHONPATH",
+          "value": "/var/task:/var/task/backend"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:482421580372:secret:openai-api-key"
+        },
+        {
+          "name": "ANTHROPIC_API_KEY", 
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:482421580372:secret:anthropic-api-key"
+        },
+        {
+          "name": "GOOGLE_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:ap-northeast-2:482421580372:secret:google-api-key"
+        }
+      ]
+    }
+  ]
+}

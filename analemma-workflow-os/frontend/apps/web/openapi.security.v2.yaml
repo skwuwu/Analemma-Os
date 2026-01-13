@@ -1,0 +1,523 @@
+openapi: 3.0.3
+info:
+  title: Workflow API (Security-Hardened)
+  version: 2.0.0
+  description: |
+    🔒 Security-hardened Step Functions 및 Lambda 핸들러를 위한 OpenAPI 명세.
+
+    ## Security Features (v2.0.0):
+    - ✅ IDOR 취약점 패치: 모든 API가 JWT claims에서 ownerId 추출
+    - ✅ WebSocket JWT 검증: JWKS 기반 실제 서명 검증 구현
+    - ✅ Tenant 격리: 사용자는 본인의 데이터에만 접근 가능
+    - ✅ 내부 API 보호: Step Functions 전용 엔드포인트는 공개 노출 제거
+
+    ## WebSocket Real-time Notifications:
+    WebSocket 연결은 JWT 토큰 검증이 필요하며, 연결 시 Authorization 헤더로 Bearer 토큰을 제공해야 합니다.
+    Notifications는 EventBridge → Notify Lambda를 통해 authenticated 사용자의 활성 연결로만 전송됩니다.
+
+    ## Breaking Changes from v1.0.0:
+    - ownerId 쿼리 매개변수 제거: JWT에서 자동 추출
+    - /notify-hitp 엔드포인트 제거: 내부 Step Functions 전용으로 변경
+servers:
+  - url: http://localhost:8000
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ExecutionStatus:
+      type: object
+      properties:
+        executionArn:
+          type: string
+        status:
+          type: string
+          enum: [RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED]
+        startDate:
+          type: string
+          format: date-time
+        stopDate:
+          type: string
+          format: date-time
+        output:
+          type: object
+    ExecutionList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionStatus'
+        nextToken:
+          type: string
+    RunWorkflowRequest:
+      type: object
+      properties:
+        initial_state:
+          type: object
+          description: "Optional initial state for the workflow; large payloads should be offloaded to S3"
+        callback_url:
+          type: string
+          format: uri
+          description: "Optional callback URL to POST result when workflow completes"
+        idempotency_key:
+          type: string
+          description: "Optional client-provided idempotency key (will be tenant-scoped by backend)"
+    DesignAssistantRequest:
+      type: object
+      required: [request]
+      properties:
+        request:
+          type: string
+          description: User request for workflow design
+security:
+  - bearerAuth: []
+paths:
+  /workflows/{id}:
+    put:
+      summary: Update workflow
+      description: "업데이트 시 owner는 JWT의 `sub` 또는 `ownerId` claim으로 결정됩니다. 클라이언트에서 ownerId를 전달하더라도 무시됩니다."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: object
+      responses:
+        '200':
+          description: Workflow updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  workflowId:
+                    type: string
+                  name:
+                    type: string
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (owner mismatch)
+    delete:
+      summary: Delete workflow
+      description: "삭제 권한은 JWT의 ownerId로 검증됩니다."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  workflowId:
+                    type: string
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden (owner mismatch)
+  /resume:
+    post:
+      summary: Resume Step Functions execution (Security-Hardened)
+      description: |
+        🔒 Security Note: ownerId는 JWT claims에서만 추출됩니다.
+        클라이언트에서 ownerId를 제공하더라도 무시되며, 인증된 사용자의 토큰에서만 추출합니다.
+        이를 통해 IDOR (Insecure Direct Object Reference) 공격을 방지합니다.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [conversation_id, response]
+              properties:
+                execution_id:
+                  type: string
+                  description: "Optional: Step Functions execution ID (for direct lookup)"
+                conversation_id:
+                  type: string
+                  description: "Required: Conversation identifier for task token lookup"
+                response:
+                  type: string
+                  description: "Required: User response to resume the paused workflow"
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+    get:
+      summary: Get resume status (optional)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: conversation_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Resume status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+  /workflows:
+    get:
+      summary: List workflows
+      description: "ownerId removed: API uses authenticated JWT `sub` claim to identify caller"
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: nextToken
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of workflows
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflows:
+                    type: array
+                    items:
+                      type: object
+                  nextToken:
+                    type: string
+        '401':
+          description: Unauthorized
+    post:
+      summary: Create workflow
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: object
+      responses:
+        '200':
+          description: Workflow created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  workflowId:
+                    type: string
+                  name:
+                    type: string
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+  /by-name:
+    get:
+      summary: Get workflow by name for authenticated owner
+      description: This endpoint uses the authenticated JWT `sub` claim as the ownerId; do not pass ownerId in query parameters.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: name
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Workflow found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  workflowId:
+                    type: string
+                  ownerId:
+                    type: string
+                  createdAt:
+                    type: integer
+                  updatedAt:
+                    type: integer
+                  is_scheduled:
+                    type: string
+                  next_run_time:
+                    type: integer
+                  config:
+                    type: object
+        '401':
+          description: Unauthorized
+        '404':
+          description: Not found
+  /design-assistant:
+    post:
+      summary: Design assistant
+      description: |
+        Note: this operation is reachable via two methods in the template:
+        - HttpApi (API Gateway) integration which requires Cognito JWT (`bearerAuth`) as documented here.
+        - Lambda Function URL (InvokeMode: RESPONSE_STREAM) which is configured with `AuthType: NONE` to support streaming LFU clients and therefore cannot use JWT. LFU/streaming clients should call the Function URL directly for SSE responses.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DesignAssistantRequest'
+      responses:
+        '200':
+          description: Assistant response (supports streaming via text/event-stream). The Function URL is recommended for long-running streaming responses.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "SSE stream of JSONL lines; each 'data: {json}\n\n' contains partial results"
+            application/json:
+              schema:
+                type: object
+                properties:
+                  complexity:
+                    type: string
+                    enum: ["단순", "보통", "복잡"]
+                  response:
+                    type: object
+                    properties:
+                      text:
+                        type: string
+                      tool_use:
+                        type: object
+    get:
+      summary: Get design assistant metadata or status
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Assistant metadata
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  info:
+                    type: string
+  /workflow-assistant:
+    post:
+      summary: Workflow assistant (alias for design-assistant)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request]
+              properties:
+                request:
+                  type: string
+                  description: User request for workflow design
+      responses:
+        '200':
+          description: Assistant response (supports streaming via text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: object
+                properties:
+                  complexity:
+                    type: string
+                    enum: ["단순", "보통", "복잡"]
+                  response:
+                    type: object
+                    properties:
+                      text:
+                        type: string
+                      tool_use:
+                        type: object
+  /workflows/{id}/run:
+    post:
+      summary: Run workflow
+      description: "워크플로우 실행 시작. 실행 레코드는 JWT의 ownerId로 소유자 필터링됩니다."
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RunWorkflowRequest'
+      responses:
+        '200':
+          description: Returns Step Functions executionArn for the started execution
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionArn:
+                    type: string
+                  message:
+                    type: string
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+  /status:
+    get:
+      summary: Get Step Functions execution status (secured)
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: executionArn
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Execution status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionStatus'
+        '400':
+          description: Bad request (missing executionArn)
+        '401':
+          description: Unauthorized
+        '403':
+          description: Forbidden
+        '404':
+          description: Not found or owner mismatch
+  /executions:
+    get:
+      summary: List my executions (Paginated)
+      description: |
+        Fetches a paginated list of Step Function executions started by the authenticated user.
+        Uses the DynamoDB GSI (ownerId-startDate-index) for fast, secure, sorted queries.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          description: Number of items to return (default 20, max 100)
+          schema:
+            type: integer
+            default: 20
+        - name: nextToken
+          in: query
+          description: Opaque token for pagination from a previous response
+          schema:
+            type: string
+      responses:
+        '200':
+          description: A paginated list of executions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionList'
+        '401':
+          description: Unauthorized
+
+# ==========================================================================
+# WebSocket API Security Information (Non-OpenAPI)
+# ==========================================================================
+#
+# WebSocket 연결 엔드포인트: wss://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+#
+# Security Requirements:
+# 1. JWT Token Required: 연결 시 Authorization 헤더에 Bearer 토큰 필수
+# 2. JWKS Validation: 실제 Cognito JWKS 서명 검증 구현됨
+# 3. Tenant Isolation: 사용자는 본인의 알림만 수신 가능
+#
+# Connection Examples:
+#
+# JavaScript:
+# const ws = new WebSocket('wss://api-id.execute-api.region.amazonaws.com/stage', [], {
+#   headers: { 'Authorization': `Bearer ${jwtToken}` }
+# });
+#
+# Python:
+# import websockets
+# headers = {"Authorization": f"Bearer {jwt_token}"}
+# async with websockets.connect("wss://...", extra_headers=headers) as websocket:
+#     ...
+#
+# Security Improvements (v2.0.0):
+# - ✅ 실제 JWKS 서명 검증 (이전 가짜 검증에서 개선)
+# - ✅ TTL 기반 연결 정리로 stale 연결 방지
+# - ✅ ownerId 기반 알림 격리로 cross-tenant 접근 차단
+#
+# Internal endpoints removed:
+# - /notify-hitp: 제거됨. 이 기능은 Step Functions 내부에서만 호출됩니다.
+#   외부 노출이 필요 없는 내부 Lambda/Step Functions 호출로 전환되었습니다.
+#
+# Notes for implementers:
+# - 모든 경로에서 ownerId는 클라이언트 입력이 아닌 JWT claim에서 추출되어 사용됩니다.
+# - 공개 엔드포인트는 bearerAuth로 보호되어야 하며, 내부 Step Functions 호출은 내부 IAM 역할로 제한되어야 합니다.
+# - SSE/Function-URL 사용 시 인증 방식(없음 또는 bearer)을 운영 정책에 맞춰 문서화하세요.

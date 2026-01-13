@@ -1,0 +1,8 @@
+google-ai-generativelanguage==0.6.15
+# Use the official google-ai-generativelanguage package (pinned) which avoids
+# pulling the heavy `google-api-python-client` into this layer. The large
+# google-api-python-client is provided via an image-based Lambda at
+# `layers/google_api_client/` (see `template.yaml`).
+
+# Pin numpy to <2.0.0 to avoid build errors with GCC < 9.3 in Lambda environment
+numpy<2.0.0

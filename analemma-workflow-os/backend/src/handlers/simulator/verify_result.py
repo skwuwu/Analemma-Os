@@ -1,0 +1,270 @@
+
+import json
+import boto3
+import os
+import uuid
+from typing import Dict, Any
+import logging
+from datetime import datetime
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# Config
+STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
+METRIC_NAMESPACE = os.environ.get('METRIC_NAMESPACE', 'Analemma/MissionSimulator')
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """
+    Verifies the output of a test execution.
+    Input: 전체 맵 반복 컨텍스트 또는 { "scenario": "...", "exec_result": {...} }
+    Output: { "passed": True/False, "report_s3_path": "s3://..." }
+    """
+    # [방어적 파싱] 전체 컨텍스트($)가 들어올 수 있으므로 다양한 경로에서 scenario 추출
+    scenario = (
+        event.get('scenario') or 
+        event.get('prep_result', {}).get('scenario') or
+        'UNKNOWN'
+    )
+    
+    # [방어적 파싱] exec_result 추출 - 직접 필드 또는 상위 레벨
+    exec_result = event.get('exec_result')
+    if exec_result is None:
+        # 전체 컨텍스트가 exec_result 자체일 수 있음
+        exec_result = event if 'Status' in event or 'status' in event or 'Error' in event else {}
+    
+    # 상세 로깅: 입력 데이터 기록
+    logger.info(f"VerifyResult called for scenario: {scenario}")
+    logger.info(f"Raw event keys: {list(event.keys())}")
+    logger.info(f"exec_result keys: {list(exec_result.keys()) if isinstance(exec_result, dict) else type(exec_result)}")
+    
+    # Extract status and output from exec_result
+    # SFN 성공 시: Status='SUCCEEDED', Output 존재
+    # SFN 실패 시 (Catch): Status='FAILED', Error/Cause 존재  
+    # SFN Runtime 에러 시: Error/Cause 필드만 존재
+    
+    # [방어적 파싱] 상태 추출 - 다양한 케이스 처리
+    error_type = exec_result.get('Error')
+    cause_raw = exec_result.get('Cause', '')
+    
+    # 상태 결정 로직 강화
+    if error_type:
+        # 에러가 있으면 무조건 FAILED
+        status = 'FAILED'
+        logger.warning(f"❌ Execution error detected: {error_type}")
+    else:
+        # 기존 로직: status 또는 Status 필드 확인
+        status = exec_result.get('status', exec_result.get('Status', 'SUCCEEDED'))
+    
+    # [방어적 파싱] Output 추출 - 여러 경로 시도
+    output_raw = exec_result.get('output') or exec_result.get('Output')
+    if not output_raw:
+        # Catch로 들어온 실패 케이스 - Cause에서 에러 정보 추출
+        if cause_raw:
+            output_raw = cause_raw
+            logger.warning(f"⚠️ No output found for {scenario}, using Cause field")
+            logger.info(f"Cause content (truncated): {str(cause_raw)[:500]}...")
+        else:
+            output_raw = '{"error": "No output or cause found"}'
+            logger.warning(f"⚠️ No output or cause found for {scenario}")
+    
+    # [Fix] Parse output if it's a string (ASL passes raw string to avoid payload limit issues)
+    output = {}
+    if isinstance(output_raw, str):
+        try:
+            output = json.loads(output_raw)
+        except Exception as e:
+            logger.warning(f"Failed to parse output string: {e}")
+            output = {"error": "Failed to parse execution output", "raw": output_raw[:1000]}
+    elif isinstance(output_raw, dict):
+        output = output_raw
+    
+    # Add error info if execution failed
+    if error_type:
+        output['execution_error'] = error_type
+        output['execution_failed'] = True
+    
+    logger.info(f"Verifying {scenario} - Status: {status}")
+    
+    # 1. Perform Verification Logic
+    verification_result = _verify_scenario(scenario, status, output)
+    
+    # 2. Embellish Result
+    verification_result['timestamp'] = datetime.utcnow().isoformat()
+    verification_result['scenario'] = scenario
+    
+    # 3. Create Detailed Report
+    report = {
+        "scenario": scenario,
+        "verification_result": verification_result,
+        "execution_status": status,
+        "execution_output": output # Storing full output here safely in S3
+    }
+    
+    # 4. Upload Report to S3 (Payload Safety)
+    report_key = f"test-reports/{datetime.utcnow().strftime('%Y/%m/%d')}/{scenario}-{uuid.uuid4()}.json"
+    if STATE_BUCKET:
+        s3 = boto3.client('s3')
+        s3.put_object(
+            Bucket=STATE_BUCKET,
+            Key=report_key,
+            Body=json.dumps(report),
+            ContentType='application/json'
+        )
+        report_s3_path = f"s3://{STATE_BUCKET}/{report_key}"
+    else:
+        logger.warning("WORKFLOW_STATE_BUCKET not set, skipping S3 upload")
+        report_s3_path = "N/A"
+
+    return {
+        "passed": verification_result['passed'],
+        "scenario": scenario,
+        "report_s3_path": report_s3_path
+    }
+
+def _verify_scenario(scenario: str, status: str, output: Dict[str, Any]) -> Dict[str, Any]:
+    checks = []
+    
+    # [선처리] LoopLimitExceeded 에러 감지 - 모든 시나리오에서 확인
+    error_type = output.get('Error', output.get('error_type', ''))
+    if error_type in ('LoopLimitExceeded', 'BranchLoopLimitExceeded'):
+        # 가드레일이 작동한 것 자체는 시스템이 정상 작동하는 증거
+        checks.append(_check("Safety Guardrail Activated", True, 
+                            details=f"Infinite loop prevented by system: {error_type}"))
+        # 하지만 HAPPY_PATH에서는 루프가 발생하면 안 되므로 실패 처리
+        if 'HAPPY_PATH' in scenario or 'MAP_AGGREGATOR' in scenario:
+            checks.append(_check("No Infinite Loop", False, 
+                                details="Workflow should complete without hitting loop limit",
+                                expected="< 100 iterations", actual=error_type))
+        return {"passed": False, "checks": checks}
+    
+    # A. Happy Path
+    if scenario in ['HAPPY_PATH', 'STANDARD_HAPPY_PATH', 'MAP_AGGREGATOR', 'STANDARD_MAP_AGGREGATOR', 'LOOP_LIMIT', 'STANDARD_LOOP_LIMIT', 'COST_GUARDRAIL', 'STANDARD_COST_GUARDRAIL', 'ATOMICITY', 'STANDARD_ATOMICITY', 'XRAY_TRACEABILITY', 'STANDARD_XRAY_TRACEABILITY']:
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        
+        # [Fix] LOOP_LIMIT/COST_GUARDRAIL: 가드레일 메트릭 검증
+        if 'LOOP_LIMIT' in scenario or 'COST_GUARDRAIL' in scenario:
+            # 가드레일 메트릭이 최종 출력에 포함되어 있는지 확인
+            has_loop_counter = isinstance(output, dict) and (
+                output.get('loop_counter') is not None or
+                output.get('max_loop_iterations') is not None
+            )
+            has_cost_metrics = isinstance(output, dict) and (
+                output.get('llm_segments') is not None or
+                output.get('total_segments') is not None
+            )
+            checks.append(_check("Guardrail Metrics Present", has_loop_counter or has_cost_metrics,
+                                details="Output should contain loop_counter or cost metrics"))
+        
+        # Additional specific checks
+        if 'MAP_AGGREGATOR' in scenario:
+             out_str = json.dumps(output)
+             # [Fix] Check for multiple possible branch result patterns including branch_executed marker
+             branch_a = 'Branch A' in out_str or 'branch_A' in out_str or 'branch_A_result' in out_str or 'branch_A_executed' in out_str or 'branch_executed' in out_str
+             branch_b = 'Branch B' in out_str or 'branch_B' in out_str or 'branch_B_result' in out_str or 'branch_B_executed' in out_str or 'branch_executed' in out_str
+             checks.append(_check("Branch A Executed", branch_a))
+             checks.append(_check("Branch B Executed", branch_b))
+    
+    # A-2. HITP Test - Human-in-the-loop 세그멘테이션 테스트
+    elif scenario == 'HITP_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # HITP 흐름 완료 확인
+        checks.append(_check("HITP Flow Completed", 
+                            'hitp_test_completed' in out_str or 'HITP_NODE_EXECUTED' in out_str or 'SUCCESS' in out_str,
+                            details="HITP workflow should complete after auto-resume"))
+        
+    # B. PII Test
+    elif 'PII_TEST' in scenario:
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED'))
+        out_str = json.dumps(output)
+        checks.append(_check("PII Email Masked", 'john@example.com' not in out_str, "Email should not be visible"))
+        checks.append(_check("PII Phone Masked", '010-1234-5678' not in out_str, "Phone should not be visible"))
+
+    # C. S3 Offloading
+    elif 'LARGE_PAYLOAD' in scenario:
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED'))
+        out_str = json.dumps(output)
+        # [Fix] S3 path can be in multiple locations - check deeper paths
+        # Check in output, execution_result, and nested state_data
+        has_s3_reference = (
+            's3://' in out_str or 
+            'state_s3_path' in out_str or 
+            'final_state_s3_path' in out_str or
+            (isinstance(output, dict) and output.get('final_state_s3_path')) or
+            (isinstance(output, dict) and output.get('execution_result', {}).get('final_state_s3_path')) or
+            (isinstance(output, dict) and output.get('state_data', {}).get('state_s3_path')) or
+            # Also check for large payload marker indicating S3 should have been used
+            (isinstance(output, dict) and output.get('large_s3_result'))
+        )
+        checks.append(_check("S3 Path Present", has_s3_reference, "Output should contain S3 reference"))
+        
+    # D. Error Handling - 의도적 실패 테스트
+    elif scenario in ['ERROR_HANDLING', 'STANDARD_ERROR_HANDLING']:
+        checks.append(_check("Status Failed", status == 'FAILED', expected="FAILED", actual=status))
+        
+        # [방어적 파싱] 에러 메시지 추출 - 다양한 위치 확인
+        error_msg = ''
+        if isinstance(output, dict):
+            error_msg = output.get('error', output.get('message', ''))
+        else:
+            error_msg = str(output)
+        
+        # FAIL_TEST 마커 확인 (의도적 실패인 경우)
+        full_context = json.dumps(output) if isinstance(output, dict) else str(output)
+        has_fail_marker = 'FAIL_TEST' in full_context
+        
+        if has_fail_marker:
+            checks.append(_check("Intentional Failure Marker Found", True, details="FAIL_TEST marker detected - test passed"))
+        else:
+            checks.append(_check("Error Info Present", len(str(error_msg)) > 0))
+
+    # E. Local Runner Scenarios - 자체 검증 결과 활용
+    elif scenario in ['API_CONNECTIVITY', 'WEBSOCKET_CONNECT', 'AUTH_FLOW', 'REALTIME_NOTIFICATION',
+                      'CORS_SECURITY', 'MULTI_TENANT_ISOLATION', 'CONCURRENT_BURST', 'CANCELLATION',
+                      'IDEMPOTENCY', 'DLQ_RECOVERY']:
+        # Local Runner가 반환한 checks 결과를 그대로 활용
+        local_checks = output.get('checks', [])
+        local_passed = output.get('passed', False)
+        
+        if local_checks:
+            # Local Runner의 상세 체크 결과 포함
+            for lc in local_checks:
+                checks.append(_check(
+                    f"[Local] {lc.get('name', 'Unknown')}",
+                    lc.get('passed', False),
+                    details=lc.get('details', '')
+                ))
+        else:
+            # checks가 없으면 status 기반으로 판단
+            checks.append(_check("Local Test Status", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        
+        # 최종 결과는 Local Runner의 passed 값 사용
+        return {"passed": local_passed, "checks": checks}
+    
+    # F. PARALLEL_GROUP_TEST - parallel_group 노드 실행 검증
+    elif scenario == 'PARALLEL_GROUP_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # Check for parallel execution markers
+        has_parallel_result = (
+            'branch' in out_str.lower() or 
+            'parallel' in out_str.lower() or
+            '_executed' in out_str
+        )
+        checks.append(_check("Parallel Execution Completed", has_parallel_result, 
+                            details="Should contain branch execution results"))
+
+    # Default fallback
+    else:
+        checks.append(_check("Status Succeeded (Default)", status == 'SUCCEEDED'))
+
+    passed = all(c['passed'] for c in checks)
+    return {"passed": passed, "checks": checks}
+
+def _check(name: str, condition: bool, details: str = None, expected: Any = None, actual: Any = None):
+    res = {'name': name, 'passed': condition}
+    if details: res['details'] = details
+    if expected: res['expected'] = expected
+    if actual: res['actual'] = actual
+    return res

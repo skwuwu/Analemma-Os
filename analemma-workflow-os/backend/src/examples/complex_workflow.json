@@ -1,0 +1,15 @@
+{
+  "nodes": [
+    { "id": "start", "type": "operator" },
+  { "id": "llm1", "type": "llm_chat", "prompt_content": "Hello, user said: {{user_query}}", "temperature": 0.7, "max_tokens": 256 },
+    { "id": "human_review", "type": "operator" },
+  { "id": "llm2", "type": "llm_chat", "prompt_content": "Revise based on review: {{userResponse}}", "temperature": 0.7, "max_tokens": 256 },
+    { "id": "end", "type": "operator" }
+  ],
+  "edges": [
+    { "type": "normal", "source": "start", "target": "llm1" },
+    { "type": "hitp", "source": "llm1", "target": "human_review" },
+    { "type": "normal", "source": "human_review", "target": "llm2" },
+    { "type": "normal", "source": "llm2", "target": "end" }
+  ]
+}

@@ -1,0 +1,97 @@
+# Docker ignore file - exclude unnecessary files from container image
+
+# Documentation and markdown files
+*.md
+docs/
+README*
+# Exclude text files but NOT requirements.txt
+license.txt
+LICENSE.txt
+CHANGELOG.txt
+
+# Test files - be specific to avoid excluding production files like infra_smoke_tester.py
+tests/
+test_*.py
+*_test.py
+conftest.py
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IMPORTANT: Include test_workflows JSON files (needed for Mission Simulator)
+!test_workflows/
+!test_workflows/*.json
+
+# Development files
+.git/
+.gitignore
+.env*
+*.log
+*.logs
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Large binary files
+*.zip
+*.tar.gz
+*.tar
+*.rar
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+.temp/
+
+# Node modules if any
+node_modules/
+
+# Python virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# Large data files
+*.csv
+*.json.gz
+*.parquet
+*.pkl
+*.pickle
+
+# AWS SAM build artifacts
+.aws-sam/
+
+# Empty or example directories
+examples/
+**/examples/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json

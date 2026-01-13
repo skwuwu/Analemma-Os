@@ -1,0 +1,110 @@
+import pytest
+import os
+import shutil
+import time
+import json
+from unittest.mock import MagicMock, patch
+from backend.worker_cache import WorkerCacheManager
+
+@pytest.fixture
+def mock_s3():
+    with patch('backend.worker_cache.boto3.client') as m:
+        yield m.return_value
+
+@pytest.fixture
+def cache_mgr(tmp_path):
+    # Use a temp directory for cache
+    # Set MAX_CACHE_SIZE_MB to a small value for testing
+    with patch.dict(os.environ, {'CACHE_MAX_SIZE_MB': '10', 'CACHE_CLEANUP_THRESHOLD': '0.8'}):
+        mgr = WorkerCacheManager(cache_dir=str(tmp_path / "cache"))
+        yield mgr
+
+def test_cache_consistency_etag(cache_mgr, mock_s3):
+    """
+    Consistency Test: Verify cache invalidation when ETag changes.
+    """
+    s3_path = "s3://bucket/data.json"
+    
+    # 1. First Load (ETag: v1)
+    mock_s3.head_object.return_value = {
+        'ETag': '"v1"', 
+        'ContentLength': 100,
+        'LastModified': 'now'
+    }
+    # Body for v1
+    mock_s3.get_object.return_value = {
+        'Body': MagicMock(read=lambda: b'[{"id": 1}]')
+    }
+    
+    data = cache_mgr.load_partition_map(s3_path)
+    assert data[0]['id'] == 1
+    assert mock_s3.get_object.call_count == 1
+    
+    # 2. Second Load (Same ETag: v1) -> Should hit cache
+    # Reset mock to ensure no call
+    mock_s3.get_object.reset_mock()
+    data = cache_mgr.load_partition_map(s3_path)
+    assert data[0]['id'] == 1
+    mock_s3.get_object.assert_not_called()
+    
+    # 3. Third Load (ETag: v2) -> Should invalidate and download
+    mock_s3.head_object.return_value = {
+        'ETag': '"v2"',  # Changed
+        'ContentLength': 100,
+        'LastModified': 'later'
+    }
+    # Body for v2
+    mock_s3.get_object.return_value = {
+        'Body': MagicMock(read=lambda: b'[{"id": 2}]')
+    }
+    
+    data = cache_mgr.load_partition_map(s3_path)
+    assert data[0]['id'] == 2 # New data
+    mock_s3.get_object.assert_called_once()
+
+def test_chaos_disk_full(cache_mgr, mock_s3):
+    """
+    Chaos Test: Simulate /tmp fullness.
+    """
+    s3_path = "s3://bucket/bigdata.json"
+    mock_s3.head_object.return_value = {'ETag': '"v1"', 'ContentLength': 1024*1024*5}
+    mock_s3.get_object.return_value = {'Body': MagicMock(read=lambda: b'[{"id": 99}]')}
+    
+    # Mock shutil.disk_usage to return 90% used
+    with patch('backend.worker_cache.shutil.disk_usage') as mock_du:
+        # total, used, free
+        mock_du.return_value = (100, 90, 10) 
+        
+        # Also fail file write to simulate real "No space left" if cleanup fails
+        with patch('builtins.open', side_effect=IOError("No space left on device")):
+             # Note: load_partition_map tries to write to cache, checks space first.
+             # _ensure_cache_space_available will be called, see usage > 80% (0.8), call cleanup.
+             # Then it tries to write. 
+             # If write fails, it should catch exception and still return data from memory.
+             
+             # Caution: We need to allow 'open' for reading if it tries to read, 
+             # but here we assume it's a fresh load so it downloads and tries to write.
+             # If we mock open globally it might break logic that reads config etc (if any).
+             # But WorkerCacheManager only opens cache files.
+             
+             # Actually, simpler: Verify it returns data even if cache write fails
+             data = cache_mgr.load_partition_map(s3_path)
+             assert data is not None
+             assert len(data) == 1
+             assert data[0]['id'] == 99
+             
+             # And it should have tried to cleanup
+             # (We can't easily assert private method called without spy, but log would show)
+
+def test_s3_fallback_on_error(cache_mgr, mock_s3):
+    """
+    Resilience: If S3 fails, return empty list gracefully (or raise depending on contract).
+    Current impl returns [].
+    """
+    mock_s3.head_object.side_effect = Exception("S3 Down")
+    # Should fallback to path based key, then try memory/disk.
+    # If not in cache, try download.
+    mock_s3.get_object.side_effect = Exception("S3 Down")
+    
+    data = cache_mgr.load_partition_map("s3://bucket/fail.json")
+    assert data == []

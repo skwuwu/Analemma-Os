@@ -1,0 +1,41 @@
+{
+    "workflow_name": "HITP Segmentation Test Workflow",
+    "description": "Human-in-the-loop 세그멘테이션 테스트 워크플로우 - 단순화",
+    "nodes": [
+        {
+            "id": "start_node",
+            "type": "operator",
+            "config": {
+                "code": "state['hitp_test_started'] = True\nstate['TEST_MARKER'] = 'SEGMENT_1_COMPLETE'"
+            }
+        },
+        {
+            "id": "hitp_node",
+            "type": "operator",
+            "hitp": true,
+            "config": {
+                "code": "state['hitp_executed'] = True\nstate['TEST_MARKER'] = 'HITP_NODE_EXECUTED'"
+            }
+        },
+        {
+            "id": "final_node",
+            "type": "operator",
+            "config": {
+                "code": "state['hitp_test_completed'] = True\nstate['TEST_RESULT'] = 'SUCCESS: HITP flow completed'"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start_node",
+            "target": "hitp_node",
+            "type": "hitp"
+        },
+        {
+            "source": "hitp_node",
+            "target": "final_node",
+            "type": "normal"
+        }
+    ],
+    "start_node": "start_node"
+}

@@ -1,0 +1,8 @@
+# Core LangChain dependencies (most stable, cache-friendly)
+# These are the foundational packages that change less frequently
+langchain-core>=0.1.0
+langchain>=0.1.0
+langchain-community>=0.0.0
+
+# Pin numpy to <2.0.0 to avoid build errors with GCC < 9.3 in Lambda environment
+numpy<2.0.0

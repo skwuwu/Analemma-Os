@@ -1,0 +1,23 @@
+# LLM / LangGraph related heavy dependencies kept separate to avoid
+# inflating the common layer. Attach this layer only to functions that
+# actually need LLM/graph/model libraries (e.g., AsyncLLMHandler, SegmentRunner).
+
+# Core LangChain packages moved to layers/llm_core/ for better caching
+
+# LangGraph and related
+langgraph>=1.0.0a4
+langgraph-checkpoint-dynamodb>=0.1.0
+
+# LLM Providers (these change more frequently)
+openai>=1.12.0
+anthropic>=0.18.1
+
+# Utilities
+dill==0.3.6
+
+# Monitoring (can be moved to separate layer if needed)
+langsmith>=0.0.0
+
+
+# Pin numpy to <2.0.0 to avoid build errors with GCC < 9.3 in Lambda environment
+numpy<2.0.0

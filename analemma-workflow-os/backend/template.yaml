@@ -1,1 +1,3954 @@
-# SAM 템플릿 (인프라 정의)
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Serverless workflow backend with security hardening and scalable architecture.
+  # Trigger deployment retry - IAM and Monitoring update v8
+  Features: IDOR vulnerability fixes, JWT-based authentication, sharded DynamoDB GSI
+  for improved scalability, and proper tenant data isolation.
+Metadata:
+  cfn-lint:
+    config:
+      ignore_checks:
+        - E6101  # FunctionUrl 속성 인식 오류 무시
+        - E1010  # GetAtt 관련 잘못된 파싱 무시
+        - W1001  # 조건부 리소스 참조 경고 무시
+
+Parameters:
+  StageName:
+    Type: String
+    Default: dev
+    Description: Deployment stage name (e.g., dev, prod).
+  MockMode:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Enable mock mode for LLM responses (true/false).
+  CognitoIssuerUrl:
+    Type: String
+    Description: The issuer URL for the Cognito User Pool.
+  CognitoAudience:
+    Type: String
+    Description: The App Client ID (audience) for the Cognito User Pool.
+  AllowedOrigins:
+    Type: String
+    Default: "https://d22tnxagg6c5pz.cloudfront.net,http://localhost:3000,http://localhost:5173"
+    Description: Comma-separated list of allowed CORS origins. Include all frontend URLs (CloudFront, localhost for dev).
+  OpenAiApiKey:
+    Type: String
+    Description: API key for OpenAI access.
+    NoEcho: true
+  AnthropicApiKey:
+    Type: String
+    Description: API key for Anthropic access.
+    NoEcho: true
+  GoogleApiKey:
+    Type: String
+    Description: API key for Google Gemini access.
+    NoEcho: true
+  WorkflowStateBucket:
+    Type: String
+    Default: ""
+    Description: S3 bucket name for workflow intermediate state offload. If empty, auto-created.
+  CallbackWhitelist:
+    Type: String
+    Default: ""
+    Description: Optional comma-separated list of allowed callback URL hostnames.
+  # Fargate Async Worker
+  AsyncWorkerEcsCluster:
+    Type: String
+    Default: ""
+  AsyncWorkerTaskDefinition:
+    Type: String
+    Default: ""
+  AsyncWorkerExecutionRoleArn:
+    Type: String
+    Default: ""
+    Description: ARN of the execution role used by the Async Worker ECS Task Definition.
+  AsyncWorkerSubnetIds:
+    Type: String
+    Default: ""
+  AsyncWorkerSecurityGroupIds:
+    Type: String
+    Default: ""
+  
+  # [테스트 유저 인증] - GitHub Secrets → AWS Secrets Manager
+  TestUserEmail:
+    Type: String
+    Default: ""
+    Description: Test user email for simulator auth tests (from GitHub Secrets)
+  TestUserPassword:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Test user password for simulator auth tests (from GitHub Secrets)
+
+  # [추가] 외부에서 주입받을 Kinesis ARN (기본값은 빈 문자열)
+  ExternalExecutionsStreamArn:
+    Type: String
+    Default: ""
+    Description: ARN of a pre-existing Kinesis stream. If provided, creation is skipped.
+
+  # [추가] 외부에서 빌드된 이미지 URI 주입
+  BackendLambdaImageUri:
+    Type: String
+    Description: Docker Image URI for Backend Lambda Functions
+
+  # DB 업데이트 전략 관련 파라미터
+  DbUpdateStrategy:
+    Type: String
+    Default: "SELECTIVE"
+    AllowedValues: ["ALL", "SELECTIVE", "MINIMAL"]
+    Description: Database update strategy (ALL=every update, SELECTIVE=smart updates, MINIMAL=critical only)
+  
+  DbUpdateInterval:
+    Type: Number
+    Default: 30
+    MinValue: 10
+    MaxValue: 300
+    Description: Minimum interval between database updates in seconds (for SELECTIVE strategy)
+
+Globals:
+  Function:
+    Architectures:
+      - arm64  # Graviton2: 20% cost savings, better performance for Python workloads
+    Timeout: 30
+    MemorySize: 512
+    Tracing: Active
+    Environment:
+      Variables:
+        # 공통 환경 변수
+        WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+        TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
+        IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+        USERS_TABLE: !Ref UsersTableV3
+        WORKFLOWS_OWNER_INDEX: OwnerIdNameIndex
+        CLOUDFRONT_DOMAIN: !Ref AllowedOrigins
+        WORKFLOW_ORCHESTRATOR_ARN: !Sub
+          - "arn:aws:states:${AWS::Region}:${AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
+          - AccountId: !Ref "AWS::AccountId"
+        WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Sub
+          - "arn:aws:states:${AWS::Region}:${AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+          - AccountId: !Ref "AWS::AccountId"
+        MOCK_MODE: !Ref MockMode
+        SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # OWNER_INDEX removed from Globals - each function must specify correct index for its table
+        # WorkflowsTableV3 uses: OwnerIdNameIndex
+        # ExecutionsTableV3 uses: OwnerIdStartDateIndex
+        BEDROCK_JOB_TABLE: !Ref BedrockJobTableV3
+        # [Checkpoint & Time Machine 공통 변수]
+        CHECKPOINT_TABLE: !Ref CheckpointsTableV3
+
+Conditions:
+  CreateWorkflowStateBucket: !Equals [ !Ref WorkflowStateBucket, "" ]
+  HasAsyncWorkerExecutionRole: !Not [ !Equals [ !Ref AsyncWorkerExecutionRoleArn, "" ] ]
+  CreateAsyncWorkerRole: !Equals [ !Ref AsyncWorkerExecutionRoleArn, "" ]
+  HasAsyncWorkerTaskDefinition: !Not [ !Equals [ !Ref AsyncWorkerTaskDefinition, "" ] ]
+  # [추가] ARN이 비어있을 때만 리소스를 생성하겠다는 조건
+  ShouldCreateKinesisStream: !Equals [ !Ref ExternalExecutionsStreamArn, "" ]
+  # [추가] 테스트 유저 자격증명이 제공된 경우에만 시크릿 생성
+  HasTestUserCredentials: !And
+    - !Not [ !Equals [ !Ref TestUserEmail, "" ] ]
+    - !Not [ !Equals [ !Ref TestUserPassword, "" ] ]
+
+Resources:
+  # [2순위 최적화] CheckIdempotencyFunction 제거됨
+  # Direct SDK Integration으로 대체 (Step Functions에서 직접 DynamoDB 조회)
+  # Lambda Cold Start 제거로 100-300ms 절감
+
+  # --- Layers (Lightweight Only) ---
+  # 🚨 LAYER SIZE LIMIT: 262MB unzipped
+  # Heavy dependencies (AI libs, FastAPI, etc.) moved to Docker images
+  
+  CommonDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "backend-common-deps-${StageName}"
+      ContentUri: packages/lambda-layers/common
+      CompatibleRuntimes: [python3.12]
+    Metadata:
+      BuildMethod: python3.12
+
+  # ❌ REMOVED: Heavy layers that exceed 262MB limit
+  # - LLMDependenciesLayer (moved to Docker image)
+  # - LLMCoreDependenciesLayer (moved to Docker image) 
+  # - GoogleGenerativeAILayer (moved to Docker image)
+  # - HeavyDependenciesLayer (moved to Docker image)
+  
+  # All AI/ML dependencies now included in Docker images for PackageType: Image functions
+
+  # --- Secrets ---
+  OpenAISecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-openai_api_key"
+      SecretString: !Sub '{"api_key":"${OpenAiApiKey}"}'
+
+  GeminiSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-gemini_api_key"
+      SecretString: !Sub '{"api_key":"${GoogleApiKey}"}'
+
+  AnthropicSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-anthropic_api_key"
+      SecretString: !Sub '{"api_key":"${AnthropicApiKey}"}'
+
+  # 🔐 테스트 유저 인증 정보 (시뮬레이터용)
+  # GitHub Secrets → 배포 시 AWS Secrets Manager에 저장 → Lambda에서 런타임 조회
+  TestUserCredentialsSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasTestUserCredentials
+    Properties:
+      Name: !Sub "analemma/${StageName}/test-user-credentials"
+      SecretString: !Sub '{"email":"${TestUserEmail}","password":"${TestUserPassword}"}'
+      Description: "Test user credentials for simulator auth tests"
+
+  # 🔐 SSM Parameter for Cognito User Pool ID
+  # CognitoIssuerUrl에서 User Pool ID를 추출하여 저장 (LocalRunnerFunction 등에서 사용)
+  CognitoUserPoolIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/analemma/${StageName}/cognito-user-pool-id"
+      Type: String
+      # CognitoIssuerUrl 형식: https://cognito-idp.{region}.amazonaws.com/{poolId}
+      Value: !Select [3, !Split ["/", !Ref CognitoIssuerUrl]]
+      Description: !Sub "Cognito User Pool ID for ${StageName} environment"
+
+  # PricingConfigParameter removed due to missing Properties causing build error
+
+  # 🔧 SSM Parameter for Pricing Configuration
+  # Required by UsageAggregatorFunction for cost calculation and user usage tracking
+  PricingConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/analemma/${StageName}/pricing"
+      Type: String
+      Value: !Sub |
+        {
+          "openai": {
+            "gpt-4": {"input": 0.03, "output": 0.06},
+            "gpt-4-turbo": {"input": 0.01, "output": 0.03},
+            "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002}
+          },
+          "anthropic": {
+            "claude-3-opus": {"input": 0.015, "output": 0.075},
+            "claude-3-sonnet": {"input": 0.003, "output": 0.015},
+            "claude-3-haiku": {"input": 0.00025, "output": 0.00125}
+          },
+          "google": {
+            "gemini-pro": {"input": 0.00025, "output": 0.0005}
+          },
+          "tokens_per_thousand": 1000,
+          "currency": "USD",
+          "last_updated": "${AWS::StackName}-${StageName}"
+        }
+      Description: !Sub "Pricing configuration for ${AWS::StackName} in ${StageName} environment"
+
+  # --- API Gateway Access Logs ---
+  HttpApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/apigateway/${AWS::StackName}-httpapi-${StageName}"
+      RetentionInDays: 30
+
+  HttpApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref StageName
+      AccessLogSettings:
+        DestinationArn: !GetAtt HttpApiAccessLogGroup.Arn
+        Format: '{"requestId":"$context.requestId","ip":"$context.identity.sourceIp","requestTime":"$context.requestTime","httpMethod":"$context.httpMethod","routeKey":"$context.routeKey","status":"$context.status","protocol":"$context.protocol","responseLength":"$context.responseLength","integrationError":"$context.integrationErrorMessage","errorMessage":"$context.error.message"}'
+      # 🛡️ [Concurrency Protection] API Gateway 최전방 방어 - 퓨즈(Fuse) 역할
+      # BurstLimit > RateLimit: 짧은 트래픽 급증은 허용, 지속적 과부하는 차단
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 100  # 순간 최대 요청 허용량
+        ThrottlingRateLimit: 50    # 초당 지속 요청 제한
+      CorsConfiguration:
+        AllowOrigins: !Split [",", !Ref AllowedOrigins]
+        AllowMethods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
+        AllowHeaders: [Authorization, Content-Type, "*"]
+        AllowCredentials: true
+      Auth:
+        Authorizers:
+          CognitoAuthorizer:
+            IdentitySource: "$request.header.Authorization"
+            JwtConfiguration:
+              issuer: !Ref CognitoIssuerUrl
+              audience: [!Ref CognitoAudience]
+        DefaultAuthorizer: CognitoAuthorizer
+
+  # --- WebSocket API ---
+  WebsocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "backend-websocket-${StageName}"
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+      DisableExecuteApiEndpoint: true
+
+  # [Fix] Explicit Authorizer Resource (SAM does not support inline Auth for V2 WebSocket)
+  WebsocketConnectAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      Name: WebsocketConnectAuthorizer
+      ApiId: !Ref WebsocketApi
+      AuthorizerType: REQUEST
+      AuthorizerUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebsocketAuthorizerFunction.Arn}/invocations"
+      IdentitySource:
+        - "route.request.querystring.token"
+      # ReauthorizeEvery is not a direct property of V2 Authorizer, it's part of Authorizer caching which isn't natively exposed in V2 Properties easily or defaults to TTL.
+      # Viewing 'AuthorizerPayloadFormatVersion' is for HTTP API, not WebSocket.
+
+  WebsocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebsocketApi
+      RouteKey: $connect
+      AuthorizationType: CUSTOM
+      AuthorizerId: !Ref WebsocketConnectAuthorizer
+      Target: !Sub "integrations/${WebsocketConnectIntegration}"
+
+  WebsocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebsocketApi
+      RouteKey: $disconnect
+      Target: !Sub "integrations/${WebsocketDisconnectIntegration}"
+
+  WebsocketConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebsocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebsocketConnectFunction.Arn}/invocations"
+
+  WebsocketDisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebsocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebsocketDisconnectFunction.Arn}/invocations"
+
+  # [Fix] $default 라우트 추가 - 클라이언트 메시지 처리
+  WebsocketDefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebsocketApi
+      RouteKey: $default
+      Target: !Sub "integrations/${WebsocketDefaultIntegration}"
+
+  WebsocketDefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebsocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebsocketDefaultFunction.Arn}/invocations"
+
+  WebsocketDeploymentV2:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [WebsocketConnectRoute, WebsocketDisconnectRoute, WebsocketDefaultRoute]
+    Properties:
+      ApiId: !Ref WebsocketApi
+      Description: !Sub "Deployment for ${StageName} - ${AWS::StackName}"
+
+  WebsocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebsocketApi
+      DeploymentId: !Ref WebsocketDeploymentV2
+      StageName: !Ref StageName
+
+  # --- Functions (LangSmith 적용 그룹) ---
+
+  WebsocketAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.websocket_authorizer.lambda_handler"]
+      Environment:
+        Variables:
+          COGNITO_ISSUER_URL: !Ref CognitoIssuerUrl
+          APP_CLIENT_ID: !Ref CognitoAudience
+          # 필요한 경우 추가 (auth_utils 로직에 따라)
+          COGNITO_REGION: !Ref AWS::Region
+
+  WebsocketAuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebsocketAuthorizerFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebsocketApi}/authorizers/*"
+
+
+
+  RunWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.run_workflow.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          APP_VERSION: "1.0.0"
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+          STREAM_INLINE_THRESHOLD_BYTES: "250000"
+          USERS_TABLE: !Ref UsersTableV3
+          SKILLS_TABLE: !Ref SkillsTableV3
+          # 🚀 동적 오케스트레이터 선택 및 캐시 최적화 설정
+          WORKFLOW_CACHE_MAX_SIZE: "1000"
+          WORKFLOW_CACHE_TTL_SECONDS: "600"  # 10분
+          ORCHESTRATOR_SELECTION_ENABLED: "true"
+          # 성능 최적화 임계값
+          DISTRIBUTED_MODE_SEGMENT_THRESHOLD: "300"
+          EVENT_HISTORY_THRESHOLD: "20000"
+          COMPLEXITY_SCORE_THRESHOLD: "80"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref SkillsTableV3
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionOrchestrator.Name
+        # 🚀 Distributed Map 오케스트레이터 실행 권한 추가
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionDistributedOrchestrator.Name
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows/{id}/run
+            Method: POST
+
+  RecoverUsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: recover-users-v2
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.recover_users.lambda_handler"]
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          COGNITO_USER_POOL_ID: !Select [3, !Split ["/", !Ref CognitoIssuerUrl]]
+          USERS_TABLE: !Ref UsersTableV3
+          DRY_RUN: "false"
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:ListUsers
+            Resource:
+              - !Sub
+                  - "arn:aws:cognito-idp:${AWS::Region}:${AccountId}:userpool/${UserPoolId}"
+                  - AccountId: !Ref "AWS::AccountId"
+                    UserPoolId: !Select [3, !Split ["/", !Ref CognitoIssuerUrl]]
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+
+  # --- Create User Function (Cognito PostConfirmation Trigger) ---
+  CreateUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.create_user.lambda_handler"]
+      Environment:
+        Variables:
+          USERS_TABLE: !Ref UsersTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+
+  # ⚠️ ARCHITECTURE WARNING: PackageType: Image functions must use linux/arm64 ECR images
+  # Globals sets arm64 architecture, but ECR images MUST be built for linux/arm64 platform
+  #
+  # 🚨 CRITICAL CI/CD REQUIREMENTS:
+  # 1. Build command: docker build --platform linux/arm64 -t myimage .
+  # 2. Push command: docker push --platform linux/arm64
+  # 3. SAM build: sam build --use-container (uses arm64 container)
+  # 4. GitHub Actions: use ubuntu-latest-arm64 runner or specify platform
+  #
+  # ❌ FAILURE SYMPTOMS: "Exec format error" when Lambda tries to run x86_64 image on arm64 runtime
+  # ✅ VERIFICATION: docker inspect <image> | grep Architecture → should show "arm64"
+  PartitionWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.services.partition_workflow_lambda.lambda_handler"]
+      Timeout: 60
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTableV3
+
+  InitializeStateDataFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.common.initialize_state_data.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref UsersTableV3
+
+  # SegmentRunnerFunction - Heavy dependencies required (langgraph, etc.)
+  SegmentRunnerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.segment_runner_handler.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          USERS_TABLE: !Ref UsersTableV3
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          APP_VERSION: "1.0.0"
+          WORKFLOW_MASTER_KEY_SECRET_NAME: !Ref OpenAISecret # Fallback for now
+          STREAM_INLINE_THRESHOLD_BYTES: "250000"
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+          GOOGLE_API_KEY: !Ref GoogleApiKey
+          # 🚀 [NEW] EventBridge 통합을 위한 환경 변수
+          WORKFLOW_EVENT_BUS_NAME: !Ref WorkflowEventBus
+          # 🚀 [NEW] Step Functions 개선사항 관련 환경 변수
+          ALLOW_UNSAFE_EXECUTION: "false"
+          FORCE_CHILD_WORKFLOW: "false"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+        - S3CrudPolicy:
+             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # 🚀 [NEW] EventBridge 발행 권한 추가
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+        - Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: 
+              - !Ref OpenAISecret
+              - !Ref GeminiSecret
+              - !Ref AnthropicSecret
+          - Effect: Allow
+            Action: bedrock:InvokeModel*
+            Resource: "*"
+
+  DesignAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.services.agentic_designer.lambda_handler"]
+      Timeout: 900
+      Environment:
+        Variables:
+          # [JWT Validation]
+          COGNITO_ISSUER_URL: !Ref CognitoIssuerUrl
+          APP_CLIENT_ID: !Ref CognitoAudience
+          # ▼▼▼ [필수 추가] 이 변수가 없으면 WebSocket 전송 실패 (사일런트 에러 발생) ▼▼▼
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+          # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: bedrock:InvokeModel*
+            Resource: "*"
+            # WebSocket 전송 권한 추가
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+          - Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:DeleteItem
+            Resource: 
+              - !GetAtt WebsocketConnectionsTableV3.Arn
+              - !Sub "${WebsocketConnectionsTableV3.Arn}/index/OwnerIdConnectionIndex"
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /design-assistant
+            Method: GET
+        ApiEventPost:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /design-assistant
+            Method: POST
+
+  # [추가] 명시적인 Function URL 리소스 정의 (참조 안정성 확보)
+  # 🔒 SECURITY: AWS_IAM for access control
+  # Frontend should use AWS SDK with temporary credentials or CloudFront OAC
+  DesignAssistantFunctionUrlResource:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: AWS_IAM  # 🔒 보안 강화: 인증 필수
+      TargetFunctionArn: !GetAtt DesignAssistantFunction.Arn
+      # InvokeMode: RESPONSE_STREAM # 스트리밍 모드 - 리전 지원 확인 후 활성화
+      Cors:
+        AllowOrigins: !Split [",", !Ref AllowedOrigins]
+        AllowMethods:
+          - "GET"
+          - "POST"
+
+  AsyncLLMHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.async_llm_handler.lambda_handler"]
+      Timeout: 900
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          USERS_TABLE: !Ref UsersTableV3
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          APP_VERSION: "1.0.0"
+          WORKFLOW_MASTER_KEY_SECRET_NAME: !Ref OpenAISecret
+          STREAM_INLINE_THRESHOLD_BYTES: "250000"
+          ASYNC_WORKER_ECS_CLUSTER: !If [HasAsyncWorkerTaskDefinition, !Sub "backend-cluster-${StageName}", ""]
+          ASYNC_WORKER_TASK_DEFINITION: !If [HasAsyncWorkerTaskDefinition, !Ref AsyncWorkerTaskDefinition, ""]
+          ASYNC_WORKER_SUBNET_IDS: !Ref AsyncWorkerSubnetIds
+          ASYNC_WORKER_SECURITY_GROUP_IDS: !Ref AsyncWorkerSecurityGroupIds
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          ANTHROPIC_API_KEY: !Ref AnthropicApiKey
+          GOOGLE_API_KEY: !Ref GoogleApiKey
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: bedrock:InvokeModel*
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+              - states:GetExecutionHistory
+              - states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+            Resource: 
+              - !Sub 
+                  - "arn:aws:s3:::${BucketName}/*"
+                  - BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          - Effect: Allow
+            Action:
+              - ecs:RunTask
+              - ecs:DescribeTasks
+              - ecs:StopTask
+              # [수정] 이름만 입력받아도 ARN으로 변환되도록 !Sub 사용. 빈 값일 경우 * 사용.
+            Resource: !If 
+              - HasAsyncWorkerTaskDefinition
+              - !Sub "arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:task-definition/${AsyncWorkerTaskDefinition}:*"
+              - "*"
+          - Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource: 
+                !If 
+                  - HasAsyncWorkerExecutionRole
+                  - !Ref AsyncWorkerExecutionRoleArn
+                  - !GetAtt AsyncWorkerTaskExecutionRole.Arn
+          - Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:Query
+              - dynamodb:Scan
+            Resource:
+              - !GetAtt WorkflowsTableV3.Arn
+              - !GetAtt TaskTokensTableV3.Arn
+              - !GetAtt IdempotencyTableV3.Arn
+              - !Sub "${WorkflowsTableV3.Arn}/index/*"
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+
+  GetExecutionHistoryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.get_execution_history.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/history
+            Method: GET
+
+  # --- Functions (LangSmith 미적용 그룹) ---
+
+  GetWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.get_workflow.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkflowsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows
+            Method: GET
+
+  GetWorkflowByNameFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.get_workflow_by_name.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkflowsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /by-name
+            Method: GET
+
+  DeleteWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.delete_workflow.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows/{id}
+            Method: DELETE
+
+  SaveWorkflowFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.save_workflow.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          APP_VERSION: "1.0.0"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows
+            Method: POST
+        ApiEventUpdate:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows/{id}
+            Method: PUT
+
+  # --- Co-design Assistant API Functions ---
+  CodesignAssistantFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.codesign_api_handler.lambda_handler"]
+      Timeout: 120
+      Environment:
+        Variables:
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          BEDROCK_REGION: !Ref AWS::Region
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: "*"
+      Events:
+        CodesignStreamEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /codesign
+            Method: POST
+        CodesignExplainEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /codesign/explain
+            Method: POST
+        CodesignSuggestionsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /codesign/suggestions
+            Method: POST
+        CodesignApplySuggestionEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /codesign/apply-suggestion
+            Method: POST
+
+  # --- Plan Briefing & Time Machine API Functions ---
+  PlanBriefingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.plan_briefing_handler.lambda_handler"]
+      Timeout: 60
+      Environment:
+        Variables:
+          EXECUTION_TABLE: !Ref ExecutionsTableV3
+          NOTIFICATION_TABLE: !Ref PendingNotificationsTableV3
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref PendingNotificationsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CheckpointsTableV3
+      Events:
+        # Workflow Preview
+        WorkflowPreviewEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows/preview
+            Method: POST
+        DetailedDraftEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /workflows/preview/detailed-draft
+            Method: POST
+        # Execution Timeline & Checkpoints
+        TimelineEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/timeline
+            Method: GET
+        CheckpointsListEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/checkpoints
+            Method: GET
+        CheckpointDetailEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/checkpoints/{checkpoint_id}
+            Method: GET
+        # Time Machine Operations
+        RollbackPreviewEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/rollback/preview
+            Method: POST
+        RollbackExecuteEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/rollback
+            Method: POST
+        CheckpointCompareEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/checkpoints/compare
+            Method: POST
+        BranchHistoryEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/branches
+            Method: GET
+        RollbackSuggestionsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/{id}/rollback-suggestions
+            Method: GET
+
+  # --- Task Manager API Functions ---
+  TaskManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.task_api_handler.lambda_handler"]
+      Timeout: 30
+      Environment:
+        Variables:
+          EXECUTION_TABLE: !Ref ExecutionsTableV3
+          NOTIFICATION_TABLE: !Ref PendingNotificationsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref PendingNotificationsTableV3
+      Events:
+        ListTasksEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /tasks
+            Method: GET
+        GetTaskDetailEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /tasks/{id}
+            Method: GET
+
+  # --- Skills API Functions ---
+  ListSkillsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.skills_api.lambda_handler"]
+      Environment:
+        Variables:
+          SKILLS_TABLE: !Ref SkillsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SkillsTableV3
+      Events:
+        ListEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills
+            Method: GET
+        PublicEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills/public
+            Method: GET
+
+  CreateSkillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.skills_api.lambda_handler"]
+      Environment:
+        Variables:
+          SKILLS_TABLE: !Ref SkillsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SkillsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills
+            Method: POST
+
+  GetSkillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.skills_api.lambda_handler"]
+      Environment:
+        Variables:
+          SKILLS_TABLE: !Ref SkillsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref SkillsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills/{id}
+            Method: GET
+
+  UpdateSkillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.skills_api.lambda_handler"]
+      Environment:
+        Variables:
+          SKILLS_TABLE: !Ref SkillsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SkillsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills/{id}
+            Method: PUT
+
+  DeleteSkillFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.skills_api.lambda_handler"]
+      Environment:
+        Variables:
+          SKILLS_TABLE: !Ref SkillsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SkillsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /skills/{id}
+            Method: DELETE
+
+  ListExecutionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.list_my_executions.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          OWNER_INDEX: OwnerIdStartDateIndex
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions
+            Method: GET
+
+  GetExecutionDetailFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.get_status.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /status
+            Method: GET
+
+
+  DeleteExecutionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.delete_execution.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions
+            Method: DELETE
+
+  StopExecutionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.stop_execution.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: states:StopExecution
+            Resource: "*"
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /executions/stop
+            Method: POST
+
+  ListNotificationsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.list_notifications.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          NOTIFICATIONS_INDEX: NotificationsIndex
+          STATUS_INDEX: OwnerIdStatusIndex
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /notifications
+            Method: GET
+
+  DismissNotificationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.dismiss_notification.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /notifications/dismiss
+            Method: POST
+
+  ResumeHandlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.resume_handler.lambda_handler"]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref TaskTokensTableV3
+        - Statement:
+          - Effect: Allow
+            Action: states:SendTaskSuccess
+            Resource: "*"
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /resume
+            Method: POST
+
+  WebsocketConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.websocket_connect.lambda_handler"]
+      Environment:
+        Variables:
+          # 검증 로직 제거로 인해 Cognito 관련 변수가 불필요할 수 있으나,
+          # 코드 내 다른 로직(사용자 정보 조회 등)에서 쓸 수 있으므로 Env Vars는 유지해도 무방함.
+          COGNITO_ISSUER_URL: !Ref CognitoIssuerUrl
+          APP_CLIENT_ID: !Ref CognitoAudience
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          STATUS_INDEX: OwnerIdStatusIndex
+          PENDING_NOTIFICATIONS_TABLE: !Ref PendingNotificationsTableV3
+          PENDING_NOTIFICATIONS_OWNER_STATUS_INDEX: OwnerIdStatusIndex
+      Policies:
+        # [삭제됨] AmazonCognitoReadOnly -> Authorizer가 검증하므로 Connect 핸들러는 Cognito 접근 불필요
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PendingNotificationsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+        - Statement:
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+
+  WebsocketDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.websocket_disconnect.lambda_handler"]
+      Environment:
+        Variables:
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+
+  # [Fix] $default 라우트 핸들러 - 클라이언트 메시지 처리 (ping, subscribe 등)
+  WebsocketDefaultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.websocket_default.lambda_handler"]
+      Environment:
+        Variables:
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+
+  # Lambda Permission for $default route
+  WebsocketDefaultFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebsocketDefaultFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebsocketApi}/*/$default"
+
+  NotifyUserFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.notify_result.lambda_handler"]
+      Environment:
+        Variables:
+          WEBSOCKET_API_ENDPOINT: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          PENDING_NOTIFICATIONS_TABLE: !Ref PendingNotificationsTableV3
+          PENDING_NOTIFICATIONS_EXECUTION_ID_INDEX: ExecutionIdIndex
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PendingNotificationsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+          - Effect: Allow
+            Action: ses:SendEmail
+            Resource: "*"
+
+  ExecutionProgressNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.execution_progress_notifier.lambda_handler"]
+      Environment:
+        Variables:
+          WEBSOCKET_API_ENDPOINT: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          # DB 업데이트 전략 관련
+          DB_UPDATE_STRATEGY: !Ref DbUpdateStrategy
+          DB_UPDATE_INTERVAL_SECONDS: !Ref DbUpdateInterval
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action: execute-api:ManageConnections
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+          - Effect: Allow
+            Action: cloudwatch:PutMetricData
+            Resource: "*"
+
+  # [추가] 워크플로우 성공 이벤트 감지 규칙
+  WorkflowSuccessRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref WorkflowEventBus
+      EventPattern:
+        source:
+          - "backend-workflow"
+        detail-type:
+          - "WorkflowExecutionSucceeded"
+      Targets:
+        - Id: "NotifyExecutionSuccess"
+          Arn: !GetAtt ExecutionProgressNotifierFunction.Arn
+
+  # [추가] EventBridge가 Lambda를 호출할 수 있도록 권한 부여
+  WorkflowSuccessRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ExecutionProgressNotifierFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowSuccessRule.Arn
+
+  # --- Collector Lambda Function (EventBridge Publisher) ---
+  CollectorLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.collector_lambda.lambda_handler"]
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref WorkflowEventBus
+          EVENT_SOURCE: "com.analemma.workflow-collector"
+          DETAIL_TYPE: "Workflow Event Collected"
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+      Events:
+        ApiEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /collect
+            Method: POST
+
+  # --- Indexer Function (Execution History Storage) ---
+  IndexerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.indexer.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          OWNER_INDEX: OwnerIdStartDateIndex
+          # ▼▼▼ [추가] WebSocket 전송을 위한 환경 변수 ▼▼▼
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+          # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+            # ▼▼▼ [추가] WebSocket 메시지 전송 및 연결 조회 권한 ▼▼▼
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+          - Effect: Allow
+            Action:
+              - dynamodb:Query
+              - dynamodb:DeleteItem
+            Resource: 
+              - !GetAtt WebsocketConnectionsTableV3.Arn
+              - !Sub "${WebsocketConnectionsTableV3.Arn}/index/OwnerIdConnectionIndex"
+            # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+  # --- Finalizer Function (Idempotency Management) ---
+  # FinalizerFunction - Convert to Docker Image due to size limit
+  FinalizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.finalizer.lambda_handler"]
+      Environment:
+        Variables:
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTableV3
+        # ▼▼▼ [필수 추가] EventBridge 페이로드 누락 시 원본 데이터 조회를 위해 필요 ▼▼▼
+        - Statement:
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+  # --- Usage Aggregator Function (Cost Calculation & User Usage Tracking) ---
+  UsageAggregatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.usage_aggregator.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          USER_USAGE_TABLE: !Ref UserUsageTableV3
+          PRICING_CONFIG_PARAM: !Sub "/analemma/${StageName}/pricing"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UserUsageTableV3
+        - Statement:
+          - Effect: Allow
+            Action: ssm:GetParameter
+            Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/analemma/${StageName}/pricing"
+        # ▼▼▼ [필수 추가] EventBridge 페이로드 누락 시 원본 데이터 조회를 위해 필요 ▼▼▼
+        - Statement:
+          - Effect: Allow
+            Action: states:DescribeExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+
+  MergeCallbackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.merge_callback.handler"]
+      Environment:
+        Variables:
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          STREAM_INLINE_THRESHOLD_BYTES: "250000"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+
+  StateDataManagerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.state_data_manager.lambda_handler"]
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          STATE_STORAGE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          MAX_PAYLOAD_SIZE_KB: "200"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObjectAcl
+              - s3:GetObjectVersion
+              - s3:DeleteObjectVersion
+            Resource: !Sub
+              - "${BucketArn}/*"
+              - BucketArn: !If 
+                - CreateWorkflowStateBucket
+                - !GetAtt WorkflowStateBucketResource.Arn
+                - !Sub "arn:aws:s3:::${WorkflowStateBucket}"
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  # --- Distributed Map Functions (Event History Limit Solution) ---
+  # 💡 메모리 최적화 참고: 배포 후 AWS Compute Optimizer로 실제 사용량 확인 권장
+  PrepareDistributedExecutionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.prepare_distributed_execution.lambda_handler"]
+      Timeout: 300  # 5분 - 대용량 워크플로우 분석 시간
+      MemorySize: 1024  # 📉 최적화: 2048 → 1024 (Compute Optimizer 권장값 적용 후 조정)
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          MAX_CHUNK_SIZE: "500"
+          DEFAULT_CHUNK_SIZE: "100"
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - CloudWatchLogsFullAccess
+        # 🚨 [Critical Fix] S3 업로드 권한 추가 - 누락된 필수 권한
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  # [REMOVED] Placeholder AggregateReportFunction - 존재하지 않는 핸들러 참조
+  # 시뮬레이터용은 SimulatorAggregateReportFunction (src.handlers.simulator.aggregate_report)
+
+  ProcessSegmentChunkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.process_segment_chunk.lambda_handler"]
+      Timeout: 900  # 15분 - 청크 처리 최대 시간
+      MemorySize: 2048  # 청크 내 여러 세그먼트 처리를 위한 큰 메모리
+      # 🚨 [Critical Fix] /tmp 공간 확장 - 캐시 최적화
+      EphemeralStorage:
+        Size: 1024  # 1GB /tmp 공간 (기본 512MB에서 확장)
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          DISTRIBUTED_FAIL_FAST: "true"
+          WORKFLOW_EVENT_BUS_NAME: !Ref WorkflowEventBus
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          STREAM_INLINE_THRESHOLD_BYTES: "250000"
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          USERS_TABLE: !Ref UsersTableV3
+          IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
+          MOCK_MODE: !Ref MockMode
+          # 🚨 [Critical Fix] 캐시 설정 환경 변수
+          CACHE_MAX_SIZE_MB: "400"  # 1GB /tmp의 40%
+          CACHE_CLEANUP_THRESHOLD: "0.8"  # 80% 사용 시 정리
+          IJSON_REQUIRED: "false"  # ijson 없어도 동작 (폴백 지원)
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UsersTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref IdempotencyTableV3
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+        - Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: 
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:workflow-master-key-*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openai-api-key-*"
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  AggregateDistributedResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.aggregate_distributed_results.lambda_handler"]
+      Timeout: 600  # 10분 - 대용량 결과 집계 시간
+      MemorySize: 2048  # 많은 청크 결과 병합을 위한 큰 메모리
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          DISTRIBUTED_FAILURE_POLICY: "fail_on_any_failure"  # fail_on_any_failure, fail_on_majority_failure
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_STATE_TABLE: !Ref WorkflowsTableV3
+          # 🚨 [Critical Fix] S3 정리 설정
+          CLEANUP_INTERMEDIATE_STATES: "true"
+          CLIENT_SORT_THRESHOLD: "50000"  # 클라이언트 정렬 임계값
+          # 🚨 [Critical Fix] 일관성 및 페이로드 관리
+          S3_CONSISTENCY_MAX_RETRIES: "3"
+          LARGE_STATE_THRESHOLD_KB: "200"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  # --- State Continuity Functions (Critical Fix #1) ---
+  LoadLatestStateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.load_latest_state.lambda_handler"]
+      Timeout: 30
+      MemorySize: 512
+      Description: "[Critical Fix #1] 상태 연속성 - 이전 청크의 latest_state.json 로드"
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_STATE_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkflowsTableV3
+
+  SaveLatestStateFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.save_latest_state.lambda_handler"]
+      Timeout: 60  # 🚨 증가: 라이프사이클 정책 설정 시간 고려
+      MemorySize: 512
+      Description: "[Critical Fix #1] 상태 연속성 - latest_state.json 덮어쓰기 + 레이스 컨디션 방지"
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_STATE_TABLE: !Ref WorkflowsTableV3
+          # 🚨 [Critical Fix] 스토리지 비용 관리 환경 변수
+          CHUNK_BACKUP_POLICY: "selective"  # none, selective, all
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+
+  ResumeChunkProcessingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.resume_chunk_processing.lambda_handler"]
+      Timeout: 900  # 15분 - 재개 후 남은 세그먼트 처리
+      MemorySize: 2048
+      Description: "[Critical Fix #3] HITL 콜백 후 중단 지점 이후 세그먼트 재계산 및 실행"
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_STATE_TABLE: !Ref WorkflowsTableV3
+          TASK_TOKEN_TABLE: !Ref TaskTokensTableV3
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskTokensTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource: 
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:workflow-master-key-*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:openai-api-key-*"
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: "*"
+
+  # --- Distributed Task Token Storage Function ---
+  StoreDistributedTaskTokenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.store_distributed_task_token.lambda_handler"]
+      Timeout: 60  # 🚨 증가: S3 저장 시간 고려
+      MemorySize: 512  # 🚨 증가: 대용량 상태 처리
+      Description: "[Critical Fixes] 분산 실행 HITL Task Token 저장 - 고유성 보장 + 대용량 상태 지원"
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+          TASK_TOKEN_TABLE: !Ref TaskTokensTableV3
+          TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3  # 🚨 추가: 환경 변수 표준화
+          # 🚨 [Critical Fix] 대용량 상태 처리를 위한 S3 설정
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskTokensTableV3
+        # 🚨 [Critical Fix] 대용량 상태 S3 저장 권한 추가
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+
+  # Express Workflow removed - using alternative Event History mitigation strategies
+
+  LogicalAuditorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "logical-auditor-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.logical_auditor.lambda_handler"]
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          LOG_LEVEL: INFO
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: bedrock:InvokeModel*
+            Resource: "*"
+      Events:
+        AuditApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /workflows/audit
+            Auth:
+              Authorizer: CognitoAuthorizer
+        SimulateApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /workflows/simulate
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+
+  EventHistoryMonitorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.event_history_monitor.lambda_handler"]
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          EVENT_HISTORY_LIMIT: "25000"
+          EVENT_HISTORY_WARNING_THRESHOLD: "20000"
+          EVENT_HISTORY_CRITICAL_THRESHOLD: "23000"
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:ListExecutions
+              - states:GetExecutionHistory
+              - states:DescribeExecution
+            Resource: !Ref StepFunctionOrchestrator
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: "rate(1 hour)"
+            Enabled: true
+
+  # --- Intelligent Instruction Distiller Functions ---
+  CorrectionQualityProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-correction-quality-processor-v2"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.correction_quality_processor.lambda_handler"]
+      Timeout: 60
+      MemorySize: 512
+
+      Environment:
+        Variables:
+          CORRECTION_LOGS_TABLE: !Ref CorrectionLogsTable
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CorrectionLogsTable
+      Events:
+        DynamoDBStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !GetAtt CorrectionLogsTable.StreamArn
+            StartingPosition: LATEST
+            BatchSize: 5  # 배치 크기 제한
+            MaximumBatchingWindowInSeconds: 10
+            # Fix #2: Partial Batch Failure 지원 활성화
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            # 재시도 설정 최적화
+            MaximumRetryAttempts: 3
+            ParallelizationFactor: 1  # 순차 처리로 안정성 확보
+
+  StoreTaskTokenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.store_task_token.lambda_handler"]
+      Environment:
+        Variables:
+          TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
+          PENDING_NOTIFICATIONS_TABLE: !Ref PendingNotificationsTableV3
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskTokensTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref PendingNotificationsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub
+              - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
+              - AccountId: !Ref "AWS::AccountId"
+
+  # --- Scheduler Function (EventBridge Scheduled Trigger) ---
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.scheduler.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          SCHEDULED_INDEX_NAME: ScheduledWorkflowsIndex
+          WORKFLOW_ORCHESTRATOR_ARN: !Sub
+            - "arn:aws:states:${AWS::Region}:${AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
+            - AccountId: !Ref "AWS::AccountId"
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - Statement:
+          - Effect: Allow
+            Action: states:StartExecution
+            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Schedule: rate(5 minutes)
+
+  # --- Step Functions State Machine (Standard) ---
+  StepFunctionOrchestrator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "WorkflowOrchestrator-${StageName}"
+      DefinitionUri: src/aws_step_functions.json
+      # Force update: 2026-01-09T15:40 - partition_map_s3_path empty string fix
+      DefinitionSubstitutions:
+        InitializeStateDataArn: !GetAtt InitializeStateDataFunction.Arn
+        WorkflowEventBusArn: !GetAtt WorkflowEventBus.Arn
+        ExecuteSegmentArn: !GetAtt SegmentRunnerFunction.Arn
+        SegmentRunnerArn: !GetAtt SegmentRunnerFunction.Arn
+        StateDataManagerArn: !GetAtt StateDataManagerFunction.Arn
+        StoreTaskTokenArn: !GetAtt StoreTaskTokenFunction.Arn
+        MergeCallbackArn: !GetAtt MergeCallbackFunction.Arn
+        AsyncLLMHandlerArn: !GetAtt AsyncLLMHandlerFunction.Arn
+        IdempotencyTable: !Ref IdempotencyTableV3
+        # Express Workflow removed - using alternative Event History mitigation strategies
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PartitionWorkflowFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SegmentRunnerFunction
+        # [2순위 최적화] CheckIdempotencyFunction 제거 - Direct SDK로 대체
+        - DynamoDBReadPolicy:
+            TableName: !Ref IdempotencyTableV3
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InitializeStateDataFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ExecutionProgressNotifierFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MergeCallbackFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AsyncLLMHandlerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StoreTaskTokenFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StateDataManagerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FinalizerFunction
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+        # Express Workflow permissions removed
+
+  # --- Step Functions State Machine (Distributed Map) ---
+  StepFunctionDistributedOrchestrator:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "WorkflowDistributedOrchestrator-${StageName}"
+      DefinitionUri: src/aws_step_functions_distributed.json
+      # Force update: 2026-01-09T15:40 - partition_map_s3_path empty string fix
+      DefinitionSubstitutions:
+        InitializeStateDataArn: !GetAtt InitializeStateDataFunction.Arn
+        WorkflowEventBusArn: !GetAtt WorkflowEventBus.Arn
+        ExecuteSegmentArn: !GetAtt SegmentRunnerFunction.Arn
+        SegmentRunnerArn: !GetAtt SegmentRunnerFunction.Arn
+        StateDataManagerArn: !GetAtt StateDataManagerFunction.Arn
+        StoreTaskTokenArn: !GetAtt StoreTaskTokenFunction.Arn
+        MergeCallbackArn: !GetAtt MergeCallbackFunction.Arn
+        AsyncLLMHandlerArn: !GetAtt AsyncLLMHandlerFunction.Arn
+        IdempotencyTable: !Ref IdempotencyTableV3
+        PrepareDistributedExecutionArn: !GetAtt PrepareDistributedExecutionFunction.Arn
+        LoadLatestStateArn: !GetAtt LoadLatestStateFunction.Arn
+        ProcessSegmentChunkArn: !GetAtt ProcessSegmentChunkFunction.Arn
+        SaveLatestStateArn: !GetAtt SaveLatestStateFunction.Arn
+        StoreDistributedTaskTokenArn: !GetAtt StoreDistributedTaskTokenFunction.Arn
+        ResumeChunkProcessingArn: !GetAtt ResumeChunkProcessingFunction.Arn
+        AggregateDistributedResultsArn: !GetAtt AggregateDistributedResultsFunction.Arn
+        ExecuteBranchArn: !GetAtt SegmentRunnerFunction.Arn
+        WorkflowStateBucket: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        # 기존 함수들에 대한 권한
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PartitionWorkflowFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SegmentRunnerFunction
+        - DynamoDBReadPolicy:
+            TableName: !Ref IdempotencyTableV3
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InitializeStateDataFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ExecutionProgressNotifierFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref MergeCallbackFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AsyncLLMHandlerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StoreTaskTokenFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StateDataManagerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref FinalizerFunction
+        # 새로운 Distributed Map 함수들에 대한 권한
+        - LambdaInvokePolicy:
+            FunctionName: !Ref PrepareDistributedExecutionFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ProcessSegmentChunkFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AggregateDistributedResultsFunction
+        # [Critical Fix #1, #3] 상태 연속성 및 HITL 재개 함수들
+        - LambdaInvokePolicy:
+            FunctionName: !Ref LoadLatestStateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SaveLatestStateFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ResumeChunkProcessingFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StoreDistributedTaskTokenFunction
+        # DynamoDB 및 EventBridge 권한
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+        # [Critical Fix #2] S3 ItemReader/ResultWriter 권한
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # Distributed Map 실행 권한
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+              - states:DescribeExecution
+              - states:StopExecution
+            Resource: 
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+
+  # --- Express Workflow removed due to managed-rule creation limitations ---
+  # Event History limit mitigation is now handled through:
+  # 1. EventHistoryMonitorFunction - monitors usage and alerts
+  # 2. Dynamic concurrency control - reduces parallel load
+  # 3. Payload compression and S3 offloading - reduces event size
+  # 4. Warning notifications for very large workflows (>200 segments)
+
+  WorkflowsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Workflows-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: workflowId
+          AttributeType: S
+        - AttributeName: name
+          AttributeType: S
+        - AttributeName: is_scheduled
+          AttributeType: S
+        - AttributeName: next_run_time
+          AttributeType: N
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: workflowId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerIdNameIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: name
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: ScheduledWorkflowsIndex
+          KeySchema:
+            - AttributeName: is_scheduled
+              KeyType: HASH
+            - AttributeName: next_run_time
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  UsersTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Users-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userId
+          KeyType: HASH
+
+  IdempotencyTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Idempotency-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: idempotency_key
+          AttributeType: S
+      KeySchema:
+        - AttributeName: idempotency_key
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  WebsocketConnectionsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "WebsocketConnections-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerIdConnectionIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: connectionId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  PendingNotificationsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "PendingNotifications-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: notificationId
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: execution_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: notificationId
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerIdStatusIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: ExecutionIdIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: execution_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  TaskTokensTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "TaskTokens-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: conversation_id
+          AttributeType: S
+        - AttributeName: execution_id
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: conversation_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: ExecutionIdIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: execution_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ExecutionsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Executions-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: executionArn
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: startDate
+          AttributeType: S
+        - AttributeName: notificationTime
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: executionArn
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerIdStartDateIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: startDate
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: NotificationsIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: notificationTime
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: OwnerIdStatusIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: status
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      # TTL 설정: 90일 후 자동 삭제
+      TimeToLiveSpecification:
+        AttributeName: expiration_timestamp
+        Enabled: true
+
+  UserUsageTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "UserUsage-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: period
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: period
+          KeyType: RANGE
+      # TTL 설정: 1년 후 자동 삭제 (사용량 데이터 장기 보관)
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  BedrockJobTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "BedrockJobs-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: job_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ownerId
+          KeyType: HASH
+        - AttributeName: job_id
+          KeyType: RANGE
+
+  # --- Checkpoints Table for Time Machine functionality ---
+  CheckpointsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Checkpoints-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: thread_id
+          AttributeType: S
+        - AttributeName: checkpoint_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: thread_id
+          KeyType: HASH
+        - AttributeName: checkpoint_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: TimeIndex
+          KeySchema:
+            - AttributeName: thread_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # --- Skills Table for modular, reusable skill units ---
+  SkillsTableV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "Skills-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: skillId
+          AttributeType: S
+        - AttributeName: version
+          AttributeType: S
+        - AttributeName: ownerId
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: visibility
+          AttributeType: S
+        - AttributeName: updated_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: skillId
+          KeyType: HASH
+        - AttributeName: version
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: OwnerIdIndex
+          KeySchema:
+            - AttributeName: ownerId
+              KeyType: HASH
+            - AttributeName: skillId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: CategoryIndex
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+            - AttributeName: skillId
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # GSI for marketplace: list public skills sorted by updated_at
+        - IndexName: VisibilityIndex
+          KeySchema:
+            - AttributeName: visibility
+              KeyType: HASH
+            - AttributeName: updated_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  # --- Correction Logs Table for Intelligent Instruction Distiller ---
+  CorrectionLogsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "CorrectionLogs-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        - AttributeName: gsi1_pk
+          AttributeType: S
+        - AttributeName: gsi1_sk
+          AttributeType: S
+        - AttributeName: gsi2_pk
+          AttributeType: S
+        - AttributeName: gsi2_sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # 태스크별 조회 최적화
+        - IndexName: task-category-index-v2
+          KeySchema:
+            - AttributeName: gsi1_pk  # task#{category}
+              KeyType: HASH
+            - AttributeName: gsi1_sk  # user#{user_id}#{timestamp}
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        
+        # 사용자별 최근 수정 조회
+        - IndexName: user-recent-index-v2
+          KeySchema:
+            - AttributeName: gsi2_pk  # user#{user_id}
+              KeyType: HASH
+            - AttributeName: gsi2_sk  # timestamp#{task_category}
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # --- Distilled Instructions Table for Intelligent Instruction Distiller ---
+  DistilledInstructionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "DistilledInstructions-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+
+  # --- NodeStats Table for ETA Calculation ---
+  # 노드별 실행 시간 통계를 저장하여 정확한 ETA 계산에 활용
+  NodeStatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "NodeStats-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: node_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: node_type
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # --- NodeStats Collector Lambda ---
+  # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트
+  NodeStatsCollectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "node-stats-collector-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.node_stats_collector.lambda_handler"]
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          NODE_STATS_TABLE: !Ref NodeStatsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref NodeStatsTable
+
+  # --- Async Alias Generator Lambda ---
+  # 워크플로우 시작 시 LLM을 호출하여 비즈니스 별칭 생성 후 WebSocket 푸시
+  AsyncAliasGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "async-alias-generator-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.async_alias_generator.lambda_handler"]
+      Timeout: 15
+      MemorySize: 512
+      Environment:
+        Variables:
+          TASK_TABLE: !Ref ExecutionsTableV3
+          WEBSOCKET_API_ENDPOINT: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: "*"
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+            Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebsocketApi}/*"
+
+  # --- Task Metrics API Lambda ---
+  # Bento Grid UI 전용 메트릭스 API
+  TaskMetricsApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "task-metrics-api-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.task_metrics_api.lambda_handler"]
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          TASK_TABLE: !Ref ExecutionsTableV3
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+      Events:
+        GetTaskMetrics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /tasks/{taskId}/metrics
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # --- HITL Instruction Distiller Lambda ---
+  # 사용자 수정 승인 시 암묵적 학습 파이프라인 실행
+  InstructionDistillerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "instruction-distiller-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.instruction_distiller.lambda_handler"]
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          DISTILLED_INSTRUCTIONS_TABLE: !Ref DistilledInstructionsTable
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DistilledInstructionsTable
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: "*"
+
+  # --- Clone Instructions API Lambda ---
+  # 기존 에이전트의 학습된 지침을 새 에이전트로 복제
+  CloneInstructionsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "clone-instructions-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.clone_instructions.lambda_handler"]
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          DISTILLED_INSTRUCTIONS_TABLE: !Ref DistilledInstructionsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DistilledInstructionsTable
+      Events:
+        CloneInstructions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /instructions/clone
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # --- EventBridge Rule for HITL Approval (Instruction Distillation) ---
+  # HITL 승인 이벤트 감지 후 Instruction Distiller 호출
+  HITLApprovalDistillRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-hitl-distill"
+      EventBusName: !Ref WorkflowEventBus
+      EventPattern:
+        source:
+          - backend-workflow.hitl
+        detail-type:
+          - HITLApprovalCompleted
+      State: ENABLED
+      Targets:
+        - Id: InstructionDistillerTarget
+          Arn: !GetAtt InstructionDistillerFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # Permission for HITL Approval Rule to invoke Instruction Distiller
+  HITLApprovalDistillPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref InstructionDistillerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt HITLApprovalDistillRule.Arn
+
+  # --- Outcome Manager API Lambda ---
+  # Outcome-First UI 전용 API (결과물 목록, 추론 과정 조회)
+  OutcomeManagerApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "outcome-manager-api-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.outcome_manager_api.lambda_handler"]
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Events:
+        GetTaskOutcomes:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /tasks/{taskId}/outcomes
+            Auth:
+              Authorizer: CognitoAuthorizer
+        GetReasoningPath:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: GET
+            Path: /tasks/{taskId}/outcomes/{artifactId}/reasoning
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # --- Quick Fix Executor API Lambda ---
+  # Quick Fix 동적 액션 실행 (Retry, Redirect, Self-healing 등)
+  QuickFixExecutorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "quick-fix-executor-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.quick_fix_executor.lambda_handler"]
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          TASK_TOKENS_TABLE: !Ref TaskTokensTableV3
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskTokensTableV3
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionOrchestrator.Name
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionDistributedOrchestrator.Name
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+            Resource: "*"
+      Events:
+        ExecuteQuickFix:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Method: POST
+            Path: /tasks/quick-fix
+            Auth:
+              Authorizer: CognitoAuthorizer
+
+  # --- EventBridge Rule for NodeStats Collection ---
+  # Step Functions 상태 변화 시 NodeStats 업데이트
+  NodeStatsCollectionRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-node-stats"
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !GetAtt StepFunctionOrchestrator.Arn
+            - !GetAtt StepFunctionDistributedOrchestrator.Arn
+          status:
+            - SUCCEEDED
+            - FAILED
+            - TIMED_OUT
+      State: ENABLED
+      Targets:
+        - Id: NodeStatsTarget
+          Arn: !GetAtt NodeStatsCollectorFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # --- EventBridge Rule for Async Alias Generation ---
+  # 워크플로우 시작 시 별칭 생성
+  AsyncAliasGenerationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-alias-gen"
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !GetAtt StepFunctionOrchestrator.Arn
+            - !GetAtt StepFunctionDistributedOrchestrator.Arn
+          status:
+            - RUNNING
+      State: ENABLED
+      Targets:
+        - Id: AliasGeneratorTarget
+          Arn: !GetAtt AsyncAliasGeneratorFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 1
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # --- Lambda Permissions for EventBridge ---
+  NodeStatsCollectorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref NodeStatsCollectorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NodeStatsCollectionRule.Arn
+
+  AsyncAliasGeneratorInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AsyncAliasGeneratorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AsyncAliasGenerationRule.Arn
+
+  # --- Event Bus & Rules ---
+  WorkflowEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-event-bus"
+
+  # --- EventBridge Rule for Execution Indexing ---
+  # --- EventBridge Rule for Workflow Status Changes (Consolidated) ---
+  WorkflowStatusChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-status-change"
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !GetAtt StepFunctionOrchestrator.Arn
+          status:
+            - SUCCEEDED
+            - FAILED
+            - TIMED_OUT
+            - ABORTED
+      State: ENABLED
+      Targets:
+        - Id: IndexerTarget
+          Arn: !GetAtt IndexerFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+        - Id: FinalizerTarget
+          Arn: !GetAtt FinalizerFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+        - Id: UsageAggregatorTarget
+          Arn: !GetAtt UsageAggregatorFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+        - Id: NotifyUserTarget
+          Arn: !GetAtt NotifyUserFunction.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # --- EventBridge Rule for S3 Cleanup on Failed Executions ---
+  WorkflowFailureS3CleanupRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-s3-cleanup"
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !GetAtt StepFunctionOrchestrator.Arn
+            - !GetAtt StepFunctionDistributedOrchestrator.Arn
+          status:
+            - FAILED
+            - TIMED_OUT
+            - ABORTED
+      State: ENABLED
+      Targets:
+        - Id: S3CleanupTarget
+          Arn: !GetAtt S3CleanupFunction.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600  # 1 hour
+            MaximumRetryAttempts: 2
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # --- EventBridge Rule Permissions ---
+  IndexerFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref IndexerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowStatusChangeRule.Arn
+
+  FinalizerFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref FinalizerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowStatusChangeRule.Arn
+
+  NotifyUserFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NotifyUserFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowStatusChangeRule.Arn
+
+  UsageAggregatorFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UsageAggregatorFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowStatusChangeRule.Arn
+
+  # --- S3 Cleanup Function EventBridge Permission ---
+  S3CleanupFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref S3CleanupFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowFailureS3CleanupRule.Arn
+
+  # --- [NEW] Dead Letter Queue for EventBridge Targets ---
+  # Enterprise-grade resilience: failed events are queued for retry/manual processing
+  EventBridgeDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "backend-workflow-${StageName}-eventbridge-dlq"
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeout: 300  # 5 minutes
+
+  # --- [NEW] EventBridge DLQ Policy ---
+  # Allow EventBridge to send messages to the DLQ when targets fail
+  EventBridgeDLQPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [ !Ref EventBridgeDLQ ]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt EventBridgeDLQ.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/*"
+
+  # --- [NEW] EventBridge Rule for Segment Execution Progress (Fire-and-Forget Pattern) ---
+  # This rule captures SegmentExecutionProgress events published by Step Functions
+  # and routes them to ExecutionProgressNotifier for async WebSocket/DB updates.
+  # This replaces synchronous Lambda invocation, saving ~100-200ms per segment.
+  SegmentProgressRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-segment-progress"
+      EventBusName: !Ref WorkflowEventBus
+      EventPattern:
+        source:
+          - backend-workflow.segment
+        detail-type:
+          - SegmentExecutionProgress
+      State: ENABLED
+      Targets:
+        - Id: ExecutionProgressNotifierTarget
+          Arn: !GetAtt ExecutionProgressNotifierFunction.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600  # 1 hour
+            MaximumRetryAttempts: 3
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # Permission for SegmentProgressRule to invoke ExecutionProgressNotifier
+  SegmentProgressNotifierInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ExecutionProgressNotifierFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SegmentProgressRule.Arn
+
+  # 🚀 [NEW] EventBridge Rule for Workflow Lifecycle Events (Start/Failure)
+  # This rule captures WorkflowExecutionStarted and WorkflowExecutionFailed events
+  # published by Step Functions and routes them to ExecutionProgressNotifier.
+  WorkflowLifecycleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-lifecycle"
+      EventBusName: !Ref WorkflowEventBus
+      EventPattern:
+        source:
+          - backend-workflow.lifecycle
+        detail-type:
+          - WorkflowExecutionStarted
+          - WorkflowExecutionFailed
+      State: ENABLED
+      Targets:
+        - Id: ExecutionProgressNotifierTarget
+          Arn: !GetAtt ExecutionProgressNotifierFunction.Arn
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 3600  # 1 hour
+            MaximumRetryAttempts: 3
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # Permission for WorkflowLifecycleRule to invoke ExecutionProgressNotifier
+  WorkflowLifecycleNotifierInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ExecutionProgressNotifierFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowLifecycleRule.Arn
+
+  # --- Optional S3 bucket for workflow state (created when WorkflowStateBucket param is empty) ---
+  # 🔧 수명 주기 정책 최적화: Outcome Manager 접근성 고려
+  WorkflowStateBucketResource:
+    Type: AWS::S3::Bucket
+    Condition: CreateWorkflowStateBucket
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          # 결과물 메타데이터는 DynamoDB에 보관, S3 본문은 90일 후 전환
+          - Id: IntelligentTieringTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+          # Glacier 전환 기간 연장 (30일 → 90일)
+          - Id: GlacierTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 90
+          # Deep Archive는 1년 후
+          - Id: DeepArchiveTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: 365
+          # 임시 파일 정리 (temp/ 프리픽스)
+          - Id: TempFilesCleanup
+            Status: Enabled
+            Prefix: temp/
+            ExpirationInDays: 7
+      Tags:
+        - Key: Stage
+          Value: !Ref StageName
+        - Key: Purpose
+          Value: WorkflowStateStorage
+        - Key: AutoCleanup
+          Value: Enabled
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  AsyncWorkerTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateAsyncWorkerRole
+    Properties:
+      RoleName: !Sub "backend-async-worker-task-execution-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # --- [추가] WebSocket Lambda Permissions (SAM이 자동으로 안 만들어줘서 수동 추가 필수) ---
+  WebsocketConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebsocketConnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/$connect"
+        - AccountId: !Ref "AWS::AccountId"
+
+  WebsocketDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WebsocketDisconnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/$disconnect"
+        - AccountId: !Ref "AWS::AccountId"
+
+  # --- [추가] Kinesis Data Stream for Executions Archive ---
+  ExecutionsDataStream:
+    Type: AWS::Kinesis::Stream
+    Condition: ShouldCreateKinesisStream  # <--- 이 줄이 핵심! ARN 있으면 생성 안 함
+    Properties:
+      Name: !Sub "executions-stream-auto-${StageName}"
+      StreamModeDetails:
+        StreamMode: ON_DEMAND
+
+  # --- Executions Archive Infrastructure (TTL + Stream + Firehose) ---
+  ExecutionsArchiveBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub
+        - "analemma-executions-archive-${StageName}-${AccountId}"
+        - AccountId: !Ref "AWS::AccountId"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: GlacierTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 30
+          - Id: DeepArchiveTransition
+            Status: Enabled
+            Transitions:
+              - StorageClass: DEEP_ARCHIVE
+                TransitionInDays: 365
+
+  ExecutionsArchiveFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub "executions-archive-firehose-${StageName}"
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration:
+        # ⚠️ SECURITY NOTE: When using ExternalExecutionsStreamArn, ensure the external Kinesis stream
+        # is in the same AWS account and region as this CloudFormation stack. Cross-region streams
+        # may cause Firehose delivery failures and additional data transfer costs.
+        KinesisStreamARN: !If 
+          - ShouldCreateKinesisStream
+          - !GetAtt ExecutionsDataStream.Arn
+          - !Ref ExternalExecutionsStreamArn
+        RoleARN: !GetAtt ExecutionsArchiveFirehoseRole.Arn
+      ExtendedS3DestinationConfiguration:
+        BucketARN: !GetAtt ExecutionsArchiveBucket.Arn
+        RoleARN: !GetAtt ExecutionsArchiveFirehoseRole.Arn
+        BufferingHints:
+          SizeInMBs: 64
+          IntervalInSeconds: 300
+        CompressionFormat: GZIP
+        Prefix: executions/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/
+        ErrorOutputPrefix: errors/year=!{timestamp:yyyy}/month=!{timestamp:MM}/day=!{timestamp:dd}/!{firehose:error-output-type}/
+
+  ExecutionsArchiveFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "executions-archive-firehose-role-${StageName}"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ExecutionsArchiveFirehosePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ExecutionsArchiveBucket.Arn
+                  - !Sub "${ExecutionsArchiveBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:ListStreams
+                Resource: !If 
+                  - ShouldCreateKinesisStream
+                  - !GetAtt ExecutionsDataStream.Arn
+                  - !Ref ExternalExecutionsStreamArn
+
+  # --- S3 정리 서비스 함수 (실패한 워크플로우 S3 파일 정리) ---
+  S3CleanupFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "s3-cleanup-service-${StageName}-v2"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.s3_cleanup_service.lambda_handler"]
+      Timeout: 300  # 5분 - S3 파일 정리 시간
+      MemorySize: 512
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:DeleteObject
+              - s3:PutBucketLifecycleConfiguration
+              - s3:GetBucketLifecycleConfiguration
+            Resource: 
+              - !If 
+                - CreateWorkflowStateBucket
+                - !GetAtt WorkflowStateBucketResource.Arn
+                - !Sub "arn:aws:s3:::${WorkflowStateBucket}"
+              - !If 
+                - CreateWorkflowStateBucket
+                - !Sub "${WorkflowStateBucketResource.Arn}/*"
+                - !Sub "arn:aws:s3:::${WorkflowStateBucket}/*"
+
+  # TTL 마이그레이션 함수 (일회성, 배포 후 제거 가능)
+  TTLMigrationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ttl-migration-v2-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.ttl_migration.lambda_handler"]
+      Timeout: 900  # 15분 타임아웃 (대용량 마이그레이션용)
+      MemorySize: 1024
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          RETENTION_DAYS: "90"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+
+  # ========================================
+  # 🔍 Infrastructure Monitoring Resources
+  # ========================================
+
+  # ========================================
+  # 🚦 Mission Simulator V2 Components
+  # ========================================
+
+  # 1. Trigger Test Handler (Prepares execution input)
+  TriggerTestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "trigger-test-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.trigger_test.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          MOCK_MODE: !Ref MockMode
+
+  # 2. Verify Result Handler (Checks output validity)
+  VerifyResultFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "verify-result-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.verify_result.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          METRIC_NAMESPACE: "Analemma/MissionSimulator"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  # 3. Aggregate Report Handler (Metrics & Dashboards)
+  SimulatorAggregateReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "simulator-aggregate-report-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.aggregate_report.lambda_handler"]
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          METRIC_NAMESPACE: "Analemma/MissionSimulator"
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+
+  # 4. Local Runner Handler (For API/Auth/WebSocket Scenarios)
+  LocalRunnerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "local-runner-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.local_runner.lambda_handler"]
+      Environment:
+        Variables:
+          API_ENDPOINT: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_ENDPOINT: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WORKFLOW_EVENT_BUS_NAME: !Ref WorkflowEventBus
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          EVENTBRIDGE_DLQ_URL: !Ref EventBridgeDLQ
+          # 🔐 테스트 유저 시크릿 이름 (런타임에 Secrets Manager에서 조회)
+          TEST_USER_CREDENTIALS_SECRET_NAME: !Sub "analemma/${StageName}/test-user-credentials"
+          # Cognito 설정 (배포 시 SSM Parameter에서 자동 생성)
+          COGNITO_USER_POOL_ID: !GetAtt CognitoUserPoolIdParameter.Value
+          COGNITO_CLIENT_ID: !Ref CognitoAudience
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action:
+              - events:PutEvents
+            Resource: !GetAtt WorkflowEventBus.Arn
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # [Fix] Step Functions permissions for CANCELLATION and IDEMPOTENCY tests
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+              - states:StopExecution
+              - states:DescribeExecution
+            Resource:
+              - !Ref StepFunctionDistributedOrchestrator
+              - !Ref StepFunctionOrchestrator
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*:*"
+        # [Fix] SQS permissions for DLQ_RECOVERY test
+        - Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueUrl
+              - sqs:GetQueueAttributes
+            Resource: !GetAtt EventBridgeDLQ.Arn
+        # 🔐 테스트 유저 시크릿 접근 권한
+        - Statement:
+          - Effect: Allow
+            Action:
+              - secretsmanager:GetSecretValue
+            Resource:
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:analemma/${StageName}/test-user-credentials-*"
+        # 🔐 Cognito 인증 권한 (테스트 유저 로그인)
+        - Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:InitiateAuth
+              - cognito-idp:RespondToAuthChallenge
+            Resource:
+              - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*"
+
+  # --- InfraSmokeTester: 5분마다 인프라 + 로직 헬스체크 ---
+  InfraSmokeTesterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "infra-smoke-tester-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.infra_smoke_tester.lambda_handler"]
+      Timeout: 120  # [FIX] Increased for S3 offloading tests
+      MemorySize: 512  # [FIX] Increased for 300KB test data processing
+      Description: "Environment Validation Engine - S3, DynamoDB, Bedrock, Step Functions, PII Masking, S3 Offloading 상태 검증"
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3  # [NEW] For StatePersistenceService
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+      Policies:
+        # S3 권한 (테스트 데이터 읽기/쓰기/삭제)
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+  # 4b. Cleanup Service (Explicit Data Debt Removal)
+  CleanupServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "cleanup-service-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.cleanup_service.lambda_handler"]
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+
+  # 5. Mission Simulator State Machine
+  MissionSimulatorWorkflow:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "MissionSimulatorWorkflow-${StageName}"
+      DefinitionUri: src/mission_simulator_workflow.json
+      DefinitionSubstitutions:
+        TriggerTestFunction: !GetAtt TriggerTestFunction.Arn
+        VerifyResultFunction: !GetAtt VerifyResultFunction.Arn
+        AggregateReportFunction: !GetAtt SimulatorAggregateReportFunction.Arn
+        LocalRunnerFunction: !GetAtt LocalRunnerFunction.Arn
+        CleanupServiceFunction: !GetAtt CleanupServiceFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref TriggerTestFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref VerifyResultFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SimulatorAggregateReportFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref LocalRunnerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CleanupServiceFunction
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionDistributedOrchestrator.Name
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionOrchestrator.Name
+        # Explicit permissions for .sync execution handling
+        - Statement:
+           - Effect: Allow
+             Action:
+               - states:StartExecution
+               - states:DescribeExecution
+               - states:StopExecution
+             Resource: 
+               - !Ref StepFunctionDistributedOrchestrator
+               - !Ref StepFunctionOrchestrator
+           - Effect: Allow
+             Action:
+               - events:PutTargets
+               - events:PutRule
+               - events:DescribeRule
+             Resource: !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
+      Tracing:
+        Enabled: true
+      Events:
+        # Schedule to replace the old Lambda schedule
+        E2ETestScheduleV2:
+          Type: Schedule
+          Properties:
+            Schedule: rate(30 minutes)
+            Description: "Mission Simulator V2 (SFN)"
+            Input: '{"scenarios": ["HAPPY_PATH", "PII_TEST", "LARGE_PAYLOAD", "COST_GUARDRAIL"], "max_concurrency": 5}'
+            Enabled: false
+
+  # --- MissionSimulator: E2E 테스트 자동화 Lambda ---
+  MissionSimulatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "mission-simulator-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.mission_simulator.lambda_handler"]
+      Timeout: 900  # 15분 - E2E 대규모 시나리오 실행을 위한 최대 시간
+      MemorySize: 512
+      Description: "E2E 테스트 자동화 - 10가지 시나리오(A-K)로 전체 워크플로우 검증"
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          METRIC_NAMESPACE: "Analemma/MissionSimulator"
+          MOCK_MODE: "true"  # E2E 테스트는 MOCK_MODE 사용
+          MAX_TOKENS_PER_EXECUTION: "100000"
+          MAX_LAMBDA_INVOCATIONS: "50"
+          API_ENDPOINT: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_ENDPOINT: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WORKFLOW_EVENT_BUS_NAME: !Ref WorkflowEventBus
+      Policies:
+        # S3 CRUD 권한 (상태 검증 및 클린업용)
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # DynamoDB CRUD 권한 (상태 저장/삭제 테스트용)
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - Statement:
+          # Step Functions 실행 및 히스토리 조회 권한
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+              - states:DescribeExecution
+              - states:ListExecutions
+              - states:GetExecutionHistory  # Cost Guardrail 검증용
+              - states:StopExecution  # Cancellation 테스트용
+            Resource:
+              - !Ref StepFunctionDistributedOrchestrator
+              # [FIX] DescribeExecution/GetExecutionHistory는 execution ARN에 대한 권한 필요
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+          # CloudWatch 메트릭 발행 및 조회 권한
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+              - cloudwatch:GetMetricData  # Bedrock 사용량 조회용
+            Resource: "*"
+          # EventBridge 이벤트 발행 권한 (Notification Pipeline 테스트용)
+          - Effect: Allow
+            Action:
+              - events:PutEvents
+            Resource: !GetAtt WorkflowEventBus.Arn
+          # SQS DLQ 확인 권한 (Scenario H용)
+          - Effect: Allow
+            Action:
+              - sqs:GetQueueAttributes
+              - sqs:ReceiveMessage
+            Resource: !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:*-dlq-*"
+      Events:
+        # 30분마다 자동 실행 (핵심 시나리오만)
+        E2ETestSchedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(30 minutes)
+            Description: "30분마다 핵심 E2E 테스트 자동 실행"
+            Input: '{"scenarios": ["HAPPY_PATH", "PII_TEST", "LARGE_PAYLOAD", "COST_GUARDRAIL"]}'
+            Enabled: false  # 수동으로 활성화 필요
+
+
+  # --- SNS Topic for Critical Alerts ---
+  MonitoringSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Analemma Infrastructure Alerts"
+
+  # --- CloudWatch Dashboard: Single Pane of Glass ---
+  AnalemmaDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub "Analemma-${StageName}"
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0, "y": 0, "width": 6, "height": 6,
+              "properties": {
+                "title": "🚦 Infra Health Status",
+                "annotations": {
+                  "horizontal": [
+                    {"color": "#d62728", "value": 0.5, "label": "Warning"},
+                    {"color": "#2ca02c", "value": 1, "label": "Healthy"}
+                  ]
+                },
+                "metrics": [
+                  ["Analemma/Engine", "InfraHealthStatus", {"stat": "Minimum", "period": 300}]
+                ],
+                "view": "gauge",
+                "yAxis": {"left": {"min": 0, "max": 1}},
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 6, "y": 0, "width": 6, "height": 6,
+              "properties": {
+                "title": "✅ Workflow Success Rate",
+                "metrics": [
+                  ["AWS/States", "ExecutionsSucceeded", "StateMachineArn", "${StepFunctionOrchestrator}", {"stat": "Sum", "period": 3600, "id": "success"}],
+                  [".", "ExecutionsFailed", ".", ".", {"stat": "Sum", "period": 3600, "id": "failed"}]
+                ],
+                "view": "pie",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 0, "width": 6, "height": 6,
+              "properties": {
+                "title": "🚨 DLQ Message Count",
+                "metrics": [
+                  ["AWS/SQS", "ApproximateNumberOfMessagesVisible", "QueueName", "backend-workflow-${StageName}-eventbridge-dlq", {"stat": "Maximum", "period": 300}]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 18, "y": 0, "width": 6, "height": 6,
+              "properties": {
+                "title": "🔄 Self-Healing Count",
+                "metrics": [
+                  ["Analemma/Engine", "SelfHealingCount", {"stat": "Sum", "period": 300}]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "📊 Self-Healing vs Errors",
+                "metrics": [
+                  ["Analemma/Engine", "SelfHealingCount", {"stat": "Sum", "period": 300, "label": "Self Healed", "color": "#2ca02c"}],
+                  ["AWS/States", "ExecutionsFailed", "StateMachineArn", "${StepFunctionOrchestrator}", {"stat": "Sum", "period": 300, "label": "Errors", "color": "#d62728"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "yAxis": {"left": {"min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 6, "width": 12, "height": 6,
+              "properties": {
+                "title": "💰 Token Usage by Model",
+                "metrics": [
+                  ["Analemma/Engine", "TotalTokenUsage", "Model", "claude-3-haiku", {"stat": "Sum", "period": 3600}],
+                  [".", ".", ".", "claude-3-sonnet", {"stat": "Sum", "period": 3600}],
+                  [".", ".", ".", "gpt-4", {"stat": "Sum", "period": 3600}]
+                ],
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 12, "width": 8, "height": 6,
+              "properties": {
+                "title": "📦 DynamoDB Capacity",
+                "metrics": [
+                  ["AWS/DynamoDB", "ConsumedWriteCapacityUnits", "TableName", "Executions-v3-${StageName}", {"stat": "Sum", "period": 60}],
+                  [".", "ConsumedReadCapacityUnits", ".", ".", {"stat": "Sum", "period": 60}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8, "y": 12, "width": 8, "height": 6,
+              "properties": {
+                "title": "⚡ Lambda Concurrency",
+                "metrics": [
+                  ["AWS/Lambda", "ConcurrentExecutions", "FunctionName", "segment-runner-${StageName}", {"stat": "Maximum", "period": 60}],
+                  [".", ".", ".", "process-segment-chunk-${StageName}", {"stat": "Maximum", "period": 60}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16, "y": 12, "width": 8, "height": 6,
+              "properties": {
+                "title": "⏱️ LLM Response Latency (P90 & P99)",
+                "metrics": [
+                  ["Analemma/Engine", "LLMResponseLatency", {"stat": "p90", "period": 300, "label": "P90", "color": "#1f77b4"}],
+                  [".", ".", {"stat": "p99", "period": 300, "label": "P99 (상위 1%)", "color": "#ff7f0e"}],
+                  [".", ".", {"stat": "Average", "period": 300, "label": "Average", "color": "#2ca02c"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "annotations": {
+                  "horizontal": [{"color": "#d62728", "value": 15000, "label": "⚠️ Warning (15s)"}]
+                },
+                "yAxis": {"left": {"label": "ms", "min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 18, "width": 6, "height": 6,
+              "properties": {
+                "title": "🎯 E2E Mission Success Rate",
+                "annotations": {
+                  "horizontal": [
+                    {"color": "#d62728", "value": 50, "label": "Critical"},
+                    {"color": "#ff7f0e", "value": 80, "label": "Warning"},
+                    {"color": "#2ca02c", "value": 100, "label": "Healthy"}
+                  ]
+                },
+                "metrics": [
+                  ["Analemma/MissionSimulator", "OverallSuccessRate", {"stat": "Average", "period": 3600}]
+                ],
+                "view": "gauge",
+                "yAxis": {"left": {"min": 0, "max": 100}},
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 6, "y": 18, "width": 9, "height": 6,
+              "properties": {
+                "title": "📊 E2E Scenario Results",
+                "metrics": [
+                  ["Analemma/MissionSimulator", "MissionResult", "Scenario", "HAPPY_PATH", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
+                  ["...", "HAPPY_PATH", "Result", "FAILURE", {"stat": "Sum", "period": 3600, "color": "#d62728"}],
+                  ["...", "PII_TEST", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
+                  ["...", "LARGE_PAYLOAD", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
+                  ["...", "COST_GUARDRAIL", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}]
+                ],
+                "view": "timeSeries",
+                "stacked": true,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 15, "y": 18, "width": 9, "height": 6,
+              "properties": {
+                "title": "⏱️ E2E Scenario Duration",
+                "metrics": [
+                  ["Analemma/MissionSimulator", "MissionDuration", "Scenario", "HAPPY_PATH", {"stat": "Average", "period": 3600, "label": "Happy Path"}],
+                  ["...", "PII_TEST", {"stat": "Average", "period": 3600, "label": "PII Test"}],
+                  ["...", "LARGE_PAYLOAD", {"stat": "Average", "period": 3600, "label": "Large Payload"}],
+                  ["...", "COST_GUARDRAIL", {"stat": "Average", "period": 3600, "label": "Cost Guardrail"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "yAxis": {"left": {"label": "Seconds", "min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0, "y": 24, "width": 12, "height": 6,
+              "properties": {
+                "title": "📊 Full Scenario Success Matrix (All 17 Scenarios)",
+                "metrics": [
+                  ["Analemma/MissionSimulator", "MissionResult", "Scenario", "HAPPY_PATH", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "A: Happy Path", "color": "#2ca02c"}],
+                  ["...", "PII_TEST", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "B: PII", "color": "#2ca02c"}],
+                  ["...", "LARGE_PAYLOAD", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "C: Large", "color": "#2ca02c"}],
+                  ["...", "ERROR_HANDLING", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "D: Error", "color": "#2ca02c"}],
+                  ["...", "MAP_AGGREGATOR", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "E: Map", "color": "#2ca02c"}],
+                  ["...", "LOOP_LIMIT", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "F: Loop", "color": "#2ca02c"}],
+                  ["...", "API_CONNECTIVITY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "L: API", "color": "#1f77b4"}],
+                  ["...", "WEBSOCKET_CONNECT", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "M: WS", "color": "#1f77b4"}],
+                  ["...", "AUTH_FLOW", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "N: Auth", "color": "#ff7f0e"}],
+                  ["...", "REALTIME_NOTIFICATION", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "O: Notify", "color": "#ff7f0e"}],
+                  ["...", "IDEMPOTENCY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "P: Idemp", "color": "#9467bd"}],
+                  ["...", "CANCELLATION", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "Q: Cancel", "color": "#9467bd"}],
+                  ["...", "CORS_SECURITY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "R: CORS", "color": "#9467bd"}]
+                ],
+                "view": "bar",
+                "stacked": false,
+                "region": "${AWS::Region}"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12, "y": 24, "width": 6, "height": 6,
+              "properties": {
+                "title": "📡 Notification Latency (EventBridge → WS)",
+                "annotations": {
+                  "horizontal": [
+                    {"color": "#ff7f0e", "value": 1000, "label": "Warning (1s)"},
+                    {"color": "#d62728", "value": 3000, "label": "Critical (3s)"}
+                  ]
+                },
+                "metrics": [
+                  ["Analemma/MissionSimulator", "NotificationLatency", "Pipeline", "EventBridge-WebSocket", {"stat": "Average", "period": 300, "label": "Avg", "color": "#2ca02c"}],
+                  ["...", {"stat": "p90", "period": 300, "label": "P90", "color": "#ff7f0e"}],
+                  ["...", {"stat": "Maximum", "period": 300, "label": "Max", "color": "#d62728"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "yAxis": {"left": {"label": "ms", "min": 0}}
+              }
+            },
+            {
+              "type": "metric",
+              "x": 18, "y": 24, "width": 6, "height": 6,
+              "properties": {
+                "title": "💰 Bedrock Cost vs E2E Success",
+                "metrics": [
+                  ["Analemma/Engine", "TotalTokenUsage", {"stat": "Sum", "period": 3600, "label": "Tokens Used", "color": "#1f77b4", "yAxis": "left"}],
+                  ["Analemma/MissionSimulator", "MissionSuccessRate", {"stat": "Average", "period": 3600, "label": "Success Rate %", "color": "#2ca02c", "yAxis": "right"}]
+                ],
+                "view": "timeSeries",
+                "region": "${AWS::Region}",
+                "yAxis": {
+                  "left": {"label": "Tokens", "min": 0},
+                  "right": {"label": "%", "min": 0, "max": 100}
+                }
+              }
+            }
+          ]
+        }
+
+
+  # --- Critical Alarm: Infra Health Failed ---
+  CriticalInfraAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Analemma-${StageName}-CriticalInfraFailure"
+      AlarmDescription: "인프라 헬스체크 실패 - 즉시 점검 필요"
+      Namespace: "Analemma/Engine"
+      MetricName: "InfraHealthStatus"
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 0.5
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+      OKActions:
+        - !Ref MonitoringSNSTopic
+
+  # --- Critical Alarm: DLQ Messages ---
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Analemma-${StageName}-DLQMessages"
+      AlarmDescription: "DLQ에 처리되지 않은 메시지 존재 - 즉시 개입 필요"
+      Namespace: "AWS/SQS"
+      MetricName: "ApproximateNumberOfMessagesVisible"
+      Dimensions:
+        - Name: QueueName
+          Value: !Sub "backend-workflow-${StageName}-eventbridge-dlq"
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+
+  # --- Warning Alarm: Self-Healing Spike ---
+  SelfHealingSpikeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Analemma-${StageName}-SelfHealingSpike"
+      AlarmDescription: !Sub "자가 치유 급증 (5분 내 10회 초과) - 프롬프트 엔지니어링 점검 필요. CloudWatch Logs에서 'SelfHealingService' 키워드로 검색하여 실패 노드 ID 확인. 대시보드: https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=Analemma-${StageName}"
+      Namespace: "Analemma/Engine"
+      MetricName: "SelfHealingCount"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+
+Outputs:
+  ApiEndpoint:
+    Description: HTTPS endpoint for the HttpApi.
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  WebsocketApiUrl:
+    Description: WebSocket URL
+    Value: !Sub "wss://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+  LfuEndpointUrl:
+    Description: Lambda Function URL for the design assistant
+    Value: !GetAtt DesignAssistantFunctionUrlResource.FunctionUrl
+  TaskMetricsApiEndpoint:
+    Description: Task Metrics API endpoint for Bento Grid UI
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}/tasks/{taskId}/metrics"
+  NodeStatsTableName:
+    Description: NodeStats DynamoDB table for ETA calculation
+    Value: !Ref NodeStatsTable
+

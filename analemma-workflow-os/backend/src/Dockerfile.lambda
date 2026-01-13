@@ -1,0 +1,20 @@
+# Use the pre-built base image with all heavy dependencies
+ARG BASE_IMAGE_URI=public.ecr.aws/lambda/python:3.12
+FROM ${BASE_IMAGE_URI}
+
+# Force rebuild to pick up latest code changes
+ENV BUILD_REFRESH_DATE="2026-01-09-18-40"
+
+# Copy application code to /var/task/src to match 'src.handlers...' imports
+COPY . /var/task/src/
+
+# Install any additional requirements if they exist
+RUN if [ -f /var/task/src/requirements.txt ]; then pip install --no-cache-dir -r /var/task/src/requirements.txt; fi
+
+# Set working directory to /var/task so that 'src' is a top-level package
+WORKDIR /var/task
+
+# Ensure Python can find src package
+ENV PYTHONPATH="/var/task"
+
+# Handler is specified in ImageConfig.Command in template.yaml

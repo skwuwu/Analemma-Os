@@ -1,0 +1,8 @@
+{
+  "name": "analemma-root",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
+}
