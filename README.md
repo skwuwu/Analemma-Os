@@ -79,8 +79,7 @@ pip install -r requirements.txt
 
 # Deploy the Kernel to AWS
 sam build && sam deploy --guided
-License
-Distributed under the Apache License 2.0. See LICENSE for more information.
+
 
 🤝 Contact
 Your Name/Team Name - [Your Email/LinkedIn/X] Project Link: https://github.com/your-username/Analemma-OS
