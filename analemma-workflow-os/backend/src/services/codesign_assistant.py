@@ -20,8 +20,8 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Generator, Iterator, List, Optional
 
-# 기존 agentic_designer 모듈에서 필요한 함수 import
-from .agentic_designer import (
+# agentic_designer_handler 모듈에서 필요한 함수 import (handlers/core로 이동됨)
+from src.handlers.core.agentic_designer_handler import (
     invoke_bedrock_model,
     invoke_bedrock_model_stream,
     invoke_claude,

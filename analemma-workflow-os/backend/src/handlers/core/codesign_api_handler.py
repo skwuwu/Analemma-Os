@@ -20,7 +20,7 @@ try:
         apply_suggestion,
         get_or_create_context
     )
-    from src.services.agentic_designer import (
+    from src.handlers.core.agentic_designer_handler import (
         invoke_bedrock_model_stream,
         SYSTEM_PROMPT,
         MODEL_SONNET,
@@ -37,7 +37,7 @@ except ImportError:
         apply_suggestion,
         get_or_create_context
     )
-    from src.services.agentic_designer import (
+    from src.handlers.core.agentic_designer_handler import (
         invoke_bedrock_model_stream,
         SYSTEM_PROMPT,
         MODEL_SONNET,

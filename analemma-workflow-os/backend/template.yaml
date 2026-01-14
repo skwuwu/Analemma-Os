@@ -576,7 +576,7 @@ Resources:
       PackageType: Image
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
-        Command: ["src.services.agentic_designer.lambda_handler"]
+        Command: ["src.handlers.core.agentic_designer_handler.lambda_handler"]
       Timeout: 900
       Environment:
         Variables:
