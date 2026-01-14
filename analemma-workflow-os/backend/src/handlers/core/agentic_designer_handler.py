@@ -5,7 +5,7 @@ import codecs
 import time
 import uuid
 import re
-from typing import Any, Dict, Iterator, List, Optional, Generator
+from typing import Any, Dict, Iterator, List, Optional, Generator, Literal
 
 import boto3
 from botocore.exceptions import ClientError
@@ -14,6 +14,104 @@ import time as _time
 # --- [설정] 로깅 및 환경변수 ---
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
+
+# ============================================================================
+# 스트리밍 UX 설정
+# ============================================================================
+# 렌더링 가독성을 위한 미세 지연 (밀리초)
+# - 너무 빠른 스트리밍은 브라우저 렌더링에 부하를 주고 사용자가 변화를 인지하기 어려움
+# - 50-100ms 권장 (인간의 시각 인지 임계값 기준)
+STREAMING_UI_DELAY_MS = int(os.getenv("STREAMING_UI_DELAY_MS", "50"))
+
+# Mock 모드에서의 UI 지연 (더 느리게 시각적 확인용)
+MOCK_UI_DELAY_MS = int(os.getenv("MOCK_UI_DELAY_MS", "100"))
+
+
+# ============================================================================
+# Gemini Response Schema 정의 (하드웨어 수준 형식 강제)
+# ============================================================================
+# 이 스키마들은 Gemini의 response_schema 기능에 주입되어
+# AI가 실수로 텍스트 설명을 섞거나 잘못된 키값을 생성하는 것을 원천 차단
+
+WORKFLOW_NODE_SCHEMA = {
+    "type": "object",
+    "required": ["type", "data"],
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": ["node"]
+        },
+        "data": {
+            "type": "object",
+            "required": ["id", "type", "position"],
+            "properties": {
+                "id": {"type": "string"},
+                "type": {
+                    "type": "string",
+                    "enum": ["operator", "llm_chat", "api_call", "db_query", 
+                             "for_each", "distributed_map", "parallel", 
+                             "route_condition", "route_draft_quality"]
+                },
+                "position": {
+                    "type": "object",
+                    "required": ["x", "y"],
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"}
+                    }
+                },
+                "config": {"type": "object"},
+                "data": {"type": "object"}
+            }
+        }
+    }
+}
+
+WORKFLOW_EDGE_SCHEMA = {
+    "type": "object",
+    "required": ["type", "data"],
+    "properties": {
+        "type": {
+            "type": "string",
+            "enum": ["edge"]
+        },
+        "data": {
+            "type": "object",
+            "required": ["source", "target"],
+            "properties": {
+                "id": {"type": "string"},
+                "source": {"type": "string"},
+                "target": {"type": "string"},
+                "sourceHandle": {"type": "string"},
+                "targetHandle": {"type": "string"}
+            }
+        }
+    }
+}
+
+WORKFLOW_STATUS_SCHEMA = {
+    "type": "object",
+    "required": ["type", "data"],
+    "properties": {
+        "type": {
+            "type": "string", 
+            "enum": ["status"]
+        },
+        "data": {
+            "type": "string",
+            "enum": ["done", "error", "processing"]
+        }
+    }
+}
+
+# JSONL 라인 하나에 대한 통합 스키마 (anyOf로 node/edge/status 허용)
+JSONL_LINE_SCHEMA = {
+    "anyOf": [
+        WORKFLOW_NODE_SCHEMA,
+        WORKFLOW_EDGE_SCHEMA,
+        WORKFLOW_STATUS_SCHEMA
+    ]
+}
 
 # 공통 유틸리티 모듈 import (Lambda 환경에서는 상대 경로 import 불가)
 try:
@@ -567,20 +665,28 @@ Loop, Map, Parallel, Conditional 구조가 필요한지 **먼저 판단**하세�
 def invoke_gemini_stream(
     user_request: str,
     current_workflow: Optional[Dict[str, Any]] = None,
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    use_response_schema: bool = True
 ) -> Generator[str, None, None]:
     """
-    Gemini Native 스트리밍 호출
+    Gemini Native 스트리밍 호출 (구조적 스키마 강제 적용)
     
-    구조적 도구를 활용한 워크플로우 생성
+    구조적 도구를 활용한 워크플로우 생성.
+    response_schema를 통해 JSONL 형식을 하드웨어 수준에서 강제합니다.
     
     Args:
         user_request: 사용자 요청
         current_workflow: 현재 워크플로우 상태
         system_prompt: 커스텀 시스템 프롬프트 (None이면 기본 프롬프트 사용)
+        use_response_schema: True면 Gemini response_schema로 형식 강제
     
     Yields:
         JSONL 형식의 응답 청크
+        
+    Technical Notes:
+        - Incremental UTF-8 decoder로 멀티바이트 문자(한글 등) 깨짐 방지
+        - UI delay로 렌더링 가독성 확보
+        - Response schema로 잘못된 형식 원천 차단
     """
     if not GEMINI_AVAILABLE:
         logger.warning("Gemini not available, falling back to Bedrock")
@@ -594,12 +700,16 @@ def invoke_gemini_stream(
     if _is_mock_mode():
         logger.info("MOCK_MODE: Streaming synthetic Gemini response")
         mock_wf = _mock_workflow_json()
+        ui_delay = MOCK_UI_DELAY_MS / 1000.0
+        
         for node in mock_wf.get("nodes", []):
             yield json.dumps({"type": "node", "data": node}) + "\n"
-            time.sleep(0.1)
+            if ui_delay > 0:
+                time.sleep(ui_delay)
         for edge in mock_wf.get("edges", []):
             yield json.dumps({"type": "edge", "data": edge}) + "\n"
-            time.sleep(0.1)
+            if ui_delay > 0:
+                time.sleep(ui_delay)
         yield json.dumps({"type": "status", "data": "done"}) + "\n"
         return
     
@@ -630,26 +740,87 @@ def invoke_gemini_stream(
 마지막에 {{"type": "status", "data": "done"}}으로 완료를 알려주세요.
 """
         
+        # Response Schema 설정 (Gemini 2.0+ 기능)
+        # 이를 통해 AI가 잘못된 형식의 응답을 생성하는 것을 원천 차단
+        generation_config = {
+            "max_output_tokens": 8192,
+            "temperature": 0.7,
+        }
+        
+        if use_response_schema:
+            # JSONL 형식 강제를 위한 스키마 주입
+            generation_config["response_schema"] = JSONL_LINE_SCHEMA
+            generation_config["response_mime_type"] = "application/json"
+            logger.debug("Using response_schema for strict JSONL enforcement")
+        
+        # ============================================================
+        # 글자 깨짐 방지 레이어 (Incremental UTF-8 Decoder)
+        # ============================================================
+        # 멀티바이트 문자(한글, 이모지 등)가 청크 경계에서 잘리는 현상 방지
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        buffer = ""
+        
+        # 렌더링 가독성을 위한 UI 지연 설정
+        ui_delay = STREAMING_UI_DELAY_MS / 1000.0
+        
         # Gemini 스트리밍 호출
-        for chunk in service.invoke_model_stream(
+        for raw_chunk in service.invoke_model_stream(
             user_prompt=enhanced_prompt,
             system_instruction=gemini_system,
-            max_output_tokens=8192,
-            temperature=0.7
+            **generation_config
         ):
-            # 구조 노드 유효성 검증
-            if validate_structure_node and chunk.strip():
+            # 바이트 데이터인 경우 디코딩
+            if isinstance(raw_chunk, bytes):
                 try:
-                    parsed = json.loads(chunk.strip())
-                    if parsed.get("type") == "node":
+                    text = decoder.decode(raw_chunk)
+                except Exception as e:
+                    logger.debug(f"Skipping non-decodable chunk: {e}")
+                    continue
+            else:
+                text = raw_chunk
+            
+            buffer += text
+            
+            # 줄바꿈 기준으로 완전한 JSON 라인 추출
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                line = line.strip()
+                if not line:
+                    continue
+                
+                try:
+                    # JSON 유효성 검증
+                    parsed = json.loads(line)
+                    
+                    # 구조 노드 유효성 검증
+                    if validate_structure_node and parsed.get("type") == "node":
                         node_data = parsed.get("data", {})
                         errors = validate_structure_node(node_data)
                         if errors:
                             logger.warning(f"Structure validation warnings: {errors}")
+                    
+                    yield line + "\n"
+                    
+                    # 렌더링 가독성을 위한 미세 지연
+                    if ui_delay > 0:
+                        time.sleep(ui_delay)
+                        
                 except json.JSONDecodeError:
-                    pass
-            
-            yield chunk
+                    logger.debug(f"Discarding non-JSON chunk: {line}")
+        
+        # 남은 버퍼 플러시
+        try:
+            tail = decoder.decode(b"", final=True)
+            buffer += tail
+        except Exception:
+            pass
+        
+        if buffer.strip():
+            try:
+                json.loads(buffer)
+                yield buffer + "\n"
+            except json.JSONDecodeError:
+                logger.debug(f"Discarding final non-JSON buffer: {buffer}")
             
     except Exception as e:
         logger.exception(f"Gemini streaming failed: {e}")
@@ -832,12 +1003,18 @@ def _broadcast_to_connections(connection_ids: List[str], data: Any):
 def _process_llm_stream(system_prompt: str, user_request: str, active_connection_ids: List[str]):
     """
     Bedrock 호출 -> 청크 수신 -> JSONL 조립 -> WebSocket 전송
+    
+    Technical Notes:
+        - Incremental UTF-8 decoder로 멀티바이트 문자 깨짐 방지
+        - UI delay로 브라우저 렌더링 부하 경감 및 사용자 인지 개선
+        - 연결 끊김 시 스트리밍 조기 종료
     """
     try:
         # MOCK_MODE 처리
         if _is_mock_mode():
             mock_wf = _mock_workflow_json()
-            ui_delay = float(os.environ.get("STREAMING_UI_DELAY", "0.1"))
+            # Mock 모드에서는 더 느린 지연으로 시각적 확인 용이
+            ui_delay = MOCK_UI_DELAY_MS / 1000.0
 
             for n in mock_wf.get("nodes", []):
                 if not active_connection_ids:
@@ -871,11 +1048,13 @@ def _process_llm_stream(system_prompt: str, user_request: str, active_connection
         if not stream:
             return
 
+        # 글자 깨짐 방지 레이어 (Incremental UTF-8 Decoder)
         decoder = codecs.getincrementaldecoder("utf-8")()
         buffer = ""
 
-        # UI 연출 딜레이 (옵션)
-        ui_delay = float(os.environ.get("STREAMING_UI_DELAY", "0.1"))
+        # 렌더링 가독성을 위한 UI 지연 (밀리초 -> 초 변환)
+        # 50-100ms가 최적: 너무 빠르면 브라우저 렌더링 부하, 너무 느리면 답답함
+        ui_delay = STREAMING_UI_DELAY_MS / 1000.0
 
         for event in stream:
             if not active_connection_ids:
@@ -910,21 +1089,27 @@ def _process_llm_stream(system_prompt: str, user_request: str, active_connection
                     # [전송] WebSocket으로 즉시 발송
                     _broadcast_to_connections(active_connection_ids, json_obj)
 
-                    # 너무 빠르면 시각적으로 놓칠 수 있으므로 미세 지연
+                    # 렌더링 가독성을 위한 미세 지연 (인간 시각 인지 최적화)
                     if ui_delay > 0:
                         time.sleep(ui_delay)
 
                 except json.JSONDecodeError:
                     # 파싱 중인 불완전한 데이터는 무시하거나 로그
-                    pass
+                    logger.debug(f"Discarding incomplete JSON: {line[:50]}...")
 
-        # 남은 버퍼 처리
+        # 남은 버퍼 처리 (스트림 종료 시 flush)
+        try:
+            tail = decoder.decode(b"", final=True)
+            buffer += tail
+        except Exception:
+            pass
+            
         if buffer.strip():
             try:
                 json_obj = json.loads(buffer)
                 _broadcast_to_connections(active_connection_ids, json_obj)
-            except:
-                pass
+            except json.JSONDecodeError:
+                logger.debug(f"Discarding final non-JSON buffer: {buffer[:50]}...")
 
         # [종료] 완료 시그널 전송
         _broadcast_to_connections(active_connection_ids, {
