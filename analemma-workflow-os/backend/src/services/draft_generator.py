@@ -1,9 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Draft Result Generator Service
+Draft Result Generator Service - Gemini Native Edition
 
 실제 실행 없이 예상 결과물의 상세 초안을 생성하는 서비스입니다.
 사용자가 "자세히 보기"를 클릭했을 때 호출됩니다.
+
+[Gemini Native 통합]
+- Gemini 1.5 Flash: 초안 생성 (비용 효율적, 빠른 응답)
+- Gemini 2.0 Flash: 복잡한 문서/멀티모달 초안
+- Google Cloud DLP: 민감 정보 탐지 (선택적)
+
+[핵심 가치] Pre-execution Visibility
+- Vertex AI가 강력한 엔진이라면, Draft Generator는 그 엔진이 만든 에너지가
+  잘못된 방향으로 분출되지 않도록 막는 '제어판'입니다.
+- 사용자가 '실행' 버튼을 누르기 전, AI가 보낼 이메일의 어조와 
+  누락된 정보를 완벽히 파악할 수 있는 환경을 제공합니다.
 """
 
 import json
@@ -11,6 +22,7 @@ import os
 import re
 import logging
 from typing import Dict, Any, List, Optional
+from enum import Enum
 
 try:
     from src.models.plan_briefing import DraftResult
@@ -19,39 +31,148 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# LLM 클라이언트
+# ═══════════════════════════════════════════════════════════════════════════════
+# Gemini Native 클라이언트
+# ═══════════════════════════════════════════════════════════════════════════════
+try:
+    from src.services.llm.gemini_service import (
+        get_gemini_flash_service,
+        get_gemini_pro_service,
+        GeminiService,
+    )
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+    get_gemini_flash_service = None
+    get_gemini_pro_service = None
+    GeminiService = None
+
+# Google Cloud DLP (선택적)
+try:
+    from google.cloud import dlp_v2
+    HAS_CLOUD_DLP = True
+except ImportError:
+    HAS_CLOUD_DLP = False
+    dlp_v2 = None
+
+# OpenAI 폴백 (레거시 호환)
 try:
     from openai import AsyncOpenAI
     HAS_OPENAI = True
 except ImportError:
-    try:
-        import openai
-        HAS_OPENAI = True
-    except ImportError:
-        HAS_OPENAI = False
+    HAS_OPENAI = False
+    AsyncOpenAI = None
+
+# 환경 변수
+USE_GEMINI_NATIVE = os.environ.get("USE_GEMINI_NATIVE", "true").lower() == "true"
+USE_CLOUD_DLP = os.environ.get("USE_CLOUD_DLP", "false").lower() == "true"
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID", "")
+
+
+class DraftOutputType(Enum):
+    """초안 출력 타입"""
+    EMAIL = "email"
+    DOCUMENT = "document"
+    SLACK_MESSAGE = "slack_message"
+    NOTIFICATION = "notification"
+    API_CALL = "api_call"
+    SMS = "sms"
+    CHART = "chart"  # 멀티모달: 차트 레이아웃
+    DIAGRAM = "diagram"  # 멀티모달: 문서 구조도
+    GENERIC = "generic"
 
 
 class DraftResultGenerator:
     """
-    실제 실행 없이 예상 결과물의 상세 초안 생성
+    실제 실행 없이 예상 결과물의 상세 초안 생성 - Gemini Native
     
     노드 타입별로 최적화된 초안 생성 로직을 제공합니다.
+    
+    [Gemini Native 장점]
+    - Gemini 1.5 Flash: 초당 수천 토큰 처리, 비용 효율적
+    - Structured Output: JSON 스키마 강제로 파싱 오류 없음
+    - 멀티모달 지원: 차트/다이어그램 프리뷰 가능
     """
     
-    def __init__(self, openai_api_key: Optional[str] = None):
+    # Gemini Structured Output 스키마
+    EMAIL_DRAFT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "subject": {"type": "string", "description": "이메일 제목"},
+            "body": {"type": "string", "description": "이메일 본문 (전문적이고 완성된 형태)"},
+            "recipients": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "수신자 이메일 목록"
+            },
+            "tone": {
+                "type": "string",
+                "enum": ["formal", "friendly", "urgent", "neutral"],
+                "description": "이메일 어조"
+            }
+        },
+        "required": ["subject", "body", "recipients"]
+    }
+    
+    DOCUMENT_DRAFT_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string"},
+            "content": {"type": "string"},
+            "sections": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "heading": {"type": "string"},
+                        "body": {"type": "string"}
+                    }
+                }
+            },
+            "structure_diagram": {
+                "type": "string",
+                "description": "문서 구조를 ASCII 다이어그램으로 표현"
+            }
+        },
+        "required": ["title", "content"]
+    }
+    
+    def __init__(self, gemini_service: Optional['GeminiService'] = None):
         """
         Args:
-            openai_api_key: OpenAI API 키 (없으면 환경변수에서 로드)
+            gemini_service: GeminiService 인스턴스 (없으면 자동 초기화)
         """
-        self.api_key = openai_api_key or os.environ.get("OPENAI_API_KEY")
-        if HAS_OPENAI and self.api_key:
+        # Gemini Native 우선 사용
+        if gemini_service:
+            self.gemini_service = gemini_service
+        elif HAS_GEMINI and USE_GEMINI_NATIVE and get_gemini_flash_service:
+            self.gemini_service = get_gemini_flash_service()
+        else:
+            self.gemini_service = None
+        
+        # OpenAI 폴백 (레거시)
+        self.openai_client = None
+        if not self.gemini_service and HAS_OPENAI:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if api_key and AsyncOpenAI:
+                self.openai_client = AsyncOpenAI(api_key=api_key)
+        
+        # Google Cloud DLP 클라이언트 (PII 탐지)
+        self.dlp_client = None
+        if HAS_CLOUD_DLP and USE_CLOUD_DLP and GCP_PROJECT_ID:
             try:
-                # AsyncOpenAI 클라이언트 사용 (v1.0+)
-                self.client = AsyncOpenAI(api_key=self.api_key)
-            except NameError:
-                # 구버전 호환성 유지
-                openai.api_key = self.api_key
-                self.client = None
+                self.dlp_client = dlp_v2.DlpServiceClient()
+                logger.info("Google Cloud DLP client initialized for PII detection")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Cloud DLP: {e}")
+        
+        # 사용 가능한 LLM 로깅
+        if self.gemini_service:
+            logger.info("DraftResultGenerator using Gemini Native")
+        elif self.openai_client:
+            logger.info("DraftResultGenerator using OpenAI fallback")
+        else:
+            logger.warning("DraftResultGenerator: No LLM available, using template-based generation")
 
     async def generate_detailed_draft(
         self,
@@ -77,6 +198,8 @@ class DraftResultGenerator:
             "notification": self._generate_notification_draft,
             "api_call": self._generate_api_draft,
             "sms": self._generate_sms_draft,
+            "chart": self._generate_chart_draft,  # 멀티모달
+            "diagram": self._generate_diagram_draft,  # 멀티모달
         }
         
         generator = generators.get(output_type, self._generate_generic_draft)
@@ -87,60 +210,88 @@ class DraftResultGenerator:
         node_config: Dict[str, Any],
         input_data: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """이메일 초안 생성"""
+        """
+        이메일 초안 생성 - Gemini Native
+        
+        Gemini 1.5 Flash를 사용하여 변수가 주입된 실제적인 이메일을 생성합니다.
+        Structured Output으로 파싱 오류 없이 안정적인 JSON 반환.
+        """
         
         template = node_config.get('template', '')
         variables = input_data
         
-        # LLM 사용 가능한 경우
-        if HAS_OPENAI and self.api_key:
+        # ═══════════════════════════════════════════════════════════════════════
+        # Gemini Native (우선)
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.gemini_service:
             try:
-                if hasattr(self, 'client') and self.client:
-                    # AsyncOpenAI 클라이언트 사용 (v1.0+)
-                    response = await self.client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[{
-                            "role": "system",
-                            "content": """Generate a realistic email draft based on the template and variables. 
-Output JSON with: subject, body, recipients (array).
-The email should be professional and complete.
-Respond in the same language as the template."""
-                        }, {
-                            "role": "user",
-                            "content": f"Template: {template}\nVariables: {json.dumps(variables, ensure_ascii=False)}"
-                        }],
-                        response_format={"type": "json_object"},
-                        max_tokens=1000,
-                        temperature=0.5
-                    )
-                else:
-                    # 구버전 호환성 유지
-                    response = await openai.ChatCompletion.acreate(
-                        model="gpt-4o-mini",
-                        messages=[{
-                            "role": "system",
-                            "content": """Generate a realistic email draft based on the template and variables. 
-Output JSON with: subject, body, recipients (array).
-The email should be professional and complete.
-Respond in the same language as the template."""
-                        }, {
-                            "role": "user",
-                            "content": f"Template: {template}\nVariables: {json.dumps(variables, ensure_ascii=False)}"
-                        }],
-                        response_format={"type": "json_object"},
-                        max_tokens=1000,
-                        temperature=0.5
-                    )
+                prompt = f"""당신은 전문적인 이메일 작성 도우미입니다.
+주어진 템플릿과 변수를 사용하여 실제 발송될 이메일 초안을 생성하세요.
+
+## 템플릿
+{template}
+
+## 변수 데이터
+{json.dumps(variables, ensure_ascii=False, indent=2)}
+
+## 요구사항
+1. 템플릿의 변수 플레이스홀더({{{{variable}}}} 또는 ${{variable}})를 실제 값으로 치환하세요.
+2. 이메일은 전문적이고 완성된 형태여야 합니다.
+3. 템플릿과 동일한 언어로 응답하세요.
+4. 수신자 목록이 없으면 변수에서 이메일 주소를 추론하세요.
+
+JSON 형식으로만 응답하세요."""
+
+                response = self.gemini_service.invoke_model(
+                    user_prompt=prompt,
+                    max_output_tokens=1000,
+                    temperature=0.5,
+                    response_schema=self.EMAIL_DRAFT_SCHEMA
+                )
                 
+                response_text = response.get('text', '{}')
+                draft = json.loads(response_text)
+                
+            except Exception as e:
+                logger.warning(f"Gemini email draft generation failed: {e}")
+                draft = self._generate_email_fallback(node_config, input_data)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # OpenAI 폴백 (레거시)
+        # ═══════════════════════════════════════════════════════════════════════
+        elif self.openai_client:
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{
+                        "role": "system",
+                        "content": """Generate a realistic email draft based on the template and variables. 
+Output JSON with: subject, body, recipients (array).
+The email should be professional and complete.
+Respond in the same language as the template."""
+                    }, {
+                        "role": "user",
+                        "content": f"Template: {template}\nVariables: {json.dumps(variables, ensure_ascii=False)}"
+                    }],
+                    response_format={"type": "json_object"},
+                    max_tokens=1000,
+                    temperature=0.5
+                )
                 draft = json.loads(response.choices[0].message.content)
             except Exception as e:
-                logger.warning(f"LLM email draft generation failed: {e}")
+                logger.warning(f"OpenAI email draft generation failed: {e}")
                 draft = self._generate_email_fallback(node_config, input_data)
         else:
             draft = self._generate_email_fallback(node_config, input_data)
         
-        # 경고 체크
-        warnings = self._check_email_warnings(draft)
+        # ═══════════════════════════════════════════════════════════════════════
+        # 보안 검사: PII 탐지 (Cloud DLP 또는 정규표현식)
+        # ═══════════════════════════════════════════════════════════════════════
+        warnings = await self._check_pii_and_warnings(
+            content=draft.get('body', '') + ' ' + draft.get('subject', ''),
+            recipients=draft.get('recipients', []),
+            content_type='email'
+        )
         
         return {
             "type": "email",
@@ -148,10 +299,12 @@ Respond in the same language as the template."""
                 "to": draft.get('recipients', []),
                 "subject": draft.get('subject', ''),
                 "body": draft.get('body', ''),
+                "tone": draft.get('tone', 'neutral'),
                 "is_preview": True
             },
             "warnings": warnings,
-            "can_edit": True
+            "can_edit": True,
+            "llm_provider": "gemini" if self.gemini_service else "openai" if self.openai_client else "template"
         }
 
     def _generate_email_fallback(

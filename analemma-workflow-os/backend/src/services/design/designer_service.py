@@ -300,3 +300,95 @@ def get_designer_service() -> DesignerService:
     if _designer_service_instance is None:
         _designer_service_instance = DesignerService()
     return _designer_service_instance
+
+
+# =========================================================================
+# 고수준 API 함수들 (핸들러에서 사용)
+# =========================================================================
+
+def analyze_request(user_request: str) -> Dict[str, str]:
+    """
+    사용자 요청의 intent와 complexity 분석
+    
+    핸들러에서 직접 호출 가능한 편의 함수
+    """
+    return get_designer_service().analyze_request(user_request)
+
+
+def stream_workflow_jsonl(
+    user_request: str,
+    current_workflow: Optional[Dict[str, Any]] = None,
+    canvas_mode: str = "agentic-designer"
+) -> Iterator[str]:
+    """
+    워크플로우 생성 JSONL 스트리밍
+    
+    Args:
+        user_request: 사용자 요청
+        current_workflow: 현재 워크플로우 상태
+        canvas_mode: Canvas 모드
+        
+    Yields:
+        JSONL 형식의 응답 문자열
+    """
+    from services.design.prompts import SYSTEM_PROMPT, get_gemini_system_prompt
+    
+    service = get_designer_service()
+    
+    # 프롬프트 구성
+    enhanced_prompt = f"""사용자 요청: {user_request}
+
+현재 워크플로우:
+{json.dumps(current_workflow or {}, ensure_ascii=False, indent=2)}
+
+위 요청을 분석하여 완전한 워크플로우를 생성해주세요.
+각 노드와 엣지를 JSONL 형식으로 순차적으로 출력하고,
+마지막에 {{"type": "status", "data": "done"}}으로 완료를 알려주세요.
+"""
+    
+    try:
+        for obj in service.stream_workflow_generation(
+            system_prompt=SYSTEM_PROMPT,
+            user_request=enhanced_prompt,
+            broadcast_fn=None
+        ):
+            yield json.dumps(obj, ensure_ascii=False) + "\n"
+    except Exception as e:
+        logger.error(f"Workflow streaming failed: {e}")
+        yield json.dumps({"type": "error", "data": str(e)}) + "\n"
+
+
+def build_text_response(user_request: str) -> Dict[str, Any]:
+    """
+    텍스트 응답 생성 (워크플로우가 아닌 일반 질문)
+    
+    Returns:
+        Lambda 응답 형식의 딕셔너리
+    """
+    service = get_designer_service()
+    
+    try:
+        response = service.invoke_model(
+            model_id=MODEL_HAIKU,
+            user_prompt=user_request,
+            system_prompt="",
+            max_tokens=1024
+        )
+        
+        text = service._extract_text(response)
+        if not text:
+            text = "모델로부터 응답을 받지 못했습니다."
+        
+        return {
+            "statusCode": 200,
+            "body": json.dumps({
+                "complexity": "단순",
+                "response": {"text": text}
+            })
+        }
+    except Exception as e:
+        logger.exception("텍스트 응답 생성 중 오류")
+        return {
+            "statusCode": 500,
+            "body": json.dumps({"error": str(e)})
+        }

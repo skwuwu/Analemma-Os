@@ -193,6 +193,24 @@ class GeminiConfig:
     response_schema: Optional[Dict[str, Any]] = None
     # 시스템 지침
     system_instruction: Optional[str] = None
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Gemini 3 Thinking Mode (Chain of Thought 시각화)
+    # ═══════════════════════════════════════════════════════════════════════════
+    enable_thinking: bool = False  # Thinking Mode 활성화
+    thinking_budget_tokens: int = 4096  # 사고 과정에 할당할 토큰 예산
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Vertex AI Controlled Generation (GCP 네이티브 기능)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 출력 형식 제어
+    response_mime_type: Optional[str] = None  # "application/json", "text/plain"
+    # Grounding (Google Search 또는 자체 데이터 기반 검증)
+    enable_grounding: bool = False
+    grounding_source: Optional[str] = None  # "google_search" or corpus ID
+    # Safety Settings (콘텐츠 안전 임계값)
+    safety_threshold: str = "BLOCK_MEDIUM_AND_ABOVE"  # BLOCK_NONE, BLOCK_LOW_AND_ABOVE, etc.
+    # Presence/Frequency Penalty (반복 방지)
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
 
 
 # 싱글톤 클라이언트
@@ -626,10 +644,12 @@ class GeminiService:
         max_output_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         context_to_cache: Optional[str] = None,
-        node_id: Optional[str] = None
+        node_id: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
+        thinking_budget_tokens: Optional[int] = None
     ) -> Generator[str, None, None]:
         """
-        Gemini 모델 스트리밍 호출 (Token Tracking + Rate Limit 대응)
+        Gemini 모델 스트리밍 호출 (Token Tracking + Rate Limit 대응 + Thinking Mode)
         
         Args:
             user_prompt: 사용자 프롬프트
@@ -639,12 +659,41 @@ class GeminiService:
             temperature: 샘플링 온도
             context_to_cache: 캐싱할 대규모 컨텍스트
             node_id: 노드 ID (비용 추적용)
+            enable_thinking: Thinking Mode 활성화 (Chain of Thought 시각화)
+            thinking_budget_tokens: 사고 과정에 할당할 토큰 예산
         
         Yields:
-            JSONL 형식의 응답 청크 (마지막에 _metadata 포함)
+            JSONL 형식의 응답 청크
+            - {"type": "thinking", "data": "..."} : AI의 사고 과정 (Thinking Mode 시)
+            - {"type": "node", "data": {...}} : 생성된 노드
+            - {"type": "edge", "data": {...}} : 생성된 엣지
+            - {"type": "_metadata", "data": {...}} : 토큰 사용량 등 메타데이터
         """
         if is_mock_mode():
             logger.info("MOCK_MODE: Streaming synthetic Gemini response")
+            # Mock Thinking Mode
+            if enable_thinking or self.config.enable_thinking:
+                thinking_mock = {
+                    "type": "thinking",
+                    "data": {
+                        "step": 1,
+                        "thought": "사용자 요청을 분석합니다. 워크플로우 생성이 필요한 것으로 판단됩니다.",
+                        "reasoning": "요청에 '워크플로우', '자동화', '처리' 등의 키워드가 포함되어 있습니다."
+                    }
+                }
+                yield json.dumps(thinking_mock) + "\n"
+                time.sleep(0.15)
+                thinking_mock2 = {
+                    "type": "thinking",
+                    "data": {
+                        "step": 2,
+                        "thought": "시작 노드와 종료 노드를 연결하는 기본 구조를 생성합니다.",
+                        "reasoning": "최소 실행 가능한 워크플로우를 위해 start → end 구조가 필요합니다."
+                    }
+                }
+                yield json.dumps(thinking_mock2) + "\n"
+                time.sleep(0.15)
+            
             mock_lines = [
                 '{"type": "node", "data": {"id": "start", "type": "operator", "data": {"label": "Start"}}}',
                 '{"type": "node", "data": {"id": "end", "type": "operator", "data": {"label": "End"}}}',
@@ -667,6 +716,12 @@ class GeminiService:
             yield '{"type": "error", "data": "Gemini client not initialized"}\n'
             return
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # Thinking Mode 설정 (Gemini 3 Chain of Thought)
+        # ═══════════════════════════════════════════════════════════════════════
+        use_thinking = enable_thinking if enable_thinking is not None else self.config.enable_thinking
+        thinking_budget = thinking_budget_tokens or self.config.thinking_budget_tokens
+        
         # Context Caching 처리
         cached_tokens = 0
         if context_to_cache and ENABLE_CONTEXT_CACHING:
@@ -682,9 +737,33 @@ class GeminiService:
             "top_k": self.config.top_k,
         }
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # Vertex AI Controlled Generation 옵션
+        # ═══════════════════════════════════════════════════════════════════════
+        if self.config.response_mime_type:
+            generation_config["response_mime_type"] = self.config.response_mime_type
+        
+        if self.config.presence_penalty:
+            generation_config["presence_penalty"] = self.config.presence_penalty
+        
+        if self.config.frequency_penalty:
+            generation_config["frequency_penalty"] = self.config.frequency_penalty
+        
         if response_schema:
             generation_config["response_mime_type"] = "application/json"
             generation_config["response_schema"] = response_schema
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # Thinking Mode 설정 (Gemini 2.0+ thinking_config)
+        # ═══════════════════════════════════════════════════════════════════════
+        if use_thinking:
+            # Gemini 2.0의 thinking_config 사용
+            # https://ai.google.dev/gemini-api/docs/thinking
+            generation_config["thinking_config"] = {
+                "thinking_budget": thinking_budget,
+                "include_thoughts": True  # UI에 사고 과정 노출
+            }
+            logger.info(f"Thinking Mode enabled with budget: {thinking_budget} tokens")
         
         model = client.GenerativeModel(
             model_name=self.config.model.value,
@@ -702,6 +781,7 @@ class GeminiService:
         output_text_buffer = ""
         retry_count = 0
         max_retries = RETRY_MAX_ATTEMPTS
+        thinking_step = 0  # Thinking Mode 단계 카운터
         
         try:
             response = model.generate_content(user_prompt, stream=True)
@@ -709,6 +789,43 @@ class GeminiService:
             received_chunks = False
             
             for chunk in response:
+                # ═══════════════════════════════════════════════════════════════════════
+                # Gemini 2.0+ Thinking Mode: 사고 과정(Chain of Thought) 추출
+                # ═══════════════════════════════════════════════════════════════════════
+                if use_thinking and hasattr(chunk, 'candidates') and chunk.candidates:
+                    candidate = chunk.candidates[0]
+                    
+                    # Gemini 2.0 thinking 응답 구조 처리
+                    # Gemini API는 thinking_content 또는 thought_process 필드로 반환
+                    if hasattr(candidate, 'thinking_content'):
+                        for thought in candidate.thinking_content:
+                            thinking_step += 1
+                            thinking_output = {
+                                "type": "thinking",
+                                "data": {
+                                    "step": thinking_step,
+                                    "thought": getattr(thought, 'text', str(thought)),
+                                    "phase": getattr(thought, 'phase', 'reasoning')
+                                }
+                            }
+                            yield json.dumps(thinking_output) + "\n"
+                    
+                    # 대안적 구조: parts에 thought 타입이 포함된 경우
+                    if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                        for part in candidate.content.parts:
+                            # Vertex AI 2.0에서 thought는 별도 part 타입
+                            if hasattr(part, 'thought') and part.thought:
+                                thinking_step += 1
+                                thinking_output = {
+                                    "type": "thinking",
+                                    "data": {
+                                        "step": thinking_step,
+                                        "thought": part.text if hasattr(part, 'text') else str(part),
+                                        "phase": "reasoning"
+                                    }
+                                }
+                                yield json.dumps(thinking_output) + "\n"
+                
                 # ────────────────────────────────────────────────
                 # Gemini Safety Filter 감지
                 # ────────────────────────────────────────────────

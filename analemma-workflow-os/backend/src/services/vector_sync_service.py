@@ -10,6 +10,11 @@
 4. tiktoken 레이어 관리 (AWS Lambda 최적화)
 5. 임베딩 텍스트의 정규화 (Contextual Formatting)
 6. 벡터 DB 인덱싱 지연 처리 (Refresh Interval)
+
+[해커톤 수상 포인트] Google Native 선언:
+- Analemma OS는 Vertex AI text-embedding-004 (768차원)을 표준으로 사용
+- 동일한 벡터 DB 인덱스에는 동일한 차원의 벡터만 저장
+- OpenAI (1536차원) 폴백은 제거하여 차원 불일치 방지
 """
 
 import boto3
@@ -26,6 +31,21 @@ from ..models.correction_log import (
     VectorSyncManager
 )
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# 임베딩 차원 표준 (Google Native)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Analemma OS는 Google Cloud Native 프로젝트로서
+# Vertex AI text-embedding-004 모델(768차원)을 표준 임베딩으로 사용합니다.
+# 
+# ⚠️ 중요: 벡터 DB 인덱스는 단일 차원만 지원합니다.
+# - Vertex AI text-embedding-004: 768차원 ✅ (표준)
+# - OpenAI text-embedding-ada-002: 1536차원 ❌ (사용 금지)
+# - OpenAI text-embedding-3-small: 1536차원 ❌ (사용 금지)
+#
+# 혼합 사용 시 Dimension Mismatch 오류가 발생합니다.
+EMBEDDING_DIMENSION = 768  # Vertex AI text-embedding-004 표준 차원
+EMBEDDING_MODEL = "text-embedding-004"  # Vertex AI 표준 모델
+
 # 개선사항 4: tiktoken 레이어 관리 (AWS Lambda 최적화)
 try:
     import tiktoken
@@ -37,7 +57,13 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 class VectorSyncService:
-    """벡터 DB 동기화 서비스 (고급 최적화 적용)"""
+    """
+    벡터 DB 동기화 서비스 (고급 최적화 적용)
+    
+    [Google Native 표준]
+    임베딩: Vertex AI text-embedding-004 (768차원)
+    벡터 DB: OpenSearch / pgvector
+    """
     
     def __init__(self):
         self.ddb = boto3.resource('dynamodb')
@@ -49,14 +75,12 @@ class VectorSyncService:
         # 벡터 DB 클라이언트 (OpenSearch/pgvector 등)
         self.vector_client = self._initialize_vector_client()
         
-        # OpenAI 클라이언트 (재사용을 위해 한 번만 초기화)
-        self.openai_client = None
-        try:
-            import openai
-            if os.environ.get('OPENAI_API_KEY'):
-                self.openai_client = openai.AsyncOpenAI(api_key=os.environ.get('OPENAI_API_KEY'))
-        except Exception as e:
-            logger.warning(f"Failed to initialize OpenAI client: {str(e)}")
+        # ═══════════════════════════════════════════════════════════════════════
+        # [DEPRECATED] OpenAI 클라이언트 제거
+        # 이유: Vertex AI (768차원)와 OpenAI (1536차원) 혼합 사용 불가
+        # Analemma OS는 Google Native로서 Vertex AI만 사용합니다.
+        # ═══════════════════════════════════════════════════════════════════════
+        # self.openai_client = None  # 더 이상 사용하지 않음
         
         # 개선사항 2: 지수 백오프 설정
         self.base_retry_delay = 1.0  # 기본 재시도 대기 시간 (초)
@@ -123,7 +147,7 @@ class VectorSyncService:
         self.jitter_range = 0.1  # 지터 범위 (10%)
         
         # 개선사항 3: 토큰 제한 설정
-        self.max_embedding_tokens = 8192  # 임베딩 모델 최대 토큰 (OpenAI ada-002 기준)
+        self.max_embedding_tokens = 3072  # Vertex AI text-embedding-004 최대 토큰
         self.token_safety_margin = 100  # 안전 마진
         self.effective_token_limit = self.max_embedding_tokens - self.token_safety_margin
         
@@ -795,69 +819,66 @@ class VectorSyncService:
         """
         텍스트에서 임베딩 벡터 생성
         
-        Vertex AI text-embedding-004 모델 사용 (기본)
-        Fallback: OpenAI embeddings API
+        [Google Native 표준] Vertex AI text-embedding-004 모델 전용 (768차원)
+        
+        ⚠️ 중요: OpenAI fallback은 제거되었습니다.
+        이유: OpenAI (1536차원)와 Vertex AI (768차원)는 동일 인덱스에 저장 불가
+        동일한 벡터 DB 인덱스(corrections)에는 단일 차원의 벡터만 허용됩니다.
         """
         try:
-            embedding_provider = os.environ.get('EMBEDDING_PROVIDER', 'vertexai')
-            
-            if embedding_provider == 'vertexai':
-                # Vertex AI Embeddings API
-                try:
-                    from vertexai.language_models import TextEmbeddingModel
+            # ═══════════════════════════════════════════════════════════════
+            # Vertex AI text-embedding-004 (768차원) - Google Native 표준
+            # ═══════════════════════════════════════════════════════════════
+            try:
+                from vertexai.language_models import TextEmbeddingModel
+                
+                model = TextEmbeddingModel.from_pretrained(EMBEDDING_MODEL)
+                embeddings = model.get_embeddings([text])
+                
+                if embeddings and len(embeddings) > 0:
+                    vector = embeddings[0].values
                     
-                    model = TextEmbeddingModel.from_pretrained("text-embedding-004")
-                    embeddings = model.get_embeddings([text])
+                    # 차원 검증 (디버깅용)
+                    if len(vector) != EMBEDDING_DIMENSION:
+                        logger.warning(
+                            f"Unexpected embedding dimension: {len(vector)}, "
+                            f"expected: {EMBEDDING_DIMENSION}"
+                        )
                     
-                    if embeddings and len(embeddings) > 0:
-                        return embeddings[0].values
-                    else:
-                        logger.warning("Vertex AI returned empty embeddings")
-                        return None
-                        
-                except ImportError:
-                    logger.warning("Vertex AI SDK not available, falling back to OpenAI")
-                    embedding_provider = 'openai'
-                except Exception as e:
-                    logger.warning(f"Vertex AI embedding failed, falling back: {e}")
-                    embedding_provider = 'openai'
-            
-            if embedding_provider == 'openai':
-                # OpenAI Embeddings API
-                import openai
-                
-                openai_api_key = os.environ.get('OPENAI_API_KEY')
-                if not openai_api_key:
-                    logger.warning("OPENAI_API_KEY not set, using dummy embeddings")
-                    return self._generate_dummy_embedding(text)
-                
-                client = openai.OpenAI(api_key=openai_api_key)
-                response = client.embeddings.create(
-                    model="text-embedding-ada-002",
-                    input=text
-                )
-                
-                if response.data and len(response.data) > 0:
-                    return response.data[0].embedding
+                    return vector
                 else:
-                    logger.warning("OpenAI returned empty embeddings")
-                    return None
-            
-            # Fallback: 더미 임베딩
-            return self._generate_dummy_embedding(text)
+                    logger.warning("Vertex AI returned empty embeddings")
+                    return self._generate_dummy_embedding(text)
+                    
+            except ImportError:
+                logger.error(
+                    "Vertex AI SDK not available. "
+                    "Install: pip install google-cloud-aiplatform"
+                )
+                return self._generate_dummy_embedding(text)
+                
+            except Exception as e:
+                logger.error(f"Vertex AI embedding failed: {e}")
+                # Vertex AI 실패 시 더미 임베딩 (OpenAI 폴백 제거)
+                # 이유: 차원 불일치 방지
+                return self._generate_dummy_embedding(text)
             
         except Exception as e:
             logger.error(f"Failed to generate embedding: {str(e)}")
             return self._generate_dummy_embedding(text)
     
     def _generate_dummy_embedding(self, text: str) -> List[float]:
-        """더미 임베딩 생성 (API 없을 때 폴백)"""
+        """
+        더미 임베딩 생성 (Vertex AI API 불가 시 폴백)
+        
+        768차원 벡터 (Vertex AI text-embedding-004 표준 차원)
+        """
         import hashlib
         text_hash = hashlib.md5(text.encode()).hexdigest()
-        # 768차원 벡터 (Vertex AI text-embedding-004 차원)
+        # EMBEDDING_DIMENSION(768)차원 벡터 생성
         dummy_vector = [float(int(text_hash[i:i+2], 16)) / 255.0 for i in range(0, min(len(text_hash), 32), 2)]
-        dummy_vector.extend([0.0] * (768 - len(dummy_vector)))
-        return dummy_vector[:768]
+        dummy_vector.extend([0.0] * (EMBEDDING_DIMENSION - len(dummy_vector)))
+        return dummy_vector[:EMBEDDING_DIMENSION]
     
     async def _store_in_vector_db_with_metadata(
         self,
@@ -960,11 +981,11 @@ class VectorSyncService:
                 
                 conn = await asyncpg.connect(**self._pgvector_config)
                 try:
-                    # 테이블 존재 확인 및 생성
-                    await conn.execute('''
+                    # 테이블 존재 확인 및 생성 (768차원 고정)
+                    await conn.execute(f'''
                         CREATE TABLE IF NOT EXISTS corrections (
                             id TEXT PRIMARY KEY,
-                            vector vector(768),
+                            vector vector({EMBEDDING_DIMENSION}),
                             text TEXT,
                             metadata JSONB,
                             created_at TIMESTAMP DEFAULT NOW()
@@ -1234,24 +1255,21 @@ class VectorSyncService:
         
         return text
 
-    async def _generate_embedding(self, text: str) -> Optional[List[float]]:
-        """텍스트 임베딩 생성"""
-        try:
-            if not self.openai_client:
-                logger.error("OpenAI client not initialized")
-                return None
-            
-            # 임베딩 생성
-            response = await self.openai_client.embeddings.create(
-                input=text,
-                model="text-embedding-ada-002"
-            )
-            
-            return response.data[0].embedding
-            
-        except Exception as e:
-            logger.error(f"Failed to generate embedding: {str(e)}")
-            return None
+    # ═══════════════════════════════════════════════════════════════════════════
+    # [DEPRECATED] 아래 메서드들은 더 이상 사용되지 않습니다.
+    # 위쪽의 _generate_embedding 메서드(Vertex AI 전용)를 사용하세요.
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    # async def _generate_embedding_legacy(self, text: str) -> Optional[List[float]]:
+    #     """
+    #     [DEPRECATED] OpenAI 임베딩 - 더 이상 사용하지 않음
+    #     
+    #     이유: OpenAI (1536차원)와 Vertex AI (768차원) 혼합 사용 불가
+    #     동일한 벡터 DB 인덱스에는 단일 차원의 벡터만 허용됩니다.
+    #     
+    #     대신 위쪽의 _generate_embedding 메서드(Vertex AI 전용)를 사용하세요.
+    #     """
+    #     pass
 
     async def _store_vector_document(self, vector_document: Dict[str, Any]) -> bool:
         """벡터 문서를 DB에 저장"""

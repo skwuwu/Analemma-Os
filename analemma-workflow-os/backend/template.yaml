@@ -2564,6 +2564,40 @@ Resources:
         AttributeName: ttl
         Enabled: true
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # --- Workflow Branches Table for Time Machine ---
+  # 롤백 분기(Branch) 기록을 저장하여 Workflow Lineage 시각화 지원
+  # ═══════════════════════════════════════════════════════════════════════════
+  WorkflowBranchesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "workflow-branches-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: branch_id
+          AttributeType: S
+        - AttributeName: root_thread_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: branch_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # Time Machine에서 Workflow Lineage 조회 시 사용
+        # 동일 루트 스레드의 모든 분기를 효율적으로 조회
+        - IndexName: root-thread-index
+          KeySchema:
+            - AttributeName: root_thread_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
   # --- NodeStats Collector Lambda ---
   # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트
   NodeStatsCollectorFunction:
