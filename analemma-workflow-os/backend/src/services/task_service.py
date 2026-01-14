@@ -19,7 +19,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 try:
-    from src.common.dynamodb_utils import get_dynamodb_resource
+    from src.common.aws_clients import get_dynamodb_resource
     from src.models.task_context import (
         TaskContext,
         TaskStatus,
@@ -30,7 +30,7 @@ try:
         get_friendly_error_message,
     )
 except ImportError:
-    from src.common.dynamodb_utils import get_dynamodb_resource
+    from src.common.aws_clients import get_dynamodb_resource
     from src.models.task_context import (
         TaskContext,
         TaskStatus,

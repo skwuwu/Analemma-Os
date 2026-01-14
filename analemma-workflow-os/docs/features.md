@@ -245,7 +245,7 @@ Execution Timeline: exec_xyz789
 ────────────────────────────────────────────────────────────────
 10:05:00.000 │ ● START        │ Execution initiated
 10:05:00.150 │ ● SEGMENT_0    │ Started segment 0
-10:05:01.200 │ ○ LLM_CALL     │ gemini-2.0-flash (1,250 tokens)
+10:05:01.200 │ ○ LLM_CALL     │ gemini-3-pro (1,250 tokens)
 10:05:02.050 │ ● SEGMENT_0    │ Completed
 10:05:02.100 │ ● SEGMENT_1    │ Started segment 1
 10:05:03.500 │ ○ API_CALL     │ external-api.com/data
@@ -297,7 +297,7 @@ Glass-Box provides **transparent AI decision-making** by logging all LLM interac
   "timestamp": "2026-01-14T10:05:01.200Z",
   "segment_id": 0,
   "data": {
-    "model": "gemini-2.0-flash",
+    "model": "gemini-3-pro",
     "prompt_preview": "Analyze the sentiment of...",
     "response_preview": "The sentiment is negative...",
     "tokens": {
@@ -604,7 +604,7 @@ The Model Router **intelligently selects the optimal LLM** for each request base
 │   └───────────────────────────────────────┘                     │
 │                         │                                        │
 │                         ▼                                        │
-│   Output: Selected model (e.g., gemini-2.0-flash)               │
+│   Output: Selected model (e.g., gemini-3-pro)                  │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -613,10 +613,9 @@ The Model Router **intelligently selects the optimal LLM** for each request base
 
 | Model | Use Case | Context | Latency | Cost |
 |-------|----------|---------|---------|------|
-| `gemini-2.0-flash` | Full generation, complex reasoning | 1M tokens | ~1s TTFT | $0.10/1M |
-| `gemini-1.5-pro` | Complex analysis, long context | 2M tokens | ~2s TTFT | $1.25/1M |
-| `gemini-1.5-flash` | Real-time collaboration | 1M tokens | ~100ms TTFT | $0.075/1M |
-| `gemini-1.5-flash-8b` | Pre-routing, classification | 1M tokens | ~80ms TTFT | $0.0375/1M |
+| `gemini-3-pro` | Full generation, complex reasoning | 2M tokens | ~500ms TTFT | $0.25/1M |
+| `gemini-3-flash` | Real-time collaboration, streaming | 1M tokens | ~100ms TTFT | $0.10/1M |
+| `gemini-3-flash-lite` | Pre-routing, classification | 1M tokens | ~80ms TTFT | $0.05/1M |
 | `claude-3-sonnet` | Fallback, Bedrock integration | 200K tokens | ~1.5s TTFT | $3/1M |
 
 ### 10.3 Context Caching

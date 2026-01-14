@@ -443,7 +443,7 @@ Authorization: Bearer <token>
       "timestamp": "2026-01-14T10:05:05Z",
       "event_type": "llm_call",
       "segment_id": 0,
-      "data": {"model": "gemini-2.0-flash", "tokens": 1250}
+      "data": {"model": "gemini-3-pro", "tokens": 1250}
     }
   ]
 }
@@ -542,7 +542,7 @@ wss://api.analemma.io/ws?token=<JWT_TOKEN>
   "execution_id": "exec_xyz789",
   "log": {
     "event": "llm_call",
-    "model": "gemini-2.0-flash",
+    "model": "gemini-3-pro",
     "prompt_preview": "Process the following...",
     "tokens_used": 1250,
     "duration_ms": 850
