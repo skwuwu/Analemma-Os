@@ -354,13 +354,16 @@ def _get_reasoning_path(task_id: str, artifact_id: str, request_owner_id: str) -
             additional_steps = _load_reasoning_from_s3(reasoning_path_ref)
             reasoning_steps.extend(additional_steps)
         
+        # 총 실행 시간 계산
+        total_duration_seconds = _calculate_total_duration(reasoning_steps, task)
+        
         # 응답 구성
         response_data = ReasoningPathResponse(
             artifact_id=artifact_id,
             artifact_title=target_artifact.get("title", "결과물"),
             reasoning_steps=[s.model_dump() for s in reasoning_steps],
             total_steps=len(reasoning_steps),
-            total_duration_seconds=None,  # TODO: 계산
+            total_duration_seconds=total_duration_seconds,
         )
         
         return {
@@ -384,6 +387,62 @@ def _map_thought_type(thought_type: str) -> str:
         "error": "observation",
     }
     return mapping.get(thought_type, "observation")
+
+
+def _calculate_total_duration(reasoning_steps: List[ReasoningStep], task: Dict[str, Any]) -> Optional[float]:
+    """
+    총 실행 시간 계산
+    
+    우선순위:
+    1. Task의 started_at ~ completed_at 사용
+    2. Reasoning steps의 첫 번째 ~ 마지막 timestamp 사용
+    3. 계산 불가 시 None 반환
+    """
+    # 방법 1: Task 메타데이터에서 계산
+    started_at = task.get("started_at") or task.get("startedAt") or task.get("created_at")
+    completed_at = task.get("completed_at") or task.get("completedAt") or task.get("updated_at")
+    
+    if started_at and completed_at:
+        try:
+            # ISO 형식 파싱
+            if isinstance(started_at, str):
+                start_dt = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
+            else:
+                start_dt = started_at
+            
+            if isinstance(completed_at, str):
+                end_dt = datetime.fromisoformat(completed_at.replace('Z', '+00:00'))
+            else:
+                end_dt = completed_at
+            
+            duration = (end_dt - start_dt).total_seconds()
+            if duration >= 0:
+                return round(duration, 2)
+        except Exception as e:
+            logger.debug(f"Failed to calculate duration from task metadata: {e}")
+    
+    # 방법 2: Reasoning steps에서 계산
+    if reasoning_steps and len(reasoning_steps) >= 2:
+        try:
+            timestamps = []
+            for step in reasoning_steps:
+                ts = step.timestamp if hasattr(step, 'timestamp') else step.get('timestamp')
+                if ts:
+                    if isinstance(ts, str):
+                        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+                    else:
+                        dt = ts
+                    timestamps.append(dt)
+            
+            if len(timestamps) >= 2:
+                timestamps.sort()
+                duration = (timestamps[-1] - timestamps[0]).total_seconds()
+                if duration >= 0:
+                    return round(duration, 2)
+        except Exception as e:
+            logger.debug(f"Failed to calculate duration from reasoning steps: {e}")
+    
+    return None
 
 
 def _load_reasoning_from_s3(s3_ref: str) -> List[ReasoningStep]:

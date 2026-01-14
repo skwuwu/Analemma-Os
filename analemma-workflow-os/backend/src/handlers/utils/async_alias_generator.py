@@ -266,13 +266,31 @@ def _update_task_alias(execution_id: str, alias: str) -> None:
 
 def _push_alias_update(execution_id: str, alias: str) -> None:
     """WebSocket을 통해 별칭 업데이트 푸시"""
-    client = get_apigw_client()
-    if not client:
-        logger.info("WebSocket endpoint not configured, skipping push")
+    # 공통 WebSocket 유틸리티 사용
+    try:
+        from src.common.websocket_utils import (
+            get_connections_for_owner, 
+            send_to_connection,
+            get_websocket_endpoint
+        )
+    except ImportError:
+        logger.warning("websocket_utils not available, skipping push")
         return
     
-    # TODO: 연결된 클라이언트 조회 및 푸시
-    # 이 부분은 실제 WebSocket 연결 관리 로직에 맞게 구현 필요
+    # execution_id에서 owner_id 조회
+    try:
+        response = task_table.get_item(Key={"execution_id": execution_id})
+        task = response.get("Item", {})
+        owner_id = task.get("ownerId") or task.get("user_id") or task.get("created_by")
+        
+        if not owner_id:
+            logger.warning(f"No owner_id found for execution {execution_id[:8]}, skipping push")
+            return
+    except Exception as e:
+        logger.error(f"Failed to get owner_id for push: {e}")
+        return
+    
+    # 메시지 구성
     message = {
         "type": "ALIAS_UPDATE",
         "payload": {
@@ -282,11 +300,18 @@ def _push_alias_update(execution_id: str, alias: str) -> None:
         }
     }
     
-    logger.info(f"Would push to WebSocket: {json.dumps(message, default=str)}")
-    # 실제 구현:
-    # connection_ids = _get_connections_for_execution(execution_id)
-    # for conn_id in connection_ids:
-    #     client.post_to_connection(
-    #         ConnectionId=conn_id,
-    #         Data=json.dumps(message).encode()
-    #     )
+    # 해당 사용자의 모든 활성 연결에 푸시
+    connection_ids = get_connections_for_owner(owner_id)
+    
+    if not connection_ids:
+        logger.debug(f"No active connections for user {owner_id}, skipping push")
+        return
+    
+    endpoint_url = get_websocket_endpoint()
+    success_count = 0
+    
+    for conn_id in connection_ids:
+        if send_to_connection(conn_id, message, endpoint_url):
+            success_count += 1
+    
+    logger.info(f"Alias update pushed to {success_count}/{len(connection_ids)} connections for {owner_id}")

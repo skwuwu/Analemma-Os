@@ -89,9 +89,29 @@ class VectorSyncService:
                     return None
                     
             elif vector_db_type == 'pgvector':
-                # pgvector 지원 (향후 구현)
-                logger.warning("pgvector not yet implemented")
-                return None
+                # pgvector 지원
+                import asyncpg
+                
+                pgvector_host = os.environ.get('PGVECTOR_HOST')
+                pgvector_port = int(os.environ.get('PGVECTOR_PORT', '5432'))
+                pgvector_user = os.environ.get('PGVECTOR_USER', 'postgres')
+                pgvector_password = os.environ.get('PGVECTOR_PASSWORD')
+                pgvector_database = os.environ.get('PGVECTOR_DATABASE', 'vectors')
+                
+                if pgvector_host:
+                    # 비동기 컨텍스트에서 사용하기 위한 연결 정보 저장
+                    self._pgvector_config = {
+                        'host': pgvector_host,
+                        'port': pgvector_port,
+                        'user': pgvector_user,
+                        'password': pgvector_password,
+                        'database': pgvector_database
+                    }
+                    logger.info(f"pgvector configured: {pgvector_host}:{pgvector_port}/{pgvector_database}")
+                    return 'pgvector'  # 컨넥션 풀 반환 대신 마커 반환
+                else:
+                    logger.warning("pgvector host not configured, vector operations will be no-ops")
+                    return None
                 
             else:
                 logger.warning(f"Unknown vector DB type: {vector_db_type}")
@@ -775,24 +795,69 @@ class VectorSyncService:
         """
         텍스트에서 임베딩 벡터 생성
         
-        실제 구현 시 OpenAI Embeddings API 등 사용
+        Vertex AI text-embedding-004 모델 사용 (기본)
+        Fallback: OpenAI embeddings API
         """
         try:
-            # TODO: 실제 임베딩 API 호출
-            # 예: OpenAI embeddings-ada-002 모델 사용
+            embedding_provider = os.environ.get('EMBEDDING_PROVIDER', 'vertexai')
             
-            # 임시 구현 (실제로는 API 호출)
-            import hashlib
-            text_hash = hashlib.md5(text.encode()).hexdigest()
-            # 1536차원 더미 벡터 (OpenAI ada-002 차원)
-            dummy_vector = [float(int(text_hash[i:i+2], 16)) / 255.0 for i in range(0, min(len(text_hash), 32), 2)]
-            dummy_vector.extend([0.0] * (1536 - len(dummy_vector)))
+            if embedding_provider == 'vertexai':
+                # Vertex AI Embeddings API
+                try:
+                    from vertexai.language_models import TextEmbeddingModel
+                    
+                    model = TextEmbeddingModel.from_pretrained("text-embedding-004")
+                    embeddings = model.get_embeddings([text])
+                    
+                    if embeddings and len(embeddings) > 0:
+                        return embeddings[0].values
+                    else:
+                        logger.warning("Vertex AI returned empty embeddings")
+                        return None
+                        
+                except ImportError:
+                    logger.warning("Vertex AI SDK not available, falling back to OpenAI")
+                    embedding_provider = 'openai'
+                except Exception as e:
+                    logger.warning(f"Vertex AI embedding failed, falling back: {e}")
+                    embedding_provider = 'openai'
             
-            return dummy_vector[:1536]
+            if embedding_provider == 'openai':
+                # OpenAI Embeddings API
+                import openai
+                
+                openai_api_key = os.environ.get('OPENAI_API_KEY')
+                if not openai_api_key:
+                    logger.warning("OPENAI_API_KEY not set, using dummy embeddings")
+                    return self._generate_dummy_embedding(text)
+                
+                client = openai.OpenAI(api_key=openai_api_key)
+                response = client.embeddings.create(
+                    model="text-embedding-ada-002",
+                    input=text
+                )
+                
+                if response.data and len(response.data) > 0:
+                    return response.data[0].embedding
+                else:
+                    logger.warning("OpenAI returned empty embeddings")
+                    return None
+            
+            # Fallback: 더미 임베딩
+            return self._generate_dummy_embedding(text)
             
         except Exception as e:
             logger.error(f"Failed to generate embedding: {str(e)}")
-            return None
+            return self._generate_dummy_embedding(text)
+    
+    def _generate_dummy_embedding(self, text: str) -> List[float]:
+        """더미 임베딩 생성 (API 없을 때 폴백)"""
+        import hashlib
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        # 768차원 벡터 (Vertex AI text-embedding-004 차원)
+        dummy_vector = [float(int(text_hash[i:i+2], 16)) / 255.0 for i in range(0, min(len(text_hash), 32), 2)]
+        dummy_vector.extend([0.0] * (768 - len(dummy_vector)))
+        return dummy_vector[:768]
     
     async def _store_in_vector_db_with_metadata(
         self,
@@ -865,59 +930,80 @@ class VectorSyncService:
         """
         실제 벡터 DB에 문서 저장 (개선사항 6: 인덱싱 지연 처리 포함)
         
-        벡터 DB별 구현 예시:
+        벡터 DB별 구현:
         - OpenSearch: 인덱스에 문서 저장 + refresh 옵션
-        - Pinecone: namespace와 metadata 함께 저장
         - pgvector: 테이블에 벡터와 메타데이터 저장
         """
         try:
-            # TODO: 실제 벡터 DB 구현에 따라 교체
-            
-            # OpenSearch 예시 (개선사항 6: refresh 처리):
-            # response = await self.opensearch_client.index(
-            #     index="corrections",
-            #     body={
-            #         "vector": vector_document["vector"],
-            #         "text": vector_document["text"],
-            #         **vector_document["metadata"]
-            #     },
-            #     refresh=True if self.enable_refresh_wait else False  # 즉시 검색 가능하도록
-            # )
-            # return response["_id"]
-            
-            # Pinecone 예시:
-            # self.pinecone_index.upsert([
-            #     (vector_document["id"], vector_document["vector"], vector_document["metadata"])
-            # ])
-            # 
-            # # Pinecone은 자동으로 인덱싱되지만 약간의 지연이 있을 수 있음
-            # if self.enable_refresh_wait:
-            #     await asyncio.sleep(self.vector_db_refresh_delay)
-            # 
-            # return vector_document["id"]
-            
-            # pgvector 예시:
-            # cursor.execute("""
-            #     INSERT INTO corrections (id, vector, text, metadata)
-            #     VALUES (%s, %s, %s, %s)
-            # """, (
-            #     vector_document["id"],
-            #     vector_document["vector"],
-            #     vector_document["text"],
-            #     json.dumps(vector_document["metadata"])
-            # ))
-            # 
-            # # pgvector는 트랜잭션 커밋 후 즉시 검색 가능
-            # connection.commit()
-            
-            # 임시 구현 (실제로는 위의 벡터 DB API 호출)
+            vector_db_type = os.environ.get('VECTOR_DB_TYPE', 'opensearch')
             embedding_id = vector_document["id"]
             
-            # 벡터 DB 저장 시뮬레이션
-            await asyncio.sleep(0.1)  # API 호출 시뮬레이션
+            if vector_db_type == 'opensearch' and self.vector_client:
+                # OpenSearch 저장
+                response = await self.vector_client.index(
+                    index="corrections",
+                    body={
+                        "vector": vector_document["vector"],
+                        "text": vector_document["text"],
+                        **vector_document.get("metadata", {})
+                    },
+                    id=embedding_id,
+                    refresh=True if self.enable_refresh_wait else False
+                )
+                logger.debug(f"OpenSearch document stored: {embedding_id}")
+                return response.get("_id", embedding_id)
+                
+            elif vector_db_type == 'pgvector' and hasattr(self, '_pgvector_config'):
+                # pgvector 저장
+                import asyncpg
+                import json as json_lib
+                
+                conn = await asyncpg.connect(**self._pgvector_config)
+                try:
+                    # 테이블 존재 확인 및 생성
+                    await conn.execute('''
+                        CREATE TABLE IF NOT EXISTS corrections (
+                            id TEXT PRIMARY KEY,
+                            vector vector(768),
+                            text TEXT,
+                            metadata JSONB,
+                            created_at TIMESTAMP DEFAULT NOW()
+                        )
+                    ''')
+                    
+                    # 벡터 인덱스 생성 (없으면)
+                    await conn.execute('''
+                        CREATE INDEX IF NOT EXISTS corrections_vector_idx 
+                        ON corrections USING ivfflat (vector vector_cosine_ops)
+                        WITH (lists = 100)
+                    ''')
+                    
+                    # 문서 UPSERT
+                    await conn.execute('''
+                        INSERT INTO corrections (id, vector, text, metadata)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (id) DO UPDATE SET
+                            vector = EXCLUDED.vector,
+                            text = EXCLUDED.text,
+                            metadata = EXCLUDED.metadata
+                    ''', 
+                        embedding_id,
+                        str(vector_document["vector"]),  # pgvector 형식
+                        vector_document["text"],
+                        json_lib.dumps(vector_document.get("metadata", {}))
+                    )
+                    
+                    logger.debug(f"pgvector document stored: {embedding_id}")
+                    return embedding_id
+                    
+                finally:
+                    await conn.close()
             
-            logger.debug(f"Vector document stored: {embedding_id}")
-            return embedding_id
+            else:
+                # Fallback: 시뮬레이션
+                await asyncio.sleep(0.1)
+                logger.debug(f"Vector document simulated: {embedding_id}")
+                return embedding_id
             
         except Exception as e:
             logger.error(f"Failed to store vector document: {str(e)}")
