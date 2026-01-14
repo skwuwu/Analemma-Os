@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 # Add backend root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../backend')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../../backend')))
 
 from src.services.execution.segment_runner_service import SegmentRunnerService
 from src.handlers.core.aggregate_distributed_results import lambda_handler as aggregate_handler

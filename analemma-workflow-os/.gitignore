@@ -89,6 +89,8 @@ htmlcov/
 *.abc
 test_result.txt
 test_*.abc
+test_output*.txt
+*.obsolete
 
 # Node
 node_modules/
