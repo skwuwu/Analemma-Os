@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional
 from src.services.state.state_manager import StateManager
 from src.services.recovery.self_healing_service import SelfHealingService
 # Legacy Imports (for now, until further refactoring)
-from src.services.workflow_repository import WorkflowRepository
+from src.services.workflow.repository import WorkflowRepository
 # Using generic imports from main handler file as source of truth
 from src.handlers.core.main import run_workflow, partition_workflow as _partition_workflow_dynamically, _build_segment_config
 from src.common.statebag import normalize_inplace

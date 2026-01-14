@@ -7,11 +7,11 @@ import boto3
 # [1순위 최적화] Pre-compilation: DB에서 partition_map 로드
 # 런타임 파티셔닝은 fallback으로만 사용
 try:
-    from src.services.partition_workflow_lambda import partition_workflow_advanced
+    from src.services.workflow.partition_service import partition_workflow_advanced
     _HAS_PARTITION = True
 except ImportError:
     try:
-        from src.services.partition_workflow_lambda import partition_workflow_advanced
+        from src.services.workflow.partition_service import partition_workflow_advanced
         _HAS_PARTITION = True
     except ImportError:
         _HAS_PARTITION = False

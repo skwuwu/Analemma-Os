@@ -23,11 +23,11 @@ except ImportError:
 
 # Pre-compilation: 저장 시점에 파티셔닝 수행
 try:
-    from src.services.partition_workflow_lambda import partition_workflow_advanced
+    from src.services.workflow.partition_service import partition_workflow_advanced
     _HAS_PARTITION = True
 except ImportError:
     try:
-        from src.services.partition_workflow_lambda import partition_workflow_advanced
+        from src.services.workflow.partition_service import partition_workflow_advanced
         _HAS_PARTITION = True
     except ImportError:
         _HAS_PARTITION = False

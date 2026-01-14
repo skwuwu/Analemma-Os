@@ -901,7 +901,7 @@ def run_workflow(config_json: str | Dict[str, Any], initial_state: Dict[str, Any
 
     # 3. Dynamic Build (No S3, No Pickle)
     # Lazy import to avoid circular ref with NODE_REGISTRY
-    from src.services.workflow_builder import DynamicWorkflowBuilder
+    from src.services.workflow.builder import DynamicWorkflowBuilder
     
     logger.info("🏗️ Building workflow dynamically...")
     builder = DynamicWorkflowBuilder(workflow_config)
@@ -1041,7 +1041,7 @@ def partition_workflow(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     워크플로우를 세그먼트로 분할하는 함수.
     partition_workflow_advanced의 alias로, Lambda 호환성을 위해 유지.
     """
-    from src.services.partition_workflow_lambda import partition_workflow_advanced
+    from src.services.workflow.partition_service import partition_workflow_advanced
     
     # partition_workflow_advanced는 {"partition_map": [...], ...} 형태로 반환하므로
     # partition_map 리스트만 추출

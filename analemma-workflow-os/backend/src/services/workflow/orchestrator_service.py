@@ -180,7 +180,7 @@ class WorkflowOrchestratorService:
         workflow_config = self._validate_config(raw_config)
         
         # 3. Dynamic Build
-        from src.services.workflow_builder import DynamicWorkflowBuilder
+        from src.services.workflow.builder import DynamicWorkflowBuilder
         
         logger.info("Building workflow dynamically...")
         builder = DynamicWorkflowBuilder(workflow_config)
@@ -222,7 +222,7 @@ class WorkflowOrchestratorService:
     
     def partition_workflow(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Partition workflow into segments for distributed execution."""
-        from src.services.partition_workflow_lambda import partition_workflow_advanced
+        from src.services.workflow.partition_service import partition_workflow_advanced
         result = partition_workflow_advanced(config)
         return result.get("partition_map", [])
     

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 # Adjust path to find backend modules
 sys.path.append(os.path.abspath("backend"))
 
-from src.services.workflow_builder import DynamicWorkflowBuilder
+from src.services.workflow.builder import DynamicWorkflowBuilder
 from src.models.task_context import TaskContext, TaskStatus
 
 class TestPessimisticLoopsAndDurability:

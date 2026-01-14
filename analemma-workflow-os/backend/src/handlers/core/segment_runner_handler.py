@@ -59,7 +59,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
 # To avoid breaking other files that import from here during transition
 # (though ideally they should import from src.services now)
 from src.services.state.state_manager import StateManager
-from src.services.workflow_repository import WorkflowRepository
+from src.services.workflow.repository import WorkflowRepository
 # We re-export run_workflow from main to keep interface if used as lib
 from src.handlers.core.main import run_workflow, partition_workflow, _build_segment_config
 

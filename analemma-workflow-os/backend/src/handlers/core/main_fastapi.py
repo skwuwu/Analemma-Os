@@ -140,7 +140,7 @@ async def codesign_endpoint(req: CodesignRequest):
     - {"type": "text", "data": "..."}
     - {"type": "status", "data": "done"}
     """
-    from src.services.codesign_assistant import stream_codesign_response
+    from src.services.design.codesign_assistant import stream_codesign_response
     
     async def generate():
         for chunk in stream_codesign_response(
@@ -237,7 +237,7 @@ async def explain_endpoint(req: ExplainRequest):
         "suggestions": [...]
     }
     """
-    from src.services.codesign_assistant import explain_workflow
+    from src.services.design.codesign_assistant import explain_workflow
     
     explanation = explain_workflow(req.workflow)
     return explanation

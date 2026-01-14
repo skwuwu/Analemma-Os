@@ -2,7 +2,7 @@ import os
 import json
 import logging
 from typing import Dict, Any, List, Set, Optional
-from src.services.workflow_repository import WorkflowRepository
+from src.services.workflow.repository import WorkflowRepository
 
 logger = logging.getLogger(__name__)
 

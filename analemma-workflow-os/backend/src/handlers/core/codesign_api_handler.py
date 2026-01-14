@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Generator
 
 # 서비스 임포트
 try:
-    from src.services.codesign_assistant import (
+    from src.services.design.codesign_assistant import (
         stream_codesign_response,
         explain_workflow,
         generate_suggestions,
@@ -30,7 +30,7 @@ try:
     from src.common.model_router import get_model_for_canvas_mode
     from src.common.auth_utils import extract_owner_id_from_event
 except ImportError:
-    from src.services.codesign_assistant import (
+    from src.services.design.codesign_assistant import (
         stream_codesign_response,
         explain_workflow,
         generate_suggestions,

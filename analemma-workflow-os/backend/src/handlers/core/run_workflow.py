@@ -7,7 +7,7 @@ import hashlib
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
-from src.services.workflow_repository import WorkflowRepository
+from src.services.workflow.repository import WorkflowRepository
 import urllib.request
 import urllib.error
 
@@ -188,7 +188,7 @@ def lambda_handler(event, context):
             # 2. DB에서 워크플로우 설정 가져오기 (캐시 사용)
             if not workflow_config:
                 try:
-                    from src.services.workflow_cache_manager import cached_get_workflow_config
+                    from src.services.workflow.cache_manager import cached_get_workflow_config
                     
                     WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
                     if WORKFLOWS_TABLE:
@@ -226,7 +226,7 @@ def lambda_handler(event, context):
             
             # 3. 오케스트레이터 선택 로직 실행
             if workflow_config:
-                from src.services.workflow_orchestrator_selector import select_orchestrator, get_orchestrator_selection_summary
+                from src.services.workflow.orchestrator_selector import select_orchestrator, get_orchestrator_selection_summary
                 
                 # 복잡도 분석 및 오케스트레이터 선택
                 orchestrator_arn, orchestrator_type, selection_metadata = select_orchestrator(workflow_config)
@@ -562,7 +562,7 @@ def lambda_handler(event, context):
         # This reduces DynamoDB calls by 60-70% (no per-segment quota checks).
         quota_reservation_id = None
         try:
-            from src.services.workflow_repository import WorkflowRepository
+            from src.services.workflow.repository import WorkflowRepository
             repo = WorkflowRepository()
             user_item = repo.get_user(owner_id)
             if user_item:
@@ -666,7 +666,7 @@ def lambda_handler(event, context):
         else:
             # [FALLBACK] 워크플로우 설정을 찾을 수 없는 경우 캐시를 사용한 DB 재시도
             try:
-                from src.services.workflow_cache_manager import cached_get_workflow_config
+                from src.services.workflow.cache_manager import cached_get_workflow_config
                 
                 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
                 if WORKFLOWS_TABLE:

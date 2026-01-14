@@ -1,5 +1,5 @@
 import pytest
-from src.services.workflow_builder import DynamicWorkflowBuilder
+from src.services.workflow.builder import DynamicWorkflowBuilder
 
 def test_circular_reference_detection():
     """
