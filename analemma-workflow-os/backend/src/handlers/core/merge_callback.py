@@ -203,28 +203,62 @@ def _normalize_callback_result(event: Dict[str, Any]) -> Dict[str, Any]:
     
     callback_result가 .Payload를 가지면 그 안의 값을 추출하고,
     그렇지 않으면 callback_result 자체를 사용.
+    
+    🚨 [Critical Fix] workflow_config 등 필수 필드 보존 강화
     """
     callback_result = event.get('callback_result', {})
+    
+    # 🚨 [Critical Fix] 기본 state_data를 event에서 가져옴 (fallback용)
+    default_state_data = event.get('state_data', {})
     
     # Payload가 있으면 Lambda invoke 래핑된 결과
     if isinstance(callback_result, dict) and 'Payload' in callback_result:
         payload = callback_result.get('Payload', {})
+        # 🚨 [Critical Fix] state_data를 payload에서 먼저, 없으면 event에서 가져오고 병합
+        merged_state_data = _merge_state_data(
+            default_state_data, 
+            payload.get('state_data') if isinstance(payload, dict) else None
+        )
         return {
             'user_callback_result': payload,
-            'state_data': payload.get('state_data', event.get('state_data')),
-            'conversation_id': payload.get('conversation_id'),
-            'workflowId': payload.get('workflowId'),
-            'ownerId': payload.get('ownerId'),
+            'state_data': merged_state_data,
+            'conversation_id': payload.get('conversation_id') if isinstance(payload, dict) else None,
+            'workflowId': payload.get('workflowId') if isinstance(payload, dict) else None,
+            'ownerId': payload.get('ownerId') if isinstance(payload, dict) else None,
+            # 🚨 [Critical Fix] workflow_config 보존
+            'workflow_config': (payload.get('workflow_config') if isinstance(payload, dict) else None) or event.get('workflow_config'),
         }
     else:
         # Direct callback result (SendTaskSuccess로 직접 전달된 경우)
+        cb_state_data = callback_result.get('state_data') if isinstance(callback_result, dict) else None
+        merged_state_data = _merge_state_data(default_state_data, cb_state_data)
         return {
             'user_callback_result': callback_result,
-            'state_data': callback_result.get('state_data', event.get('state_data')) if isinstance(callback_result, dict) else event.get('state_data'),
+            'state_data': merged_state_data,
             'conversation_id': callback_result.get('conversation_id') if isinstance(callback_result, dict) else None,
             'workflowId': callback_result.get('workflowId') if isinstance(callback_result, dict) else None,
             'ownerId': callback_result.get('ownerId') if isinstance(callback_result, dict) else None,
+            # 🚨 [Critical Fix] workflow_config 보존
+            'workflow_config': (callback_result.get('workflow_config') if isinstance(callback_result, dict) else None) or event.get('workflow_config'),
         }
+
+
+def _merge_state_data(base: Any, override: Any) -> Dict[str, Any]:
+    """
+    🚨 [Critical Fix] state_data 병합 - 필수 필드(workflow_config 등) 보존 보장
+    """
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(override, dict):
+        override = {}
+    
+    # base를 복사하고 override로 덮어씌움
+    result = dict(base)
+    for key, value in override.items():
+        if value is not None:  # None 값은 기존 값 유지
+            result[key] = value
+    
+    return result
 
 
 def handler(event, context=None):

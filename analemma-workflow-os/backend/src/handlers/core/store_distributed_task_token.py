@@ -81,7 +81,8 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
         
         # DynamoDB에 Task Token 저장
         dynamodb = boto3.resource('dynamodb')
-        token_table_name = os.environ.get('TASK_TOKEN_TABLE') or os.environ.get('TASK_TOKENS_TABLE_NAME', 'TaskTokensTableV2')
+        # 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME 우선 사용
+        token_table_name = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKEN_TABLE', os.environ.get('TASK_TOKENS_TABLE', 'TaskTokensTableV3')))
         token_table = dynamodb.Table(token_table_name)
         
         timestamp = int(time.time())

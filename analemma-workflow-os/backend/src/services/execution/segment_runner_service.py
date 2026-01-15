@@ -274,8 +274,16 @@ class SegmentRunnerService:
                      return parts[segment_id]
                  return workflow_config # Fallback
 
-        if partition_map and str(segment_id) in partition_map:
-            return partition_map[str(segment_id)]
+        # 🚨 [Critical Fix] partition_map이 list 또는 dict일 수 있음
+        if partition_map:
+            if isinstance(partition_map, list):
+                # list인 경우: 인덱스로 접근
+                if 0 <= segment_id < len(partition_map):
+                    return partition_map[segment_id]
+            elif isinstance(partition_map, dict):
+                # dict인 경우: 문자열 키로 접근
+                if str(segment_id) in partition_map:
+                    return partition_map[str(segment_id)]
             
         # Simplified fallback for readability in pilot
         return workflow_config

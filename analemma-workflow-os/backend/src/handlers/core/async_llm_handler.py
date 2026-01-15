@@ -315,6 +315,11 @@ def _execute_worker(payload: Dict[str, Any], context: Any = None) -> Dict[str, A
 
 
 def _build_final_payload(result: Any, segment_index: int) -> Dict[str, Any]:
+    """
+    세그먼트 실행 결과를 Step Functions 호환 페이로드로 변환.
+    
+    🚨 [Critical Fix] States.JsonMerge 호환성을 위해 final_state는 항상 dict 보장
+    """
     payload: Dict[str, Any] = {
         "next_segment_to_run": segment_index + 1,
         "status": "COMPLETE",
@@ -337,10 +342,20 @@ def _build_final_payload(result: Any, segment_index: int) -> Dict[str, Any]:
             has_explicit_state_key = True  # 명시적 키 (S3) 발견
 
         if result.get("final_state") is not None:
-            payload["final_state"] = result.get("final_state")
+            fs = result.get("final_state")
+            # 🚨 [Critical Fix] final_state가 dict가 아니면 래핑
+            if isinstance(fs, dict):
+                payload["final_state"] = fs
+            else:
+                payload["final_state"] = {"value": fs, "_wrapped": True}
             has_explicit_state_key = True  # 명시적 키 (inline) 발견
         elif result.get("output_state") is not None:
-            payload["final_state"] = result.get("output_state")
+            os_val = result.get("output_state")
+            # 🚨 [Critical Fix] output_state가 dict가 아니면 래핑
+            if isinstance(os_val, dict):
+                payload["final_state"] = os_val
+            else:
+                payload["final_state"] = {"value": os_val, "_wrapped": True}
             has_explicit_state_key = True  # 명시적 키 (inline) 발견
 
         # 'result'가 딕셔너리임에도 불구하고,
@@ -352,10 +367,13 @@ def _build_final_payload(result: Any, segment_index: int) -> Dict[str, Any]:
             
     else:
         # 'result'가 딕셔너리가 아닌 경우 (예: 문자열, 숫자, 리스트 등)
-        # 기존 로직과 동일하게 'result' 자체를 final_state로 설정합니다.
-        # (이 부분은 원래도 안전했습니다.)
-        payload["final_state"] = result
+        # 🚨 [Critical Fix] States.JsonMerge 호환성을 위해 dict로 래핑
+        payload["final_state"] = {"value": result, "_wrapped": True}
 
+    # 🚨 [Critical Fix] final_state가 None이거나 dict가 아닌 경우 최종 보장
+    if not isinstance(payload.get("final_state"), dict):
+        payload["final_state"] = {"value": payload.get("final_state"), "_wrapped": True}
+    
     return payload
 
 

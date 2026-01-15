@@ -34,7 +34,8 @@ sns_client = boto3.client("sns")
 
 # Environment Variables
 EXECUTIONS_TABLE = os.environ.get("EXECUTIONS_TABLE", "Executions-v3-dev")
-TASK_TOKENS_TABLE = os.environ.get("TASK_TOKENS_TABLE", "TaskTokens-v3-dev")
+# 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME 우선 사용
+TASK_TOKENS_TABLE = os.environ.get("TASK_TOKENS_TABLE_NAME", os.environ.get("TASK_TOKENS_TABLE", "TaskTokensTableV3"))
 WORKFLOW_ORCHESTRATOR_ARN = os.environ.get("WORKFLOW_ORCHESTRATOR_ARN", "")
 WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN = os.environ.get("WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN", "")
 ALERT_TOPIC_ARN = os.environ.get("ALERT_TOPIC_ARN", "")

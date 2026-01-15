@@ -229,7 +229,7 @@
             "Source": "backend-workflow.lifecycle",
             "DetailType": "WorkflowLifecycleEvent",
             "Detail": {
-              "execution_id.$": "$.Execution.Id",
+              "execution_id.$": "$$.Execution.Id",
               "ownerId.$": "$.state_data.ownerId",
               "workflowId.$": "$.state_data.workflowId",
               "total_segments.$": "$.state_data.total_segments",
@@ -466,7 +466,7 @@
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
             "Parameters": {
-              "FunctionName": "${ExecuteSegmentFunction.Arn}",
+              "FunctionName": "${ExecuteSegmentArn}",
               "Payload": {
                 "workflow_config.$": "$.state_data.workflow_config",
                 "current_state.$": "$.state_data.current_state",
@@ -1041,7 +1041,7 @@
             "Detail": {
               "event_type": "FAILED",
               "event_version": "1.0",
-              "trace_id.$": "$.Execution.Id",
+              "trace_id.$": "$$.Execution.Id",
               "timestamp.$": "$$.State.EnteredTime",
               "TaskToken": "EXECUTION_FAILURE",
               "notification_type": "execution_progress",

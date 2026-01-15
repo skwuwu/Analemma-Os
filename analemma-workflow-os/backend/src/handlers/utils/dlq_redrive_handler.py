@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # 환경 변수
-TASK_TOKENS_TABLE = os.environ.get('TASK_TOKENS_TABLE')
+# 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME 우선 사용
+TASK_TOKENS_TABLE = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKENS_TABLE'))
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE')
 WEBSOCKET_CONNECTIONS_TABLE = os.environ.get('WEBSOCKET_CONNECTIONS_TABLE')
 WEBSOCKET_ENDPOINT = os.environ.get('WEBSOCKET_ENDPOINT')
