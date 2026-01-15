@@ -1,6 +1,12 @@
 """
 Skills API Lambda Handler - CRUD operations for Skills.
 
+[v2.1] 개선사항:
+1. Gemini 시만틱 스킬 검색 (GET /skills/search?q=)
+2. Breaking Change 감지 및 경고
+3. 전역 이벤트 루프 + safe_run_async 패턴
+4. 코드 일관성 (다른 핸들러와 동일 패턴)
+
 Endpoints:
 - POST   /skills           - Create a new skill
 - GET    /skills           - List skills for authenticated user
@@ -8,6 +14,7 @@ Endpoints:
 - PUT    /skills/{id}      - Update a skill
 - DELETE /skills/{id}      - Delete a skill
 - GET    /skills/public    - List public/shared skills (marketplace)
+- GET    /skills/search    - [v2.1] Gemini semantic skill search
 
 All endpoints require authentication via JWT (Cognito).
 """
@@ -15,7 +22,9 @@ All endpoints require authentication via JWT (Cognito).
 import json
 import os
 import logging
-from typing import Optional, Dict, Any, Tuple
+import asyncio
+from typing import Optional, Dict, Any, Tuple, List
+from concurrent.futures import ThreadPoolExecutor
 
 # Import repository
 try:
@@ -29,6 +38,81 @@ except ImportError:
     from src.models.skill_models import validate_skill, create_default_skill
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# =============================================================================
+# [v2.1] 전역 이벤트 루프 관리 (Warm Start 최적화)
+# =============================================================================
+_global_loop: Optional[asyncio.AbstractEventLoop] = None
+_executor: Optional[ThreadPoolExecutor] = None
+
+def get_or_create_event_loop() -> asyncio.AbstractEventLoop:
+    """[v2.1] 전역 이벤트 루프 재사용."""
+    global _global_loop
+    
+    if _global_loop is not None:
+        try:
+            if not _global_loop.is_closed():
+                return _global_loop
+        except Exception:
+            pass
+    
+    try:
+        _global_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _global_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_global_loop)
+    
+    return _global_loop
+
+def safe_run_async(coro):
+    """[v2.1] 안전한 비동기 실행 래퍼."""
+    global _executor
+    
+    try:
+        loop = asyncio.get_running_loop()
+        if _executor is None:
+            _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="async_runner")
+        import concurrent.futures
+        future = _executor.submit(lambda: asyncio.run(coro))
+        return future.result(timeout=60)
+    except RuntimeError:
+        loop = get_or_create_event_loop()
+        return loop.run_until_complete(coro)
+
+# =============================================================================
+# [v2.1] Gemini 시만틱 스킬 검색
+# =============================================================================
+_gemini_model = None
+
+def _get_gemini_model():
+    """Lazy initialization of Gemini model."""
+    global _gemini_model
+    if _gemini_model is None:
+        try:
+            import google.generativeai as genai
+            api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
+            if api_key:
+                genai.configure(api_key=api_key)
+                _gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                logger.info("Gemini 1.5 Flash model initialized for skill search")
+            else:
+                logger.warning("No Gemini API key found, semantic search disabled")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Gemini model: {e}")
+    return _gemini_model
+
+# =============================================================================
+# [v2.1] Breaking Change 감지 상수
+# =============================================================================
+# 이 필드들이 변경되면 기존 워크플로우에 영향을 줄 수 있음
+BREAKING_CHANGE_FIELDS = {
+    'tool_definitions',      # 툴 시그니처 변경
+    'input_schema',          # 입력 스키마 변경
+    'output_schema',         # 출력 스키마 변경
+    'subgraph_config',       # 서브그래프 구조 변경
+    'required_permissions',  # 권한 요구사항 변경
+}
 logger.setLevel(logging.INFO)
 
 
@@ -106,6 +190,10 @@ def lambda_handler(event, context):
         # Check for special routes first
         if path.endswith('/public'):
             return handle_list_public(repo, event)
+        
+        # [v2.1] 시만틱 검색 라우트
+        if path.endswith('/search'):
+            return handle_semantic_search(repo, owner_id, event)
         
         if skill_id:
             # Single skill operations
@@ -293,7 +381,13 @@ def handle_list_skills(repo: SkillRepository, owner_id: str, event: Dict) -> Dic
 
 
 def handle_update_skill(repo: SkillRepository, owner_id: str, skill_id: str, event: Dict) -> Dict:
-    """Update an existing skill."""
+    """
+    Update an existing skill.
+    
+    [v2.1] Breaking Change 감지:
+    - tool_definitions, input/output_schema 등 중요 필드 변경 시 경고
+    - 기존 워크플로우 호환성 정보 반환
+    """
     body, error = _parse_body(event)
     if error:
         return _response(400, {'error': error})
@@ -308,11 +402,16 @@ def handle_update_skill(repo: SkillRepository, owner_id: str, skill_id: str, eve
         if not existing:
             return _response(404, {'error': 'Skill not found'})
         version = existing['version']
+    else:
+        existing = repo.get_skill(skill_id, version)
+        if not existing:
+            return _response(404, {'error': 'Skill not found'})
     
     # Fields that can be updated
     allowed_updates = [
         'name', 'description', 'category', 'tags',
         'tool_definitions', 'system_instructions',
+        'input_schema', 'output_schema', 'subgraph_config',
         'dependencies', 'required_api_keys', 'required_permissions',
         'timeout_seconds', 'retry_config', 'visibility', 'status'
     ]
@@ -322,6 +421,9 @@ def handle_update_skill(repo: SkillRepository, owner_id: str, skill_id: str, eve
     if not updates:
         return _response(400, {'error': 'No valid fields to update'})
     
+    # [v2.1] Breaking Change 감지
+    breaking_changes = _detect_breaking_changes(existing, updates)
+    
     try:
         updated = repo.update_skill(
             skill_id=skill_id,
@@ -329,10 +431,90 @@ def handle_update_skill(repo: SkillRepository, owner_id: str, skill_id: str, eve
             updates=updates,
             owner_id=owner_id  # Validates ownership
         )
-        logger.info("Updated skill: %s (owner=%s)", skill_id, owner_id)
-        return _response(200, updated)
+        
+        logger.info("Updated skill: %s (owner=%s, breaking_changes=%s)", 
+                   skill_id, owner_id, list(breaking_changes.keys()))
+        
+        # [v2.1] Breaking Change 경고 포함
+        response_body = updated
+        if breaking_changes:
+            response_body = {
+                **updated,
+                '_warnings': {
+                    'breaking_changes': breaking_changes,
+                    'message': (
+                        '이 업데이트는 기존 워크플로우에 영향을 줄 수 있습니다. '
+                        '버전을 올리거나 기존 워크플로우를 테스트해 주세요.'
+                    ),
+                    'recommendation': 'Consider incrementing version or testing existing workflows'
+                }
+            }
+        
+        return _response(200, response_body)
     except ValueError as e:
         return _response(404, {'error': str(e)})
+
+
+def _detect_breaking_changes(existing: Dict, updates: Dict) -> Dict[str, Dict]:
+    """
+    [v2.1] Breaking Change 감지.
+    
+    중요 필드의 변경사항을 분석하여 잠재적 호환성 문제 경고.
+    """
+    breaking_changes = {}
+    
+    for field in BREAKING_CHANGE_FIELDS:
+        if field not in updates:
+            continue
+        
+        old_value = existing.get(field)
+        new_value = updates[field]
+        
+        # 값이 다르면 breaking change
+        if old_value != new_value:
+            change_info = {
+                'field': field,
+                'severity': 'high' if field in ('tool_definitions', 'subgraph_config') else 'medium'
+            }
+            
+            # 툴 정의 변경 상세 분석
+            if field == 'tool_definitions':
+                change_info['details'] = _analyze_tool_changes(old_value or [], new_value or [])
+            
+            # 스키마 변경 상세 분석
+            elif field in ('input_schema', 'output_schema'):
+                change_info['details'] = _analyze_schema_changes(old_value or {}, new_value or {})
+            
+            breaking_changes[field] = change_info
+    
+    return breaking_changes
+
+
+def _analyze_tool_changes(old_tools: List, new_tools: List) -> Dict:
+    """Tool definitions 변경 분석."""
+    old_names = {t.get('name') for t in old_tools if isinstance(t, dict)}
+    new_names = {t.get('name') for t in new_tools if isinstance(t, dict)}
+    
+    return {
+        'removed_tools': list(old_names - new_names),
+        'added_tools': list(new_names - old_names),
+        'potentially_modified': list(old_names & new_names)
+    }
+
+
+def _analyze_schema_changes(old_schema: Dict, new_schema: Dict) -> Dict:
+    """입출력 스키마 변경 분석."""
+    old_props = set((old_schema.get('properties') or {}).keys())
+    new_props = set((new_schema.get('properties') or {}).keys())
+    
+    old_required = set(old_schema.get('required') or [])
+    new_required = set(new_schema.get('required') or [])
+    
+    return {
+        'removed_properties': list(old_props - new_props),
+        'added_properties': list(new_props - old_props),
+        'new_required_fields': list(new_required - old_required)
+    }
 
 
 def handle_delete_skill(repo: SkillRepository, owner_id: str, skill_id: str, event: Dict) -> Dict:
@@ -405,3 +587,191 @@ def handle_list_public(repo: SkillRepository, event: Dict) -> Dict:
         response_body['nextToken'] = json.dumps(result['last_key'])
     
     return _response(200, response_body)
+
+
+# =============================================================================
+# [v2.1] Gemini 시맨틱 스킬 검색
+# =============================================================================
+
+async def _search_skills_with_gemini(
+    query: str, 
+    skills: List[Dict],
+    top_k: int = 5
+) -> List[Dict]:
+    """
+    [v2.1] Gemini를 사용한 시맨틱 스킬 검색.
+    
+    사용자의 자연어 쿼리를 이해하고, 가장 적합한 스킬을 반환.
+    """
+    model = _get_gemini_model()
+    if not model:
+        # Gemini 없으면 단순 키워드 매칭으로 폴백
+        return _fallback_keyword_search(query, skills, top_k)
+    
+    # 스킬 요약 생성 (Gemini 컨텍스트용)
+    skills_context = []
+    for i, skill in enumerate(skills[:50]):  # 최대 50개만 고려
+        skills_context.append({
+            'index': i,
+            'name': skill.get('name', ''),
+            'description': skill.get('description', ''),
+            'category': skill.get('category', ''),
+            'tags': skill.get('tags', []),
+            'skill_type': skill.get('skill_type', 'tool_based')
+        })
+    
+    prompt = f"""You are a skill matching assistant for an AI workflow system.
+
+User Query: "{query}"
+
+Available Skills:
+{json.dumps(skills_context, indent=2, ensure_ascii=False)}
+
+Analyze the user's intent and return the indices of the most relevant skills.
+Consider:
+- Semantic meaning (not just keyword matching)
+- User's likely intent and use case
+- Skill capabilities and descriptions
+
+Respond in JSON format only:
+{{
+  "matches": [
+    {{"index": 0, "relevance_score": 0.95, "reason": "brief reason"}},
+    ...
+  ],
+  "query_interpretation": "what the user is looking for"
+}}
+
+Return up to {top_k} most relevant matches, sorted by relevance."""
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.1,
+                    "max_output_tokens": 500,
+                    "response_mime_type": "application/json"
+                }
+            )
+        )
+        
+        result = json.loads(response.text)
+        matches = result.get('matches', [])
+        
+        # 결과 조합
+        matched_skills = []
+        for match in matches[:top_k]:
+            idx = match.get('index', -1)
+            if 0 <= idx < len(skills):
+                skill = skills[idx].copy()
+                skill['_search_meta'] = {
+                    'relevance_score': match.get('relevance_score', 0),
+                    'reason': match.get('reason', ''),
+                    'query_interpretation': result.get('query_interpretation', '')
+                }
+                matched_skills.append(skill)
+        
+        logger.info(f"Gemini semantic search: query='{query}', found={len(matched_skills)}")
+        return matched_skills
+        
+    except Exception as e:
+        logger.warning(f"Gemini search failed, falling back to keyword: {e}")
+        return _fallback_keyword_search(query, skills, top_k)
+
+
+def _fallback_keyword_search(query: str, skills: List[Dict], top_k: int) -> List[Dict]:
+    """Gemini 실패 시 키워드 기반 폴백 검색."""
+    query_lower = query.lower()
+    query_words = set(query_lower.split())
+    
+    scored_skills = []
+    for skill in skills:
+        score = 0
+        
+        # 이름 매칭
+        name = (skill.get('name') or '').lower()
+        if query_lower in name:
+            score += 10
+        score += sum(2 for word in query_words if word in name)
+        
+        # 설명 매칭
+        desc = (skill.get('description') or '').lower()
+        score += sum(1 for word in query_words if word in desc)
+        
+        # 태그 매칭
+        tags = [t.lower() for t in (skill.get('tags') or [])]
+        score += sum(3 for word in query_words if word in tags)
+        
+        if score > 0:
+            skill_copy = skill.copy()
+            skill_copy['_search_meta'] = {
+                'relevance_score': min(score / 20, 1.0),
+                'reason': 'keyword_match',
+                'query_interpretation': query
+            }
+            scored_skills.append((score, skill_copy))
+    
+    # 점수 내림차순 정렬
+    scored_skills.sort(key=lambda x: x[0], reverse=True)
+    return [s[1] for s in scored_skills[:top_k]]
+
+
+def handle_semantic_search(repo: SkillRepository, owner_id: str, event: Dict) -> Dict:
+    """
+    [v2.1] Gemini 시맨틱 스킬 검색.
+    
+    GET /skills/search?q=<query>&scope=all|owned|public
+    
+    예시:
+    - GET /skills/search?q=이메일 보내는 스킬
+    - GET /skills/search?q=PDF를 분석하는 도구
+    - GET /skills/search?q=고객 데이터 처리
+    """
+    query_params = event.get('queryStringParameters') or {}
+    
+    query = query_params.get('q') or query_params.get('query', '')
+    if not query:
+        return _response(400, {'error': 'Query parameter "q" is required'})
+    
+    scope = query_params.get('scope', 'all')  # all, owned, public
+    
+    try:
+        top_k = int(query_params.get('limit', 5))
+        top_k = max(1, min(top_k, 20))
+    except (TypeError, ValueError):
+        top_k = 5
+    
+    # 검색 대상 스킬 수집
+    all_skills = []
+    
+    if scope in ('all', 'owned'):
+        owned_result = repo.list_skills_by_owner(owner_id, limit=100)
+        all_skills.extend(owned_result.get('items', []))
+    
+    if scope in ('all', 'public'):
+        public_result = repo.list_public_skills(limit=100)
+        # 중복 제거
+        existing_ids = {s['skill_id'] for s in all_skills}
+        for skill in public_result.get('items', []):
+            if skill['skill_id'] not in existing_ids:
+                all_skills.append(skill)
+    
+    if not all_skills:
+        return _response(200, {
+            'items': [],
+            'count': 0,
+            'query': query,
+            'message': 'No skills available to search'
+        })
+    
+    # [v2.1] Gemini 시맨틱 검색 실행
+    matched_skills = safe_run_async(_search_skills_with_gemini(query, all_skills, top_k))
+    
+    return _response(200, {
+        'items': matched_skills,
+        'count': len(matched_skills),
+        'query': query,
+        'scope': scope,
+        'search_method': 'gemini_semantic' if _get_gemini_model() else 'keyword_fallback'
+    })
