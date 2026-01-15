@@ -89,7 +89,8 @@ def convert_conditions_in_config(cfg: dict) -> dict:
     return out
 
 # Use environment variable for table name for flexibility
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'Workflows')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 SKELETON_S3_BUCKET = os.environ.get('SKELETON_S3_BUCKET')
 SKELETON_S3_PREFIX = os.environ.get('SKELETON_S3_PREFIX', '')
 APP_VERSION = os.environ.get('APP_VERSION')

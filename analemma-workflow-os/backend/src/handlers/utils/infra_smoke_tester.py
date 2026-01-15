@@ -34,7 +34,8 @@ DATA_BUCKET = os.environ.get("WORKFLOW_STATE_BUCKET", "")
 EXECUTIONS_TABLE = os.environ.get("EXECUTIONS_TABLE", "")
 ORCHESTRATOR_ARN = os.environ.get("WORKFLOW_ORCHESTRATOR_ARN", "")
 DISTRIBUTED_ORCHESTRATOR_ARN = os.environ.get("WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN", "")
-WORKFLOWS_TABLE = os.environ.get("WORKFLOWS_TABLE", "")
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+WORKFLOWS_TABLE = os.environ.get("WORKFLOWS_TABLE", "WorkflowsTableV3")
 METRIC_NAMESPACE = "Analemma/Engine"
 
 

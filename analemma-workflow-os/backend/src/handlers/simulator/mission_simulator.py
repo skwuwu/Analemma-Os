@@ -149,7 +149,8 @@ DISTRIBUTED_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_DISTRIBUTED_ORCHESTRATO
 STANDARD_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
 STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE')
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴 (로컬 테스트 시 사용)
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 MOCK_MODE = os.environ.get('MOCK_MODE', 'true')  # E2E tests use MOCK_MODE
 
 # Polling configuration

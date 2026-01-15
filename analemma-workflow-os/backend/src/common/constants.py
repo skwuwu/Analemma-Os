@@ -253,7 +253,8 @@ class DynamoDBConfig:
     """DynamoDB 관련 설정"""
     
     # 테이블 이름 (환경변수에서 가져옴)
-    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV2')
+    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴 (V3)
+    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
     EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'ExecutionsTableV2')
     PENDING_NOTIFICATIONS_TABLE = os.environ.get('PENDING_NOTIFICATIONS_TABLE', 'PendingNotificationsTableV2')
     # 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME을 우선 사용 (template.yaml과 일치)

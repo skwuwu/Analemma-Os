@@ -41,7 +41,8 @@ except Exception:
         def eq(self, v):
             return {'name': self.name, 'op': 'eq', 'value': v}
 
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'Workflows')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 
 table = dynamodb.Table(WORKFLOWS_TABLE)
 

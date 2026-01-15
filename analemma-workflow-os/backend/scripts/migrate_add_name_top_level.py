@@ -22,7 +22,8 @@ import json
 import boto3
 from botocore.exceptions import ClientError
 
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'Workflows')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 
 
 def extract_name_from_config(cfg_value):

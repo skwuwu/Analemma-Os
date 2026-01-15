@@ -190,7 +190,8 @@ def lambda_handler(event, context):
                 try:
                     from src.services.workflow.cache_manager import cached_get_workflow_config
                     
-                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+                    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
                     if WORKFLOWS_TABLE:
                         wf_table = dynamodb.Table(WORKFLOWS_TABLE)
                         
@@ -211,7 +212,8 @@ def lambda_handler(event, context):
                     # 캐시 모듈이 없으면 기본 DB 조회
                     logger.warning("⚠️ Cache module not available, using direct DB query")
                     try:
-                        WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+                        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                        WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
                         if WORKFLOWS_TABLE:
                             wf_table = dynamodb.Table(WORKFLOWS_TABLE)
                             wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})
@@ -668,7 +670,8 @@ def lambda_handler(event, context):
             try:
                 from src.services.workflow.cache_manager import cached_get_workflow_config
                 
-                WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+                # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
                 if WORKFLOWS_TABLE:
                     wf_table = dynamodb.Table(WORKFLOWS_TABLE)
                     
@@ -695,7 +698,8 @@ def lambda_handler(event, context):
             except ImportError:
                 # 캐시 모듈이 없으면 기본 DB 조회
                 try:
-                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE')
+                    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
                     if WORKFLOWS_TABLE:
                         wf_table = dynamodb.Table(WORKFLOWS_TABLE)
                         wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})

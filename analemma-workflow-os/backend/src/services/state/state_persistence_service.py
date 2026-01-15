@@ -49,7 +49,8 @@ class StatePersistenceService:
         self._s3_client = None
         self._dynamodb = None
         self._state_bucket = state_bucket or os.environ.get('WORKFLOW_STATE_BUCKET')
-        self._workflows_table = workflows_table or os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTable')
+        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+        self._workflows_table = workflows_table or os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 
     @property
     def s3_client(self):

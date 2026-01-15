@@ -24,7 +24,8 @@ SKELETON_S3_PREFIX = os.environ.get('SKELETON_S3_PREFIX', '')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'Workflows')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 
 table = dynamodb.Table(WORKFLOWS_TABLE)
 

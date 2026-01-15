@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # 환경변수에서 테이블 이름 로드
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE')
-WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'Workflows')
+WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 OWNER_INDEX = os.environ.get('OWNER_INDEX')
 NOTIFICATIONS_INDEX = os.environ.get('NOTIFICATIONS_INDEX')
 SKELETON_S3_BUCKET = os.environ.get('SKELETON_S3_BUCKET')
