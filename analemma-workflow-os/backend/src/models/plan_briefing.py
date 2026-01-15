@@ -2,13 +2,18 @@
 """
 Plan Briefing models for workflow preview feature.
 
+[v2.1] 개선사항:
+1. Pydantic v2 @model_validator 사용 (__init__ 오버라이딩 제거)
+2. ImpactScope Enum 추가 (Gemini 위험도 판단 가이드)
+3. DraftResult 확장성 개선 (is_truncated, full_content_s3_key)
+
 이 모듈은 워크플로우 실행 전 미리보기를 생성하기 위한 
 데이터 모델을 정의합니다.
 """
 
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone
+from pydantic import BaseModel, Field, model_validator
+from typing import List, Optional, Dict, Any, Set
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 import uuid
 
@@ -18,6 +23,63 @@ class RiskLevel(str, Enum):
     LOW = "low"         # 낮은 위험 - 읽기 전용 작업, 외부 영향 없음
     MEDIUM = "medium"   # 중간 위험 - 제한된 외부 영향, 되돌릴 수 있음
     HIGH = "high"       # 높은 위험 - 되돌릴 수 없는 외부 영향 (이메일 발송, 결제 등)
+
+
+class ImpactScope(str, Enum):
+    """
+    [v2.1] 영향 범위 열거형
+    
+    Gemini가 RiskLevel을 결정할 때 참고하는 객관적 기준.
+    
+    Risk Mapping Guide:
+    - READ_ONLY: LOW
+    - DATABASE_WRITE, FILESYSTEM: MEDIUM (rollback 가능)
+    - EMAIL, NOTIFICATION: MEDIUM/HIGH (발송 후 취소 불가)
+    - PAYMENT, EXTERNAL_API: HIGH (되돌릴 수 없음)
+    """
+    READ_ONLY = "read_only"           # 읽기 전용 (DB 조회, 파일 읽기)
+    DATABASE_WRITE = "database_write" # DB 쓰기 (롤백 가능)
+    FILESYSTEM = "filesystem"         # 파일 시스템 변경
+    EMAIL = "email"                   # 이메일 발송 (발송 후 취소 불가)
+    NOTIFICATION = "notification"     # 알림 발송 (Slack, SMS 등)
+    EXTERNAL_API = "external_api"     # 외부 API 호출 (부작용 가능)
+    PAYMENT = "payment"               # 결제/금융 트랜잭션
+    AUTHENTICATION = "authentication" # 인증/권한 변경
+    SCHEDULED_TASK = "scheduled_task" # 예약 작업 등록
+
+
+# [v2.1] 자동 위험도 매핑 (Gemini 참조용)
+IMPACT_TO_RISK_MAPPING: Dict[ImpactScope, RiskLevel] = {
+    ImpactScope.READ_ONLY: RiskLevel.LOW,
+    ImpactScope.DATABASE_WRITE: RiskLevel.MEDIUM,
+    ImpactScope.FILESYSTEM: RiskLevel.MEDIUM,
+    ImpactScope.EMAIL: RiskLevel.HIGH,
+    ImpactScope.NOTIFICATION: RiskLevel.MEDIUM,
+    ImpactScope.EXTERNAL_API: RiskLevel.HIGH,
+    ImpactScope.PAYMENT: RiskLevel.HIGH,
+    ImpactScope.AUTHENTICATION: RiskLevel.HIGH,
+    ImpactScope.SCHEDULED_TASK: RiskLevel.MEDIUM,
+}
+
+
+def _calculate_risk_from_impacts(impact_scopes: Set[ImpactScope]) -> RiskLevel:
+    """
+    [v2.1] 영향 범위에서 최대 위험도 계산.
+    
+    여러 ImpactScope 중 가장 높은 위험도를 반환.
+    """
+    if not impact_scopes:
+        return RiskLevel.LOW
+    
+    risk_priority = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+    max_risk = RiskLevel.LOW
+    
+    for scope in impact_scopes:
+        risk = IMPACT_TO_RISK_MAPPING.get(scope, RiskLevel.LOW)
+        if risk_priority[risk] > risk_priority[max_risk]:
+            max_risk = risk
+    
+    return max_risk
 
 
 class PlanStep(BaseModel):
@@ -40,6 +102,13 @@ class PlanStep(BaseModel):
         ge=0,
         description="예상 소요 시간 (초)"
     )
+    
+    # [v2.1] 영향 범위 (Gemini 위험도 판단 가이드)
+    impact_scopes: Set[ImpactScope] = Field(
+        default_factory=set,
+        description="이 단계의 영향 범위 (DB, Email 등)"
+    )
+    
     risk_level: RiskLevel = Field(
         default=RiskLevel.LOW,
         description="이 단계의 위험 수준"
@@ -81,6 +150,28 @@ class PlanStep(BaseModel):
         None,
         description="실행 조건 설명"
     )
+    
+    @model_validator(mode='after')
+    def auto_calculate_risk(self) -> 'PlanStep':
+        """
+        [v2.1] impact_scopes에서 risk_level 자동 계산.
+        
+        명시적으로 risk_level을 설정하지 않았다면 impact_scopes에서 유추.
+        """
+        if self.impact_scopes and self.risk_level == RiskLevel.LOW:
+            calculated_risk = _calculate_risk_from_impacts(self.impact_scopes)
+            if calculated_risk != RiskLevel.LOW:
+                object.__setattr__(self, 'risk_level', calculated_risk)
+        
+        # has_external_side_effect 자동 설정
+        external_scopes = {
+            ImpactScope.EMAIL, ImpactScope.NOTIFICATION, 
+            ImpactScope.EXTERNAL_API, ImpactScope.PAYMENT
+        }
+        if self.impact_scopes & external_scopes:
+            object.__setattr__(self, 'has_external_side_effect', True)
+        
+        return self
 
 
 class DraftResult(BaseModel):
@@ -103,6 +194,22 @@ class DraftResult(BaseModel):
         max_length=1000,
         description="내용 미리보기 (최대 1000자)"
     )
+    
+    # [v2.1] 확장성: 긴 콘텐츠 처리
+    is_truncated: bool = Field(
+        default=False,
+        description="미리보기가 잘렸는지 여부 (UI '더 보기' 버튼용)"
+    )
+    full_content_s3_key: Optional[str] = Field(
+        None,
+        description="전체 콘텐츠가 저장된 S3 키 (is_truncated=True일 때)"
+    )
+    original_length: Optional[int] = Field(
+        None,
+        ge=0,
+        description="원본 콘텐츠 길이 (바이트)"
+    )
+    
     recipients: Optional[List[str]] = Field(
         None,
         description="수신자 목록 (이메일, 알림 등)"
@@ -121,6 +228,18 @@ class DraftResult(BaseModel):
         default=False,
         description="발송/실행 전 사용자 검토 필요 여부"
     )
+    
+    @model_validator(mode='after')
+    def validate_truncation(self) -> 'DraftResult':
+        """
+        [v2.1] 잘림 상태 검증.
+        
+        content_preview가 1000자에 도달하면 is_truncated 자동 설정.
+        """
+        if len(self.content_preview) >= 1000 and not self.is_truncated:
+            object.__setattr__(self, 'is_truncated', True)
+        
+        return self
 
 
 class PlanBriefing(BaseModel):
@@ -207,10 +326,40 @@ class PlanBriefing(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
-
-    def __init__(self, **data):
-        super().__init__(**data)
-        # 토큰 만료 시간 설정 (생성 후 30분)
+    
+    @model_validator(mode='after')
+    def set_token_expiry_and_risk(self) -> 'PlanBriefing':
+        """
+        [v2.1] 토큰 만료 시간 및 전체 위험도 자동 설정.
+        
+        - token_expires_at: 생성 후 30분
+        - overall_risk_level: 모든 step 중 최대 위험도
+        - requires_confirmation: HIGH 위험 시 자동 활성화
+        """
+        # 토큰 만료 시간 설정
         if self.token_expires_at is None:
-            from datetime import timedelta
-            self.token_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            object.__setattr__(
+                self, 
+                'token_expires_at', 
+                datetime.now(timezone.utc) + timedelta(minutes=30)
+            )
+        
+        # 전체 위험도 계산 (모든 step 중 최대)
+        if self.steps:
+            risk_priority = {RiskLevel.LOW: 0, RiskLevel.MEDIUM: 1, RiskLevel.HIGH: 2}
+            max_risk = max(self.steps, key=lambda s: risk_priority[s.risk_level]).risk_level
+            
+            if risk_priority[max_risk] > risk_priority[self.overall_risk_level]:
+                object.__setattr__(self, 'overall_risk_level', max_risk)
+        
+        # HIGH 위험 시 확인 필요
+        if self.overall_risk_level == RiskLevel.HIGH and not self.requires_confirmation:
+            object.__setattr__(self, 'requires_confirmation', True)
+            if not self.confirmation_message:
+                object.__setattr__(
+                    self,
+                    'confirmation_message',
+                    "이 워크플로우는 되돌릴 수 없는 작업을 포함합니다. 계속하시겠습니까?"
+                )
+        
+        return self
