@@ -2,14 +2,20 @@
 """
 Task Context Models for Task Manager UI.
 
+[v2.1] 개선사항:
+1. SubStatus 추가 (구체적 행위 배지 표시)
+2. full_thought_trace_ref (히스토리 무손실 보존)
+3. CostDetail 모델 (LLM/Storage/Network 비용 분리)
+
 이 모듈은 기술적인 워크플로우 로그를 비즈니스 친화적인 
 "Task" 개념으로 추상화하기 위한 데이터 모델을 정의합니다.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timezone
 from enum import Enum
+from decimal import Decimal
 
 
 class TaskStatus(str, Enum):
@@ -20,6 +26,63 @@ class TaskStatus(str, Enum):
     COMPLETED = "completed"        # 완료
     FAILED = "failed"              # 실패
     CANCELLED = "cancelled"        # 취소됨
+
+
+class SubStatus(str, Enum):
+    """
+    [v2.1] 구체적 행위 상태 (상단 배지용)
+    
+    동일한 IN_PROGRESS 상태에서도 사용자가 느끼는 체감 속도가
+    다르므로, AI가 수행 중인 구체적 행위를 표시합니다.
+    """
+    # 데이터 처리
+    COLLECTING_DATA = "collecting_data"       # 데이터 수집 중
+    ANALYZING_DATA = "analyzing_data"         # 데이터 분석 중
+    TRANSFORMING_DATA = "transforming_data"   # 데이터 변환 중
+    
+    # 문서 생성
+    DRAFTING_DOCUMENT = "drafting_document"   # 문서 초안 작성 중
+    FORMATTING_OUTPUT = "formatting_output"   # 출력물 포맷팅 중
+    GENERATING_PDF = "generating_pdf"         # PDF 생성 중
+    
+    # LLM 작업
+    THINKING = "thinking"                     # AI 사고 중
+    REASONING = "reasoning"                   # 추론 중
+    SUMMARIZING = "summarizing"               # 요약 중
+    
+    # 외부 연동
+    CALLING_API = "calling_api"               # 외부 API 호출 중
+    SENDING_EMAIL = "sending_email"           # 이메일 발송 중
+    QUERYING_DATABASE = "querying_database"   # 데이터베이스 조회 중
+    
+    # 검증/대기
+    VALIDATING = "validating"                 # 검증 중
+    WAITING_FOR_RESOURCE = "waiting_for_resource"  # 리소스 대기 중
+    
+    # 기타
+    IDLE = "idle"                             # 유휴 상태
+    UNKNOWN = "unknown"                       # 알 수 없음
+
+
+# SubStatus 한글 매핑 (UI 표시용)
+SUB_STATUS_DISPLAY: Dict[SubStatus, str] = {
+    SubStatus.COLLECTING_DATA: "📊 데이터 수집 중",
+    SubStatus.ANALYZING_DATA: "🔍 데이터 분석 중",
+    SubStatus.TRANSFORMING_DATA: "⚙️ 데이터 변환 중",
+    SubStatus.DRAFTING_DOCUMENT: "✍️ 문서 작성 중",
+    SubStatus.FORMATTING_OUTPUT: "📝 포맷팅 중",
+    SubStatus.GENERATING_PDF: "📄 PDF 생성 중",
+    SubStatus.THINKING: "🤔 AI 사고 중",
+    SubStatus.REASONING: "💭 추론 중",
+    SubStatus.SUMMARIZING: "📋 요약 중",
+    SubStatus.CALLING_API: "🌐 API 호출 중",
+    SubStatus.SENDING_EMAIL: "📧 이메일 발송 중",
+    SubStatus.QUERYING_DATABASE: "🗄️ DB 조회 중",
+    SubStatus.VALIDATING: "✅ 검증 중",
+    SubStatus.WAITING_FOR_RESOURCE: "⏳ 리소스 대기 중",
+    SubStatus.IDLE: "💤 유휴",
+    SubStatus.UNKNOWN: "❓ 처리 중",
+}
 
 
 # 상수 정의
@@ -99,10 +162,127 @@ class ArtifactMetadata(BaseModel):
     version: int = Field(default=1, description="결과물 버전")
 
 
+class CostCategory(str, Enum):
+    """
+    [v2.1] 비용 카테고리
+    
+    B2B 시장에서 상세 비용 내역 제공을 위한 분류.
+    """
+    LLM = "llm"                   # LLM API 비용 (Gemini, Claude 등)
+    STORAGE = "storage"           # S3, DynamoDB 스토리지 비용
+    COMPUTE = "compute"           # Lambda, ECS 컴퓨팅 비용
+    NETWORK = "network"           # 데이터 전송 비용
+    THIRD_PARTY = "third_party"   # 외부 API 비용 (SendGrid 등)
+    OTHER = "other"               # 기타 비용
+
+
+class CostLineItem(BaseModel):
+    """
+    [v2.1] 비용 상세 항목
+    """
+    category: CostCategory = Field(..., description="비용 카테고리")
+    service_name: str = Field(..., description="서비스 이름 (예: 'Gemini 1.5 Flash')")
+    quantity: float = Field(default=0, ge=0, description="사용량 (토큰, GB, 호출 수 등)")
+    unit: str = Field(default="tokens", description="단위 (tokens, GB, requests)")
+    unit_price_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="단가 (USD)"
+    )
+    total_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="총 비용 (USD)"
+    )
+    
+    @model_validator(mode='after')
+    def calculate_total(self) -> "CostLineItem":
+        """총 비용 자동 계산."""
+        if self.total_usd == Decimal("0") and self.quantity > 0:
+            calculated = Decimal(str(self.quantity)) * self.unit_price_usd
+            object.__setattr__(self, 'total_usd', calculated)
+        return self
+
+
+class CostDetail(BaseModel):
+    """
+    [v2.1] 상세 비용 내역 (B2B 시장용)
+    
+    단순 float 대신 LLM/Storage/Network 등 복합 과금 체계 지원.
+    2026년 Gemini 3, Batch API, 스토리지 비용 등 반영.
+    """
+    # 상세 항목
+    line_items: List[CostLineItem] = Field(
+        default_factory=list,
+        description="비용 상세 항목 목록"
+    )
+    
+    # 카테고리별 합계 (캐시)
+    breakdown_by_category: Dict[str, Decimal] = Field(
+        default_factory=dict,
+        description="카테고리별 비용 합계"
+    )
+    
+    # 총합
+    estimated_total_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="예상 총 비용 (USD)"
+    )
+    actual_total_usd: Decimal = Field(
+        default=Decimal("0"),
+        description="실제 총 비용 (USD)"
+    )
+    
+    # 메타데이터
+    currency: str = Field(default="USD", description="통화")
+    billing_period_start: Optional[datetime] = Field(None, description="과금 기간 시작")
+    billing_period_end: Optional[datetime] = Field(None, description="과금 기간 종료")
+    
+    # 비용 알림
+    budget_limit_usd: Optional[Decimal] = Field(None, description="예산 한도 (USD)")
+    budget_warning_threshold: float = Field(
+        default=0.8,
+        ge=0,
+        le=1,
+        description="예산 경고 임계값 (0.8 = 80%)"
+    )
+    is_over_budget: bool = Field(default=False, description="예산 초과 여부")
+    
+    def add_cost(self, item: CostLineItem) -> None:
+        """비용 항목 추가 및 합계 재계산."""
+        self.line_items.append(item)
+        
+        # 카테고리별 합계 업데이트
+        category_key = item.category.value
+        current = self.breakdown_by_category.get(category_key, Decimal("0"))
+        self.breakdown_by_category[category_key] = current + item.total_usd
+        
+        # 총합 업데이트
+        self.actual_total_usd += item.total_usd
+        
+        # 예산 체크
+        if self.budget_limit_usd and self.actual_total_usd > self.budget_limit_usd:
+            self.is_over_budget = True
+    
+    def get_category_total(self, category: CostCategory) -> Decimal:
+        """특정 카테고리 비용 합계 조회."""
+        return self.breakdown_by_category.get(category.value, Decimal("0"))
+    
+    def to_summary_dict(self) -> Dict[str, Any]:
+        """UI 표시용 요약 딕셔너리."""
+        return {
+            "total_usd": float(self.actual_total_usd),
+            "breakdown": {
+                k: float(v) for k, v in self.breakdown_by_category.items()
+            },
+            "item_count": len(self.line_items),
+            "is_over_budget": self.is_over_budget,
+        }
+
+
 class CollapsedHistory(BaseModel):
     """
     축약된 히스토리 (결과물 매니저용)
     
+    [v2.1] Infinite Scroll 지원을 위한 페이지네이션 정보 추가.
     상세 히스토리는 필요할 때만 로드합니다.
     """
     summary: str = Field(..., description="간략 요약 (예: '3개의 노드를 거쳐 완료')")
@@ -112,6 +292,20 @@ class CollapsedHistory(BaseModel):
     full_trace_ref: Optional[str] = Field(None, description="전체 히스토리 S3 참조")
     key_decisions: List[str] = Field(
         default_factory=list, description="핵심 의사결정 포인트 (최대 3개)"
+    )
+    
+    # [v2.1] Infinite Scroll 지원
+    total_thought_count: int = Field(
+        default=0,
+        description="전체 사고 기록 수 (Infinite Scroll용)"
+    )
+    page_size: int = Field(
+        default=20,
+        description="페이지당 로드 수"
+    )
+    has_more: bool = Field(
+        default=False,
+        description="추가 데이터 존재 여부"
     )
 
 
@@ -211,6 +405,18 @@ class TaskContext(BaseModel):
         default=TaskStatus.QUEUED,
         description="현재 태스크 상태"
     )
+    
+    # [v2.1] 구체적 행위 상태 (배지용)
+    sub_status: SubStatus = Field(
+        default=SubStatus.IDLE,
+        description="AI가 수행 중인 구체적 행위 (상단 배지 표시용)"
+    )
+    sub_status_detail: Optional[str] = Field(
+        None,
+        max_length=100,
+        description="sub_status 추가 설명 (예: '3/10 페이지 처리 중')"
+    )
+    
     progress_percentage: int = Field(
         default=0,
         ge=0,
@@ -230,7 +436,17 @@ class TaskContext(BaseModel):
     )
     thought_history: List[AgentThought] = Field(
         default_factory=list,
-        description="사고 과정 히스토리 (최신 10개만 유지)"
+        description="사고 과정 히스토리 (최신 10개만 유지, 전체는 S3)"
+    )
+    
+    # [v2.1] 전체 히스토리 참조 (무손실 보존)
+    full_thought_trace_ref: Optional[str] = Field(
+        None,
+        description="전체 사고 히스토리 S3 참조 (Infinite Scroll용)"
+    )
+    total_thought_count: int = Field(
+        default=0,
+        description="전체 사고 기록 수"
     )
     
     # 의사결정 대기
@@ -246,19 +462,26 @@ class TaskContext(BaseModel):
     )
     
     # 비용 및 리소스
+    # [v2.1] 레거시 필드 (하위 호환성)
     estimated_cost: Optional[float] = Field(
         None,
         ge=0,
-        description="예상 비용 (USD)"
+        description="DEPRECATED: cost_detail.estimated_total_usd 사용"
     )
     actual_cost: Optional[float] = Field(
         None,
         ge=0,
-        description="실제 사용 비용 (USD)"
+        description="DEPRECATED: cost_detail.actual_total_usd 사용"
     )
     token_usage: Optional[Dict[str, int]] = Field(
         None,
         description="토큰 사용량 {'input': N, 'output': M}"
+    )
+    
+    # [v2.1] 상세 비용 내역 (B2B용)
+    cost_detail: Optional[CostDetail] = Field(
+        None,
+        description="LLM/Storage/Network 등 상세 비용 내역"
     )
     
     # 타임스탬프
@@ -299,8 +522,24 @@ class TaskContext(BaseModel):
             datetime: lambda v: v.isoformat()
         }
 
-    def add_thought(self, message: str, thought_type: str = "progress", **kwargs) -> None:
-        """사고 기록 추가 (최대 10개 유지)"""
+    def add_thought(
+        self, 
+        message: str, 
+        thought_type: str = "progress",
+        persist_to_s3: bool = True,
+        **kwargs
+    ) -> None:
+        """
+        사고 기록 추가.
+        
+        [v2.1] 메모리에는 최신 10개만 유지하고,
+        전체 히스토리는 S3에 저장 (무손실).
+        
+        Args:
+            message: 사고 내용
+            thought_type: progress, decision, question, warning, success, error
+            persist_to_s3: S3에 전체 히스토리 저장 여부 (기본 True)
+        """
         import uuid
         thought = AgentThought(
             thought_id=str(uuid.uuid4()),
@@ -311,8 +550,10 @@ class TaskContext(BaseModel):
         self.thought_history.append(thought)
         self.current_thought = message
         self.updated_at = datetime.now(timezone.utc)
+        self.total_thought_count += 1
         
-        # 최대 10개 유지
+        # 최대 10개 유지 (메모리 최적화)
+        # 전체 히스토리는 full_thought_trace_ref에 보존됨
         if len(self.thought_history) > THOUGHT_HISTORY_MAX_LENGTH:
             self.thought_history = self.thought_history[-THOUGHT_HISTORY_MAX_LENGTH:]
 
@@ -340,11 +581,64 @@ class TaskContext(BaseModel):
             self.status = TaskStatus.IN_PROGRESS
         self.updated_at = datetime.now(timezone.utc)
 
+    def set_sub_status(self, sub_status: SubStatus, detail: Optional[str] = None) -> None:
+        """
+        [v2.1] 구체적 행위 상태 설정.
+        
+        Args:
+            sub_status: 구체적 행위 상태
+            detail: 추가 설명 (예: '3/10 페이지 처리 중')
+        """
+        self.sub_status = sub_status
+        self.sub_status_detail = detail
+        self.updated_at = datetime.now(timezone.utc)
+    
+    def add_cost_item(
+        self,
+        category: CostCategory,
+        service_name: str,
+        quantity: float,
+        unit: str,
+        unit_price_usd: float
+    ) -> None:
+        """
+        [v2.1] 비용 항목 추가.
+        
+        Args:
+            category: 비용 카테고리 (LLM, STORAGE 등)
+            service_name: 서비스 이름
+            quantity: 사용량
+            unit: 단위
+            unit_price_usd: 단가 (USD)
+        """
+        if self.cost_detail is None:
+            self.cost_detail = CostDetail()
+        
+        item = CostLineItem(
+            category=category,
+            service_name=service_name,
+            quantity=quantity,
+            unit=unit,
+            unit_price_usd=Decimal(str(unit_price_usd))
+        )
+        self.cost_detail.add_cost(item)
+        
+        # 레거시 필드 동기화
+        self.actual_cost = float(self.cost_detail.actual_total_usd)
+        self.updated_at = datetime.now(timezone.utc)
+
     def to_websocket_payload(self) -> Dict[str, Any]:
-        """WebSocket 전송용 간소화된 페이로드 생성"""
-        return {
+        """
+        WebSocket 전송용 간소화된 페이로드 생성.
+        
+        [v2.1] sub_status 및 비용 요약 추가.
+        """
+        payload = {
             "task_id": self.task_id,
             "display_status": self._get_display_status(),
+            "sub_status": self.sub_status.value,
+            "sub_status_display": SUB_STATUS_DISPLAY.get(self.sub_status, "처리 중"),
+            "sub_status_detail": self.sub_status_detail,
             "thought": self.current_thought,
             "progress": self.progress_percentage,
             "current_step": self.current_step_name,
@@ -352,7 +646,14 @@ class TaskContext(BaseModel):
             "artifacts_count": len(self.artifacts),
             "agent_name": self.agent_name,
             "updated_at": self.updated_at.isoformat(),
+            "total_thought_count": self.total_thought_count,
         }
+        
+        # 비용 요약 추가
+        if self.cost_detail:
+            payload["cost_summary"] = self.cost_detail.to_summary_dict()
+        
+        return payload
 
     def _get_display_status(self) -> str:
         """사용자 친화적 상태 문자열 반환"""
