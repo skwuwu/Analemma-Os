@@ -896,6 +896,8 @@ Resources:
         Variables:
           EXECUTION_TABLE: !Ref ExecutionsTableV3
           NOTIFICATION_TABLE: !Ref PendingNotificationsTableV3
+          CONFIRMATION_TOKENS_TABLE: !Ref ConfirmationTokensTable
+          WORKFLOW_BRANCHES_TABLE: !Ref WorkflowBranchesTable
           OPENAI_API_KEY: !Ref OpenAiApiKey
       Policies:
         - DynamoDBReadPolicy:
@@ -904,6 +906,10 @@ Resources:
             TableName: !Ref PendingNotificationsTableV3
         - DynamoDBCrudPolicy:
             TableName: !Ref CheckpointsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConfirmationTokensTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowBranchesTable
       Events:
         # Workflow Preview
         WorkflowPreviewEvent:
@@ -982,11 +988,18 @@ Resources:
         Variables:
           EXECUTION_TABLE: !Ref ExecutionsTableV3
           NOTIFICATION_TABLE: !Ref PendingNotificationsTableV3
+          TASK_EVENTS_TABLE: !Ref TaskEventsTable
+          EXECUTION_ID_INDEX: ExecutionIdIndex
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref ExecutionsTableV3
         - DynamoDBReadPolicy:
             TableName: !Ref PendingNotificationsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskEventsTable
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Events:
         ListTasksEvent:
           Type: HttpApi
@@ -4061,3 +4074,6 @@ Outputs:
   TaskEventsTableName:
     Description: Task Events DynamoDB table for WebSocket state recovery
     Value: !Ref TaskEventsTable
+  WorkflowBranchesTableName:
+    Description: Workflow Branches DynamoDB table for Time Machine rollback history
+    Value: !Ref WorkflowBranchesTable
