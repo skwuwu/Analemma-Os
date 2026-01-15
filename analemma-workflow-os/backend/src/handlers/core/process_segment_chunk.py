@@ -142,7 +142,8 @@ def _store_distributed_task_token(
     """Store token in DynamoDB"""
     try:
         dynamodb = boto3.resource('dynamodb')
-        token_table = dynamodb.Table(os.environ.get('TASK_TOKEN_TABLE', 'TaskTokensTableV2'))
+        # 🚨 [Critical Fix] 환경변수명 통일: TASK_TOKENS_TABLE_NAME 우선 (DynamoDBConfig와 일치)
+        token_table = dynamodb.Table(os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKEN_TABLE', 'TaskTokensTableV3')))
         token_table.put_item(Item={
             'conversation_id': f"{chunk_id}_segment_{segment_id}",
             'task_token': task_token,

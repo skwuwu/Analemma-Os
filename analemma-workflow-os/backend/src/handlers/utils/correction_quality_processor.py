@@ -29,7 +29,8 @@ logger.setLevel(logging.INFO)
 
 # DynamoDB 클라이언트
 dynamodb = boto3.resource('dynamodb')
-correction_table = dynamodb.Table(os.environ.get('CORRECTION_LOGS_TABLE', 'correction-logs'))
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+correction_table = dynamodb.Table(os.environ.get('CORRECTION_LOGS_TABLE', 'CorrectionLogsTable'))
 
 # =============================================================================
 # [v2.1] 전역 이벤트 루프 관리 (Warm Start 최적화)

@@ -22,8 +22,9 @@ class CorrectionService:
     
     def __init__(self):
         self.ddb = boto3.resource('dynamodb')
+        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
         self.correction_table = self.ddb.Table(
-            os.environ.get('CORRECTION_LOGS_TABLE', 'correction-logs')
+            os.environ.get('CORRECTION_LOGS_TABLE', 'CorrectionLogsTable')
         )
         self.metadata_extractor = MetadataExtractor()
     

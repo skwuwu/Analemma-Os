@@ -41,7 +41,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'Skills')
+# 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'SkillsTableV3')
 
 
 class SkillRepository:

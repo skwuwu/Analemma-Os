@@ -43,22 +43,14 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 환경 변수
+# 환경 변수 - 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
 # ═══════════════════════════════════════════════════════════════════════════════
 STATE_MACHINE_ARN = os.environ.get('STATE_MACHINE_ARN', '')
-BRANCHES_TABLE = os.environ.get('BRANCHES_TABLE', 'workflow-branches')
+BRANCHES_TABLE = os.environ.get('WORKFLOW_BRANCHES_TABLE', 'WorkflowBranchesTable')
 ENABLE_COGNITIVE_ROLLBACK = os.environ.get('ENABLE_COGNITIVE_ROLLBACK', 'true').lower() == 'true'
 
-# GSI 이름 (CloudFormation/SAM에서 정의 필요)
-# 📌 template.yaml에 아래 GSI 정의 필수:
-#   GlobalSecondaryIndexes:
-#     - IndexName: root-thread-index
-#       KeySchema:
-#         - AttributeName: root_thread_id
-#           KeyType: HASH
-#       Projection:
-#         ProjectionType: ALL
-ROOT_THREAD_GSI = os.environ.get('ROOT_THREAD_GSI', 'root-thread-index')
+# GSI 이름 (template.yaml GlobalSecondaryIndexes.IndexName과 일치)
+ROOT_THREAD_GSI = os.environ.get('ROOT_THREAD_INDEX', 'root-thread-index')
 
 
 class TimeMachineService:

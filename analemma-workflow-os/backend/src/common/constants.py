@@ -250,40 +250,66 @@ class EnvironmentVariables:
 
 
 class DynamoDBConfig:
-    """DynamoDB 관련 설정"""
+    """DynamoDB 관련 설정
     
+    🚨 [Critical] 모든 기본값은 template.yaml의 실제 리소스명과 일치해야 함
+    - 테이블명: TableName 속성값 (예: Workflows-v3-${StageName})의 논리 이름 (WorkflowsTableV3)
+    - GSI명: template.yaml의 IndexName 속성값과 정확히 일치
+    """
+    
+    # ═══════════════════════════════════════════════════════════════════════════
     # 테이블 이름 (환경변수에서 가져옴)
-    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴 (V3)
+    # 기본값: template.yaml !Ref 리소스 논리 이름과 동일한 형식
+    # ═══════════════════════════════════════════════════════════════════════════
     WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-    EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'ExecutionsTableV2')
-    PENDING_NOTIFICATIONS_TABLE = os.environ.get('PENDING_NOTIFICATIONS_TABLE', 'PendingNotificationsTableV2')
+    EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'ExecutionsTableV3')
+    PENDING_NOTIFICATIONS_TABLE = os.environ.get('PENDING_NOTIFICATIONS_TABLE', 'PendingNotificationsTableV3')
     # 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME을 우선 사용 (template.yaml과 일치)
     TASK_TOKENS_TABLE = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKENS_TABLE', 'TaskTokensTableV3'))
-    WEBSOCKET_CONNECTIONS_TABLE = os.environ.get('WEBSOCKET_CONNECTIONS_TABLE', 'WebsocketConnectionsTableV2')
-    USERS_TABLE = os.environ.get('USERS_TABLE', 'UsersTableV2')
-    IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE', 'IdempotencyTableV2')
-    USER_USAGE_TABLE = os.environ.get('USER_USAGE_TABLE', 'UserUsageTableV2')
-    BEDROCK_JOB_TABLE = os.environ.get('BEDROCK_JOB_TABLE', 'BedrockJobTableV2')
-    CHECKPOINTS_TABLE = os.environ.get('CHECKPOINTS_TABLE', 'CheckpointsTable')
-    SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'SkillsTableV2')
+    WEBSOCKET_CONNECTIONS_TABLE = os.environ.get('WEBSOCKET_CONNECTIONS_TABLE', 'WebsocketConnectionsTableV3')
+    USERS_TABLE = os.environ.get('USERS_TABLE', 'UsersTableV3')
+    IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE', 'IdempotencyTableV3')
+    USER_USAGE_TABLE = os.environ.get('USER_USAGE_TABLE', 'UserUsageTableV3')
+    BEDROCK_JOB_TABLE = os.environ.get('BEDROCK_JOB_TABLE', 'BedrockJobTableV3')
+    CHECKPOINTS_TABLE = os.environ.get('CHECKPOINTS_TABLE', 'CheckpointsTableV3')
+    SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'SkillsTableV3')
     CORRECTION_LOGS_TABLE = os.environ.get('CORRECTION_LOGS_TABLE', 'CorrectionLogsTable')
     DISTILLED_INSTRUCTIONS_TABLE = os.environ.get('DISTILLED_INSTRUCTIONS_TABLE', 'DistilledInstructionsTable')
-    CHECKPOINT_TABLE = os.environ.get('CHECKPOINT_TABLE', 'CheckpointsV2')
+    WORKFLOW_BRANCHES_TABLE = os.environ.get('WORKFLOW_BRANCHES_TABLE', 'WorkflowBranchesTable')
     
-    # GSI 이름 (환경변수에서 가져옴)
-    OWNER_ID_NAME_INDEX = os.environ.get('OWNER_ID_NAME_INDEX', 'OwnerIdNameIndexV2')
-    OWNER_ID_START_DATE_INDEX = os.environ.get('OWNER_ID_START_DATE_INDEX', 'OwnerIdStartDateIndexV2')
-    OWNER_ID_STATUS_INDEX = os.environ.get('OWNER_ID_STATUS_INDEX', 'OwnerIdStatusIndexV2')
-    WEBSOCKET_OWNER_ID_GSI = os.environ.get('WEBSOCKET_OWNER_ID_GSI', 'OwnerIdConnectionIndexV2')
-    NOTIFICATIONS_INDEX = os.environ.get('NOTIFICATIONS_INDEX', 'NotificationsIndexV2')
-    SCHEDULED_WORKFLOWS_INDEX = os.environ.get('SCHEDULED_WORKFLOWS_INDEX', 'ScheduledWorkflowsIndexV2')
-    EXECUTION_ID_INDEX = os.environ.get('EXECUTION_ID_INDEX', 'ExecutionIdIndexV2')
-    TIME_INDEX = os.environ.get('TIME_INDEX', 'TimeIndexV2')
-    OWNER_ID_INDEX = os.environ.get('OWNER_ID_INDEX', 'OwnerIdIndexV2')
-    CATEGORY_INDEX = os.environ.get('CATEGORY_INDEX', 'CategoryIndexV2')
-    VISIBILITY_INDEX = os.environ.get('VISIBILITY_INDEX', 'VisibilityIndexV2')
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GSI 이름 (template.yaml GlobalSecondaryIndexes.IndexName과 정확히 일치)
+    # ⚠️ V2 접미사 제거: template.yaml에는 V2 없음
+    # ═══════════════════════════════════════════════════════════════════════════
+    # WorkflowsTableV3 GSI
+    OWNER_ID_NAME_INDEX = os.environ.get('OWNER_ID_NAME_INDEX', 'OwnerIdNameIndex')
+    SCHEDULED_WORKFLOWS_INDEX = os.environ.get('SCHEDULED_WORKFLOWS_INDEX', 'ScheduledWorkflowsIndex')
+    
+    # ExecutionsTableV3 GSI
+    OWNER_ID_START_DATE_INDEX = os.environ.get('OWNER_ID_START_DATE_INDEX', 'OwnerIdStartDateIndex')
+    OWNER_ID_STATUS_INDEX = os.environ.get('OWNER_ID_STATUS_INDEX', 'OwnerIdStatusIndex')
+    NOTIFICATIONS_INDEX = os.environ.get('NOTIFICATIONS_INDEX', 'NotificationsIndex')
+    
+    # WebsocketConnectionsTableV3 GSI
+    WEBSOCKET_OWNER_ID_GSI = os.environ.get('WEBSOCKET_OWNER_ID_GSI', 'OwnerIdConnectionIndex')
+    
+    # TaskTokensTableV3 / PendingNotificationsTableV3 GSI
+    EXECUTION_ID_INDEX = os.environ.get('EXECUTION_ID_INDEX', 'ExecutionIdIndex')
+    
+    # CheckpointsTableV3 GSI
+    TIME_INDEX = os.environ.get('TIME_INDEX', 'TimeIndex')
+    
+    # SkillsTableV3 GSI
+    OWNER_ID_INDEX = os.environ.get('OWNER_ID_INDEX', 'OwnerIdIndex')
+    CATEGORY_INDEX = os.environ.get('CATEGORY_INDEX', 'CategoryIndex')
+    VISIBILITY_INDEX = os.environ.get('VISIBILITY_INDEX', 'VisibilityIndex')
+    
+    # CorrectionLogsTable GSI
     TASK_CATEGORY_INDEX = os.environ.get('TASK_CATEGORY_INDEX', 'task-category-index-v2')
     USER_RECENT_INDEX = os.environ.get('USER_RECENT_INDEX', 'user-recent-index-v2')
+    
+    # WorkflowBranchesTable GSI
+    ROOT_THREAD_INDEX = os.environ.get('ROOT_THREAD_INDEX', 'root-thread-index')
     
     # 배치 크기
     BATCH_WRITE_SIZE = 25

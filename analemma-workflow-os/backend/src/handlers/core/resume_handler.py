@@ -23,8 +23,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# 환경 변수에서 테이블명 읽기
-TABLE_NAME = os.environ.get("TASK_TOKENS_TABLE_NAME", "TaskTokens")
+# 환경 변수에서 테이블명 읽기 (DynamoDBConfig와 동일한 폴백 전략)
+TABLE_NAME = os.environ.get("TASK_TOKENS_TABLE_NAME", os.environ.get("TASK_TOKENS_TABLE", "TaskTokensTableV3"))
 table = dynamodb.Table(TABLE_NAME)
 
 # Use common CORS headers or fallback

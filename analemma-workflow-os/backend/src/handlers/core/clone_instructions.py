@@ -39,8 +39,8 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# 환경 변수
-DISTILLED_INSTRUCTIONS_TABLE = os.environ.get("DISTILLED_INSTRUCTIONS_TABLE", "DistilledInstructions")
+# 환경 변수 - 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+DISTILLED_INSTRUCTIONS_TABLE = os.environ.get("DISTILLED_INSTRUCTIONS_TABLE", "DistilledInstructionsTable")
 
 # AWS 클라이언트 (지연 초기화 - 테스트 시 모킹 가능)
 _dynamodb = None

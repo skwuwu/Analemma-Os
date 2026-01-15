@@ -32,8 +32,8 @@ dynamodb = boto3.resource("dynamodb")
 sfn_client = boto3.client("stepfunctions")
 sns_client = boto3.client("sns")
 
-# Environment Variables
-EXECUTIONS_TABLE = os.environ.get("EXECUTIONS_TABLE", "Executions-v3-dev")
+# Environment Variables - 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+EXECUTIONS_TABLE = os.environ.get("EXECUTIONS_TABLE", "ExecutionsTableV3")
 # 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME 우선 사용
 TASK_TOKENS_TABLE = os.environ.get("TASK_TOKENS_TABLE_NAME", os.environ.get("TASK_TOKENS_TABLE", "TaskTokensTableV3"))
 WORKFLOW_ORCHESTRATOR_ARN = os.environ.get("WORKFLOW_ORCHESTRATOR_ARN", "")
@@ -464,9 +464,12 @@ def _get_task_token(owner_id: str, execution_arn: str) -> Optional[str]:
     """Get active task token for HITL resume"""
     table = dynamodb.Table(TASK_TOKENS_TABLE)
     
+    # 🚨 [Critical Fix] GSI 이름을 환경변수에서 가져옴 (template.yaml과 일치)
+    execution_id_index = os.environ.get('EXECUTION_ID_INDEX', 'ExecutionIdIndex')
+    
     try:
         response = table.query(
-            IndexName="ExecutionIdIndex",
+            IndexName=execution_id_index,
             KeyConditionExpression="ownerId = :oid AND execution_id = :eid",
             ExpressionAttributeValues={
                 ":oid": owner_id,

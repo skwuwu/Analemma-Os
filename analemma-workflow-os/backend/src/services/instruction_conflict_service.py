@@ -26,8 +26,9 @@ class InstructionConflictService:
     def __init__(self):
         self.ddb = boto3.resource('dynamodb')
         self.ddb_client = boto3.client('dynamodb')  # 트랜잭션용 클라이언트 추가
+        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
         self.instruction_table = self.ddb.Table(
-            os.environ.get('DISTILLED_INSTRUCTIONS_TABLE', 'distilled-instructions')
+            os.environ.get('DISTILLED_INSTRUCTIONS_TABLE', 'DistilledInstructionsTable')
         )
         self.conflict_resolver = ConflictResolver()
         self.semantic_validator = None  # LLM 기반 의미적 검증기 (지연 초기화)

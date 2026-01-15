@@ -92,7 +92,7 @@ def _calculate_dynamic_concurrency(
     
     # 3. 사용자 티어 기반 조정 (선택적)
     try:
-        user_table = _dynamodb.Table(os.environ.get('USERS_TABLE', 'Users'))
+        user_table = _dynamodb.Table(os.environ.get('USERS_TABLE', 'UsersTableV3'))
         user_response = user_table.get_item(Key={'userId': owner_id})
         user_item = user_response.get('Item')
         
