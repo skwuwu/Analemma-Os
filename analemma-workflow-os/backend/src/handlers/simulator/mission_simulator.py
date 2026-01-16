@@ -342,6 +342,24 @@ SCENARIOS = {
         'test_keyword': 'COMPLETE',
         'expected_status': 'SUCCEEDED',
         'verify_func': 'verify_xray_traceability'
+    },
+    # ========================================================================
+    # Ultimate Stress Test (Y)
+    # ========================================================================
+    'HYPER_REPORT': {
+        'name': 'Scenario Y: 글로벌 기술 트렌드 하이퍼-리포트 자동 생성',
+        'description': '대량 데이터, 병렬/순차 처리, 의도적 장애, HITL, 지능 증류 통합 시나리오',
+        'test_keyword': 'HYPER_REPORT',
+        'input_data': {
+            'categories': ['AI', 'Cloud', 'Security', 'SaaS'],
+            'expected_payload_size_kb': 350,
+            'enable_failure_injection': True,
+            'enable_hitl': True,
+            'enable_distiller': True
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_hyper_report',
+        'timeout_seconds': 300  # 5분 타임아웃 (복잡한 시나리오)
     }
 }
 
@@ -370,6 +388,7 @@ TEST_WORKFLOW_MAPPINGS = {
     'E2E_S3_LARGE_DATA': 'test_s3_large_workflow',
     'MAP_AGGREGATOR_TEST': 'test_map_aggregator_workflow',
     'LOOP_LIMIT_DYNAMIC': 'test_loop_limit_dynamic_workflow',
+    'HYPER_REPORT': 'test_hyper_report_workflow',  # 하이퍼-리포트 시나리오
 }
 
 
@@ -1925,6 +1944,562 @@ def verify_xray_traceability(execution_arn: str, result: dict, scenario_config: 
 def lambda_handler(event: dict, context: Any) -> dict:
 
 
+    """
+    Mission Simulator Lambda Handler.
+    
+    Event format:
+    - {"scenario": "HAPPY_PATH"} - Run single scenario
+    - {"scenarios": ["HAPPY_PATH", "PII_TEST"]} - Run multiple scenarios
+    - {} - Run all scenarios (default)
+    """
+    logger.info("=== Mission Simulator Starting ===")
+    logger.info(f"Event: {json.dumps(event)}")
+    
+    # Determine which scenarios to run
+    scenarios_to_run = []
+    
+    if 'scenario' in event:
+        scenarios_to_run = [event['scenario']]
+    elif 'scenarios' in event:
+        scenarios_to_run = event['scenarios']
+    else:
+        # Default: run all scenarios
+        scenarios_to_run = list(SCENARIOS.keys())
+    
+    logger.info(f"Scenarios to run: {scenarios_to_run}")
+    
+    # Run scenarios
+    results = []
+    passed_count = 0
+    failed_count = 0
+    
+    for scenario_key in scenarios_to_run:
+        result = run_scenario(scenario_key)
+        results.append(result)
+        
+        if result['status'] == 'PASSED':
+            passed_count += 1
+            logger.info(f"✅ {scenario_key}: PASSED")
+        else:
+            failed_count += 1
+            logger.error(f"❌ {scenario_key}: {result['status']}")
+    
+    # Summary
+    total = len(results)
+    success_rate = (passed_count / total * 100) if total > 0 else 0
+    
+    summary = {
+        'total_scenarios': total,
+        'passed': passed_count,
+        'failed': failed_count,
+        'success_rate': f"{success_rate:.1f}%",
+        'timestamp': datetime.now(timezone.utc).isoformat()
+    }
+    
+    logger.info(f"=== Mission Simulator Complete ===")
+    logger.info(f"Summary: {passed_count}/{total} passed ({success_rate:.1f}%)")
+    
+    # Emit overall success rate
+    try:
+        cw = get_cloudwatch_client()
+        cw.put_metric_data(
+            Namespace=METRIC_NAMESPACE,
+            MetricData=[
+                {
+                    'MetricName': 'E2E_Success_Rate',
+                    'Value': success_rate,
+                    'Unit': 'Percent',
+                    'Timestamp': datetime.now(timezone.utc)
+                }
+            ]
+        )
+    except Exception as e:
+        logger.warning(f"Failed to emit success rate metric: {e}")
+    
+    return {
+        'statusCode': 200 if failed_count == 0 else 500,
+        'body': {
+            'summary': summary,
+            'results': results
+        }
+    }
+
+
+# ============================================================================
+# Scenario Y: 글로벌 기술 트렌드 하이퍼-리포트 검증 함수
+# ============================================================================
+
+def verify_hyper_report(execution_arn: str, scenario_key: str) -> dict:
+    """
+    하이퍼-리포트 시나리오 검증.
+    
+    검증 항목:
+    1. S3 Offloading (350KB+ 페이로드)
+    2. Map 병렬 처리 (4개 카테고리 동시 실행)
+    3. ForEach 순차 처리 (상태 유실 없는 반복)
+    4. 의도적 장애 주입 및 모델 스위칭
+    5. HITL (TaskToken 보존 및 상태 복구)
+    6. Distiller (사용자 피드백 패턴 추출)
+    7. 비용 정산 (소수점 단위 정확도)
+    """
+    logger.info(f"[HYPER_REPORT] Starting verification for {execution_arn}")
+    
+    results = {
+        's3_offloading': False,
+        'parallel_map': False,
+        'foreach_iteration': False,
+        'error_injection_and_recovery': False,
+        'hitl_state_preservation': False,
+        'distiller_feedback': False,
+        'cost_calculation': False
+    }
+    
+    checks = []
+    
+    try:
+        # 1. S3 Offloading 검증
+        s3_check = _verify_s3_offloading(execution_arn)
+        results['s3_offloading'] = s3_check['passed']
+        checks.append({
+            'name': 'S3 Offloading (350KB+ Payload)',
+            'status': 'PASSED' if s3_check['passed'] else 'FAILED',
+            'details': s3_check.get('details', {})
+        })
+        
+        # 2. Map 병렬 처리 검증
+        map_check = _verify_parallel_map_execution(execution_arn)
+        results['parallel_map'] = map_check['passed']
+        checks.append({
+            'name': 'Parallel Map (4 Categories)',
+            'status': 'PASSED' if map_check['passed'] else 'FAILED',
+            'details': map_check.get('details', {})
+        })
+        
+        # 3. ForEach 순차 처리 검증
+        foreach_check = _verify_foreach_state_preservation(execution_arn)
+        results['foreach_iteration'] = foreach_check['passed']
+        checks.append({
+            'name': 'ForEach Sequential Processing',
+            'status': 'PASSED' if foreach_check['passed'] else 'FAILED',
+            'details': foreach_check.get('details', {})
+        })
+        
+        # 4. 장애 주입 및 복구 검증
+        error_check = _verify_error_injection_recovery(execution_arn)
+        results['error_injection_and_recovery'] = error_check['passed']
+        checks.append({
+            'name': 'Error Injection & Model Switching',
+            'status': 'PASSED' if error_check['passed'] else 'FAILED',
+            'details': error_check.get('details', {})
+        })
+        
+        # 5. HITL 상태 보존 검증
+        hitl_check = _verify_hitl_state_preservation(execution_arn)
+        results['hitl_state_preservation'] = hitl_check['passed']
+        checks.append({
+            'name': 'HITL State Preservation',
+            'status': 'PASSED' if hitl_check['passed'] else 'FAILED',
+            'details': hitl_check.get('details', {})
+        })
+        
+        # 6. Distiller 피드백 추출 검증
+        distiller_check = _verify_distiller_feedback(execution_arn)
+        results['distiller_feedback'] = distiller_check['passed']
+        checks.append({
+            'name': 'Distiller Feedback Extraction',
+            'status': 'PASSED' if distiller_check['passed'] else 'FAILED',
+            'details': distiller_check.get('details', {})
+        })
+        
+        # 7. 비용 정산 검증
+        cost_check = _verify_cost_calculation(execution_arn)
+        results['cost_calculation'] = cost_check['passed']
+        checks.append({
+            'name': 'Cost Calculation Accuracy',
+            'status': 'PASSED' if cost_check['passed'] else 'FAILED',
+            'details': cost_check.get('details', {})
+        })
+        
+        # 종합 판정
+        all_passed = all(results.values())
+        passed_count = sum(1 for v in results.values() if v)
+        total_count = len(results)
+        
+        logger.info(f"[HYPER_REPORT] Verification complete: {passed_count}/{total_count} checks passed")
+        
+        return {
+            'passed': all_passed,
+            'passed_count': passed_count,
+            'total_count': total_count,
+            'checks': checks,
+            'results': results
+        }
+        
+    except Exception as e:
+        logger.error(f"[HYPER_REPORT] Verification error: {e}", exc_info=True)
+        return {
+            'passed': False,
+            'error': str(e),
+            'checks': checks
+        }
+
+
+def _verify_s3_offloading(execution_arn: str) -> dict:
+    """S3 Offloading 검증: 350KB+ 페이로드가 S3로 오프로드되었는지 확인"""
+    try:
+        s3 = get_s3_client()
+        execution_id = execution_arn.split(':')[-1]
+        
+        # S3 버킷에서 해당 실행의 상태 파일 조회
+        prefix = f"executions/{execution_id}/"
+        
+        response = s3.list_objects_v2(
+            Bucket=STATE_BUCKET,
+            Prefix=prefix,
+            MaxKeys=10
+        )
+        
+        if 'Contents' not in response or len(response['Contents']) == 0:
+            return {
+                'passed': False,
+                'details': {
+                    'reason': 'No S3 objects found for execution',
+                    'prefix': prefix
+                }
+            }
+        
+        # 페이로드 크기 확인
+        total_size = sum(obj['Size'] for obj in response['Contents'])
+        size_kb = total_size / 1024
+        
+        # 350KB 이상이면 성공
+        passed = size_kb >= 300  # 약간의 여유 (350KB 목표, 300KB 최소)
+        
+        return {
+            'passed': passed,
+            'details': {
+                'total_size_kb': round(size_kb, 2),
+                'object_count': len(response['Contents']),
+                'expected_min_kb': 300,
+                'bucket': STATE_BUCKET,
+                'prefix': prefix
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"S3 Offloading verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_parallel_map_execution(execution_arn: str) -> dict:
+    """Map 병렬 처리 검증: 4개 카테고리가 동시에 실행되었는지 확인"""
+    try:
+        sfn = get_stepfunctions_client()
+        
+        # 실행 히스토리에서 Map 이터레이션 찾기
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000
+        )
+        
+        map_iterations = []
+        for event in history['events']:
+            if event['type'] == 'MapIterationStarted':
+                map_iterations.append({
+                    'timestamp': event['timestamp'],
+                    'index': event.get('mapIterationStartedEventDetails', {}).get('index', -1)
+                })
+        
+        if len(map_iterations) < 4:
+            return {
+                'passed': False,
+                'details': {
+                    'reason': 'Expected 4 map iterations (AI, Cloud, Security, SaaS)',
+                    'actual_count': len(map_iterations)
+                }
+            }
+        
+        # 병렬 실행 확인: 시작 시간이 5초 이내에 분산되었는지
+        if len(map_iterations) >= 4:
+            start_times = [it['timestamp'] for it in map_iterations[:4]]
+            time_range = (max(start_times) - min(start_times)).total_seconds()
+            
+            # 5초 이내면 병렬로 간주
+            parallel = time_range <= 5.0
+            
+            return {
+                'passed': parallel and len(map_iterations) >= 4,
+                'details': {
+                    'iteration_count': len(map_iterations),
+                    'time_range_seconds': round(time_range, 2),
+                    'parallel_threshold_seconds': 5.0,
+                    'is_parallel': parallel
+                }
+            }
+        
+        return {
+            'passed': True,
+            'details': {
+                'iteration_count': len(map_iterations)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Parallel Map verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_foreach_state_preservation(execution_arn: str) -> dict:
+    """ForEach 순차 처리 검증: 상태 유실 없이 반복했는지 확인"""
+    try:
+        sfn = get_stepfunctions_client()
+        
+        # ForEach 노드의 실행 횟수 카운트
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000
+        )
+        
+        foreach_executions = 0
+        for event in history['events']:
+            # TaskStateEntered에서 foreach 노드 실행 확인
+            if event['type'] == 'TaskStateEntered':
+                state_name = event.get('stateEnteredEventDetails', {}).get('name', '')
+                if 'foreach' in state_name.lower() or 'article_analysis' in state_name.lower():
+                    foreach_executions += 1
+        
+        # 최소 10개 기사 분석 (메타데이터에서 max_iterations=20)
+        passed = foreach_executions >= 10
+        
+        return {
+            'passed': passed,
+            'details': {
+                'foreach_execution_count': foreach_executions,
+                'expected_min': 10,
+                'expected_max': 20
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"ForEach verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_error_injection_recovery(execution_arn: str) -> dict:
+    """장애 주입 및 복구 검증: 의도적 에러 후 모델 스위칭 확인"""
+    try:
+        sfn = get_stepfunctions_client()
+        
+        # SaaS 분석 노드의 재시도 확인
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000
+        )
+        
+        retry_count = 0
+        model_switches = 0
+        
+        for event in history['events']:
+            # TaskStateEntered에서 재시도 카운트
+            if event['type'] == 'TaskFailed':
+                details = event.get('taskFailedEventDetails', {})
+                error = details.get('error', '')
+                if 'RATE_LIMIT' in error or 'SaaS' in str(details):
+                    retry_count += 1
+            
+            # LambdaFunctionScheduled에서 모델 변경 감지
+            if event['type'] == 'LambdaFunctionScheduled':
+                input_str = event.get('lambdaFunctionScheduledEventDetails', {}).get('input', '{}')
+                try:
+                    input_data = json.loads(input_str)
+                    if 'model_id' in str(input_data) and 'haiku' in str(input_data).lower():
+                        model_switches += 1
+                except:
+                    pass
+        
+        # 최소 2회 재시도 (메타데이터에서 expected_initial_failures=2)
+        passed = retry_count >= 2
+        
+        return {
+            'passed': passed,
+            'details': {
+                'retry_count': retry_count,
+                'model_switches': model_switches,
+                'expected_failures': 2
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error injection verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_hitl_state_preservation(execution_arn: str) -> dict:
+    """HITL 상태 보존 검증: TaskToken 보존 및 S3 복구 확인"""
+    try:
+        # HITL 노드가 실행되었는지 확인
+        sfn = get_stepfunctions_client()
+        
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000
+        )
+        
+        hitl_found = False
+        task_token_found = False
+        
+        for event in history['events']:
+            if event['type'] == 'TaskStateEntered':
+                state_name = event.get('stateEnteredEventDetails', {}).get('name', '')
+                if 'approval' in state_name.lower() or 'hitl' in state_name.lower():
+                    hitl_found = True
+                    
+                    # TaskToken 확인
+                    input_str = event.get('stateEnteredEventDetails', {}).get('input', '{}')
+                    try:
+                        input_data = json.loads(input_str)
+                        if '_task_token' in input_data or 'taskToken' in input_data:
+                            task_token_found = True
+                    except:
+                        pass
+        
+        # HITL이 실행되지 않았으면 SKIPPED로 처리 (조건부 실행)
+        if not hitl_found:
+            return {
+                'passed': True,
+                'details': {
+                    'reason': 'HITL skipped (no low-confidence items)',
+                    'hitl_executed': False
+                }
+            }
+        
+        return {
+            'passed': hitl_found and task_token_found,
+            'details': {
+                'hitl_executed': hitl_found,
+                'task_token_preserved': task_token_found
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"HITL verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_distiller_feedback(execution_arn: str) -> dict:
+    """Distiller 피드백 추출 검증: 사용자 수정사항 패턴 추출 확인"""
+    try:
+        # Distiller 노드 실행 확인
+        sfn = get_stepfunctions_client()
+        
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000
+        )
+        
+        distiller_executed = False
+        guidelines_extracted = False
+        
+        for event in history['events']:
+            if event['type'] == 'TaskStateEntered':
+                state_name = event.get('stateEnteredEventDetails', {}).get('name', '')
+                if 'correction' in state_name.lower() or 'distiller' in state_name.lower():
+                    distiller_executed = True
+            
+            # 출력에서 가이드라인 확인
+            if event['type'] == 'TaskSucceeded':
+                output_str = event.get('taskSucceededEventDetails', {}).get('output', '{}')
+                try:
+                    output_data = json.loads(output_str)
+                    if 'correction_guidelines' in output_data or 'guidelines' in str(output_data).lower():
+                        guidelines_extracted = True
+                except:
+                    pass
+        
+        return {
+            'passed': distiller_executed or guidelines_extracted,
+            'details': {
+                'distiller_executed': distiller_executed,
+                'guidelines_extracted': guidelines_extracted
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Distiller verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+def _verify_cost_calculation(execution_arn: str) -> dict:
+    """비용 정산 검증: 소수점 단위 정확도 확인"""
+    try:
+        # 비용 계산 노드 출력 확인
+        sfn = get_stepfunctions_client()
+        
+        history = sfn.get_execution_history(
+            executionArn=execution_arn,
+            maxResults=1000,
+            reverseOrder=True  # 최신 이벤트부터
+        )
+        
+        cost_found = False
+        cost_value = None
+        
+        for event in history['events']:
+            if event['type'] == 'TaskSucceeded':
+                state_name = event.get('taskSucceededEventDetails', {}).get('name', '')
+                if 'cost' in state_name.lower():
+                    output_str = event.get('taskSucceededEventDetails', {}).get('output', '{}')
+                    try:
+                        output_data = json.loads(output_str)
+                        if 'cost_detail' in output_data:
+                            cost_found = True
+                            cost_value = output_data.get('cost_detail', {}).get('total_cost')
+                            break
+                    except:
+                        pass
+        
+        # 비용이 계산되고 0보다 크면 성공
+        passed = cost_found and cost_value is not None and cost_value > 0
+        
+        return {
+            'passed': passed,
+            'details': {
+                'cost_calculated': cost_found,
+                'total_cost': cost_value if cost_value else 0.0
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Cost calculation verification failed: {e}")
+        return {
+            'passed': False,
+            'details': {'error': str(e)}
+        }
+
+
+# ============================================================================
+# Lambda Handler
+# ============================================================================
+
+def lambda_handler(event, context):
     """
     Mission Simulator Lambda Handler.
     

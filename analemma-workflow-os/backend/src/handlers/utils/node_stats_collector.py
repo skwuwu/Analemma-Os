@@ -31,6 +31,11 @@ CURRENT_FACTOR = Decimal("0.1")  # 현재 값 가중치
 OUTLIER_THRESHOLD_MULTIPLIER = Decimal("3.0")  # 아웃라이어 임계값 (평균의 3배)
 TTL_DAYS = 90  # 통계 데이터 TTL (일)
 
+# [v2.3] 최소 실행 시간 가드레일 (10ms)
+# Express Workflow나 빠른 데이터 변환 노드의 경우 0.1초 미만일 수 있음
+# 0에 수렴하는 값으로 이동 평균이 고착되는 것을 방지
+MIN_DURATION_FLOOR_SECONDS = Decimal("0.01")  # 10ms
+
 # DynamoDB 클라이언트
 dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 table = dynamodb.Table(NODE_STATS_TABLE)
@@ -98,6 +103,9 @@ def _process_execution_status_change(detail: Dict[str, Any]) -> Dict[str, Any]:
     
     duration_seconds = (stop_date - start_date) / 1000.0
     
+    # [v2.3] 최소 실행 시간 가드레일 - 0에 수렴하는 값 방지
+    duration_seconds = max(duration_seconds, float(MIN_DURATION_FLOOR_SECONDS))
+    
     # State Machine ARN에서 워크플로우 이름 추출
     state_machine_arn = detail.get("stateMachineArn", "")
     workflow_name = state_machine_arn.split(":")[-1] if state_machine_arn else "unknown"
@@ -140,6 +148,8 @@ def _process_state_transition(detail: Dict[str, Any]) -> Dict[str, Any]:
     
     if duration_ms:
         duration_seconds = float(duration_ms) / 1000.0
+        # [v2.3] 최소 실행 시간 가드레일
+        duration_seconds = max(duration_seconds, float(MIN_DURATION_FLOOR_SECONDS))
     else:
         # 타임스탬프에서 계산 (이전 이벤트 참조 필요)
         logger.warning(f"No duration for state {state_name}")
@@ -157,8 +167,21 @@ def _process_state_transition(detail: Dict[str, Any]) -> Dict[str, Any]:
 
 def _infer_node_type(state_name: str, detail: Dict[str, Any]) -> str:
     """
-    상태 이름에서 노드 타입 추론
+    노드 타입 추론.
+    
+    [v2.3] 계층적 타입 추론:
+    1. 워크플로우 정의의 metadata.node_type (명시적 지정)
+    2. input의 _metadata.node_type (런타임 주입)
+    3. state_name 키워드 매칭 (폴백)
     """
+    
+    # [Priority 1] 명시적 메타데이터에서 타입 추출
+    # 워크플로우 정의(JSON)에 metadata: { "node_type": "llm_chat" } 형식으로 지정
+    explicit_type = _extract_node_type_from_metadata(detail)
+    if explicit_type:
+        return explicit_type
+    
+    # [Priority 2] state_name 키워드 매칭 (폴백)
     state_name_lower = state_name.lower()
     
     # LLM 관련 노드
@@ -186,6 +209,56 @@ def _infer_node_type(state_name: str, detail: Dict[str, Any]) -> str:
         return "database"
     
     return "default"
+
+
+def _extract_node_type_from_metadata(detail: Dict[str, Any]) -> Optional[str]:
+    """
+    [v2.3] EventBridge 이벤트의 input/metadata에서 명시적 node_type 추출.
+    
+    지원하는 메타데이터 위치:
+    1. input._metadata.node_type
+    2. input.metadata.node_type
+    3. stateEnteredEventDetails.input._metadata.node_type
+    
+    워크플로우 설계자가 워크플로우 JSON에 명시적으로 지정:
+    {
+      "States": {
+        "MyProcess1": {
+          "Type": "Task",
+          "Parameters": {
+            "_metadata": { "node_type": "llm_chat" },
+            ...
+          }
+        }
+      }
+    }
+    """
+    # input 필드 파싱
+    input_str = detail.get("input") or detail.get("stateEnteredEventDetails", {}).get("input")
+    
+    if not input_str:
+        return None
+    
+    try:
+        if isinstance(input_str, str):
+            input_data = json.loads(input_str)
+        else:
+            input_data = input_str
+        
+        # 메타데이터 위치 탐색
+        for meta_key in ["_metadata", "metadata", "__metadata"]:
+            if isinstance(input_data, dict) and meta_key in input_data:
+                metadata = input_data[meta_key]
+                if isinstance(metadata, dict) and "node_type" in metadata:
+                    node_type = metadata["node_type"]
+                    if isinstance(node_type, str) and node_type.strip():
+                        logger.info(f"Extracted explicit node_type from metadata: {node_type}")
+                        return node_type.strip()
+        
+    except (json.JSONDecodeError, TypeError, KeyError) as e:
+        logger.debug(f"Failed to parse metadata for node_type: {e}")
+    
+    return None
 
 
 def _update_node_stats(

@@ -36,10 +36,19 @@ else:
 # Fallback: 공통 모듈 import 실패 시에만 로컬 정의
 if not _USE_COMMON_UTILS:
     class DecimalEncoder(json.JSONEncoder):
-        """DynamoDB Decimal 타입을 JSON 호환되도록 변환 (Fallback)"""
+        """
+        DynamoDB Decimal 타입을 JSON 호환되도록 변환 (Fallback).
+        
+        [v2.3] 부동 소수점 정밀도 이슈 해결:
+        - obj % 1 대신 Decimal 메서드 사용
+        - 명시적 타입 변환
+        """
         def default(self, obj):
             if isinstance(obj, Decimal):
-                return float(obj) if obj % 1 else int(obj)
+                # [v2.3] 정수/소수 판별을 Decimal 메서드로 안전하게 처리
+                if obj == obj.to_integral_value():
+                    return int(obj)
+                return float(obj)
             return super(DecimalEncoder, self).default(obj)
 
     def decode_token(token):
@@ -60,10 +69,26 @@ if not _USE_COMMON_UTILS:
 
 
 def lambda_handler(event, context):
-    """GET /executions
-    Expects JWT authorizer with claims at event['requestContext']['authorizer']['jwt']['claims']
-    Returns list of executions for the authenticated ownerId using the configured GSI.
-    Supports query params: limit (int), nextToken (opaque token returned from src.previous call)
+    """
+    GET /executions - 사용자의 실행 이력 목록 조회.
+    
+    JWT authorizer claims에서 ownerId를 추출하여 해당 사용자의 실행 목록 반환.
+    OwnerIdStartDateIndex GSI를 사용하여 최신순 정렬.
+    
+    Query Params:
+        limit (int): 반환할 최대 항목 수 (1-100, 기본값 20)
+        nextToken (str): 페이지네이션 토큰
+    
+    [v2.3] 개선사항:
+    1. ProjectionExpression 최적화 - 필요한 필드만 조회하여 RCU 절약
+    2. step_function_state에서 대용량 state_history 제거 (OOM 방지)
+    3. final_result 파싱 실패 시 구조화된 에러 객체 반환
+    4. HTTP 캐싱 헤더 추가 (API 호출 횟수 감소)
+    
+    Note:
+        GSI Projection 설정 확인 필요:
+        - KEYS_ONLY 또는 INCLUDE로 설정 시 RCU 절약 가능
+        - ALL로 설정 시 메인 테이블과 동일한 RCU 비용 발생
     """
     # 보안 로깅: 민감한 정보 제외하고 필요한 정보만 로깅
     logger.info('ListExecutions called: method=%s, path=%s',
@@ -169,23 +194,32 @@ def lambda_handler(event, context):
             if 'final_result' in item and isinstance(item['final_result'], str):
                 try:
                     item['final_result'] = json.loads(item['final_result'])
-                except (json.JSONDecodeError, TypeError):
-                    # 파싱 실패 시 문자열 그대로 유지
-                    pass
+                except (json.JSONDecodeError, TypeError) as e:
+                    # [v2.3] 파싱 실패 시 구조화된 에러 객체 반환
+                    # 프론트엔드에서 방어 로직을 짤 수 있도록 가이드
+                    item['final_result'] = {
+                        'raw': item['final_result'][:1000] if len(item['final_result']) > 1000 else item['final_result'],
+                        'parse_error': True,
+                        'error_type': type(e).__name__
+                    }
 
-            # Strip detailed state_history from src.step_function_state for list responses
+            # [v2.3] step_function_state에서 대용량 state_history 제거
+            # 목록 조회에서는 스냅샷만 유지하여 페이로드 크기 최소화
+            # Note: 이상적으로는 DynamoDB에서 읽을 때부터 제외해야 RCU 절약 가능
+            #       현재는 ProjectionExpression에서 중첩 필드 제외가 불가하여 메모리에서 처리
             if 'step_function_state' in item and isinstance(item['step_function_state'], dict):
                 try:
-                    # Remove large or sensitive `state_history` keys while keeping the snapshot
                     sfs = item['step_function_state']
                     if isinstance(sfs, dict):
+                        # 대용량 히스토리 필드 제거 (OOM 방지)
                         sfs.pop('state_history', None)
-                        # Also remove nested occurrences
+                        
+                        # 중첩된 히스토리도 제거
                         for k in ('state_data', 'current_state'):
                             if isinstance(sfs.get(k), dict):
                                 sfs[k].pop('state_history', None)
                         
-                        # Inject initial_input if input is missing
+                        # initial_input이 있으면 input 필드에 주입
                         if not sfs.get('input') and item.get('initial_input'):
                             sfs['input'] = item.get('initial_input')
 
@@ -204,9 +238,19 @@ def lambda_handler(event, context):
             'nextToken': out_token,
         }
         
+        # [v2.3] HTTP 캐싱 헤더 추가
+        # 실행 이력은 대부분 COMPLETED 상태이므로 단기 캐싱 가능
+        # private: 사용자별 데이터이므로 CDN 캐싱 금지
+        cache_control = 'private, max-age=30'  # 30초 캐시
+        
         # DecimalEncoder를 사용하여 숫자는 숫자 그대로 JSON 변환
         return {
             'statusCode': 200,
+            'headers': {
+                'Content-Type': 'application/json',
+                'Cache-Control': cache_control,
+                'X-Content-Type-Options': 'nosniff',  # 보안 헤더
+            },
             'body': json.dumps(body, cls=DecimalEncoder),
         }
 

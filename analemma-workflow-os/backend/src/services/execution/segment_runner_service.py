@@ -3,6 +3,13 @@ import os
 import time
 from typing import Dict, Any, Optional
 
+# [v2.1] 중앙 집중식 재시도 유틸리티
+try:
+    from src.common.retry_utils import retry_call, retry_stepfunctions, retry_s3
+    RETRY_UTILS_AVAILABLE = True
+except ImportError:
+    RETRY_UTILS_AVAILABLE = False
+
 # Services
 from src.services.state.state_manager import StateManager
 from src.services.recovery.self_healing_service import SelfHealingService
@@ -54,15 +61,28 @@ class SegmentRunnerService:
             payload['idempotency_key'] = child_idempotency_key
             payload['parent_workflow_id'] = parent_workflow_id
             
-            # 4. Start Execution
+            # 4. Start Execution with retry
             safe_exec_name = "".join(c for c in child_idempotency_key if c.isalnum() or c in "-_")
             
             logger.info(f"Triggering Child SFN: {safe_exec_name}")
-            response = sfn_client.start_execution(
-                stateMachineArn=orchestrator_arn,
-                name=safe_exec_name,
-                input=json.dumps(payload)
-            )
+            
+            # [v2.1] Step Functions start_execution에 재시도 적용
+            def _start_child_execution():
+                return sfn_client.start_execution(
+                    stateMachineArn=orchestrator_arn,
+                    name=safe_exec_name,
+                    input=json.dumps(payload)
+                )
+            
+            if RETRY_UTILS_AVAILABLE:
+                response = retry_call(
+                    _start_child_execution,
+                    max_retries=2,
+                    base_delay=0.5,
+                    max_delay=5.0
+                )
+            else:
+                response = _start_child_execution()
             
             return {
                 "status": "ASYNC_CHILD_WORKFLOW_STARTED",
@@ -124,7 +144,7 @@ class SegmentRunnerService:
         partition_map = event.get('partition_map')
         partition_map_s3_path = event.get('partition_map_s3_path')
         
-        # [Critical Fix] Support S3 Offloaded Partition Map
+        # [Critical Fix] Support S3 Offloaded Partition Map with retry
         if not partition_map and partition_map_s3_path:
             try:
                 import boto3
@@ -134,10 +154,24 @@ class SegmentRunnerService:
                 key_name = "/".join(partition_map_s3_path.replace("s3://", "").split("/")[1:])
                 
                 logger.info(f"Loading partition_map from S3: {partition_map_s3_path}")
-                obj = s3.get_object(Bucket=bucket_name, Key=key_name)
-                partition_map = json.loads(obj['Body'].read().decode('utf-8'))
+                
+                # [v2.1] S3 get_object에 재시도 적용
+                def _get_partition_map():
+                    obj = s3.get_object(Bucket=bucket_name, Key=key_name)
+                    return json.loads(obj['Body'].read().decode('utf-8'))
+                
+                if RETRY_UTILS_AVAILABLE:
+                    partition_map = retry_call(
+                        _get_partition_map,
+                        max_retries=2,
+                        base_delay=0.5,
+                        max_delay=5.0
+                    )
+                else:
+                    partition_map = _get_partition_map()
+                    
             except Exception as e:
-                logger.error(f"Failed to load partition_map from S3: {e}")
+                logger.error(f"Failed to load partition_map from S3 after retries: {e}")
                 # Fallback to dynamic partitioning (handled in _resolve_segment_config)
         
         segment_config = self._resolve_segment_config(workflow_config, partition_map, segment_id)

@@ -5,6 +5,14 @@ import uuid
 from typing import Any, Dict, Optional
 
 import boto3
+from botocore.exceptions import ClientError
+
+# [v2.1] 중앙 집중식 재시도 유틸리티
+try:
+    from src.common.retry_utils import retry_call, with_retry_sync, CircuitBreaker
+    RETRY_UTILS_AVAILABLE = True
+except ImportError:
+    RETRY_UTILS_AVAILABLE = False
 
 try:  # Allow local imports during tests and packaged Lambda execution
     from src.handlers.core.segment_runner_handler import lambda_handler as segment_runner  # type: ignore
@@ -184,26 +192,39 @@ def _dispatch_worker(payload: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         ecs_client = boto3.client("ecs")
         
-        # Fargate Task 실행 (15분 제한 없음!)
-        response = ecs_client.run_task(
-            cluster=cluster_name,
-            taskDefinition=task_definition,
-            launchType="FARGATE",
-            networkConfiguration=network_config,
-            overrides=container_overrides,
-            tags=[
-                {"key": "WorkflowId", "value": str(workflow_id or "unknown")},
-                {"key": "OwnerId", "value": str(owner_id or "unknown")},
-                {"key": "SegmentToRun", "value": str(segment_to_run)},
-                {"key": "Purpose", "value": "AsyncLLMWorker"}
-            ]
-        )
+        # [v2.1] ECS run_task는 Exponential Backoff로 재시도
+        # 프로비저닝 지연, API Throttling 등 일시적 장애 대응
+        def _run_ecs_task():
+            return ecs_client.run_task(
+                cluster=cluster_name,
+                taskDefinition=task_definition,
+                launchType="FARGATE",
+                networkConfiguration=network_config,
+                overrides=container_overrides,
+                tags=[
+                    {"key": "WorkflowId", "value": str(workflow_id or "unknown")},
+                    {"key": "OwnerId", "value": str(owner_id or "unknown")},
+                    {"key": "SegmentToRun", "value": str(segment_to_run)},
+                    {"key": "Purpose", "value": "AsyncLLMWorker"}
+                ]
+            )
+        
+        if RETRY_UTILS_AVAILABLE:
+            response = retry_call(
+                _run_ecs_task,
+                max_retries=3,
+                base_delay=1.0,
+                max_delay=10.0,
+                exceptions=(ClientError, ConnectionError, Exception)
+            )
+        else:
+            response = _run_ecs_task()
         
         task_arn = response["tasks"][0]["taskArn"] if response.get("tasks") else None
         logger.info(f"Started Fargate async worker task: {task_arn}")
         
     except Exception as exc:
-        logger.exception("Failed to start Fargate async worker")
+        logger.exception("Failed to start Fargate async worker after retries")
         _send_task_failure_safe(task_token, "AsyncLLMDispatchFailed", str(exc))
         raise
 

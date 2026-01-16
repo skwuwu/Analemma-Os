@@ -1,19 +1,19 @@
 """
-Model Router v2.3: Canvas 모드에 따른 동적 모델 선택
+Model Router v2.3: Dynamic Model Selection Based on Canvas Mode
 
-비용 최적화를 위해 작업 복잡도에 따라 적절한 모델을 선택합니다.
-- Agentic Designer (전체 생성): 고성능 모델 (Gemini 1.5 Pro, Claude 3.5 Sonnet, GPT-4o)
-- Co-design (부분 수정): 경량 모델 (Gemini 1.5 Flash, Claude Haiku)
+Selects appropriate models based on task complexity for cost optimization.
+- Agentic Designer (full generation): High-performance models (Gemini 1.5 Pro, Claude 3.5 Sonnet, GPT-4o)
+- Co-design (partial modification): Lightweight models (Gemini 1.5 Flash, Claude Haiku)
 
-Gemini Native 통합:
-- 구조적 복잡성(Loop/Map) 해결: Gemini 1.5 Pro 우선 할당
-- 초장기 문맥(1M+ 토큰): Gemini 1.5 Pro/Flash 활용
-- 실시간 협업: Gemini 1.5 Flash (1초 미만 응답)
+Gemini Native Integration:
+- Structural complexity (Loop/Map) resolution: Gemini 1.5 Pro priority allocation
+- Extended context (1M+ tokens): Gemini 1.5 Pro/Flash utilization
+- Real-time collaboration: Gemini 1.5 Flash (sub-second response)
 
 v2.3 Critical Fixes:
-- ① 이중 부정 감지 개선: LLM 기반 의도 분석으로 하드코딩 필터 대체
-- ② Adaptive TTFT Routing: 실시간 메트릭 기반 동적 라우팅
-- ③ Soft/Hard 예산 정책: 예산 부족 시 유연한 성능 조절
+- (1) Double negation detection improvement: LLM-based intent analysis replacing hardcoded filters
+- (2) Adaptive TTFT Routing: Real-time metrics-based dynamic routing
+- (3) Soft/Hard budget policy: Flexible performance adjustment when budget is insufficient
 """
 
 import os
@@ -28,31 +28,31 @@ logger = logging.getLogger(__name__)
 
 
 class ModelTier(Enum):
-    """모델 성능 티어"""
-    PREMIUM = "premium"      # 최고 성능, 높은 비용 (전체 워크플로우 생성)
-    STANDARD = "standard"    # 중간 성능, 중간 비용 (복잡한 Co-design)
-    ECONOMY = "economy"      # 기본 성능, 낮은 비용 (단순 Co-design)
+    """Model performance tier"""
+    PREMIUM = "premium"      # Highest performance, high cost (full workflow generation)
+    STANDARD = "standard"    # Medium performance, medium cost (complex Co-design)
+    ECONOMY = "economy"      # Basic performance, low cost (simple Co-design)
 
 
 class ThinkingLevel(Enum):
     """
-    Gemini Thinking Mode 레벨
+    Gemini Thinking Mode Level
     
-    복잡한 계획/설계 작업에서 AI의 사고 깊이를 동적으로 조절합니다.
-    - MINIMAL: 단순 변경, 오타 수정 등 (1K 토큰)
-    - STANDARD: 일반적인 Co-design 작업 (2K 토큰)
-    - DEEP: 복잡한 구조 변경, 다중 노드 추가 (4K 토큰)
-    - MAXIMUM: 전체 워크플로우 생성, 아키텍처 설계 (8K 토큰)
-    - ULTRA: 극도로 복잡한 분산 시스템 설계 (16K 토큰)
+    Dynamically adjusts AI reasoning depth for complex planning/design tasks.
+    - MINIMAL: Simple changes, typo fixes, etc. (1K tokens)
+    - STANDARD: Typical Co-design tasks (2K tokens)
+    - DEEP: Complex structural changes, multi-node additions (4K tokens)
+    - MAXIMUM: Full workflow generation, architecture design (8K tokens)
+    - ULTRA: Extremely complex distributed system design (16K tokens)
     """
-    MINIMAL = "minimal"      # 1024 토큰
-    STANDARD = "standard"    # 2048 토큰
-    DEEP = "deep"            # 4096 토큰
-    MAXIMUM = "maximum"      # 8192 토큰
-    ULTRA = "ultra"          # 16384 토큰
+    MINIMAL = "minimal"      # 1024
+    STANDARD = "standard"    # 2048
+    DEEP = "deep"            # 4096
+    MAXIMUM = "maximum"      # 8192
+    ULTRA = "ultra"          # 16384
 
 
-# ThinkingLevel → 토큰 예산 매핑
+# ThinkingLevel
 THINKING_BUDGET_MAP = {
     ThinkingLevel.MINIMAL: 1024,
     ThinkingLevel.STANDARD: 2048,
@@ -63,25 +63,25 @@ THINKING_BUDGET_MAP = {
 
 
 class ModelProvider(Enum):
-    """모델 제공자"""
-    GEMINI = "gemini"        # Google Gemini (1M+ context, 구조적 추론)
+    """Model provider"""
+    GEMINI = "gemini"        # Google Gemini (1M+ context, structural reasoning)
     ANTHROPIC = "anthropic"  # Anthropic Claude (Bedrock)
-    OPENAI = "openai"        # OpenAI GPT (직접 API)
+    OPENAI = "openai"        # OpenAI GPT (direct API)
     META = "meta"            # Meta Llama (Bedrock)
 
 
 @dataclass
 class ModelConfig:
     """
-    모델 설정
+    Model configuration
     
-    [2026년 고도화]
-    - supports_context_caching: Gemini Context Caching API 지원 (입력 비용 최대 90% 절감)
-    - expected_ttft_ms: 첫 번째 토큰 생성 시간 (Time To First Token) - 기준값
-    - cached_cost_per_1k_tokens: 캐싱 적용 시 비용
+    [2026 Enhancement]
+    - supports_context_caching: Gemini Context Caching API support (up to 90% input cost reduction)
+    - expected_ttft_ms: Time To First Token - baseline value
+    - cached_cost_per_1k_tokens: Cost when caching is applied
     
     [v2.3 Adaptive Routing]
-    - _recent_ttft_samples: 최근 TTFT 측정값 (동적 라우팅용)
+    - _recent_ttft_samples: Recent TTFT measurements (for dynamic routing)
     """
     model_id: str
     max_tokens: int
@@ -101,31 +101,32 @@ class ModelConfig:
 
 
 # ============================================================
-# [② Adaptive TTFT Routing] 실시간 TTFT 메트릭 추적
+# [(2) Adaptive TTFT Routing] Real-time TTFT Metrics Tracking
 # ============================================================
 
 # ┌───────────────────────────────────────────────────────────────────────────┐
-# │ ⚠️ Lambda Stateless 환경 고려사항                                         │
+# │ ⚠️ Lambda Stateless Environment Considerations                            │
 # │                                                                           │
-# │ 현재 _ttft_tracker는 인메모리에 상주합니다. AWS Lambda는 실행 후          │
-# │ 컨테이너가 소멸하므로 다음 실행 시 이전 TTFT 기록이 유실됩니다.           │
+# │ Currently _ttft_tracker resides in-memory. AWS Lambda containers          │
+# │ are destroyed after execution, so previous TTFT records are lost          │
+# │ on subsequent invocations.                                                 │
 # │                                                                           │
-# │ ▸ 데모/개발 환경: 현재 구현으로 충분                                       │
-# │ ▸ 프로덕션 환경: 아래 옵션 중 선택하여 확장 필요                           │
+# │ ▸ Demo/Development environment: Current implementation is sufficient      │
+# │ ▸ Production environment: Choose from the following options to extend     │
 # │                                                                           │
-# │   1. ElastiCache (Redis): 짧은 TTL(5분)로 TTFT 메트릭 공유                │
-# │      - 장점: 밀리초 수준 지연, Lambda 간 즉시 공유                         │
-# │      - 단점: 추가 비용, VPC 설정 필요                                      │
+# │   1. ElastiCache (Redis): Share TTFT metrics with short TTL (5min)        │
+# │      - Pros: Millisecond-level latency, instant sharing between Lambdas   │
+# │      - Cons: Additional cost, VPC configuration required                  │
 # │                                                                           │
-# │   2. DynamoDB: TTL 속성 활용한 자동 만료                                   │
-# │      - 장점: 서버리스, 관리 부담 낮음                                      │
-# │      - 단점: Redis 대비 지연 높음 (10-20ms)                                │
+# │   2. DynamoDB: Automatic expiration using TTL attribute                   │
+# │      - Pros: Serverless, low management overhead                          │
+# │      - Cons: Higher latency compared to Redis (10-20ms)                   │
 # │                                                                           │
-# │   3. CloudWatch Metrics: EMF 포맷으로 TTFT 퍼블리시                        │
-# │      - 장점: 기존 모니터링 통합, 추가 인프라 불필요                        │
-# │      - 단점: 쿼리 지연 (1-2분), 실시간 라우팅에 부적합                     │
+# │   3. CloudWatch Metrics: Publish TTFT in EMF format                       │
+# │      - Pros: Integrates with existing monitoring, no additional infra     │
+# │      - Cons: Query latency (1-2min), unsuitable for real-time routing     │
 # │                                                                           │
-# │ 분산 환경 확장 시 아래 인터페이스를 구현하면 됩니다:                       │
+# │ For distributed environment extension, implement the following interface: │
 # │   TTFTStorage.save(model_id, ttft_ms)                                     │
 # │   TTFTStorage.load(model_id) -> List[int]                                 │
 # └───────────────────────────────────────────────────────────────────────────┘
@@ -202,14 +203,14 @@ class AdaptiveTTFTTracker:
                 logger.warning(f"Failed to sync from distributed storage: {e}")
     
     def record_ttft(self, model_id: str, measured_ttft_ms: int) -> None:
-        """TTFT 측정값 기록 (인메모리 + 분산 스토리지)"""
+        """Record TTFT measurement (in-memory + distributed storage)"""
         if model_id not in self._samples:
             self._samples[model_id] = deque(maxlen=self._window_size)
         
         self._samples[model_id].append(measured_ttft_ms)
         self._last_update[model_id] = time.time()
         
-        # 분산 스토리지에도 저장 (비동기 권장이지만 동기로 구현)
+        # Save to distributed storage as well (async recommended but sync implemented)
         if self._distributed_backend and self._distributed_backend.is_available():
             try:
                 self._distributed_backend.save(model_id, measured_ttft_ms)
@@ -229,7 +230,7 @@ class AdaptiveTTFTTracker:
         Returns:
             효과적 TTFT (ms) - 최근 측정값이 없으면 기준값 반환
         """
-        # Lambda 콜드 스타트 시 분산 스토리지에서 동기화
+        # Sync from distributed storage on Lambda cold start
         self._sync_from_distributed(model_id)
         
         if model_id not in self._samples or len(self._samples[model_id]) == 0:
@@ -237,7 +238,7 @@ class AdaptiveTTFTTracker:
         
         samples = list(self._samples[model_id])
         
-        # 지수 가중 평균 (최근 값에 높은 가중치)
+        # Exponentially weighted average (higher weight for recent values)
         weighted_sum = 0.0
         weight_total = 0.0
         
@@ -251,9 +252,9 @@ class AdaptiveTTFTTracker:
         
         effective = int(weighted_sum / weight_total)
         
-        # 기준값과의 편차가 너무 크면 클램핑 (이상치 방지)
-        max_deviation = base_ttft_ms * 3  # 최대 3배까지만 허용
-        min_deviation = base_ttft_ms // 3  # 최소 1/3까지만 허용
+        # Clamp if deviation from baseline is too large (outlier prevention)
+        max_deviation = base_ttft_ms * 3  # Allow up to 3x baseline
+        min_deviation = base_ttft_ms // 3  # Allow down to 1/3 baseline
         
         return max(min_deviation, min(effective, max_deviation))
     
@@ -316,31 +317,31 @@ def get_ttft_metrics() -> Dict[str, Dict[str, Any]]:
 
 
 # ============================================================
-# [③ Soft/Hard 예산 정책] Budget Policy
+# [(3) Soft/Hard Budget Policy] Budget Policy
 # ============================================================
 class BudgetPolicy(Enum):
     """
-    예산 제약 정책
+    Budget constraint policy
     
-    - HARD: 예산 초과 시 즉시 하위 모델로 전환 (비용 엄격 제어)
-    - SOFT: 예산 초과 시 성능 조절 후 경고 (품질 우선)
-    - ADAPTIVE: 작업 중요도에 따라 자동 결정
+    - HARD: Immediately switch to lower model when budget exceeded (strict cost control)
+    - SOFT: Adjust performance with token limits and warn when budget exceeded (quality priority)
+    - ADAPTIVE: Automatically decide based on task importance
     """
-    HARD = "hard"        # 엄격한 예산 제어, 성능 저하 감수
-    SOFT = "soft"        # 유연한 예산, 토큰 제한으로 조절
-    ADAPTIVE = "adaptive"  # 작업 복잡도에 따라 자동 결정
+    HARD = "hard"        # Strict budget control, accept performance degradation
+    SOFT = "soft"        # Flexible budget, adjust with token limits
+    ADAPTIVE = "adaptive"  # Automatically decide based on task complexity
 
 
 @dataclass
 class BudgetAdjustmentResult:
     """
-    예산 조정 결과
+    Budget adjustment result
     
-    Soft 정책 적용 시 어떤 조정이 이루어졌는지 상세 정보 제공
+    Provides detailed information about what adjustments were made when Soft policy is applied
     
-    [③ Critical Fix] system_prompt_addition 필드 추가:
-    - SOFT 정책 적용 시 시스템 프롬프트에 추가할 지침
-    - 토큰 제한으로 인한 답변 끊김 방지
+    [(3) Critical Fix] system_prompt_addition field added:
+    - Instructions to add to system prompt when SOFT policy is applied
+    - Prevents response cut-off due to token limits
     """
     original_model: str
     adjusted_model: str
@@ -364,21 +365,21 @@ class BudgetAdjustmentResult:
     
     def get_augmented_system_prompt(self, original_prompt: str) -> str:
         """
-        [③ Critical Fix] 예산 조정에 따른 시스템 프롬프트 보강
+        [(3) Critical Fix] Augment system prompt based on budget adjustment
         
-        SOFT 정책이 적용된 경우, 모델에게 "짧게 답변하라"는 지침을
-        동적으로 추가하여 답변이 중간에 끊기는 것을 방지합니다.
+        When SOFT policy is applied, dynamically adds "respond briefly" instructions
+        to the model to prevent response cut-off mid-sentence.
         
         Args:
-            original_prompt: 원본 시스템 프롬프트
+            original_prompt: Original system prompt
             
         Returns:
-            보강된 시스템 프롬프트
+            Augmented system prompt
         """
         if not self.system_prompt_addition:
             return original_prompt
         
-        # 프롬프트 끝에 예산 제약 지침 추가
+        # Add budget constraint instruction at the end of prompt
         return f"""{original_prompt}
 
 {self.system_prompt_addition}"""
@@ -431,18 +432,18 @@ def _ensure_output_headroom(
     if max_tokens <= 0:
         return thinking_budget, max_tokens
     
-    # 최대 허용 Thinking Budget 계산
+    # Calculate maximum allowed Thinking Budget
     max_thinking_budget = int(max_tokens * (1 - min_output_ratio))
     
-    # 최소 Thinking Budget 보장 (1024 토큰)
+    # Ensure minimum Thinking Budget (1024 tokens)
     max_thinking_budget = max(1024, max_thinking_budget)
     
-    # Thinking Budget 조정 필요 여부 확인
+    # Check if Thinking Budget adjustment is needed
     if thinking_budget > max_thinking_budget:
         original_thinking = thinking_budget
         thinking_budget = max_thinking_budget
         
-        # Output 공간 계산
+        # Output space calculation
         output_space = max_tokens - thinking_budget
         output_ratio = output_space / max_tokens * 100
         
@@ -479,11 +480,11 @@ def apply_budget_constraint(
     Returns:
         (조정된 ModelConfig, 조정된 Thinking Budget, 조정 결과 상세)
     """
-    # 예산 제약 확인 필요 여부
+    # Budget constraint check
     tier_order = {ModelTier.ECONOMY: 0, ModelTier.STANDARD: 1, ModelTier.PREMIUM: 2}
     
     if tier_order.get(recommended_model.tier, 0) <= tier_order.get(budget_constraint, 2):
-        # 제약 내에 있음 - 조정 불필요
+        # Within constraint - no adjustment needed
         return recommended_model, recommended_thinking_budget, BudgetAdjustmentResult(
             original_model=recommended_model.model_id,
             adjusted_model=recommended_model.model_id,
@@ -494,33 +495,33 @@ def apply_budget_constraint(
             policy_applied=policy
         )
     
-    # ADAPTIVE 정책: 복잡도에 따라 HARD/SOFT 결정
+    # ADAPTIVE policy: Decide HARD/SOFT based on complexity
     if policy == BudgetPolicy.ADAPTIVE:
-        # 복잡한 작업(score >= 5)은 SOFT, 단순 작업은 HARD
+        # Complex tasks (score >= 5) use SOFT, simple tasks use HARD
         policy = BudgetPolicy.SOFT if task_complexity_score >= 5 else BudgetPolicy.HARD
     
-    # HARD 정책: 하위 티어 모델로 전환
+    # HARD policy: Switch to lower tier model
     if policy == BudgetPolicy.HARD:
-        # 예산 티어에 맞는 모델 찾기
+        # Find model matching budget tier
         target_models = [
             (name, config) for name, config in AVAILABLE_MODELS.items()
             if config.tier == budget_constraint and config.provider == recommended_model.provider
         ]
         
         if not target_models:
-            # 같은 제공자 없으면 아무 모델이나
+            # If no same provider, pick any model
             target_models = [
                 (name, config) for name, config in AVAILABLE_MODELS.items()
                 if config.tier == budget_constraint
             ]
         
         if target_models:
-            # 가장 저렴한 모델 선택
+            # Select the cheapest model
             _, adjusted_model = min(target_models, key=lambda x: x[1].cost_per_1k_tokens)
         else:
             adjusted_model = AVAILABLE_MODELS.get("claude-3-haiku", recommended_model)
         
-        # Thinking budget도 비례 축소
+        # Thinking budget proportionally reduced
         budget_ratio = adjusted_model.max_tokens / recommended_model.max_tokens
         adjusted_thinking = int(recommended_thinking_budget * budget_ratio)
         adjusted_thinking = max(1024, min(adjusted_thinking, adjusted_model.max_tokens // 2))
@@ -547,24 +548,24 @@ def apply_budget_constraint(
             original_thinking_budget=recommended_thinking_budget,
             adjusted_thinking_budget=adjusted_thinking,
             policy_applied=BudgetPolicy.HARD,
-            warning_message=f"⚠️ 예산 제약으로 {recommended_model.model_id} → {adjusted_model.model_id} 전환. 복잡한 작업 시 성능 저하 가능.",
+            warning_message=f"⚠️ Budget constraint: Switched {recommended_model.model_id} → {adjusted_model.model_id}. Performance may degrade for complex tasks.",
             cost_reduction_percent=cost_reduction
         )
     
-    # SOFT 정책: 동일 모델, 토큰 제한으로 비용 절감
+    # SOFT policy: Same model, reduce cost through token limits
     else:  # BudgetPolicy.SOFT
-        # 비용 비율 계산
+        # Calculate cost ratio
         target_cost_ratio = {
             ModelTier.ECONOMY: 0.3,
             ModelTier.STANDARD: 0.6,
             ModelTier.PREMIUM: 1.0
         }.get(budget_constraint, 1.0)
         
-        # max_tokens 축소 (비용은 출력 토큰에 비례)
+        # max_tokens reduction (cost proportional to output tokens)
         adjusted_max_tokens = int(recommended_model.max_tokens * target_cost_ratio)
-        adjusted_max_tokens = max(1024, adjusted_max_tokens)  # 최소 1K
+        adjusted_max_tokens = max(1024, adjusted_max_tokens)  # Minimum 1K
         
-        # Thinking budget도 축소
+        # Thinking budget also reduced
         adjusted_thinking = int(recommended_thinking_budget * target_cost_ratio)
         adjusted_thinking = max(1024, adjusted_thinking)
         
@@ -581,22 +582,22 @@ def apply_budget_constraint(
         
         cost_reduction = (1 - target_cost_ratio) * 100
         
-        # ═══════════════════════════════════════════════════════════════════
-        # [③ Critical Fix] SOFT 정책 시 시스템 프롬프트 지침 생성
-        # - max_tokens만 줄이면 모델이 답변 중간에 끊김 (Cut-off)
-        # - 시스템 프롬프트에 "짧게 답변하라"는 지침을 동적 추가
-        # ═══════════════════════════════════════════════════════════════════
-        budget_constraint_prompt = f"""⚠️ [시스템 예산 제약 안내]
-현재 예산 제약으로 인해 응답 토큰이 {adjusted_max_tokens}개로 제한되어 있습니다.
-다음 지침을 반드시 따르세요:
+        # ===============================================================
+        # [(3) Critical Fix] Generate system prompt instructions for SOFT policy
+        # - If only max_tokens is reduced, the model response gets cut off mid-sentence
+        # - Dynamically add "respond briefly" instructions to system prompt
+        # ===============================================================
+        budget_constraint_prompt = f"""⚠️ [System Budget Constraint Notice]
+Due to current budget constraints, response tokens are limited to {adjusted_max_tokens}.
+Please follow these instructions strictly:
 
-1. **핵심만 간결하게**: 부가 설명 없이 요청된 내용의 핵심만 답변하세요.
-2. **우선순위 기반 출력**: 가장 중요한 내용을 먼저 출력하세요.
-3. **코드 최소화**: 코드가 필요한 경우 핵심 로직만 포함하세요.
-4. **완전한 문장 유지**: 답변이 중간에 끊기지 않도록 마무리를 먼저 계획하세요.
-5. **JSON 구조 완성 보장**: JSON을 출력할 경우 반드시 닫는 괄호까지 포함하세요.
+1. **Be concise with essentials only**: Answer only the core requested content without elaboration.
+2. **Priority-based output**: Output the most important content first.
+3. **Minimize code**: Include only essential logic when code is needed.
+4. **Maintain complete sentences**: Plan your conclusion first to avoid mid-sentence cut-off.
+5. **Ensure JSON structure completion**: Always include closing brackets when outputting JSON.
 
-제한된 토큰 내에서 완전하고 유용한 응답을 제공하는 것이 목표입니다."""
+The goal is to provide complete and useful responses within the limited tokens."""
         
         return recommended_model, adjusted_thinking, BudgetAdjustmentResult(
             original_model=recommended_model.model_id,
@@ -606,9 +607,9 @@ def apply_budget_constraint(
             original_thinking_budget=recommended_thinking_budget,
             adjusted_thinking_budget=adjusted_thinking,
             policy_applied=BudgetPolicy.SOFT,
-            warning_message=f"⚠️ 예산 제약으로 출력 토큰 {recommended_model.max_tokens}→{adjusted_max_tokens}, Thinking {recommended_thinking_budget}→{adjusted_thinking}으로 제한.",
+            warning_message=f"⚠️ Budget constraint: Output tokens {recommended_model.max_tokens}→{adjusted_max_tokens}, Thinking {recommended_thinking_budget}→{adjusted_thinking} limited.",
             cost_reduction_percent=cost_reduction,
-            system_prompt_addition=budget_constraint_prompt  # [③ Fix] 프롬프트 지침 추가
+            system_prompt_addition=budget_constraint_prompt  # [(3) Fix] Add prompt instructions
         )
 
 
@@ -628,9 +629,9 @@ AVAILABLE_MODELS = {
         supports_long_context=True,
         supports_structured_output=True,
         supports_context_caching=True,
-        cached_cost_per_1k_tokens=0.01875,  # 캐싱 시 75% 할인
-        expected_ttft_ms=150,               # 매우 빠른 응답
-        expected_tps=150,                   # 높은 처리량
+        cached_cost_per_1k_tokens=0.01875,  # 75% discount with caching
+        expected_ttft_ms=150,               # Very fast response
+        expected_tps=150,                   # High throughput
     ),
     "gemini-1.5-pro": ModelConfig(
         model_id="gemini-1.5-pro",
@@ -641,8 +642,8 @@ AVAILABLE_MODELS = {
         supports_long_context=True,
         supports_structured_output=True,
         supports_context_caching=True,
-        cached_cost_per_1k_tokens=0.3125,   # 캐싱 시 75% 할인
-        expected_ttft_ms=300,               # 빠른 응답
+        cached_cost_per_1k_tokens=0.3125,   # 75% discount with caching
+        expected_ttft_ms=300,               # Fast response
         expected_tps=80,
     ),
     "gemini-1.5-flash": ModelConfig(
@@ -654,9 +655,9 @@ AVAILABLE_MODELS = {
         supports_long_context=True,
         supports_structured_output=True,
         supports_context_caching=True,
-        cached_cost_per_1k_tokens=0.01875,  # 캐싱 시 75% 할인
-        expected_ttft_ms=100,               # 가장 빠른 응답
-        expected_tps=200,                   # 가장 높은 처리량
+        cached_cost_per_1k_tokens=0.01875,  # 75% discount with caching
+        expected_ttft_ms=100,               # Fastest response
+        expected_tps=200,                   # Highest throughput
     ),
     "gemini-1.5-flash-8b": ModelConfig(
         model_id="gemini-1.5-flash-8b",
@@ -667,9 +668,9 @@ AVAILABLE_MODELS = {
         supports_long_context=True,
         supports_structured_output=True,
         supports_context_caching=True,
-        cached_cost_per_1k_tokens=0.009375, # 캐싱 시 75% 할인
-        expected_ttft_ms=80,                # 초고속 응답 (Pre-Routing용)
-        expected_tps=250,                   # 최고 처리량
+        cached_cost_per_1k_tokens=0.009375, # 75% discount with caching
+        expected_ttft_ms=80,                # Ultra-fast response (for Pre-Routing)
+        expected_tps=250,                   # Maximum throughput
     ),
     
     # ──────────────────────────────────────────────────────────
@@ -732,36 +733,36 @@ AVAILABLE_MODELS = {
 
 
 # ============================================================
-# 구조적 복잡성 키워드 (Gemini 우선 할당 트리거)
+# Structural Complexity Keywords (Gemini Priority Allocation Trigger)
 # ============================================================
 STRUCTURAL_KEYWORDS = [
-    # Loop/반복 관련
-    "반복", "루프", "loop", "for each", "foreach", "iterate", "순회",
-    # Map/병렬 관련
-    "병렬", "parallel", "map", "동시", "분산", "concurrent", "distributed",
-    # 조건부 분기 관련
-    "조건", "분기", "if", "else", "switch", "condition", "branch",
-    # 에러 처리 관련
-    "재시도", "retry", "catch", "에러", "예외", "fallback",
-    # 복잡한 구조 관련
-    "서브그래프", "subgraph", "중첩", "nested", "워크플로우 호출",
+    # Loop/Iteration related
+    "repeat", "loop", "for each", "foreach", "iterate", "traverse",
+    # Map/Parallel related
+    "parallel", "map", "concurrent", "distributed", "simultaneous",
+    # Conditional branching related
+    "condition", "branch", "if", "else", "switch",
+    # Error handling related
+    "retry", "catch", "error", "exception", "fallback",
+    # Complex structure related
+    "subgraph", "nested", "workflow call",
 ]
 
-# 장기 컨텍스트 키워드 (Gemini 장기 컨텍스트 활용 트리거)
+# Long context keywords (Gemini Long Context Utilization Trigger)
 LONG_CONTEXT_KEYWORDS = [
-    "이전", "아까", "전에", "과거", "히스토리", "history", "기억",
-    "3단계 전", "이전 버전", "되돌려", "복원", "맥락", "context",
+    "previous", "earlier", "before", "past", "history", "remember",
+    "3 steps ago", "previous version", "revert", "restore", "context",
 ]
 
 
 def _detect_structural_complexity(user_request: str) -> bool:
-    """구조적 복잡성(Loop/Map/Parallel) 필요 여부 감지 (키워드 기반)"""
+    """Detect if structural complexity (Loop/Map/Parallel) is needed (keyword-based)"""
     request_lower = user_request.lower()
     return any(keyword in request_lower for keyword in STRUCTURAL_KEYWORDS)
 
 
 def _detect_long_context_need(user_request: str) -> bool:
-    """장기 컨텍스트 참조 필요 여부 감지 (키워드 기반)"""
+    """Detect if long context reference is needed (keyword-based)"""
     request_lower = user_request.lower()
     return any(keyword in request_lower for keyword in LONG_CONTEXT_KEYWORDS)
 
@@ -777,15 +778,15 @@ def _is_gemini_available() -> bool:
 
 
 # ============================================================
-# [① Pre-Routing Classifier] Semantic Intent Detection
+# [(1) Pre-Routing Classifier] Semantic Intent Detection
 # ============================================================
-# 키워드 매칭의 한계를 극복하기 위해 저렴한 모델로 의도 분류
-# "이전 기능은 무시하고 루프 없이 짜줘" 같은 부정 문맥 처리
+# Overcome keyword matching limitations by classifying intent with inexpensive model
+# Handles negation contexts like "ignore previous features and write without loops"
 
-# 부정어 패턴 (키워드를 무효화)
+# Negation patterns (invalidate keywords)
 NEGATION_PATTERNS = [
-    "없이", "말고", "제외", "무시", "빼고", "안 ", "하지마", "하지 마",
     "without", "except", "exclude", "ignore", "don't", "do not", "no ",
+    "skip", "remove", "disable", "avoid", "not use",
 ]
 
 # [① Critical Fix] 이중 부정 패턴 (부정을 다시 긍정으로)
@@ -804,10 +805,10 @@ DOUBLE_NEGATION_PATTERNS = [
     ("never without", True),
 ]
 
-# 반어법/강조 패턴 (키워드 사용을 강조)
+# Sarcasm/Emphasis patterns (emphasize keyword usage)
 EMPHASIS_PATTERNS = [
-    "반드시", "꼭", "필수", "무조건", "항상", "절대",
     "must", "always", "definitely", "absolutely", "required",
+    "essential", "necessary", "critical", "important", "mandatory",
 ]
 
 

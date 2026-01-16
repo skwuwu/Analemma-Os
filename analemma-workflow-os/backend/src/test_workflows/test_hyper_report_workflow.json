@@ -1,0 +1,225 @@
+{
+  "name": "글로벌 기술 트렌드 하이퍼-리포트 자동 생성",
+  "description": "대량 데이터 처리, 병렬/순차 처리, 의도적 장애, HITL, 지능 증류를 포함한 복합 시나리오",
+  "version": "2.1",
+  "max_loop_iterations": 50,
+  "nodes": [
+    {
+      "node_id": "data_ingestion",
+      "node_name": "대량 데이터 수집",
+      "description": "50+ RSS 피드 또는 200+ 기술 문서 수집 (256KB 초과 시나리오)",
+      "type": "llm",
+      "llm_config": {
+        "provider": "bedrock",
+        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "temperature": 0.3,
+        "max_tokens": 4096,
+        "system_prompt": "당신은 글로벌 기술 트렌드를 수집하는 데이터 엔지니어입니다. 50개 이상의 뉴스 소스에서 데이터를 수집하여 구조화된 JSON 형식으로 반환하세요.",
+        "user_prompt_template": "다음 카테고리에서 최신 기술 트렌드를 수집하세요:\n\n카테고리:\n{% for category in categories %}\n- {{ category }}\n{% endfor %}\n\n각 카테고리별로 10개 이상의 기사 제목과 요약을 포함하여 반환하세요. 총 데이터 크기가 300KB를 초과하도록 상세하게 작성하세요."
+      },
+      "input_variables": ["categories"],
+      "output_key": "raw_data_collection",
+      "metadata": {
+        "expected_payload_size_kb": 350,
+        "test_s3_offloading": true
+      }
+    },
+    {
+      "node_id": "category_dispatcher",
+      "node_name": "분야별 병렬 분류",
+      "description": "수집된 데이터를 AI, Cloud, Security, SaaS 분야로 병렬 분류",
+      "type": "map",
+      "map_config": {
+        "items_source": "$.raw_data_collection.categories",
+        "max_concurrency": 4,
+        "item_processor": {
+          "type": "llm",
+          "llm_config": {
+            "provider": "bedrock",
+            "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "temperature": 0.2,
+            "max_tokens": 2048,
+            "system_prompt": "당신은 기술 문서 분류 전문가입니다. 주어진 기사를 정확한 카테고리로 분류하세요.",
+            "user_prompt_template": "다음 카테고리의 기사들을 분석하세요:\n\n카테고리: {{ item.category }}\n기사 목록: {{ item.articles | tojson }}\n\n각 기사의 핵심 키워드, 중요도(1-10), 관련 기술 스택을 JSON으로 반환하세요."
+          }
+        }
+      },
+      "input_variables": ["raw_data_collection"],
+      "output_key": "categorized_data",
+      "metadata": {
+        "test_parallel_execution": true,
+        "expected_segments": 4
+      }
+    },
+    {
+      "node_id": "saas_analyzer_with_failure",
+      "node_name": "SaaS 분야 분석 (장애 주입)",
+      "description": "SaaS 카테고리 분석 중 의도적 API 에러 발생",
+      "type": "llm",
+      "llm_config": {
+        "provider": "bedrock",
+        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "temperature": 0.5,
+        "max_tokens": 3072,
+        "system_prompt": "당신은 SaaS 트렌드 분석가입니다. 주어진 데이터를 분석하되, 처음 2번은 의도적으로 실패하세요 (테스트 목적).",
+        "user_prompt_template": "{% if attempt_count is undefined or attempt_count < 2 %}SIMULATE_RATE_LIMIT_ERROR{% else %}다음 SaaS 관련 기사를 분석하세요:\n\n{{ categorized_data.SaaS | tojson }}\n\n각 기사의 비즈니스 임팩트, 시장 트렌드, 경쟁 분석을 포함하여 상세 리포트를 작성하세요.{% endif %}"
+      },
+      "input_variables": ["categorized_data", "attempt_count"],
+      "output_key": "saas_analysis",
+      "retry_config": {
+        "max_retries": 3,
+        "base_delay": 2.0,
+        "exponential_backoff": true,
+        "adaptive_model_routing": true
+      },
+      "metadata": {
+        "test_error_injection": true,
+        "test_model_switching": true,
+        "expected_initial_failures": 2
+      }
+    },
+    {
+      "node_id": "foreach_article_analysis",
+      "node_name": "개별 기사 순차 분석",
+      "description": "각 분야 내 개별 기사를 순차적으로 심층 분석",
+      "type": "foreach",
+      "foreach_config": {
+        "items_source": "$.categorized_data.all_articles",
+        "max_iterations": 20,
+        "item_processor": {
+          "type": "llm",
+          "llm_config": {
+            "provider": "bedrock",
+            "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "temperature": 0.3,
+            "max_tokens": 1024,
+            "system_prompt": "당신은 개별 기술 기사를 심층 분석하는 전문가입니다.",
+            "user_prompt_template": "다음 기사를 분석하세요:\n\n제목: {{ item.title }}\n요약: {{ item.summary }}\n\n핵심 내용, 기술적 의미, 향후 전망을 3문장 이내로 요약하세요."
+          }
+        }
+      },
+      "input_variables": ["categorized_data"],
+      "output_key": "detailed_article_analysis",
+      "metadata": {
+        "test_foreach_iteration": true,
+        "test_state_preservation": true
+      }
+    },
+    {
+      "node_id": "low_confidence_filter",
+      "node_name": "신뢰도 필터링",
+      "description": "신뢰도 60% 미만 항목 감지 및 사용자 승인 요청",
+      "type": "condition",
+      "condition": {
+        "expression": "$.detailed_article_analysis.low_confidence_items | length > 0",
+        "true_branch": "human_approval_request",
+        "false_branch": "aggregate_report"
+      },
+      "input_variables": ["detailed_article_analysis"],
+      "output_key": "confidence_check_result",
+      "metadata": {
+        "test_conditional_routing": true
+      }
+    },
+    {
+      "node_id": "human_approval_request",
+      "node_name": "사용자 승인 대기 (HITL)",
+      "description": "낮은 신뢰도 항목에 대한 사용자 검토 요청",
+      "type": "human_approval",
+      "approval_config": {
+        "timeout_seconds": 3600,
+        "fallback_action": "skip_low_confidence",
+        "notification_channels": ["email", "websocket"]
+      },
+      "input_variables": ["detailed_article_analysis", "confidence_check_result"],
+      "output_key": "human_approval_result",
+      "metadata": {
+        "test_hitl": true,
+        "test_task_token_persistence": true,
+        "test_state_recovery": true
+      }
+    },
+    {
+      "node_id": "aggregate_report",
+      "node_name": "최종 리포트 집계",
+      "description": "모든 분석 결과를 하나의 리포트로 통합",
+      "type": "llm",
+      "llm_config": {
+        "provider": "bedrock",
+        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "temperature": 0.4,
+        "max_tokens": 8192,
+        "system_prompt": "당신은 기술 트렌드 리포트 작성 전문가입니다. 모든 분석 결과를 통합하여 경영진용 요약 리포트를 작성하세요.",
+        "user_prompt_template": "다음 분석 결과를 통합하여 최종 리포트를 작성하세요:\n\n카테고리별 분석:\n{{ categorized_data | tojson }}\n\nSaaS 심층 분석:\n{{ saas_analysis | tojson }}\n\n개별 기사 분석:\n{{ detailed_article_analysis | tojson }}\n\n{% if human_approval_result is defined %}사용자 피드백:\n{{ human_approval_result | tojson }}\n{% endif %}\n\n다음 항목을 포함하세요:\n1. 핵심 요약 (Executive Summary)\n2. 분야별 주요 트렌드\n3. 비즈니스 임팩트 분석\n4. 향후 전략 제언\n5. 상세 데이터 테이블"
+      },
+      "input_variables": ["categorized_data", "saas_analysis", "detailed_article_analysis", "human_approval_result"],
+      "output_key": "final_report",
+      "metadata": {
+        "test_aggregation": true,
+        "expected_output_size_kb": 50
+      }
+    },
+    {
+      "node_id": "user_correction_processing",
+      "node_name": "사용자 수정사항 처리",
+      "description": "사용자가 최종 리포트에서 수정한 내용을 반영",
+      "type": "llm",
+      "llm_config": {
+        "provider": "bedrock",
+        "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "temperature": 0.1,
+        "max_tokens": 2048,
+        "system_prompt": "당신은 사용자 피드백 분석 전문가입니다. 사용자의 수정사항에서 패턴을 추출하여 향후 개선을 위한 지침을 생성하세요.",
+        "user_prompt_template": "사용자가 다음과 같이 리포트를 수정했습니다:\n\n원본:\n{{ final_report.original_section }}\n\n수정본:\n{{ user_corrections }}\n\n다음을 추출하세요:\n1. 사용자 선호 스타일 (간결/상세, 기술적/비즈니스)\n2. 피해야 할 표현\n3. 강조해야 할 요소\n4. 향후 리포트 작성 시 적용할 가이드라인 (3-5개 문장)"
+      },
+      "input_variables": ["final_report", "user_corrections"],
+      "output_key": "correction_guidelines",
+      "metadata": {
+        "test_distiller": true,
+        "test_feedback_loop": true
+      }
+    },
+    {
+      "node_id": "cost_calculation",
+      "node_name": "비용 정산",
+      "description": "전체 워크플로우의 LLM 비용 계산",
+      "type": "function",
+      "function_name": "calculate_workflow_cost",
+      "input_variables": ["execution_metadata", "token_usage"],
+      "output_key": "cost_detail",
+      "metadata": {
+        "test_cost_tracking": true
+      }
+    }
+  ],
+  "start_node": "data_ingestion",
+  "end_node": "cost_calculation",
+  "edges": [
+    {"from": "data_ingestion", "to": "category_dispatcher"},
+    {"from": "category_dispatcher", "to": "saas_analyzer_with_failure"},
+    {"from": "saas_analyzer_with_failure", "to": "foreach_article_analysis"},
+    {"from": "foreach_article_analysis", "to": "low_confidence_filter"},
+    {"from": "low_confidence_filter", "to": "human_approval_request", "condition": "low_confidence"},
+    {"from": "low_confidence_filter", "to": "aggregate_report", "condition": "high_confidence"},
+    {"from": "human_approval_request", "to": "aggregate_report"},
+    {"from": "aggregate_report", "to": "user_correction_processing"},
+    {"from": "user_correction_processing", "to": "cost_calculation"}
+  ],
+  "metadata": {
+    "test_category": "complex_integration",
+    "test_features": [
+      "s3_offloading",
+      "parallel_map",
+      "sequential_foreach",
+      "error_injection",
+      "adaptive_routing",
+      "hitl",
+      "state_persistence",
+      "distiller",
+      "cost_tracking"
+    ],
+    "expected_duration_seconds": 180,
+    "expected_token_usage": 25000,
+    "expected_llm_calls": 30
+  }
+}

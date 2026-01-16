@@ -41,7 +41,8 @@
                     "CONCURRENT_BURST",
                     "XRAY_TRACEABILITY",
                     "HITP_TEST",
-                    "PARALLEL_GROUP_TEST"
+                    "PARALLEL_GROUP_TEST",
+                    "HYPER_REPORT"
                 ]
             },
             "Next": "InitializeSimulator"

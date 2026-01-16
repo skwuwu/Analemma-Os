@@ -10,21 +10,34 @@ import logging
 import os
 import asyncio
 from typing import Dict, Any, Optional
+from decimal import Decimal
 
 # 서비스 임포트
 try:
     from src.services.task_service import TaskService
     from src.common.auth_utils import extract_owner_id_from_event
+    from src.common.json_utils import DecimalEncoder
 except ImportError:
     from src.services.task_service import TaskService
     from src.common.auth_utils import extract_owner_id_from_event
+    # Fallback DecimalEncoder
+    class DecimalEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, Decimal):
+                return int(obj) if obj % 1 == 0 else float(obj)
+            return super().default(obj)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 
 
 def _response(status_code: int, body: Any, headers: Dict = None) -> Dict:
-    """Lambda proxy response 생성"""
+    """
+    Lambda proxy response 생성
+    
+    [v2.3] DecimalEncoder를 사용하여 데이터 타입 보존
+    (default=str는 모든 숫자를 문자열로 변환해 차트 라이브러리 호환성 문제 발생)
+    """
     return {
         'statusCode': status_code,
         'headers': {
@@ -34,7 +47,7 @@ def _response(status_code: int, body: Any, headers: Dict = None) -> Dict:
             'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS',
             **(headers or {})
         },
-        'body': json.dumps(body, ensure_ascii=False, default=str) if body else ''
+        'body': json.dumps(body, ensure_ascii=False, cls=DecimalEncoder) if body else ''
     }
 
 
@@ -48,6 +61,28 @@ def _get_path_param(event: Dict, param: str) -> Optional[str]:
     """경로 파라미터 안전 추출"""
     path_params = event.get('pathParameters') or {}
     return path_params.get(param)
+
+
+def _safe_parse_int(value: Any, default: int, min_val: int = 1, max_val: int = 100) -> int:
+    """
+    안전한 정수 파싱 (리소스 제한 가드레일)
+    
+    [v2.3] 사용자가 숫자가 아닌 값을 넣었을 때 int() 에러 방지
+    
+    Args:
+        value: 파싱할 값
+        default: 기본값
+        min_val: 최소값 (기본 1)
+        max_val: 최대값 (기본 100)
+    
+    Returns:
+        안전하게 파싱된 정수
+    """
+    try:
+        parsed = int(value) if value is not None else default
+        return max(min_val, min(parsed, max_val))
+    except (ValueError, TypeError):
+        return default
 
 
 async def lambda_handler(event, context):
@@ -101,11 +136,8 @@ async def handle_list_tasks(
     
     # 쿼리 파라미터 파싱
     status_filter = _get_query_param(event, 'status')
-    limit = int(_get_query_param(event, 'limit', 50))
+    limit = _safe_parse_int(_get_query_param(event, 'limit', 50), default=50, min_val=1, max_val=100)
     include_completed = _get_query_param(event, 'include_completed', 'true').lower() == 'true'
-    
-    # 제한값 검증
-    limit = max(1, min(limit, 100))
     
     try:
         tasks = await task_service.get_tasks(

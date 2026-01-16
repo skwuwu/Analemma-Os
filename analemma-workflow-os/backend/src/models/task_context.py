@@ -12,10 +12,14 @@ Task Context Models for Task Manager UI.
 """
 
 from pydantic import BaseModel, Field, model_validator
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Generator, TYPE_CHECKING
 from datetime import datetime, timezone
 from enum import Enum
 from decimal import Decimal
+from contextlib import contextmanager
+
+if TYPE_CHECKING:
+    from typing import Self
 
 
 class TaskStatus(str, Enum):
@@ -307,6 +311,18 @@ class CollapsedHistory(BaseModel):
         default=False,
         description="추가 데이터 존재 여부"
     )
+    
+    # [v2.2] Cursor Persistence: Anchor Timestamp
+    # 사용자가 히스토리를 보는 도중 새 로그가 쌓여도
+    # 페이지네이션 순서가 꼬이지 않도록 기준 시각을 고정
+    anchor_timestamp: Optional[datetime] = Field(
+        None,
+        description="페이지네이션 기준 시각 (이 시점 이전 로그만 쿼리)"
+    )
+    next_cursor: Optional[str] = Field(
+        None,
+        description="다음 페이지 커서 (S3 key 또는 timestamp 기반)"
+    )
 
 
 class ArtifactPreview(BaseModel):
@@ -519,7 +535,8 @@ class TaskContext(BaseModel):
 
     class Config:
         json_encoders = {
-            datetime: lambda v: v.isoformat()
+            datetime: lambda v: v.isoformat(),
+            Decimal: lambda v: float(v),  # DynamoDB Decimal → JSON float
         }
 
     def add_thought(
@@ -592,6 +609,47 @@ class TaskContext(BaseModel):
         self.sub_status = sub_status
         self.sub_status_detail = detail
         self.updated_at = datetime.now(timezone.utc)
+    
+    def reset_sub_status(self) -> None:
+        """
+        [v2.2] SubStatus를 IDLE로 초기화.
+        
+        노드 종료 시 호출하여 이전 상태가 남아있는 현상 방지.
+        """
+        self.sub_status = SubStatus.IDLE
+        self.sub_status_detail = None
+        self.updated_at = datetime.now(timezone.utc)
+    
+    @contextmanager
+    def sub_status_scope(
+        self, 
+        sub_status: SubStatus, 
+        detail: Optional[str] = None
+    ) -> Generator[None, None, None]:
+        """
+        [v2.2] SubStatus Context Manager.
+        
+        노드 실행 시 자동으로 상태를 설정하고,
+        종료 시 (정상/예외 모두) 자동으로 IDLE로 리셋.
+        
+        Usage:
+            with task_context.sub_status_scope(SubStatus.ANALYZING_DATA, "Processing page 1/10"):
+                # do work here
+                pass
+            # sub_status is automatically reset to IDLE
+        
+        Args:
+            sub_status: 설정할 구체적 행위 상태
+            detail: 추가 설명 (예: '3/10 페이지 처리 중')
+        """
+        previous_status = self.sub_status
+        previous_detail = self.sub_status_detail
+        try:
+            self.set_sub_status(sub_status, detail)
+            yield
+        finally:
+            # 노드 종료 시 항상 IDLE로 리셋 (에러 발생 시에도)
+            self.reset_sub_status()
     
     def add_cost_item(
         self,

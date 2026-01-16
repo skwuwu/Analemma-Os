@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # 이 필드들은 사용자/워크플로우에서 덮어쓸 수 없는 커널 수준 상태입니다.
 # state_data에서 이 필드들이 존재해도 최상위 값이 우선합니다.
+#
+# [v2.1 - TaskToken 조건부 갱신]
+# _task_token은 기본적으로 보호되지만, allow_token_update=True일 때는
+# state_data의 값으로 갱신됩니다 (서브 워크플로우 Callback 패턴).
 
 KERNEL_PROTECTED_FIELDS: FrozenSet[str] = frozenset({
     # 실행 식별자
@@ -46,13 +50,16 @@ KERNEL_PROTECTED_FIELDS: FrozenSet[str] = frozenset({
     "_kernel_version",
     "_created_at",
     "_started_at",
-    "_task_token",
+    # "_task_token",  # [v2.1] 조건부 보호로 변경 (allow_token_update 플래그)
     
     # 보안 관련
     "auth_context",
     "permissions",
     "tenant_id",
 })
+
+# TaskToken은 별도로 관리 (조건부 보호)
+TASKTOKEN_FIELD = "_task_token"
 
 # 절대 병합하면 안 되는 내부 필드 (완전 무시)
 INTERNAL_FIELDS: FrozenSet[str] = frozenset({
@@ -71,18 +78,38 @@ def _is_mergeable_dict(obj: Any) -> bool:
     return isinstance(obj, dict) and not hasattr(obj, '_asdict')  # namedtuple 제외
 
 
-def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any], 
-               protect_kernel_fields: bool = True) -> Dict[str, Any]:
+def deep_merge(
+    base: Dict[str, Any], 
+    overlay: Dict[str, Any], 
+    protect_kernel_fields: bool = True,
+    allow_token_update: bool = False,
+    max_depth: int = 20,
+    _current_depth: int = 0,
+    _visited: Optional[Set[int]] = None
+) -> Dict[str, Any]:
     """
     두 딕셔너리를 재귀적으로 깊은 병합(Deep Merge)합니다.
+    
+    [v2.1 개선사항]
+    - 순환 참조 방지 (visited 세트)
+    - 재귀 깊이 제한 (max_depth)
+    - dict 전용 최적화 (copy.deepcopy 대신 직접 병합)
+    - TaskToken 조건부 갱신 (allow_token_update)
     
     Args:
         base: 기본 딕셔너리 (우선순위 높음)
         overlay: 오버레이 딕셔너리 (base에 없는 값만 병합)
         protect_kernel_fields: True면 커널 보호 필드는 base 값 유지
+        allow_token_update: True면 _task_token도 갱신 허용 (서브 워크플로우 Callback)
+        max_depth: 최대 재귀 깊이 (순환 참조/무한 루프 방지)
+        _current_depth: 현재 재귀 깊이 (내부용)
+        _visited: 방문한 객체 ID 세트 (순환 참조 추적)
         
     Returns:
         병합된 새 딕셔너리
+        
+    Raises:
+        RecursionError: max_depth 초과 시
         
     Example:
         base = {"config": {"timeout": 30}, "name": "test"}
@@ -90,13 +117,44 @@ def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any],
         result = deep_merge(base, overlay)
         # {"config": {"timeout": 30, "retries": 3}, "name": "test", "debug": True}
     """
-    result = copy.copy(base)
+    # 재귀 깊이 체크 (순환 참조 방지)
+    if _current_depth >= max_depth:
+        logger.warning(
+            f"⚠️ deep_merge: max_depth({max_depth}) 도달. Shallow merge로 전환합니다."
+        )
+        # Fallback: Shallow merge로 전환
+        return {**overlay, **base}  # base 우선
+    
+    # 순환 참조 추적 초기화
+    if _visited is None:
+        _visited = set()
+    
+    # 순환 참조 체크
+    base_id = id(base)
+    overlay_id = id(overlay)
+    if base_id in _visited or overlay_id in _visited:
+        logger.warning(
+            f"⚠️ deep_merge: 순환 참조 감지 (depth={_current_depth}). 병합 중단합니다."
+        )
+        return base  # 순환 참조 시 base 값 유지
+    
+    _visited.add(base_id)
+    _visited.add(overlay_id)
+    
+    # dict 전용 최적화: copy.copy 대신 dict comprehension
+    result = {k: v for k, v in base.items()}
     
     for key, overlay_value in overlay.items():
         # 내부 필드는 완전 무시
         if key in INTERNAL_FIELDS:
             continue
-            
+        
+        # TaskToken 조건부 보호
+        if key == TASKTOKEN_FIELD:
+            if not allow_token_update and key in result:
+                continue  # 갱신 불허 시 base 값 유지
+            # allow_token_update=True이면 아래로 진행하여 갱신
+        
         # 커널 보호 필드는 base 값 유지
         if protect_kernel_fields and key in KERNEL_PROTECTED_FIELDS:
             if key in result:
@@ -104,10 +162,24 @@ def deep_merge(base: Dict[str, Any], overlay: Dict[str, Any],
         
         if key not in result:
             # base에 없으면 overlay 값 사용
-            result[key] = copy.deepcopy(overlay_value) if _is_mergeable_dict(overlay_value) else overlay_value
+            # dict 전용 최적화: deepcopy 대신 재귀 호출 또는 직접 복사
+            if _is_mergeable_dict(overlay_value):
+                # 딕셔너리는 재귀적으로 빈 dict와 병합 (깊은 복사 효과)
+                result[key] = deep_merge(
+                    {}, overlay_value, 
+                    protect_kernel_fields, allow_token_update,
+                    max_depth, _current_depth + 1, _visited
+                )
+            else:
+                result[key] = overlay_value
+                
         elif _is_mergeable_dict(result[key]) and _is_mergeable_dict(overlay_value):
             # 둘 다 딕셔너리면 재귀적으로 병합
-            result[key] = deep_merge(result[key], overlay_value, protect_kernel_fields)
+            result[key] = deep_merge(
+                result[key], overlay_value, 
+                protect_kernel_fields, allow_token_update,
+                max_depth, _current_depth + 1, _visited
+            )
         # else: base 값 유지 (기존 동작)
     
     return result
@@ -195,6 +267,7 @@ def normalize_event(
     remove_state_data: bool = False,
     deep: bool = False,
     protect_kernel_fields: bool = True,
+    allow_token_update: bool = False,
     validate_schema: bool = False,
     required_fields: Optional[List[str]] = None,
     field_types: Optional[Dict[str, type]] = None
@@ -207,6 +280,7 @@ def normalize_event(
         remove_state_data: True면 병합 후 state_data 키 제거 (페이로드 최적화)
         deep: True면 중첩 딕셔너리도 재귀적으로 병합 (Deep Merge)
         protect_kernel_fields: True면 커널 보호 필드는 최상위 값 유지
+        allow_token_update: [v2.1] True면 _task_token도 갱신 허용 (서브 워크플로우 Callback)
         validate_schema: True면 JIT 스키마 검증 수행
         required_fields: 필수 필드 목록 (validate_schema=True일 때)
         field_types: 필드별 예상 타입 (validate_schema=True일 때)
@@ -218,10 +292,16 @@ def normalize_event(
         # 기본 사용
         event = normalize_event(raw_event)
         
-        # Deep merge + 검증
+        # Deep merge + TaskToken 갱신
         event = normalize_event(
             raw_event, 
             deep=True,
+            allow_token_update=True  # 서브 워크플로우 Callback 패턴
+        )
+        
+        # 검증과 함께
+        event = normalize_event(
+            raw_event,
             validate_schema=True,
             required_fields=['workflow_id']
         )
@@ -240,7 +320,7 @@ def normalize_event(
     if deep:
         # 먼저 event에서 state_data 제외한 복사본 생성
         base = {k: v for k, v in event.items() if k != "state_data"}
-        out = deep_merge(base, sd, protect_kernel_fields)
+        out = deep_merge(base, sd, protect_kernel_fields, allow_token_update)
     else:
         # Shallow merge (기존 동작)
         out = dict(event)
@@ -248,8 +328,12 @@ def normalize_event(
             # 내부 필드 무시
             if k in INTERNAL_FIELDS:
                 continue
+            # TaskToken 조건부 보호
+            if k == TASKTOKEN_FIELD:
+                if not allow_token_update and k in out:
+                    continue  # 갱신 불허 시 기존 값 유지
             # 커널 보호 필드는 기존 값 유지
-            if protect_kernel_fields and k in KERNEL_PROTECTED_FIELDS and k in out:
+            elif protect_kernel_fields and k in KERNEL_PROTECTED_FIELDS and k in out:
                 continue
             if k not in out:
                 out[k] = v
@@ -268,7 +352,8 @@ def normalize_event(
 def normalize_inplace(
     event: Union[Dict[str, Any], Any], 
     remove_state_data: bool = False,
-    protect_kernel_fields: bool = True
+    protect_kernel_fields: bool = True,
+    allow_token_update: bool = False
 ) -> Union[Dict[str, Any], Any]:
     """
     이벤트를 제자리에서(in-place) 정규화합니다.
@@ -278,6 +363,7 @@ def normalize_inplace(
         event: 정규화할 이벤트 (직접 수정됨)
         remove_state_data: True면 병합 후 state_data 키 제거
         protect_kernel_fields: True면 커널 보호 필드는 기존 값 유지
+        allow_token_update: [v2.1] True면 _task_token도 갱신 허용
         
     Note:
         Deep merge는 지원하지 않습니다. 깊은 병합이 필요하면 
@@ -295,6 +381,11 @@ def normalize_inplace(
         # 내부 필드 무시
         if k in INTERNAL_FIELDS:
             continue
+        # TaskToken 조건부 보호
+        if k == TASKTOKEN_FIELD:
+            if allow_token_update or k not in event:
+                event[k] = v  # 갱신 허용 또는 기존값 없으면 설정
+            continue
         # 커널 보호 필드 체크
         if protect_kernel_fields and k in KERNEL_PROTECTED_FIELDS and k in event:
             continue
@@ -310,6 +401,7 @@ def normalize_inplace(
 def deep_normalize(
     event: Union[Dict[str, Any], Any],
     remove_state_data: bool = False,
+    allow_token_update: bool = False,
     validate_schema: bool = False,
     required_fields: Optional[List[str]] = None
 ) -> Union[Dict[str, Any], Any]:
@@ -317,12 +409,16 @@ def deep_normalize(
     Deep merge를 사용하는 정규화의 편의 함수입니다.
     
     normalize_event(event, deep=True, ...)와 동일합니다.
+    
+    Args:
+        allow_token_update: [v2.1] True면 _task_token도 갱신 허용
     """
     return normalize_event(
         event, 
         remove_state_data=remove_state_data,
         deep=True,
         protect_kernel_fields=True,
+        allow_token_update=allow_token_update,
         validate_schema=validate_schema,
         required_fields=required_fields
     )

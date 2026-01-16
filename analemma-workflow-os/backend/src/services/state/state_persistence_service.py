@@ -66,6 +66,19 @@ class StatePersistenceService:
             self._dynamodb = boto3.resource('dynamodb')
         return self._dynamodb
 
+    def set_bucket(self, bucket_name: str) -> None:
+        """
+        [v2.3] 상태 버킷을 동적으로 설정.
+        
+        핸들러에서 프라이벗 멤버에 직접 접근하는 대신
+        이 메서드를 사용하여 캡슐화 원칙을 준수.
+        
+        Args:
+            bucket_name: S3 버킷 이름
+        """
+        if bucket_name:
+            self._state_bucket = bucket_name
+
     # =========================================================================
     # LOAD STATE (Read Path)
     # =========================================================================

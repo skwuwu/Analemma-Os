@@ -11,6 +11,13 @@ from src.services.workflow.repository import WorkflowRepository
 import urllib.request
 import urllib.error
 
+# [v2.1] 중앙 집중식 재시도 유틸리티
+try:
+    from src.common.retry_utils import retry_call, retry_stepfunctions
+    RETRY_UTILS_AVAILABLE = True
+except ImportError:
+    RETRY_UTILS_AVAILABLE = False
+
 # Skills integration
 try:
     from src.services.skill_repository import SkillRepository, get_skill_repository
@@ -764,11 +771,24 @@ def lambda_handler(event, context):
         if tenant_scoped_key:
             payload['idempotency_key'] = tenant_scoped_key
 
-        # Start the Step Functions execution
-        response = stepfunctions.start_execution(
-            stateMachineArn=orchestrator_arn,
-            input=json.dumps(payload)
-        )
+        # [v2.1] Start the Step Functions execution with retry
+        # API Throttling(ProvisionedThroughputExceededException) 대응
+        def _start_sfn_execution():
+            return stepfunctions.start_execution(
+                stateMachineArn=orchestrator_arn,
+                input=json.dumps(payload)
+            )
+        
+        if RETRY_UTILS_AVAILABLE:
+            response = retry_call(
+                _start_sfn_execution,
+                max_retries=2,
+                base_delay=0.5,
+                max_delay=5.0,
+                exceptions=(ClientError,)
+            )
+        else:
+            response = _start_sfn_execution()
 
         execution_arn = response.get('executionArn')
         start_date = response.get('startDate')

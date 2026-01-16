@@ -26,13 +26,58 @@ Bento Grid UI 전용 메트릭스 API 엔드포인트입니다.
 import os
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timezone
+from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import boto3
 from botocore.exceptions import ClientError
 from pydantic import BaseModel, Field
-from typing import List
+
+# ETA 계산을 위한 기존 node_stats 유틸리티 (WMA 기반)
+try:
+    from handlers.utils.node_stats_collector import get_node_stats_for_eta
+except ImportError:
+    get_node_stats_for_eta = None  # Lambda 배포 환경에서 사용
+
+
+# =============================================================================
+# DynamoDB Decimal → JSON 호환 유틸리티
+# =============================================================================
+
+class DecimalEncoder(json.JSONEncoder):
+    """
+    DynamoDB Decimal을 JSON 직렬화 가능한 타입으로 변환.
+    
+    - Decimal → int (if whole number) or float
+    - 프론트엔드 차트 라이브러리가 기대하는 number 타입 보존
+    """
+    def default(self, obj):
+        if isinstance(obj, Decimal):
+            # 정수인 경우 int로, 아니면 float으로 변환
+            if obj % 1 == 0:
+                return int(obj)
+            return float(obj)
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
+def convert_decimals(obj: Any) -> Any:
+    """
+    재귀적으로 모든 Decimal을 Python native 타입으로 변환.
+    
+    json.loads(json.dumps(obj, cls=DecimalEncoder)) 대신 사용하여
+    중간 문자열 변환 오버헤드 제거.
+    """
+    if isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    elif isinstance(obj, dict):
+        return {k: convert_decimals(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimals(item) for item in obj]
+    return obj
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -87,9 +132,22 @@ class ConfidenceItem(BaseModel):
 
 
 class AutonomyItem(BaseModel):
-    """자율도 그리드 아이템"""
+    """
+    자율도 그리드 아이템 (인간-AI 협업 밀도 측정)
+    
+    사용자 개입(Intervention) 시 자율도가 실시간으로 차감되어
+    Analemma OS가 단순 자동화 툴이 아닌 '협업 밀도' 측정 플랫폼임을 증명.
+    """
     value: float = Field(description="자율도 (0-100)")
     display: str = Field(description="표시 문자열")
+    penalty_per_intervention: float = Field(
+        default=5.0,
+        description="개입 1회당 자율도 차감률 (%)"
+    )
+    intervention_impact: str = Field(
+        default="",
+        description="개입 영향 설명 (예: '2회 개입으로 -10% 감소')"
+    )
 
 
 class InterventionHistoryEntry(BaseModel):
@@ -110,10 +168,18 @@ class InterventionItem(BaseModel):
 
 
 class ResourcesItem(BaseModel):
-    """리소스 사용량 그리드 아이템"""
+    """리소스 사용량 그리드 아이템 (Resource Efficiency 시연용)"""
     tokens: int = Field(description="사용된 토큰 수")
     cost_usd: float = Field(description="비용 (USD)")
     compute_time: str = Field(description="컴퓨팅 시간")
+    cost_display: str = Field(
+        default="$0.00",
+        description="실시간 비용 표시 (예: '$0.05')"
+    )
+    efficiency_message: str = Field(
+        default="",
+        description="효율성 메시지 (예: '단 $0.05로 이만큼의 업무를 수행했습니다')"
+    )
 
 
 class GridItems(BaseModel):
@@ -163,9 +229,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not metrics:
             return _error_response(404, f"Task not found: {task_id}")
         
+        # DecimalEncoder를 사용하여 number 타입 보존
+        # (default=str는 모든 숫자를 문자열로 변환해 차트 라이브러리 호환성 문제 발생)
         return {
             "statusCode": 200,
-            "body": json.dumps(metrics, ensure_ascii=False, default=str)
+            "body": json.dumps(metrics, ensure_ascii=False, cls=DecimalEncoder)
         }
         
     except Exception as e:
@@ -177,19 +245,43 @@ def _get_task_metrics(task_id: str, request_owner_id: str, tenant_id: Optional[s
     """
     DynamoDB에서 Task 정보를 조회하고 Bento Grid 형식으로 변환
     소유권 검증 포함
+    
+    [v2.2] 개선사항:
+    - 병렬 쿼리로 지연 시간 최소화
+    - Decimal 타입 변환으로 JSON 호환성 보장
+    
+    TODO (Architecture Improvement):
+    DynamoDB Streams를 활용하여 모든 메트릭 정보를 TaskMetricsTable로
+    집약(Aggregated View)하면 단일 쿼리로 처리 가능.
+    참고: backend/infrastructure/fargate-async-config/README.md
     """
     try:
-        # Task 테이블에서 조회
-        response = task_table.get_item(Key={"execution_id": task_id})
-        task = response.get("Item")
+        # [v2.2] 병렬 쿼리로 지연 시간 최소화
+        task = None
         
-        if not task:
-            # Executions 테이블에서 시도
-            response = executions_table.get_item(Key={"execution_id": task_id})
-            task = response.get("Item")
+        def query_task_table():
+            return task_table.get_item(Key={"execution_id": task_id}).get("Item")
+        
+        def query_executions_table():
+            return executions_table.get_item(Key={"execution_id": task_id}).get("Item")
+        
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {
+                executor.submit(query_task_table): "task_table",
+                executor.submit(query_executions_table): "executions_table"
+            }
+            
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    task = result
+                    break  # 첫 번째 결과 발견 시 종료
         
         if not task:
             return None
+        
+        # Decimal 타입 변환 (프론트엔드 호환성)
+        task = convert_decimals(task)
         
         # 소유권 검증
         task_owner_id = task.get("ownerId") or task.get("user_id") or task.get("created_by")
@@ -244,11 +336,25 @@ def _format_bento_grid_response(task: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
     
-    # 4. Autonomy 아이템
-    autonomy_rate = float(task.get("autonomy_rate", 100) or 100)
+    # 4. Autonomy 아이템 (인간-AI 협업 밀도 측정)
+    # 개입 횟수에 따라 자율도 실시간 차감
+    base_autonomy = float(task.get("base_autonomy_rate", 100) or 100)
+    intervention_count = int(task.get("intervention_count", 0) or 0)
+    penalty_per_intervention = 5.0  # 개입 1회당 5% 차감
+    
+    # 자율도 = 기본값 - (개입 횟수 × 차감률), 최소 0%
+    autonomy_penalty = intervention_count * penalty_per_intervention
+    autonomy_rate = max(0, base_autonomy - autonomy_penalty)
+    
+    intervention_impact = ""
+    if intervention_count > 0:
+        intervention_impact = f"{intervention_count}회 개입으로 -{autonomy_penalty:.0f}% 감소"
+    
     autonomy_item = {
         "value": autonomy_rate,
-        "display": task.get("autonomy_display") or _get_autonomy_display(autonomy_rate)
+        "display": task.get("autonomy_display") or _get_autonomy_display(autonomy_rate),
+        "penalty_per_intervention": penalty_per_intervention,
+        "intervention_impact": intervention_impact
     }
     
     # 5. Intervention 아이템
@@ -267,12 +373,23 @@ def _format_bento_grid_response(task: Dict[str, Any]) -> Dict[str, Any]:
         "history": intervention.get("history", [])[:5]  # 최근 5개만
     }
     
-    # 6. Resource Usage 아이템 (추가)
+    # 6. Resource Usage 아이템 (Resource Efficiency 시연)
+    # "단 $X로 이만큼의 업무를 수행했습니다" 메시지로 비즈니스 파괴력 극대화
     resource_usage = task.get("resource_usage", {}) or {}
+    tokens = int(resource_usage.get("tokens", 0) or 0)
+    cost_usd = float(resource_usage.get("cost_usd", 0) or 0)
+    compute_time = resource_usage.get("compute_time", "0s") or "0s"
+    
+    # 실시간 비용 표시 및 효율성 메시지 생성
+    cost_display = f"${cost_usd:.2f}"
+    efficiency_message = _generate_efficiency_message(cost_usd, progress, tokens)
+    
     resources_item = {
-        "tokens": int(resource_usage.get("tokens", 0) or 0),
-        "cost_usd": float(resource_usage.get("cost_usd", 0) or 0),
-        "compute_time": resource_usage.get("compute_time", "0s") or "0s"
+        "tokens": tokens,
+        "cost_usd": cost_usd,
+        "compute_time": compute_time,
+        "cost_display": cost_display,
+        "efficiency_message": efficiency_message
     }
     
     return {
@@ -329,7 +446,14 @@ def _get_status_label(status: str) -> str:
 
 
 def _calculate_eta_text(progress: float, status: str, task: Dict[str, Any]) -> str:
-    """진행률과 상태 기반 ETA 텍스트 생성 (NodeStats 연동)"""
+    """
+    진행률과 상태 기반 ETA 텍스트 생성.
+    
+    [v2.2] 개선사항:
+    - 단순 remaining_progress * avg_duration 대신
+    - "남은 세그먼트들의 평균 소요 시간 합"으로 계산
+    - 오차 범위 효과적으로 감소
+    """
     if status.upper() in ("COMPLETED", "SUCCEEDED", "COMPLETE"):
         return "완료됨"
     elif status.upper() in ("FAILED", "TIMED_OUT", "ABORTED"):
@@ -338,33 +462,16 @@ def _calculate_eta_text(progress: float, status: str, task: Dict[str, Any]) -> s
         return "곧 완료"
     
     try:
-        # NodeStats에서 전체 평균 실행 시간 조회
-        workflow_name = task.get("workflow_name") or "default"
-        node_type = f"workflow:{workflow_name}"
+        # [v2.2] 세그먼트 기반 ETA 계산
+        estimated_seconds = _calculate_segment_based_eta(task, progress)
         
-        response = node_stats_table.get_item(Key={"node_type": node_type})
-        node_stats = response.get("Item", {})
-        avg_duration = float(node_stats.get("avg_duration_seconds", 300))  # 기본 5분
-        
-        # 남은 진행률에 따른 예상 시간 계산
-        remaining_progress = (100 - progress) / 100
-        estimated_seconds = remaining_progress * avg_duration
-        
-        if estimated_seconds < 60:
-            return f"약 {int(estimated_seconds)}초"
-        elif estimated_seconds < 3600:
-            minutes = int(estimated_seconds / 60)
-            return f"약 {minutes}분"
-        else:
-            hours = int(estimated_seconds / 3600)
-            return f"약 {hours}시간"
+        if estimated_seconds is not None:
+            return _format_duration_text(estimated_seconds)
             
     except Exception as e:
-        logger.warning(f"Failed to calculate ETA from NodeStats: {e}")
-        # 폴백: 기존 하드코딩 방식
-        pass
+        logger.warning(f"Failed to calculate segment-based ETA: {e}")
     
-    # 기존 하드코딩 방식 (폴백)
+    # 폴백: 기존 하드코딩 방식
     if progress >= 80:
         return "약 1분"
     elif progress >= 50:
@@ -373,6 +480,92 @@ def _calculate_eta_text(progress: float, status: str, task: Dict[str, Any]) -> s
         return "약 5분"
     else:
         return "계산 중"
+
+
+def _calculate_segment_based_eta(task: Dict[str, Any], progress: float) -> Optional[float]:
+    """
+    [v2.3] 남은 세그먼트들의 평균 소요 시간 합으로 ETA 계산.
+    
+    계산 우선순위:
+    1. exec_status_helper 세그먼트 기반 계산 (average_segment_duration × remaining_segments)
+    2. remaining_nodes[] 기반 계산 (각 노드의 WMA 통계 합산)
+    3. 워크플로우 전체 평균 시간 기반 추정
+    
+    Returns:
+        예상 남은 시간 (초), 또는 계산 불가 시 None
+    """
+    
+    # [Priority 1] exec_status_helper에서 주입한 세그먼트 기반 ETA 사용
+    # 이 방식이 가장 정확: (elapsed_time / completed_segments) × remaining_segments
+    estimated_remaining = task.get("estimated_remaining_seconds")
+    if estimated_remaining is not None:
+        try:
+            return float(estimated_remaining)
+        except (ValueError, TypeError):
+            pass
+    
+    # average_segment_duration이 있으면 직접 계산
+    avg_segment_duration = task.get("average_segment_duration")
+    total_segments = task.get("total_segments")
+    current_segment = task.get("current_segment", 0)
+    
+    if avg_segment_duration and total_segments:
+        try:
+            remaining_segments = max(int(total_segments) - int(current_segment) - 1, 0)
+            return float(avg_segment_duration) * remaining_segments
+        except (ValueError, TypeError):
+            pass
+    
+    # [Priority 2] remaining_nodes[] 기반 계산
+    workflow_name = task.get("workflow_name") or "default"
+    remaining_nodes = task.get("remaining_nodes", [])
+    
+    if remaining_nodes:
+        # get_node_stats_for_eta 함수 활용 (가능한 경우)
+        if get_node_stats_for_eta:
+            node_types = [f"node:{workflow_name}:{node_id}" for node_id in remaining_nodes]
+            stats = get_node_stats_for_eta(node_types)
+            return sum(stats.values())
+        else:
+            # 직접 DynamoDB 쿼리 (폴백)
+            total_remaining_seconds = 0.0
+            for node_id in remaining_nodes:
+                node_type = f"node:{workflow_name}:{node_id}"
+                try:
+                    response = node_stats_table.get_item(Key={"node_type": node_type})
+                    node_stats = response.get("Item", {})
+                    avg_duration = float(node_stats.get("avg_duration_seconds", 30))
+                    total_remaining_seconds += avg_duration
+                except Exception:
+                    total_remaining_seconds += 30
+            return total_remaining_seconds
+    
+    # [Priority 3] 워크플로우 전체 평균 시간 기반 추정
+    workflow_type = f"workflow:{workflow_name}"
+    try:
+        response = node_stats_table.get_item(Key={"node_type": workflow_type})
+        workflow_stats = response.get("Item", {})
+        avg_total_duration = float(workflow_stats.get("avg_duration_seconds", 300))
+        
+        remaining_ratio = (100 - progress) / 100
+        return remaining_ratio * avg_total_duration
+        
+    except Exception:
+        return None
+
+
+def _format_duration_text(seconds: float) -> str:
+    """소요 시간을 사용자 친화적 텍스트로 변환."""
+    if seconds < 60:
+        return f"약 {int(seconds)}초"
+    elif seconds < 3600:
+        minutes = int(seconds / 60)
+        return f"약 {minutes}분"
+    else:
+        hours = seconds / 3600
+        if hours < 2:
+            return f"약 {int(hours * 60)}분"  # 90분 등으로 표시
+        return f"약 {hours:.1f}시간"
 
 
 def _get_progress_text(progress: int) -> str:
@@ -409,6 +602,28 @@ def _get_autonomy_display(rate: float) -> str:
         return f"자율도 {rate:.0f}% (양호)"
     else:
         return f"자율도 {rate:.0f}% (개선 필요)"
+
+
+def _generate_efficiency_message(cost_usd: float, progress: float, tokens: int) -> str:
+    """
+    Resource Efficiency 시연용 효율성 메시지 생성.
+    
+    "이 에이전트는 단 $X로 이만큼의 업무를 수행했습니다"
+    메시지로 비즈니스 파괴력 극대화.
+    """
+    if cost_usd <= 0:
+        return "분석 준비 중..."
+    
+    # 토큰당 비용 효율 계산
+    cost_per_1k_tokens = (cost_usd / max(tokens, 1)) * 1000 if tokens > 0 else 0
+    
+    # 진행률 기반 메시지 생성
+    if progress >= 100:
+        return f"단 ${cost_usd:.2f}로 작업을 완료했습니다"
+    elif progress >= 50:
+        return f"단 ${cost_usd:.2f}로 {progress:.0f}%의 업무를 수행 중"
+    else:
+        return f"${cost_usd:.2f} 사용 중 ({tokens:,} 토큰)"
 
 
 def _error_response(status_code: int, message: str) -> Dict[str, Any]:

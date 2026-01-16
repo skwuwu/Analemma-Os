@@ -22,6 +22,7 @@ TEST_WORKFLOW_MAPPINGS = {
     'E2E_S3_LARGE_DATA': 'test_s3_large_workflow',
     'MAP_AGGREGATOR_TEST': 'test_map_aggregator_workflow',
     'LOOP_LIMIT_DYNAMIC': 'test_loop_limit_dynamic_workflow',
+    'HYPER_REPORT': 'test_hyper_report_workflow',  # 하이퍼-리포트 시나리오
     # [Fix] 누락된 테스트 시나리오 추가
     'PARALLEL_GROUP': 'test_parallel_complex_5_branches_workflow',
     'HITP': 'test_hitp_workflow',
@@ -192,6 +193,18 @@ SCENARIO_CONFIG = {
     'PARALLEL_GROUP_TEST': {'test_keyword': 'PARALLEL_GROUP'},  # PARALLEL_GROUP 경로 테스트
     'ASYNC_LLM_TEST': {'test_keyword': 'ASYNC_LLM'},  # PAUSED_FOR_ASYNC_LLM 경로 테스트
     'MAP_AGGREGATOR_HITP': {'test_keyword': 'MAP_AGGREGATOR_HITP'},  # Map + HITP 조합 테스트
+    
+    # Ultimate Stress Test
+    'HYPER_REPORT': {
+        'test_keyword': 'HYPER_REPORT',
+        'input_data': {
+            'categories': ['AI', 'Cloud', 'Security', 'SaaS'],
+            'expected_payload_size_kb': 350,
+            'enable_failure_injection': True,
+            'enable_hitl': True,
+            'enable_distiller': True
+        }
+    },
     
     # Standard SFN Scenarios
     'STANDARD_HAPPY_PATH': {'test_keyword': 'COMPLETE'},
