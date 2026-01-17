@@ -3713,7 +3713,7 @@ Resources:
       PackageType: Image
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
-        Command: ["src.handlers.utils.mission_simulator.lambda_handler"]
+        Command: ["src.handlers.simulator.mission_simulator.lambda_handler"]
       Timeout: 900  # 15분 - E2E 대규모 시나리오 실행을 위한 최대 시간
       MemorySize: 512
       Description: "E2E 테스트 자동화 - 10가지 시나리오(A-K)로 전체 워크플로우 검증"

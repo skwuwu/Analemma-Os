@@ -304,8 +304,8 @@ def handle_lambda_error(error: Exception) -> Dict[str, Any]:
     Returns:
         API Gateway 호환 응답 딕셔너리
     """
-    from .http_utils import build_response
-    from .exceptions import BaseAnalemmaError
+    from src.common.http_utils import build_response
+    from src.common.exceptions import BaseAnalemmaError
 
     if isinstance(error, BaseAnalemmaError):
         return build_response(error.status_code, {"error": error.message})

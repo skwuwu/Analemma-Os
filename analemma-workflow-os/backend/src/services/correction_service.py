@@ -205,7 +205,7 @@ class CorrectionService:
             items = response.get('Items', [])
             
             # VectorSyncManager를 사용하여 재시도 필요한 항목만 필터링
-            from ..models.correction_log import VectorSyncManager, CorrectionLog
+            from src.models.correction_log import VectorSyncManager, CorrectionLog
             
             corrections = []
             for item in items:

@@ -1,0 +1,77 @@
+name: Frontend Deploy
+# Trigger deployment: Update SSM parameters and redeploy frontend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'analemma-workflow-os/frontend/**'
+      - 'analemma-workflow-os/backend/scripts/**'
+
+permissions:
+  id-token: write # AWS OIDC 인증 필수
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
+  CLOUDFRONT_DIST_ID: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./analemma-workflow-os/frontend/apps/web
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # 1. AWS 인증 (OIDC) - 가장 먼저 수행
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 2. 환경변수 가져오기 (기존 스크립트 활용)
+      - name: Fetch API configuration from SSM
+        run: |
+          # backend/scripts 폴더에 있는 스크립트 실행 (frontend 폴더 기준 상위로 이동)
+          chmod +x ../../../backend/scripts/fetch-api-url.sh
+          ../../../backend/scripts/fetch-api-url.sh
+          echo "Verifying .env file:"
+          ls -l .env || echo ".env file not found in frontend directory!"
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+          PARAM_NAME_OVERRIDE: ${{ secrets.API_URL_SSM_PARAM || '/my-app/dev/api-url' }}
+          # Default PARAM_NAME_WS updated to match SSM parameter used in this repo
+          PARAM_NAME_WS: ${{ secrets.WS_URL_SSM_PARAM || '/my-app/dev/websocket-url' }}
+
+      # 3. 의존성 설치 및 빌드
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build React App
+        run: npm run build
+
+      # 4. S3에 파일 업로드 (Sync)
+      - name: Deploy to S3
+        run: |
+          aws s3 sync ./dist s3://${{ env.S3_BUCKET_NAME }} \
+            --delete \
+            --region ${{ env.AWS_REGION }}
+
+      # 5. CloudFront 캐시 무효화 (필수)
+      - name: Invalidate CloudFront Cache
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ env.CLOUDFRONT_DIST_ID }} \
+            --paths "/*"

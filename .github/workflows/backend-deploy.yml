@@ -1,0 +1,283 @@
+name: Backend Deploy
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'analemma-workflow-os/backend/**'
+      - 'analemma-workflow-os/backend/scripts/**'
+      - '.github/workflows/backend-deploy.yml'
+  workflow_dispatch: # 수동 실행 가능하도록 추가 (권장)
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # Extended for 64 Lambda Docker builds
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE_NAME: dev
+      SAM_STACK_NAME: backend-workflow-dev
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    environment: dev
+    defaults:
+      run:
+        working-directory: ./analemma-workflow-os/backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+
+
+      # [최적화] 디스크 공간 최대 확보 (64개 Lambda 이미지 빌드용)
+      # [FIX] Python Setup 이전에 실행하여 필요한 Python 버전 삭제 방지
+      - name: Maximize disk space for Docker builds
+        run: |
+          echo "=== Current disk space ==="
+          df -h
+          echo ""
+          echo "=== Removing unnecessary tools ==="
+          # 큰 용량 도구들 제거 (~35GB 확보)
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /opt/hostedtoolcache/Python
+          sudo rm -rf /opt/hostedtoolcache/node
+          sudo rm -rf /opt/az
+          sudo apt-get clean
+          # Docker 미사용 데이터 정리
+          docker system prune -af --volumes || true
+          echo ""
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      # [최적화 1] Python 통합 설정 및 캐싱 강화
+      - name: Setup Python 3.12 (Primary)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/src/requirements.txt
+
+      - name: Setup Python 3.11 for SAM CLI
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+
+      - name: Verify Python versions
+        run: |
+          python3.12 --version
+          python3.11 --version
+          python3 --version
+
+      # [최적화 2] SAM 빌드 아티팩트 캐싱 강화
+      - name: Cache SAM Build Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .aws-sam
+            ~/.cache/pip
+          key: ${{ runner.os }}-sam-${{ hashFiles('template.yaml', 'requirements.txt', 'src/requirements.txt', 'Dockerfile.lambda', 'Dockerfile.base') }}
+          restore-keys: |
+            ${{ runner.os }}-sam-
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r src/requirements.txt
+
+      - name: Setup AWS SAM CLI
+        uses: aws-actions/setup-sam@v2
+
+      # [FIX] Enable ARM64 cross-compilation for Graviton2 Lambda
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # [최적화 2] Base Image 변경 감지 (유지)
+      - name: Check for Base Image changes
+        id: base-image-check
+        run: |
+          HASH=$(sha256sum Dockerfile.base src/requirements.txt | sha256sum | awk '{print $1}')
+          echo "hash=${HASH}" >> $GITHUB_OUTPUT
+          echo "Base Image Hash: ${HASH}"
+
+      - name: Create ECR Repository for Base Image
+        if: steps.base-image-check.outputs.hash != ''
+        run: |
+          repo="backend-llm-base"
+          aws ecr describe-repositories --repository-names ${repo} --region ${AWS_REGION} || aws ecr create-repository --repository-name ${repo} --region ${AWS_REGION}
+
+      # [최적화 1] Base Image Docker Layer 캐싱 (GHA 캐시 사용)
+      - name: Build and Push LLM Base Image
+        uses: docker/build-push-action@v5
+        id: docker_build
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.base
+          platforms: linux/arm64  # [FIX] ARM64 for Graviton2 Lambda
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/backend-llm-base:latest
+            ${{ steps.login-ecr.outputs.registry }}/backend-llm-base:${{ steps.base-image-check.outputs.hash }}
+          # GitHub Actions 캐시 사용으로 빌드 속도 50% 향상
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+      - name: Set BASE_IMAGE_URI
+        run: |
+           echo "BASE_IMAGE_URI=${{ steps.login-ecr.outputs.registry }}/backend-llm-base:latest" >> $GITHUB_ENV
+
+      # [추가] Lambda Image용 ECR 리포지토리 생성
+      - name: Create ECR Repository for Lambda Image
+        run: |
+          repo="backend-lambda-function"
+          aws ecr describe-repositories --repository-names ${repo} --region ${AWS_REGION} || aws ecr create-repository --repository-name ${repo} --region ${AWS_REGION}
+
+      # [REMOVED] cp -r sync step - SAM now uses DockerContext: ./src from Metadata blocks
+
+      # [FIX] Docker build context changed to src/ after apps/ folder deletion
+      - name: Build and Push Final Lambda Image
+        uses: docker/build-push-action@v5
+        id: build-app-image
+        with:
+          context: ./analemma-workflow-os/backend/src
+          file: ./analemma-workflow-os/backend/src/Dockerfile.lambda
+          platforms: linux/arm64  # [FIX] ARM64 for Graviton2 Lambda
+          push: true
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/backend-lambda-function:latest
+            ${{ steps.login-ecr.outputs.registry }}/backend-lambda-function:${{ github.sha }}
+          # [FIX] Disable cache temporarily to ensure fresh build with synced src/
+          no-cache: true
+          provenance: false
+          build-args: |
+            BASE_IMAGE_URI=${{ env.BASE_IMAGE_URI }}
+
+
+      - name: Login to Amazon ECR Public
+        run: |
+          aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+
+      # [최적화 3] SAM Build 캐시 활성화 (템플릿 검증 용도)
+      - name: SAM Build
+        env:
+          STAGE_NAME: ${{ env.STAGE_NAME }}
+        run: |
+          # Docker 이미지는 SAM이 DockerContext: ./src 에서 직접 빌드 (캐시 비활성화로 항상 최신 코드 사용)
+          sam build --parameter-overrides StageName=${STAGE_NAME}
+
+      # [추가] Kinesis 스트림 사전 확보
+      - name: Ensure Kinesis Stream Exists
+        id: ensure-kinesis
+        run: |
+          chmod +x scripts/ensure-kinesis.sh
+          ./scripts/ensure-kinesis.sh "dev" "${{ env.AWS_REGION }}"
+
+      - name: SAM Deploy
+        env:
+          STAGE_NAME: ${{ env.STAGE_NAME }}
+          SAM_STACK_NAME: ${{ env.SAM_STACK_NAME }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+          COGNITO_ISSUER_URL: ${{ secrets.COGNITO_ISSUER_URL }}
+          COGNITO_AUDIENCE: ${{ secrets.COGNITO_AUDIENCE }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          TEST_USER_EMAIL: ${{ secrets.TEST_USER_EMAIL || '' }}
+          TEST_USER_PASSWORD: ${{ secrets.TEST_USER_PASSWORD || '' }}
+          ASYNC_WORKER_ECS_CLUSTER: ${{ secrets.ASYNC_WORKER_ECS_CLUSTER || '' }}
+          ASYNC_WORKER_TASK_DEFINITION: ${{ secrets.ASYNC_WORKER_TASK_DEFINITION || '' }}
+          ASYNC_WORKER_EXECUTION_ROLE_ARN: ${{ secrets.ASYNC_WORKER_EXECUTION_ROLE_ARN || '' }}
+          ASYNC_WORKER_SUBNET_IDS: ${{ secrets.ASYNC_WORKER_SUBNET_IDS || '' }}
+          ASYNC_WORKER_SECURITY_GROUP_IDS: ${{ secrets.ASYNC_WORKER_SECURITY_GROUP_IDS || '' }}
+          KINESIS_ARN: ${{ env.KINESIS_STREAM_ARN }}
+          LAMBDA_IMAGE_URI: ${{ steps.login-ecr.outputs.registry }}/backend-lambda-function:${{ github.sha }}
+          IMAGE_REPO_URI: ${{ steps.login-ecr.outputs.registry }}/backend-lambda-function
+        run: |
+          # AllowedOrigins는 template.yaml의 기본값 사용 (GitHub Secrets 아님)
+          PARAM_OVERRIDES="StageName=${STAGE_NAME} CognitoIssuerUrl=${COGNITO_ISSUER_URL} CognitoAudience=${COGNITO_AUDIENCE} OpenAiApiKey=${OPENAI_API_KEY} AnthropicApiKey=${ANTHROPIC_API_KEY} GoogleApiKey=${GOOGLE_API_KEY}"
+
+          # 테스트 유저 시크릿 주입 (CI/CD → AWS Secrets Manager)
+          if [ -n "${TEST_USER_EMAIL}" ] && [ -n "${TEST_USER_PASSWORD}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} TestUserEmail=${TEST_USER_EMAIL} TestUserPassword=${TEST_USER_PASSWORD}"
+          fi
+
+          if [ -n "${ASYNC_WORKER_ECS_CLUSTER}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} AsyncWorkerEcsCluster=${ASYNC_WORKER_ECS_CLUSTER}"
+          fi
+          if [ -n "${ASYNC_WORKER_TASK_DEFINITION}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} AsyncWorkerTaskDefinition=${ASYNC_WORKER_TASK_DEFINITION}"
+          fi
+          if [ -n "${ASYNC_WORKER_EXECUTION_ROLE_ARN}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} AsyncWorkerExecutionRoleArn=${ASYNC_WORKER_EXECUTION_ROLE_ARN}"
+          fi
+          if [ -n "${ASYNC_WORKER_SUBNET_IDS}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} AsyncWorkerSubnetIds=${ASYNC_WORKER_SUBNET_IDS}"
+          fi
+          if [ -n "${ASYNC_WORKER_SECURITY_GROUP_IDS}" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} AsyncWorkerSecurityGroupIds=${ASYNC_WORKER_SECURITY_GROUP_IDS}"
+          fi
+          
+          if [ -z "${KINESIS_ARN}" ]; then
+            echo "❌ Error: KINESIS_ARN is empty. Previous step failed to set it."
+            exit 1
+          fi
+          PARAM_OVERRIDES="${PARAM_OVERRIDES} ExternalExecutionsStreamArn=${KINESIS_ARN}"
+          
+          # [추가] 이미지 URI 전달
+          PARAM_OVERRIDES="${PARAM_OVERRIDES} BackendLambdaImageUri=${LAMBDA_IMAGE_URI}"
+
+          echo "🚀 Deploying with Parameters: ${PARAM_OVERRIDES}"
+
+          sam deploy \
+            --stack-name "${SAM_STACK_NAME}" \
+            --region "${AWS_REGION}" \
+            --resolve-s3 \
+            --image-repository "${IMAGE_REPO_URI}" \
+            --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM \
+            --no-confirm-changeset \
+            --no-fail-on-empty-changeset \
+            --parameter-overrides ${PARAM_OVERRIDES}
+
+      - name: Update SSM Parameters
+        run: |
+          chmod +x scripts/update-api-url-ssm.sh
+          ./scripts/update-api-url-ssm.sh "${SAM_STACK_NAME}" "${AWS_REGION}"
+
+      - name: Notify deployment status
+        if: always()
+        env:
+          STAGE_NAME: ${{ env.STAGE_NAME }}
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment to ${STAGE_NAME} environment successful"
+          else
+            echo "❌ Deployment to ${STAGE_NAME} environment failed"
+          fi

@@ -26,7 +26,7 @@ def _get_secrets_client():
     global _secrets_client
     if _secrets_client is None:
         try:
-            from .aws_clients import get_secrets_client
+            from src.common.aws_clients import get_secrets_client
             _secrets_client = get_secrets_client()
         except (ImportError, AttributeError):
             import boto3

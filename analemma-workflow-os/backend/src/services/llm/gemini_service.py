@@ -1568,7 +1568,7 @@ def invoke_gemini_for_structure(
     # 구조 도구 정의 로드
     if structure_tools is None:
         try:
-            from .structure_tools import get_all_structure_tools
+            from src.services.llm.structure_tools import get_all_structure_tools
             structure_tools = get_all_structure_tools()
         except ImportError:
             structure_tools = []
