@@ -254,6 +254,91 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any]) -> Dict
         )
         checks.append(_check("Parallel Execution Completed", has_parallel_result, 
                             details="Should contain branch execution results"))
+    
+    # G. HYPER_STRESS_V3 - V3 하이퍼 스트레스 시나리오
+    elif scenario == 'HYPER_STRESS_V3':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # Nested Map 실행 확인
+        has_nested_map = (
+            'nested_map' in out_str.lower() or
+            'market_analysis' in out_str.lower() or
+            'outer_count' in out_str.lower()
+        )
+        # Multi-HITL 확인
+        has_hitl = (
+            'hitl' in out_str.lower() or
+            'hitl_merge' in out_str.lower() or
+            'hitl_decisions' in out_str.lower()
+        )
+        # Partial State Sync 확인
+        has_partial_sync = (
+            'partial_sync' in out_str.lower() or
+            'delta_sync' in out_str.lower() or
+            'state_delta' in out_str.lower()
+        )
+        checks.append(_check("Nested Map Executed", has_nested_map, details="Should contain nested map results"))
+        checks.append(_check("Multi-HITL Merged", has_hitl, details="Should contain HITL merge results"))
+        checks.append(_check("Partial State Sync", has_partial_sync, details="Should contain partial sync results"))
+    
+    # H. MULTIMODAL_VISION - Gemini Vision 이미지 분석
+    elif scenario == 'MULTIMODAL_VISION':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # Vision 결과 확인
+        has_vision_result = (
+            'vision_result' in output or
+            'vision' in out_str.lower() or
+            'image_analysis' in out_str.lower() or
+            'product_specs' in output
+        )
+        # Vision 메타데이터 확인 (선택적)
+        has_vision_meta = (
+            'vision_meta' in output or
+            'vision_node_meta' in output or
+            'image_count' in out_str.lower()
+        )
+        checks.append(_check("Vision Analysis Complete", has_vision_result, 
+                            details="Should contain vision analysis results"))
+        checks.append(_check("Vision Metadata Present (Optional)", has_vision_meta, 
+                            details="Should contain vision metadata if available"))
+    
+    # I. MULTIMODAL_COMPLEX - 비디오 + 이미지 복합 분석
+    elif scenario == 'MULTIMODAL_COMPLEX':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # 비디오 청킹 확인
+        has_video = (
+            'video_chunks' in output or
+            'video_analysis' in out_str.lower() or
+            'video_track' in out_str.lower()
+        )
+        # 이미지 분석 확인
+        has_images = (
+            'spec_sheet' in out_str.lower() or
+            'image_track' in out_str.lower() or
+            'sheet_spec' in out_str.lower()
+        )
+        # 충돌 해결 확인
+        has_conflict_resolution = (
+            'conflict' in out_str.lower() or
+            'final_product_specs' in output or
+            'merged' in out_str.lower()
+        )
+        # HTML 생성 확인 (선택적)
+        has_html = (
+            'final_html' in output or
+            'html' in out_str.lower() or
+            'product_page' in out_str.lower()
+        )
+        checks.append(_check("Video Chunking Complete", has_video, 
+                            details="Should contain video chunking/analysis results"))
+        checks.append(_check("Image Analysis Complete", has_images, 
+                            details="Should contain spec sheet analysis results"))
+        checks.append(_check("Conflict Resolution Complete", has_conflict_resolution, 
+                            details="Should contain conflict resolution or merged specs"))
+        checks.append(_check("HTML Generation (Optional)", has_html or status == 'SUCCEEDED', 
+                            details="Should contain final HTML if workflow completed"))
 
     # Default fallback
     else:

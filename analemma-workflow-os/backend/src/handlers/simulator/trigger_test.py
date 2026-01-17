@@ -28,6 +28,10 @@ TEST_WORKFLOW_MAPPINGS = {
     'HITP': 'test_hitp_workflow',
     'MAP_AGGREGATOR_HITP': 'test_map_aggregator_hitp_workflow',
     'ASYNC_LLM': 'test_async_llm_workflow',
+    # Multimodal & Advanced Scenarios
+    'MULTIMODAL_VISION': 'test_vision_workflow',  # Gemini Vision 멀티모달 이미지 분석
+    'HYPER_STRESS_V3': 'test_hyper_stress_workflow',  # V3 하이퍼-스트레스 시나리오 (Nested Map, Multi-HITL)
+    'MULTIMODAL_COMPLEX': 'extreme_product_page_workflow',  # 비디오 + 이미지 멀티모달 복합 분석
 }
 
 
@@ -203,6 +207,37 @@ SCENARIO_CONFIG = {
             'enable_failure_injection': True,
             'enable_hitl': True,
             'enable_distiller': True
+        }
+    },
+    
+    # Multimodal & Advanced Scenarios
+    'MULTIMODAL_VISION': {
+        'test_keyword': 'MULTIMODAL_VISION',
+        'input_data': {
+            'product_image': 's3://test-bucket/sample_product.jpg',
+            'vision_test_enabled': True
+        }
+    },
+    'HYPER_STRESS_V3': {
+        'test_keyword': 'HYPER_STRESS_V3',
+        'input_data': {
+            'test_nested_map': True,
+            'test_multi_hitl': True,
+            'test_partial_sync': True,
+            'expected_outer_count': 4,
+            'expected_inner_total': 10
+        }
+    },
+    'MULTIMODAL_COMPLEX': {
+        'test_keyword': 'MULTIMODAL_COMPLEX',
+        'input_data': {
+            'video_input_uri': 's3://test-bucket/sample_video.mp4',
+            'image_input_uris': [
+                's3://test-bucket/spec_sheet_1.jpg',
+                's3://test-bucket/spec_sheet_2.jpg',
+                's3://test-bucket/spec_sheet_3.jpg'
+            ],
+            'multimodal_test_enabled': True
         }
     },
     

@@ -42,7 +42,10 @@
                     "XRAY_TRACEABILITY",
                     "HITP_TEST",
                     "PARALLEL_GROUP_TEST",
-                    "HYPER_REPORT"
+                    "HYPER_REPORT",
+                    "MULTIMODAL_VISION",
+                    "HYPER_STRESS_V3",
+                    "MULTIMODAL_COMPLEX"
                 ]
             },
             "Next": "InitializeSimulator"

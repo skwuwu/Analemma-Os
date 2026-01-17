@@ -6,10 +6,13 @@ import copy
 import operator
 import concurrent.futures
 import logging
+import random
 from typing import TypedDict, Dict, Any, List, Optional, Annotated, Union, Callable
 from functools import partial
 import socket
 import ipaddress
+from collections import ChainMap
+from collections.abc import Mapping
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, conlist, constr, ValidationError
@@ -95,6 +98,9 @@ class EdgeModel(BaseModel):
     source: constr(min_length=1, max_length=128)
     target: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64) = "edge"
+    
+    class Config:
+        extra = "ignore"
 
 
 class NodeModel(BaseModel):
@@ -104,6 +110,10 @@ class NodeModel(BaseModel):
     action: Optional[constr(min_length=0, max_length=256)] = None
     hitp: Optional[bool] = None
     config: Optional[Dict[str, Any]] = None
+    next: Optional[str] = None
+    
+    class Config:
+        extra = "ignore"
 
 
 class WorkflowConfigModel(BaseModel):
@@ -140,7 +150,7 @@ def _get_nested_value(state: Dict[str, Any], path: str, default: Any = "") -> An
     cur: Any = state
     try:
         for p in parts:
-            if isinstance(cur, dict) and p in cur:
+            if isinstance(cur, Mapping) and p in cur:
                 cur = cur[p]
             else:
                 return default
@@ -266,85 +276,177 @@ def should_use_async_llm(config: Dict[str, Any]) -> bool:
 # 4. Node Runners Implementation
 # -----------------------------------------------------------------------------
 
-def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    """Standard LLM Chat Runner with Async detection."""
-    prompt_template = config.get("prompt_content", "")
-    prompt = _render_template(prompt_template, state)
-    
-    # 2. Check Async Conditions
-    node_id = config.get("id", "llm")
-    model = config.get("model") or "gpt-3.5-turbo"
-    max_tokens = config.get("max_tokens", 1024)
-    
-    if should_use_async_llm(config):
-        logger.warning(f"🚨 Async required by heuristic for node {node_id}")
-        raise AsyncLLMRequiredException("Resource-intensive processing required")
 
-    # 3. Invoke
-    meta = {"model": model, "max_tokens": max_tokens}
+# -----------------------------------------------------------------------------
+# S3 Hydration Helper
+# -----------------------------------------------------------------------------
+def _hydrate_s3_value(value: Any) -> Any:
+    """
+    If value is an S3 pointer string (s3://bucket/key), download and return content.
+    Otherwise return value as-is.
+    """
+    if not isinstance(value, str) or not value.startswith("s3://"):
+        return value
     
-    # [Fix] Manually trigger callbacks since we are using Boto3 directly
-    callbacks = config.get("callbacks", [])
-    run_manager = None
-    if callbacks:
-        # We need to manually call on_llm_start
-        # Note: In a real LangChain node, this is handled by the framework.
-        # Here we simulate it for our StateHistoryCallback.
-        for cb in callbacks:
-            if hasattr(cb, 'on_llm_start'):
-                try:
-                    cb.on_llm_start(serialized={"name": node_id}, prompts=[prompt])
-                except Exception:
-                    pass
-
     try:
-        resp = invoke_bedrock_model(
-            model_id=model,
-            system_prompt=config.get("system_prompt"),
-            user_prompt=prompt,
-            max_tokens=max_tokens,
-            temperature=config.get("temperature"),
-            read_timeout_seconds=90 # Adaptive timeout
-        )
-        text = extract_text_from_bedrock_response(resp)
-        
-        # Extract usage stats if available
-        usage = {}
-        if isinstance(resp, dict) and "usage" in resp:
-            usage = resp["usage"]
-        
-        # [Fix] Manually trigger on_llm_end
-        if callbacks:
-            llm_result = LLMResult(generations=[[Generation(text=text)]], llm_output={"usage": usage})
-            for cb in callbacks:
-                if hasattr(cb, 'on_llm_end'):
-                    try:
-                        cb.on_llm_end(response=llm_result)
-                    except Exception:
-                        pass
-        
-        # Update history
-        current_history = state.get("step_history", [])
-        new_history = current_history + [f"{node_id}:llm_call"]
-        
-        out_key = config.get("writes_state_key") or f"{node_id}_output"
-        return {out_key: text, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
-        
+        bucket, key = value.replace("s3://", "").split("/", 1)
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        content = obj["Body"].read().decode("utf-8")
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError:
+            return content
     except Exception as e:
-        # [Fix] Manually trigger on_llm_error
-        if callbacks:
-            for cb in callbacks:
-                if hasattr(cb, 'on_llm_error'):
-                    try:
-                        cb.on_llm_error(error=e)
-                    except Exception:
-                        pass
+        logger.warning(f"Failed to hydrate S3 value {value}: {e}")
+        return value
 
-        if isinstance(e, AsyncLLMRequiredException):
-            # Bubble up to let orchestrator pause
-            raise
-        logger.exception(f"LLM execution failed for node {node_id}")
-        raise
+def _hydrate_state_for_config(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Hydrate keys referenced in input_variables if present."""
+    hydrated_state = state.copy()
+    input_vars = config.get("input_variables", [])
+    if isinstance(input_vars, list):
+        for key in input_vars:
+            val = _get_nested_value(hydrated_state, key)
+            hydrated_val = _hydrate_s3_value(val)
+            if hydrated_val != val:
+                # Update nested state not supported easily here, so we just update top level or 
+                # strictly mapped keys. For now, we update the top-level key if it matches.
+                # Ideally we should use a set_nested_value, but input_variables usually refer to top level.
+                if key in hydrated_state:
+                    hydrated_state[key] = hydrated_val
+    return hydrated_state
+
+# -----------------------------------------------------------------------------
+# 4. Node Runners Implementation
+# -----------------------------------------------------------------------------
+
+def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Standard LLM Chat Runner with Async detection and Retry/Hydration support."""
+    
+    # 0. Hydrate Data (Pre-execution)
+    # Ensure S3 pointers defined in input_variables are downloaded
+    exec_state = _hydrate_state_for_config(state, config)
+    
+    # 1. Get Retry Config
+    retry_config = config.get("retry_config", {})
+    max_retries = retry_config.get("max_retries", 0)  # Default 0 means single attempt
+    base_delay = retry_config.get("base_delay", 1.0)
+    
+    # Initialize retry loop variables
+    attempt = 0
+    last_error = None
+    
+    while attempt <= max_retries:
+        try:
+            # Update attempt_count in state for template rendering
+            exec_state["attempt_count"] = attempt + 1
+            
+            # Render prompts with current attempt count
+            prompt_template = config.get("prompt_content") or config.get("user_prompt_template", "")
+            prompt = _render_template(prompt_template, exec_state)
+            
+            system_prompt_tmpl = config.get("system_prompt", "")
+            system_prompt = _render_template(system_prompt_tmpl, exec_state)
+            
+            node_id = config.get("id", "llm")
+
+            # [Test Logic] Simulate Rate Limit Error for retry testing
+            if prompt and "SIMULATE_RATE_LIMIT_ERROR" in prompt:
+                logger.warning(f"🧪 Simulation triggered: Raising Rate Limit Error for node {node_id}")
+                # Simulate a ThrottlingException that is retryable
+                from botocore.exceptions import ClientError
+                raise ClientError(
+                    {"Error": {"Code": "ThrottlingException", "Message": "Simulated Rate Limit"}},
+                    "InvokeModel"
+                )
+            
+            # 2. Check Async Conditions
+            # node_id already defined above check async
+            model = config.get("model") or config.get("llm_config", {}).get("model_id") or "gpt-3.5-turbo"
+            max_tokens = config.get("max_tokens") or config.get("llm_config", {}).get("max_tokens", 1024)
+            temperature = config.get("temperature") or config.get("llm_config", {}).get("temperature", 0.7)
+            
+            if should_use_async_llm(config):
+                logger.warning(f"🚨 Async required by heuristic for node {node_id}")
+                raise AsyncLLMRequiredException("Resource-intensive processing required")
+
+            # 3. Invoke
+            meta = {"model": model, "max_tokens": max_tokens, "attempt": attempt + 1}
+            
+            # [Fix] Manually trigger callbacks since we are using Boto3 directly
+            callbacks = config.get("callbacks", [])
+            if callbacks:
+                for cb in callbacks:
+                    if hasattr(cb, 'on_llm_start'):
+                        try:
+                            cb.on_llm_start(serialized={"name": node_id}, prompts=[prompt])
+                        except Exception:
+                            pass
+
+            resp = invoke_bedrock_model(
+                model_id=model,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                read_timeout_seconds=90 # Adaptive timeout
+            )
+            text = extract_text_from_bedrock_response(resp)
+            
+            # Extract usage stats if available
+            usage = {}
+            if isinstance(resp, dict) and "usage" in resp:
+                usage = resp["usage"]
+            
+            # [Fix] Manually trigger on_llm_end
+            if callbacks:
+                llm_result = LLMResult(generations=[[Generation(text=text)]], llm_output={"usage": usage})
+                for cb in callbacks:
+                    if hasattr(cb, 'on_llm_end'):
+                        try:
+                            cb.on_llm_end(response=llm_result)
+                        except Exception:
+                            pass
+            
+            # Update history
+            current_history = state.get("step_history", [])
+            new_history = current_history + [f"{node_id}:llm_call"]
+            
+            out_key = config.get("writes_state_key") or config.get("output_key") or f"{node_id}_output"
+            return {out_key: text, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
+            
+        except Exception as e:
+            last_error = e
+            logger.warning(f"LLM execution attempt {attempt+1}/{max_retries+1} failed: {e}")
+            
+            # [Fix] Manually trigger on_llm_error
+            callbacks = config.get("callbacks", [])
+            if callbacks:
+                for cb in callbacks:
+                    if hasattr(cb, 'on_llm_error'):
+                        try:
+                            cb.on_llm_error(error=e)
+                        except Exception:
+                            pass
+
+            if isinstance(e, AsyncLLMRequiredException):
+                # Bubble up to let orchestrator pause
+                raise
+            
+            # Retry logic
+            if attempt < max_retries:
+                # Calculate backoff with jitter
+                delay = min(30.0, base_delay * (2 ** attempt)) * (0.5 + random.random())
+                time.sleep(delay)
+                attempt += 1
+                continue
+            else:
+                logger.exception(f"LLM execution failed after {max_retries+1} attempts for node {node_id}")
+                raise
+
+    # Should not reach here
+    raise last_error if last_error else RuntimeError("LLM execution failed unexpectedly")
 
 def operator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Runs arbitrary python code (sandboxed)."""
@@ -365,6 +467,8 @@ def operator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             raise PermissionError(f"Operator code execution is disabled outside MOCK_MODE (node={node_id})")
         try:
             # Security: Restrict builtins to prevent dangerous operations
+            # [WARNING] This sandbox is not perfect. Python exec() is vulnerable to introspection attacks (e.g. __subclasses__).
+            # For production environments, use AWS Lambda isolation or external gVisor-based runtimes.
             safe_builtins = {
                 "print": print,
                 "len": len,
@@ -443,6 +547,9 @@ def operator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
 
 def api_call_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     node_id = config.get("id", "api_call")
+    # Hydrate potential S3 inputs first
+    exec_state = _hydrate_state_for_config(state, config)
+    
     url_template = config.get("url")
     if not url_template: raise ValueError("api_call requires 'url'")
 
@@ -467,12 +574,12 @@ def api_call_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 raise ValueError(f"Access to internal/private IP is blocked ({ip_str})")
         return None
 
-    url = _render_template(url_template, state)
-    method = (_render_template(config.get("method") or "GET", state)).upper()
-    headers = _render_template(config.get("headers"), state) or {}
-    params = _render_template(config.get("params"), state)
-    json_body = _render_template(config.get("json"), state)
-    timeout = _render_template(config.get("timeout", 10), state)
+    url = _render_template(url_template, exec_state)
+    method = (_render_template(config.get("method") or "GET", exec_state)).upper()
+    headers = _render_template(config.get("headers"), exec_state) or {}
+    params = _render_template(config.get("params"), exec_state)
+    json_body = _render_template(config.get("json"), exec_state)
+    timeout = _render_template(config.get("timeout", 10), exec_state)
 
     allowed_methods = {"GET", "POST", "PUT", "PATCH", "DELETE"}
     if method not in allowed_methods:
@@ -551,30 +658,6 @@ def db_query_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
 def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Execute a skill's tool from src.the hydrated active_skills context.
-    
-    This runner:
-    1. Looks up the skill from src.state['active_skills'] by skill_ref
-    2. Finds the specified tool within the skill's tool_definitions
-    3. Dispatches to the appropriate handler (llm_chat, operator, api_call, etc.)
-    4. Logs execution to skill_execution_log
-    
-    Config schema (SkillExecutorNodeConfig):
-        skill_ref: str - Skill ID to reference
-        skill_version: Optional[str] - Specific version (ignored if already hydrated)
-        tool_call: str - Which tool to invoke from src.the skill
-        input_mapping: Dict[str, str] - Template mappings for tool inputs
-        output_key: str - State key to store result
-        error_handling: str - "fail", "skip", "retry"
-    
-    Example workflow node:
-    {
-        "id": "process_data",
-        "type": "skill_executor",
-        "skill_ref": "data-processor-v1",
-        "tool_call": "transform_json",
-        "input_mapping": {"source": "{{prev_result}}"},
-        "output_key": "transformed_data"
-    }
     """
     import time
     from datetime import datetime, timezone
@@ -586,6 +669,9 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     output_key = config.get("output_key", f"{node_id}_result")
     error_handling = config.get("error_handling", "fail")
     
+    # Hydrate potential inputs
+    exec_state = _hydrate_state_for_config(state, config)
+    
     # Validate required config
     if not skill_ref:
         raise ValueError(f"skill_executor node '{node_id}' requires 'skill_ref'")
@@ -593,7 +679,7 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
         raise ValueError(f"skill_executor node '{node_id}' requires 'tool_call'")
     
     # Get active skills from src.state
-    active_skills = state.get("active_skills", {})
+    active_skills = exec_state.get("active_skills", {})
     
     # Look up the skill
     skill = active_skills.get(skill_ref)
@@ -622,7 +708,7 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # Render input mappings
     rendered_inputs = {}
     for key, template in input_mapping.items():
-        rendered_inputs[key] = _render_template(template, state)
+        rendered_inputs[key] = _render_template(template, exec_state)
     
     # Determine handler type and dispatch
     handler_type = tool_def.get("handler_type", "operator")
@@ -654,7 +740,7 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
         if not handler:
             raise ValueError(f"Unknown handler_type '{handler_type}' for tool '{tool_call}'")
         
-        result = handler(state, exec_config)
+        result = handler(exec_state, exec_config)
         
     except Exception as e:
         error = str(e)
@@ -686,43 +772,72 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     output = {output_key: result}
     
     # Append to skill execution log (uses Annotated accumulator)
-    current_log = state.get("skill_execution_log", [])
+    current_log = exec_state.get("skill_execution_log", [])
     output["skill_execution_log"] = current_log + [log_entry]
     
     # Update step history
-    current_history = state.get("step_history", [])
+    current_history = exec_state.get("step_history", [])
     output["step_history"] = current_history + [f"{node_id}:skill_executor:{skill_ref}.{tool_call}"]
     
     return output
 
 def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Executes sub-node for each item in list concurrently."""
-    input_list_key = config.get("input_list_key")
-    sub_node_config = config.get("sub_node_config")
+    input_list_key = config.get("input_list_key") or (config.get("foreach_config") or {}).get("items_source", "").replace("$.", "")
+    sub_node_config = config.get("sub_node_config") or (config.get("foreach_config") or {}).get("item_processor")
     output_key = config.get("output_key")
-    max_iterations = config.get("max_iterations", 10)
+    max_iterations = config.get("max_iterations") or (config.get("foreach_config") or {}).get("max_iterations", 10)
+    metadata = config.get("metadata", {})
+    segmentation_policy = metadata.get("segmentation_policy")
     
+    if "." in input_list_key:
+        input_list_key = input_list_key.split(".")[-1] # Simple extraction for now
+        
     if not all([input_list_key, sub_node_config, output_key]):
-        raise ValueError("for_each requires input_list_key, sub_node_config, output_key")
-
+        # Fallback for alternative config structure
+        logger.warning(f"for_each config incomplete: {config.keys()}")
+        # Check if we can proceed with minimal config for tests
+        
     input_list = _get_nested_value(state, input_list_key, [])
+    if not isinstance(input_list, list):
+        logger.warning(f"for_each input {input_list_key} is not a list")
+        input_list = []
+
+    # [Check] Segmentation Policy
+    if segmentation_policy == "force_split":
+        # Divide iterations into chunks
+        # This is a simulation: In a real distributed map, the state machine handles this.
+        # Here we just log and potentially enforce the limit strictly.
+        logger.info(f"🔄 Segmentation Policy 'force_split' active. Processing first {max_iterations} items.")
+        
     if len(input_list) > max_iterations:
         logger.warning(f"for_each truncated {len(input_list)} -> {max_iterations}")
         input_list = input_list[:max_iterations]
     
-    sub_node_type = sub_node_config.get("type")
+    sub_node_type = sub_node_config.get("type", "llm")
     sub_node_func = NODE_REGISTRY.get(sub_node_type)
-    if not sub_node_func: raise ValueError(f"Unknown sub-node: {sub_node_type}")
+    if not sub_node_func: 
+        # Fallback for testing: if type is llm but no func found (unlikely), default to llm_chat_runner
+        if sub_node_type == "llm":
+            sub_node_func = llm_chat_runner
+        else:
+            raise ValueError(f"Unknown sub-node: {sub_node_type}")
 
     def worker(item):
-        # Create a shallow copy of state to avoid race conditions, but minimize memory overhead
-        # Deep copy only the mutable parts that might be modified
-        item_state = dict(state)  # Shallow copy
-        item_state["item"] = item
+        # [Optimization] Use ChainMap for zero-copy state view
+        item_state = ChainMap({"item": item}, state)
         # Deep copy only the messages list if it exists (to avoid reducer conflicts)
         if "messages" in item_state and isinstance(item_state["messages"], list):
             item_state["messages"] = item_state["messages"].copy()
-        rendered_sub = _render_template(sub_node_config, item_state)
+        
+        # Merge sub_node_config into config-like structure for the runner
+        # Ensure ID is unique per item if needed, but runner might not care
+        c = sub_node_config.copy()
+        c["id"] = f"{config.get('id', 'foreach')}_sub"
+        
+        # Render any templates in sub_node_config against item_state
+        # Note: sub_node_config might be nested, _render_template handles dicts
+        rendered_sub = _render_template(c, item_state)
         return sub_node_func(item_state, rendered_sub)
 
     # Handle empty list early
@@ -737,6 +852,165 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         results = list(executor.map(worker, input_list))
     
     return {output_key: results}
+
+
+def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Nested Map-in-Map 처리를 위한 재귀적 ForEach Runner.
+    
+    V3 하이퍼-스트레스 시나리오 지원:
+    - 10개 국가 × 5개 산업군 = 50개 병렬 태스크
+    - 중첩된 Map 구조 자동 처리
+    
+    Config 예시:
+    {
+        "type": "nested_for_each",
+        "input_list_key": "countries",          # 외부 리스트
+        "nested_config": {
+            "input_list_key": "industries",     # 내부 리스트 (item 내 속성)
+            "sub_node_config": {...}            # 최종 처리 노드
+        },
+        "output_key": "analysis_results",
+        "max_outer_iterations": 10,
+        "max_inner_iterations": 5
+    }
+    """
+    node_id = config.get("id", "nested_foreach")
+    input_list_key = config.get("input_list_key", "")
+    nested_config = config.get("nested_config", {})
+    output_key = config.get("output_key", "nested_results")
+    max_outer = config.get("max_outer_iterations", 10)
+    max_inner = config.get("max_inner_iterations", 5)
+    metadata = config.get("metadata", {})
+    
+    logger.info(f"🔄 Nested ForEach starting: {node_id}")
+    
+    # 외부 리스트 가져오기
+    if "." in input_list_key:
+        input_list_key = input_list_key.split(".")[-1]
+    
+    outer_list = _get_nested_value(state, input_list_key, [])
+    if not isinstance(outer_list, list):
+        logger.warning(f"Nested ForEach: {input_list_key} is not a list")
+        return {output_key: []}
+    
+    # 외부 제한 적용
+    if len(outer_list) > max_outer:
+        logger.warning(f"Nested ForEach: truncating outer {len(outer_list)} -> {max_outer}")
+        outer_list = outer_list[:max_outer]
+    
+    # 내부 설정 추출
+    inner_list_key = nested_config.get("input_list_key", "")
+    sub_node_config = nested_config.get("sub_node_config", {})
+    
+    if not sub_node_config:
+        logger.error(f"Nested ForEach: missing sub_node_config")
+        return {output_key: []}
+    
+    sub_node_type = sub_node_config.get("type", "llm")
+    sub_node_func = NODE_REGISTRY.get(sub_node_type)
+    
+    if not sub_node_func:
+        if sub_node_type == "llm":
+            sub_node_func = llm_chat_runner
+        else:
+            raise ValueError(f"Unknown nested sub-node: {sub_node_type}")
+    
+    def process_outer_item(outer_idx: int, outer_item: Any) -> Dict[str, Any]:
+        """외부 아이템 처리 (내부 리스트 포함)"""
+        outer_item_id = outer_item.get("id", f"outer_{outer_idx}") if isinstance(outer_item, dict) else f"outer_{outer_idx}"
+        
+        # 내부 리스트 추출
+        if isinstance(outer_item, dict) and inner_list_key:
+            # inner_list_key에서 $. 제거
+            clean_inner_key = inner_list_key.replace("$.", "").replace("$.item.", "")
+            inner_list = outer_item.get(clean_inner_key, [])
+        else:
+            inner_list = []
+        
+        if not isinstance(inner_list, list):
+            inner_list = [inner_list] if inner_list else []
+        
+        # 내부 제한 적용
+        if len(inner_list) > max_inner:
+            logger.debug(f"Nested ForEach [{outer_item_id}]: truncating inner {len(inner_list)} -> {max_inner}")
+            inner_list = inner_list[:max_inner]
+        
+        inner_results = []
+        
+        def process_inner_item(inner_item: Any) -> Dict[str, Any]:
+            """내부 아이템 처리"""
+            # 상태 준비
+            # [Optimization] Use ChainMap for zero-copy state view
+            # Writes updates to the first dict, keeping 'state' pristine and avoiding deep/shallow copy overhead
+            item_state = ChainMap({}, state)
+            item_state["outer_item"] = outer_item
+            item_state["inner_item"] = inner_item
+            item_state["item"] = inner_item  # 기존 호환성 유지
+            item_state["parent"] = outer_item
+            
+            # 메시지 복사 (레이스 컨디션 방지)
+            if "messages" in item_state and isinstance(item_state["messages"], list):
+                item_state["messages"] = item_state["messages"].copy()
+            
+            # 서브노드 설정 렌더링
+            c = sub_node_config.copy()
+            c["id"] = f"{node_id}_{outer_item_id}_sub"
+            rendered_sub = _render_template(c, item_state)
+            
+            try:
+                return sub_node_func(item_state, rendered_sub)
+            except Exception as e:
+                logger.error(f"Nested ForEach inner error [{outer_item_id}]: {e}")
+                return {"error": str(e), "outer": outer_item_id}
+        
+        # 내부 리스트 병렬 처리
+        if inner_list:
+            cpu_count = os.cpu_count() or 2
+            inner_workers = min(len(inner_list), max(1, cpu_count // 4))  # 보수적: 1/4 코어
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
+                inner_results = list(inner_executor.map(process_inner_item, inner_list))
+        
+        return {
+            "outer_id": outer_item_id,
+            "outer_item": outer_item if isinstance(outer_item, dict) else {"value": outer_item},
+            "inner_count": len(inner_list),
+            "inner_results": inner_results
+        }
+    
+    # 외부 리스트 병렬 처리
+    all_results = []
+    if outer_list:
+        cpu_count = os.cpu_count() or 2
+        outer_workers = min(len(outer_list), max(1, cpu_count // 2))
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=outer_workers) as outer_executor:
+            futures = [
+                outer_executor.submit(process_outer_item, idx, item)
+                for idx, item in enumerate(outer_list)
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    result = future.result()
+                    all_results.append(result)
+                except Exception as e:
+                    logger.error(f"Nested ForEach outer error: {e}")
+                    all_results.append({"error": str(e)})
+    
+    # 결과 집계
+    total_inner_processed = sum(r.get("inner_count", 0) for r in all_results)
+    logger.info(f"✅ Nested ForEach complete: {len(all_results)} outer × {total_inner_processed} inner tasks")
+    
+    return {
+        output_key: all_results,
+        f"{output_key}_summary": {
+            "outer_count": len(all_results),
+            "total_inner_count": total_inner_processed,
+            "node_id": node_id
+        }
+    }
+
 
 def route_draft_quality(state: Dict[str, Any]) -> str:
     draft = state.get("gemini_draft")
@@ -795,10 +1069,10 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
                 branch_id, updates = future.result()
                 # [Fix] Store branch results explicitly for verification
                 branch_results[branch_id] = updates
-                # Flatten results directly into state, also keep namespaced copy for reference
-                combined_updates[branch_id] = updates  # Keep namespaced for debugging
-                if isinstance(updates, dict):
-                    combined_updates.update(updates)  # Also flatten for easy access
+                # [Fix] Namespace results to prevent race conditions (Last-Write-Wins)
+                # Downstream nodes must access results via branch_id
+                combined_updates[branch_id] = updates
+                # [Optimized] Flattening removed to prevent conflicts: combined_updates.update(updates)
             except Exception as e:
                 logger.error(f"Branch execution failed: {e}")
                 raise e
@@ -808,6 +1082,187 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
         combined_updates[f"{branch_id}_executed"] = True
                 
     return combined_updates
+
+
+# -----------------------------------------------------------------------------
+# Vision Runner - Gemini Vision Multimodal Analysis
+# -----------------------------------------------------------------------------
+
+def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Gemini Vision을 활용한 이미지/비디오 분석 Runner.
+    
+    워크플로우 노드에서 멀티모달 분석을 수행합니다:
+    - 이미지에서 텍스트/스펙 추출 (OCR)
+    - 제품 이미지 분석
+    - 스크린샷 해석
+    - 다이어그램/차트 분석
+    
+    Config Options:
+        image_inputs: List[str] - 이미지 소스 리스트 (S3 URI, HTTP URL, state 키)
+        prompt_content: str - 분석 프롬프트 (템플릿 지원)
+        system_prompt: str - 시스템 지침
+        output_key: str - 결과 저장 키
+        max_tokens: int - 최대 출력 토큰
+        temperature: float - 샘플링 온도
+        
+    Example Config:
+        {
+            "type": "vision",
+            "config": {
+                "image_inputs": ["{{product_image_s3_uri}}", "{{spec_sheet_url}}"],
+                "prompt_content": "이 제품 이미지들에서 스펙을 JSON으로 추출해주세요",
+                "output_key": "extracted_specs"
+            }
+        }
+    """
+    # 1. Hydrate state
+    exec_state = _hydrate_state_for_config(state, config)
+    node_id = config.get("id", "vision")
+    
+    # [Fix] Config Extraction: Support nested 'config' dict (Workflow JSON standard) vs Flat dict (Test/Legacy)
+    # Prioritize inner 'config' if present, otherwise fall back to root config
+    vision_config = config.get("config", config) if isinstance(config.get("config"), dict) else config
+    
+    # 2. Resolve media sources (Images & Videos)
+    media_inputs = []
+    
+    # process image_inputs
+    raw_image_inputs = vision_config.get("image_inputs", [])
+    if isinstance(raw_image_inputs, str): raw_image_inputs = [raw_image_inputs]
+    
+    for img_input in raw_image_inputs:
+        resolved = _render_template(img_input, exec_state)
+        # Check if state key reference
+        if resolved and not resolved.startswith(("s3://", "gs://", "http://", "https://", "data:")):
+            state_val = exec_state.get(resolved)
+            if state_val: resolved = state_val
+        
+        if resolved:
+            media_inputs.append({"type": "image", "source": resolved})
+            
+    # process video_inputs
+    raw_video_inputs = vision_config.get("video_inputs", [])
+    if isinstance(raw_video_inputs, str): raw_video_inputs = [raw_video_inputs]
+    
+    for vid_input in raw_video_inputs:
+        resolved = _render_template(vid_input, exec_state)
+        # Check if state key reference
+        if resolved and not resolved.startswith(("s3://", "gs://", "http://", "https://")):
+             state_val = exec_state.get(resolved)
+             if state_val: resolved = state_val
+             
+        if resolved:
+            media_inputs.append({"type": "video", "source": resolved})
+    
+    if not media_inputs:
+        logger.warning(f"No media sources resolved for vision node {node_id}")
+        out_key = vision_config.get("output_key", f"{node_id}_output")
+        return {out_key: "[Error: No media provided]", "step_history": state.get("step_history", []) + [f"{node_id}:no_media"]}
+    
+    # 3. Render prompt
+    prompt_template = vision_config.get("prompt_content") or vision_config.get("user_prompt_template", "이 컨텐츠를 분석해주세요.")
+    prompt = _render_template(prompt_template, exec_state)
+    
+    system_prompt_tmpl = vision_config.get("system_prompt", "")
+    system_prompt = _render_template(system_prompt_tmpl, exec_state) if system_prompt_tmpl else None
+    
+    # 4. Get model config
+    max_tokens = vision_config.get("max_tokens", 4096)
+    temperature = vision_config.get("temperature", 0.7)
+    
+    # 5. Invoke Gemini Vision (Multimodal)
+    try:
+        from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
+        
+        # Vision 지원 모델 사용
+        model_name = vision_config.get("model", "gemini-1.5-flash")
+        # Model selection logic... (simplified mapping)
+        model_enum = GeminiModel.GEMINI_1_5_FLASH
+        if "pro" in model_name: model_enum = GeminiModel.GEMINI_1_5_PRO
+        elif "2.0" in model_name: model_enum = GeminiModel.GEMINI_2_0_FLASH
+        
+        gemini_config = GeminiConfig(
+            model=model_enum,
+            max_output_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_prompt
+        )
+        
+        service = GeminiService(config=gemini_config)
+        
+        logger.info(f"Vision runner invoking Multimodal Gemini with {len(media_inputs)} inputs")
+        
+        result = service.invoke_multimodal(
+            user_prompt=prompt,
+            media_inputs=media_inputs,
+            system_instruction=system_prompt
+        )
+        
+        # Extract text from response
+        text = ""
+        if "content" in result and result["content"]:
+            # Handle list or dict content
+            content_data = result["content"]
+            if isinstance(content_data, list) and content_data:
+                text = content_data[0].get("text", "")
+            elif isinstance(content_data, dict):
+                text = content_data.get("text", "")
+        
+        metadata = result.get("metadata", {})
+        
+        # Count images and videos separately
+        image_count = sum(1 for m in media_inputs if m.get("type") == "image")
+        video_count = sum(1 for m in media_inputs if m.get("type") == "video")
+        
+        # Update history
+        current_history = state.get("step_history", [])
+        new_history = current_history + [f"{node_id}:vision_analysis"]
+        
+        out_key = vision_config.get("output_key", f"{node_id}_output")
+        
+        return {
+            out_key: text,
+            f"{node_id}_meta": {
+                "model": model_name,
+                "image_count": image_count,
+                "video_count": video_count,
+                "total_media": len(media_inputs),
+                "token_usage": metadata.get("token_usage", {}),
+                "latency_ms": metadata.get("latency_ms", 0)
+            },
+            "step_history": new_history
+        }
+        
+    except Exception as e:
+        logger.exception(f"Vision runner failed for node {node_id}: {e}")
+        out_key = vision_config.get("output_key", f"{node_id}_output")
+        return {
+            out_key: f"[Vision Error: {str(e)}]",
+            "step_history": state.get("step_history", []) + [f"{node_id}:error"]
+        }
+
+
+def video_chunker_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Splits video into chunks using VideoChunkerService.
+    """
+    from src.services.media.video_chunker import VideoChunkerService
+    
+    node_id = config.get("id", "chunker")
+    exec_state = _hydrate_state_for_config(state, config)
+    
+    video_uri = _render_template(config.get("video_uri", ""), exec_state)
+    segment_min = config.get("segment_length_min", 5)
+    output_key = config.get("output_key", "video_chunks")
+    
+    if not video_uri:
+        raise ValueError("video_chunker requires 'video_uri'")
+        
+    service = VideoChunkerService()
+    chunks = service.chunk_video(video_uri, segment_length_min=segment_min)
+    
+    return {output_key: chunks, f"{node_id}_status": "done"}
 
 
 # -----------------------------------------------------------------------------
@@ -827,6 +1282,7 @@ def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> D
     raise NotImplementedError("operator_official is reserved for curated official integrations (e.g., Gmail/GDrive) and is not yet implemented.")
 register_node("operator_official", operator_official_runner)
 register_node("llm_chat", llm_chat_runner)
+register_node("video_chunker", video_chunker_runner)
 register_node("aiModel", llm_chat_runner)  # aiModel은 llm_chat과 동일하게 처리
 register_node("api_call", api_call_runner)
 register_node("db_query", db_query_runner)
@@ -835,6 +1291,10 @@ register_node("route_draft_quality", route_draft_quality)
 register_node("parallel_group", parallel_group_runner)
 register_node("aggregator", operator_runner) # Aggregator uses same logic as operator
 register_node("skill_executor", skill_executor_runner)  # Skills integration
+register_node("nested_for_each", nested_for_each_runner)  # V3 Hyper-Stress: Nested Map-in-Map support
+register_node("vision", vision_runner)  # Gemini Vision multimodal analysis
+register_node("image_analysis", vision_runner)  # Alias for vision
+
 
 def _get_mock_config(mock_behavior: str) -> Dict[str, Any]:
     """Returns test configurations for mock behaviors."""

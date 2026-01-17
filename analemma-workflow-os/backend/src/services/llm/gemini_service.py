@@ -31,10 +31,16 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 try:
     from src.common.constants import is_mock_mode
     from src.common.secrets_utils import get_gemini_api_key
+    from src.common.retry_utils import with_retry_sync
 except ImportError:
     def is_mock_mode():
         return os.getenv("MOCK_MODE", "true").strip().lower() in {"true", "1", "yes", "on"}
     get_gemini_api_key = None
+    # Fallback retry just in case
+    def with_retry_sync(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -103,72 +109,14 @@ RETRY_MAX_DELAY = float(os.getenv("GEMINI_RETRY_MAX_DELAY", "60.0"))
 RETRY_EXPONENTIAL_BASE = 2
 
 
-def with_exponential_backoff(
-    max_attempts: int = RETRY_MAX_ATTEMPTS,
-    base_delay: float = RETRY_BASE_DELAY,
-    max_delay: float = RETRY_MAX_DELAY,
-    retryable_exceptions: Tuple = None
-):
-    """
-    Exponential Backoff 데코레이터
-    
-    Rate Limit, 일시적 오류 등에 대한 자동 재시도
-    """
-    if retryable_exceptions is None:
-        # 재시도 가능한 예외 패턴
-        retryable_exceptions = (
-            "429",  # Rate Limit
-            "503",  # Service Unavailable
-            "500",  # Internal Server Error
-            "ResourceExhausted",
-            "RESOURCE_EXHAUSTED",
-            "rate limit",
-            "quota exceeded",
-            "temporarily unavailable",
-        )
-    
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            
-            for attempt in range(max_attempts):
-                try:
-                    return func(*args, **kwargs)
-                except Exception as e:
-                    error_str = str(e).lower()
-                    
-                    # 재시도 가능한 오류인지 확인
-                    is_retryable = any(
-                        pattern.lower() in error_str 
-                        for pattern in retryable_exceptions
-                    )
-                    
-                    if not is_retryable or attempt == max_attempts - 1:
-                        raise
-                    
-                    last_exception = e
-                    
-                    # 지수 백오프 계산
-                    delay = min(
-                        base_delay * (RETRY_EXPONENTIAL_BASE ** attempt),
-                        max_delay
-                    )
-                    # 지터 추가 (0.5 ~ 1.5배)
-                    import random
-                    delay *= (0.5 + random.random())
-                    
-                    logger.warning(
-                        f"Retryable error on attempt {attempt + 1}/{max_attempts}: {e}. "
-                        f"Retrying in {delay:.2f}s..."
-                    )
-                    time.sleep(delay)
-            
-            if last_exception:
-                raise last_exception
-        
-        return wrapper
-    return decorator
+# ═══════════════════════════════════════════════════════════════════════════════
+# Constants & Retry Config
+# ═══════════════════════════════════════════════════════════════════════════════
+RETRY_MAX_ATTEMPTS = int(os.getenv("GEMINI_RETRY_MAX_ATTEMPTS", "5"))
+RETRY_BASE_DELAY = float(os.getenv("GEMINI_RETRY_BASE_DELAY", "1.0"))
+RETRY_MAX_DELAY = float(os.getenv("GEMINI_RETRY_MAX_DELAY", "60.0"))
+
+MAX_IMAGES_PER_REQUEST = 16  # Vertex AI limit
 
 
 class GeminiModel(Enum):
@@ -540,7 +488,7 @@ class GeminiService:
     # Model Invocation (핵심 메서드)
     # ═══════════════════════════════════════════════════════════════════════════
     
-    @with_exponential_backoff()
+    @with_retry_sync(max_retries=RETRY_MAX_ATTEMPTS, base_delay=RETRY_BASE_DELAY, max_delay=RETRY_MAX_DELAY)
     def invoke_model(
         self,
         user_prompt: str,
@@ -1069,6 +1017,521 @@ class GeminiService:
             logger.info(f"Clearing context cache: {cache_name}")
             self._context_cache = None
             self._context_cache_key = None
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Multimodal Vision Methods (이미지/비디오 입력)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    @with_exponential_backoff()
+    def invoke_with_image(
+        self,
+        user_prompt: str,
+        image_source: Union[str, bytes],
+        mime_type: Optional[str] = None,
+        system_instruction: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        이미지 입력을 포함한 Gemini Vision 호출
+        
+        Gemini 1.5/2.0 모델의 멀티모달 기능을 활용하여 이미지 분석을 수행합니다.
+        
+        Args:
+            user_prompt: 사용자 프롬프트 (이미지에 대한 질문/지시)
+            image_source: 이미지 소스 (S3 URI, HTTP URL, 파일 경로, 또는 bytes)
+            mime_type: MIME 타입 (None이면 자동 감지)
+            system_instruction: 시스템 지침
+            max_output_tokens: 최대 출력 토큰
+            temperature: 샘플링 온도
+            
+        Returns:
+            Gemini 응답 딕셔너리
+            
+        Example:
+            >>> service = GeminiService()
+            >>> result = service.invoke_with_image(
+            ...     "이 제품 이미지에서 스펙을 추출해주세요",
+            ...     "s3://bucket/product_spec.jpg"
+            ... )
+        """
+        return self.invoke_with_images(
+            user_prompt=user_prompt,
+            image_sources=[image_source],
+            mime_types=[mime_type] if mime_type else None,
+            system_instruction=system_instruction,
+            max_output_tokens=max_output_tokens,
+            temperature=temperature
+        )
+    
+    @with_retry_sync(max_retries=RETRY_MAX_ATTEMPTS, base_delay=RETRY_BASE_DELAY, max_delay=RETRY_MAX_DELAY)
+    def invoke_with_images(
+        self,
+        user_prompt: str,
+        image_sources: List[Union[str, bytes]],
+        mime_types: Optional[List[str]] = None,
+        system_instruction: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> Dict[str, Any]:
+        """
+        다중 이미지 입력을 포함한 Gemini Vision 호출
+        
+        최대 16개의 이미지를 동시에 분석할 수 있습니다 (Gemini 모델 제한).
+        
+        Args:
+            user_prompt: 사용자 프롬프트
+            image_sources: 이미지 소스 리스트 (S3 URI, HTTP URL, 파일 경로, bytes)
+            mime_types: 각 이미지의 MIME 타입 리스트 (None이면 자동 감지)
+            system_instruction: 시스템 지침
+            max_output_tokens: 최대 출력 토큰
+            temperature: 샘플링 온도
+            
+        Returns:
+            Gemini 응답 딕셔너리
+        """
+        """
+        if is_mock_mode():
+            logger.info(f"MOCK_MODE: Returning synthetic Vision response for {len(image_sources)} images")
+            return {
+                "content": [{
+                    "text": f"[MOCK] 이미지 {len(image_sources)}개를 분석했습니다. "
+                           f"프롬프트: {user_prompt[:50]}..."
+                }],
+                "metadata": {
+                    "token_usage": TokenUsage(input_tokens=100 * len(image_sources), output_tokens=50).to_dict(),
+                    "image_count": len(image_sources),
+                    "model": self.config.model.value
+                }
+            }
+        
+        # 16개 이미지 제한 적용 (Boundary Test 대응)
+        if len(image_sources) > MAX_IMAGES_PER_REQUEST:
+            logger.warning(
+                f"Too many images provided ({len(image_sources)}). "
+                f"Truncating to first {MAX_IMAGES_PER_REQUEST} images to avoid API error."
+            )
+            image_sources = image_sources[:MAX_IMAGES_PER_REQUEST]
+            if mime_types:
+                mime_types = mime_types[:MAX_IMAGES_PER_REQUEST]
+
+        client = self.client
+                    "token_usage": TokenUsage(input_tokens=100, output_tokens=50).to_dict(),
+                    "image_count": len(image_sources),
+                    "model": self.config.model.value
+                }
+            }
+        
+        client = self.client
+        if not client:
+            raise RuntimeError("Gemini client not initialized")
+        
+        # 이미지 Part 구성
+        image_parts = []
+        for idx, source in enumerate(image_sources):
+            mime = mime_types[idx] if mime_types and idx < len(mime_types) else None
+            part = self._create_image_part(source, mime)
+            if part:
+                image_parts.append(part)
+        
+        if not image_parts:
+            raise ValueError("No valid images provided")
+        
+        # 모델 생성
+        generation_config = {
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "temperature": temperature or self.config.temperature,
+            "top_p": self.config.top_p,
+            "top_k": self.config.top_k,
+        }
+        
+        model = client.GenerativeModel(
+            model_name=self.config.model.value,
+            generation_config=generation_config,
+            system_instruction=system_instruction or self.config.system_instruction
+        )
+        
+        # 컨텐츠 구성: [텍스트 프롬프트, 이미지1, 이미지2, ...]
+        contents = [user_prompt] + image_parts
+        
+        start_time = time.time()
+        
+        try:
+            response = model.generate_content(contents)
+            
+            # 토큰 사용량 추적
+            token_usage = self._track_token_usage(response, user_prompt, cached_tokens=0)
+            
+            elapsed_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"Gemini Vision: model={self.config.model.value}, "
+                f"images={len(image_parts)}, "
+                f"output_tokens={token_usage.output_tokens}, "
+                f"cost=${token_usage.estimated_cost_usd:.6f}, "
+                f"latency={elapsed_ms:.0f}ms"
+            )
+            
+            parsed = self._parse_response(response)
+            parsed["metadata"] = {
+                "token_usage": token_usage.to_dict(),
+                "latency_ms": elapsed_ms,
+                "model": self.config.model.value,
+                "image_count": len(image_parts)
+            }
+            return parsed
+            
+        except Exception as e:
+            logger.exception(f"Gemini Vision invocation failed: {e}")
+            raise
+    
+    def _create_image_part(
+        self, 
+        source: Union[str, bytes], 
+        mime_type: Optional[str] = None
+    ) -> Optional[Any]:
+        """
+        이미지 소스에서 Gemini Part 객체 생성
+        
+        지원 소스:
+        - S3 URI (s3://bucket/key)
+        - HTTP/HTTPS URL
+        - 로컬 파일 경로
+        - bytes 데이터
+        
+        Args:
+            source: 이미지 소스
+            mime_type: MIME 타입 (None이면 자동 감지)
+            
+        Returns:
+            vertexai.generative_models.Part 객체
+        """
+        client = self.client
+        if not client:
+            return None
+        
+        try:
+            # bytes 데이터인 경우
+            if isinstance(source, bytes):
+                image_bytes = source
+                if not mime_type:
+                    mime_type = self._detect_mime_type(image_bytes)
+            
+            # S3 URI인 경우
+            elif isinstance(source, str) and source.startswith("s3://"):
+                image_bytes = self._download_from_s3(source)
+                if not mime_type:
+                    mime_type = self._detect_mime_type_from_extension(source)
+            
+            # HTTP/HTTPS URL인 경우
+            elif isinstance(source, str) and source.startswith(("http://", "https://")):
+                image_bytes = self._download_from_url(source)
+                if not mime_type:
+                    mime_type = self._detect_mime_type_from_extension(source)
+            
+            # 로컬 파일 경로인 경우
+            elif isinstance(source, str):
+                with open(source, "rb") as f:
+                    image_bytes = f.read()
+                if not mime_type:
+                    mime_type = self._detect_mime_type_from_extension(source)
+            
+            else:
+                logger.warning(f"Unknown image source type: {type(source)}")
+                return None
+            
+            # 기본 MIME 타입
+            if not mime_type:
+                mime_type = "image/jpeg"
+            
+            # Vertex AI Part 생성
+            return client.Part.from_data(data=image_bytes, mime_type=mime_type)
+            
+        except Exception as e:
+            logger.error(f"Failed to create image part from {source}: {e}")
+            return None
+    
+    def _create_video_part(self, video_source: Union[str, bytes], mime_type: str = "video/mp4") -> Any:
+        """
+        비디오 소스를 Vertex AI Part 객체로 변환
+        
+        대용량 비디오 지원 전략:
+        1. GCS URI ("gs://") -> Part.from_uri() 사용 (대용량 가능)
+        2. S3/URL/Local -> 다운로드 후 Part.from_data() 사용 (용량 제한 있음, 20MB 권장)
+           TODO: S3 -> GCS 자동 복사 로직 추가 필요 for Production
+        """
+        from vertexai.generative_models import Part
+        
+        # 1. GCS URI (Direct File API)
+        if isinstance(video_source, str) and video_source.startswith("gs://"):
+            logger.info(f"Using File API (Part.from_uri) for GCS video: {video_source}")
+            return Part.from_uri(uri=video_source, mime_type=mime_type)
+            
+        # 2. Other Sources (Fallback to Data)
+        data = b""
+        if isinstance(video_source, str):
+            if video_source.startswith("s3://"):
+                # TODO: For production, authorize S3->GCS transfer or use signed URL if supported
+                data = self._download_from_s3(video_source)
+                mime_type = self._detect_mime_type_from_extension(video_source) or mime_type
+            elif video_source.startswith(("http://", "https://")):
+                data = self._download_from_url(video_source)
+                mime_type = self._detect_mime_type_from_extension(video_source) or mime_type
+            elif os.path.isfile(video_source):
+                with open(video_source, "rb") as f:
+                    data = f.read()
+                mime_type = self._detect_mime_type_from_extension(video_source) or mime_type
+            else:
+                 # Check if it's a "virtual" chunk from Meta-Chunker
+                 if "_chunk_" in video_source and is_mock_mode():
+                     return Part.from_data(data=b"mock_video_chunk", mime_type=mime_type)
+                 raise ValueError(f"Invalid video source: {video_source}")
+                 
+        elif isinstance(video_source, bytes):
+            data = video_source
+            
+        # Size Limit Warning
+        if len(data) > 20 * 1024 * 1024:
+             logger.warning(
+                 f"Video size {len(data)/1024/1024:.2f}MB exceeds recommended limit for Part.from_data. "
+                 "Use gs:// URI for large files."
+             )
+        
+        return Part.from_data(data=data, mime_type=mime_type)
+
+    def invoke_multimodal(
+        self,
+        user_prompt: str,
+        media_inputs: List[Dict[str, str]], # [{"type": "image|video", "source": "..."}]
+        system_instruction: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        통합 멀티모달 호출 (이미지/비디오 혼합 가능)
+        """
+        if is_mock_mode():
+             return self._mock_response("multimodal_analysis")
+
+        client = self.client
+        if not client: return {"error": "Gemini client not initialized"}
+
+        contents = [user_prompt]
+        
+        for item in media_inputs:
+            kind = item.get("type", "image")
+            src = item.get("source")
+            if not src: continue
+            
+            if kind == "video":
+                part = self._create_video_part(src)
+            else:
+                part = self._create_image_part(src)
+                
+            if part: contents.append(part)
+            
+        # Call Generate Content (Similar logic to invoke_with_images)
+        # ... (Implementation simplified for brevity, reusing existing patterns)
+        # For now, let's delegate to the actual call logic or duplicate it slightly
+        # Ideally refactor `invoke_with_images` to be generic.
+        
+        # Temporary: Reuse generation logic
+        return self._generate_content_generic(contents, system_instruction)
+
+    def _generate_content_generic(self, contents, system_instruction):
+        """
+        Generic content generation helper for multimodal calls.
+        Reuses token tracking and response parsing logic.
+        """
+        import time
+        
+        try:
+            generation_config = {
+                "max_output_tokens": self.config.max_output_tokens,
+                "temperature": self.config.temperature,
+                "top_p": self.config.top_p,
+                "top_k": self.config.top_k,
+            }
+            
+            model = self.client.GenerativeModel(
+                model_name=self.config.model.value,
+                generation_config=generation_config,
+                system_instruction=system_instruction or self.config.system_instruction
+            )
+            
+            start_time = time.time()
+            response = model.generate_content(contents)
+            elapsed_ms = (time.time() - start_time) * 1000
+            
+            # Extract user prompt from contents (first element is usually text)
+            user_prompt = contents[0] if contents and isinstance(contents[0], str) else ""
+            
+            # Track token usage
+            token_usage = self._track_token_usage(response, user_prompt, cached_tokens=0)
+            
+            # Parse response
+            parsed = self._parse_response(response)
+            
+            # Add metadata
+            if isinstance(parsed, dict):
+                parsed.setdefault("metadata", {}).update({
+                    "token_usage": token_usage.to_dict() if hasattr(token_usage, 'to_dict') else str(token_usage),
+                    "latency_ms": elapsed_ms,
+                    "model": self.config.model.value
+                })
+            
+            logger.info(
+                f"Gemini Multimodal: model={self.config.model.value}, "
+                f"media_items={len(contents) - 1}, "  # Subtract prompt text
+                f"output_tokens={token_usage.output_tokens if hasattr(token_usage, 'output_tokens') else 'N/A'}, "
+                f"latency={elapsed_ms:.0f}ms"
+            )
+            
+            return parsed
+            
+        except Exception as e:
+            logger.error(f"Multimodal error: {e}")
+            return {"error": str(e), "content": []}
+
+        
+
+
+    def _download_from_s3(self, s3_uri: str) -> bytes:
+        """S3 URI에서 이미지 다운로드"""
+        import boto3
+        
+        # s3://bucket/key 파싱
+        if not s3_uri.startswith("s3://"):
+            raise ValueError(f"Invalid S3 URI: {s3_uri}")
+        
+        path = s3_uri[5:]  # "s3://" 제거
+        parts = path.split("/", 1)
+        if len(parts) != 2:
+            raise ValueError(f"Invalid S3 URI format: {s3_uri}")
+        
+        bucket, key = parts
+        
+        s3_client = boto3.client("s3")
+        response = s3_client.get_object(Bucket=bucket, Key=key)
+        return response["Body"].read()
+    
+    def _download_from_url(self, url: str) -> bytes:
+        """HTTP URL에서 이미지 다운로드"""
+        import urllib.request
+        
+        with urllib.request.urlopen(url, timeout=30) as response:
+            return response.read()
+    
+    def _detect_mime_type(self, data: bytes) -> str:
+        """바이트 데이터에서 MIME 타입 감지 (magic bytes)"""
+        if data[:8] == b'\x89PNG\r\n\x1a\n':
+            return "image/png"
+        elif data[:2] == b'\xff\xd8':
+            return "image/jpeg"
+        elif data[:6] in (b'GIF87a', b'GIF89a'):
+            return "image/gif"
+        elif data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+            return "image/webp"
+        elif data[:4] == b'\x00\x00\x00\x1c' or data[:4] == b'\x00\x00\x00\x20':
+            return "video/mp4"  # HEIC/HEIF도 이 시그니처 사용
+        else:
+            return "image/jpeg"  # 기본값
+    
+    def _detect_mime_type_from_extension(self, path: str) -> str:
+        """파일 확장자에서 MIME 타입 추론"""
+        ext = path.lower().split(".")[-1].split("?")[0]  # 쿼리 파라미터 제거
+        
+        extension_map = {
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "png": "image/png",
+            "gif": "image/gif",
+            "webp": "image/webp",
+            "bmp": "image/bmp",
+            "svg": "image/svg+xml",
+            "heic": "image/heic",
+            "heif": "image/heif",
+            "mp4": "video/mp4",
+            "mov": "video/quicktime",
+            "avi": "video/x-msvideo",
+            "webm": "video/webm",
+        }
+        
+        return extension_map.get(ext, "image/jpeg")
+    
+    def invoke_vision_stream(
+        self,
+        user_prompt: str,
+        image_sources: List[Union[str, bytes]],
+        mime_types: Optional[List[str]] = None,
+        system_instruction: Optional[str] = None,
+        max_output_tokens: Optional[int] = None,
+        temperature: Optional[float] = None
+    ) -> Generator[str, None, None]:
+        """
+        이미지 입력을 포함한 Gemini Vision 스트리밍 호출
+        
+        대용량 분석 결과를 실시간으로 스트리밍합니다.
+        
+        Yields:
+            JSONL 형식의 응답 청크
+        """
+        if is_mock_mode():
+            logger.info(f"MOCK_MODE: Streaming Vision response for {len(image_sources)} images")
+            mock_lines = [
+                '{"type": "analysis", "data": {"description": "제품 이미지 분석 결과"}}',
+                '{"type": "spec", "data": {"key": "크기", "value": "100x200mm"}}',
+                '{"type": "status", "data": "done"}'
+            ]
+            for line in mock_lines:
+                yield line + "\n"
+                time.sleep(0.1)
+            return
+        
+        client = self.client
+        if not client:
+            yield '{"type": "error", "data": "Gemini client not initialized"}\n'
+            return
+        
+        # 이미지 Part 구성
+        image_parts = []
+        for idx, source in enumerate(image_sources):
+            mime = mime_types[idx] if mime_types and idx < len(mime_types) else None
+            part = self._create_image_part(source, mime)
+            if part:
+                image_parts.append(part)
+        
+        if not image_parts:
+            yield '{"type": "error", "data": "No valid images provided"}\n'
+            return
+        
+        generation_config = {
+            "max_output_tokens": max_output_tokens or self.config.max_output_tokens,
+            "temperature": temperature or self.config.temperature,
+        }
+        
+        model = client.GenerativeModel(
+            model_name=self.config.model.value,
+            generation_config=generation_config,
+            system_instruction=system_instruction or self.config.system_instruction
+        )
+        
+        contents = [user_prompt] + image_parts
+        
+        try:
+            response = model.generate_content(contents, stream=True)
+            buffer = ""
+            
+            for chunk in response:
+                if chunk.text:
+                    buffer += chunk.text
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        if line.strip():
+                            yield line + "\n"
+            
+            if buffer.strip():
+                yield buffer + "\n"
+                
+        except Exception as e:
+            yield f'{{"type": "error", "data": "{str(e)}"}}\n'
 
 
 # 편의 함수들
