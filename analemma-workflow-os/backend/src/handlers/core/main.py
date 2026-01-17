@@ -371,8 +371,8 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 logger.warning(f"🚨 Async required by heuristic for node {node_id}")
                 raise AsyncLLMRequiredException("Resource-intensive processing required")
 
-            # 3. Invoke
-            meta = {"model": model, "max_tokens": max_tokens, "attempt": attempt + 1}
+            # 3. Invoke - Provider Selection (Gemini or Bedrock)
+            meta = {"model": model, "max_tokens": max_tokens, "attempt": attempt + 1, "provider": "gemini"}
             
             # [Fix] Manually trigger callbacks since we are using Boto3 directly
             callbacks = config.get("callbacks", [])
@@ -384,20 +384,73 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         except Exception:
                             pass
 
-            resp = invoke_bedrock_model(
-                model_id=model,
-                system_prompt=system_prompt,
-                user_prompt=prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                read_timeout_seconds=90 # Adaptive timeout
-            )
-            text = extract_text_from_bedrock_response(resp)
+            # Provider selection: Gemini (default) or Bedrock (fallback)
+            provider = config.get("provider", "gemini")
             
-            # Extract usage stats if available
-            usage = {}
-            if isinstance(resp, dict) and "usage" in resp:
-                usage = resp["usage"]
+            if provider == "gemini":
+                # Use Gemini Service (Native SDK)
+                try:
+                    from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
+                    
+                    # Map model string to GeminiModel enum
+                    model_mapping = {
+                        "gemini-2.0-flash": GeminiModel.GEMINI_2_0_FLASH,
+                        "gemini-1.5-pro": GeminiModel.GEMINI_1_5_PRO,
+                        "gemini-1.5-flash": GeminiModel.GEMINI_1_5_FLASH,
+                        "gemini-1.5-flash-8b": GeminiModel.GEMINI_1_5_FLASH_8B,
+                    }
+                    
+                    gemini_model = model_mapping.get(model, GeminiModel.GEMINI_1_5_FLASH)
+                    
+                    gemini_config = GeminiConfig(
+                        model=gemini_model,
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
+                        system_instruction=system_prompt
+                    )
+                    
+                    service = GeminiService(config=gemini_config)
+                    resp = service.invoke_model(
+                        user_prompt=prompt,
+                        system_instruction=system_prompt,
+                        max_output_tokens=max_tokens,
+                        temperature=temperature
+                    )
+                    
+                    # Extract text from Gemini response structure
+                    text = ""
+                    if "content" in resp and isinstance(resp["content"], list) and resp["content"]:
+                        text = resp["content"][0].get("text", "")
+                    elif "text" in resp:
+                        text = resp["text"]
+                    else:
+                        text = str(resp)
+                    
+                    usage = resp.get("metadata", {}).get("token_usage", {})
+                    meta["provider"] = "gemini"
+                    
+                except Exception as gemini_error:
+                    # Gemini failed, fallback to Bedrock
+                    logger.warning(f"Gemini invocation failed, falling back to Bedrock: {gemini_error}")
+                    provider = "bedrock"
+            
+            if provider == "bedrock":
+                # Bedrock fallback (existing logic)
+                meta["provider"] = "bedrock"
+                resp = invoke_bedrock_model(
+                    model_id=model,
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    read_timeout_seconds=90 # Adaptive timeout
+                )
+                text = extract_text_from_bedrock_response(resp)
+                
+                # Extract usage stats if available
+                usage = {}
+                if isinstance(resp, dict) and "usage" in resp:
+                    usage = resp["usage"]
             
             # [Fix] Manually trigger on_llm_end
             if callbacks:
