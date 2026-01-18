@@ -47,13 +47,20 @@ def _load_test_workflow_config(test_keyword: str) -> dict:
     # Base directory 계산 (backend/src/handlers/simulator -> backend)
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     
+    # Workspace root 계산 (backend -> analemma-workflow-os)
+    workspace_root = os.path.dirname(base_dir)
+    
     # Lambda 컨테이너 및 로컬 개발 환경 경로들
     possible_paths = [
-        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container
+        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (legacy)
+        f"/var/task/tests/backend/workflows/{mapped_workflow_id}.json",  # Lambda container (actual location)
         f"{base_dir}/src/test_workflows/{mapped_workflow_id}.json",  # backend/src/test_workflows
+        f"{workspace_root}/tests/backend/workflows/{mapped_workflow_id}.json",  # analemma-workflow-os/tests/backend/workflows
         f"./test_workflows/{mapped_workflow_id}.json",
+        f"./tests/backend/workflows/{mapped_workflow_id}.json",
         f"src/test_workflows/{mapped_workflow_id}.json",
         f"backend/src/test_workflows/{mapped_workflow_id}.json",
+        f"tests/backend/workflows/{mapped_workflow_id}.json",
     ]
     
     logger.info(f"Loading test workflow for {test_keyword} -> {mapped_workflow_id}")
