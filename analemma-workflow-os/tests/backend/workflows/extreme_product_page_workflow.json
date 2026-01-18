@@ -19,7 +19,8 @@
                 "prompt": "비디오를 분석하여 제품 데모의 주요 특징을 요약해주세요. 비디오: {multimodal_inputs[video]}",
                 "temperature": 0.3,
                 "multimodal": true,
-                "video_enabled": true
+                "video_enabled": true,
+                "output_key": "video_analysis"
             }
         },
         {
@@ -48,7 +49,7 @@
             "id": "multimodal_aggregator",
             "type": "operator",
             "config": {
-                "code": "video_result = state.get('video_analysis', {})\nimage_results = state.get('image_batch_results', [])\nstate['multimodal_summary'] = {\n    'video_features': video_result.get('features', []),\n    'spec_count': len(image_results),\n    'analysis_complete': True\n}\nstate['multimodal_results'].append(state['multimodal_summary'])\nprint(f\"Multimodal analysis complete: Video + {len(image_results)} images processed\")",
+                "code": "video_result = state.get('video_analysis', '') or state.get('video_analysis_output', '')\nimage_results = state.get('image_batch_results', [])\nstate['multimodal_summary'] = {\n    'video_features': video_result if isinstance(video_result, str) else video_result.get('features', []) if hasattr(video_result, 'get') else [],\n    'spec_count': len(image_results),\n    'analysis_complete': True\n}\nstate['multimodal_results'].append(state['multimodal_summary'])\nprint(f\"Multimodal analysis complete: Video + {len(image_results)} images processed\")",
                 "output_key": "multimodal_summary"
             }
         },
@@ -74,12 +75,12 @@
         {
             "source": "image_batch_analysis",
             "target": "image_processor",
-            "type": "for_each_body"
+            "type": "normal"
         },
         {
             "source": "image_processor",
             "target": "multimodal_aggregator",
-            "type": "for_each_exit"
+            "type": "normal"
         },
         {
             "source": "multimodal_aggregator",

@@ -52,7 +52,7 @@
         {
             "source": "outer_map_processor",
             "target": "inner_map_processor",
-            "type": "for_each_body"
+            "type": "normal"
         },
         {
             "source": "inner_map_processor",

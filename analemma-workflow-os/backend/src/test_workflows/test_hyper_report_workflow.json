@@ -5,7 +5,7 @@
   "max_loop_iterations": 50,
   "nodes": [
     {
-      "node_id": "data_ingestion",
+      "id": "data_ingestion",
       "node_name": "Large-scale Data Collection",
       "description": "Collect 50+ RSS feeds or 200+ technical documents (scenario exceeding 256KB)",
       "type": "llm",
@@ -25,7 +25,7 @@
       }
     },
     {
-      "node_id": "category_dispatcher",
+      "id": "category_dispatcher",
       "node_name": "Parallel classification by field",
       "description": "Parallel classification of collected data into AI, Cloud, Security, SaaS fields",
       "type": "map",
@@ -52,7 +52,7 @@
       }
     },
     {
-      "node_id": "saas_analyzer_with_failure",
+      "id": "saas_analyzer_with_failure",
       "node_name": "SaaS field analysis (failure injection)",
       "description": "Intentional API error during SaaS category analysis",
       "type": "llm",
@@ -79,7 +79,7 @@
       }
     },
     {
-      "node_id": "foreach_article_analysis",
+      "id": "foreach_article_analysis",
       "node_name": "개별 기사 순차 분석",
       "description": "각 분야 내 개별 기사를 순차적으로 심층 분석",
       "type": "foreach",
@@ -106,7 +106,7 @@
       }
     },
     {
-      "node_id": "low_confidence_filter",
+      "id": "low_confidence_filter",
       "node_name": "신뢰도 필터링",
       "description": "신뢰도 60% 미만 항목 감지 및 사용자 승인 요청",
       "type": "condition",
@@ -122,7 +122,7 @@
       }
     },
     {
-      "node_id": "human_approval_request",
+      "id": "human_approval_request",
       "node_name": "사용자 승인 대기 (HITL)",
       "description": "낮은 신뢰도 항목에 대한 사용자 검토 요청",
       "type": "human_approval",
@@ -140,7 +140,7 @@
       }
     },
     {
-      "node_id": "aggregate_report",
+      "id": "aggregate_report",
       "node_name": "최종 리포트 집계",
       "description": "모든 분석 결과를 하나의 리포트로 통합",
       "type": "llm",
@@ -160,7 +160,7 @@
       }
     },
     {
-      "node_id": "user_correction_processing",
+      "id": "user_correction_processing",
       "node_name": "사용자 수정사항 처리",
       "description": "사용자가 최종 리포트에서 수정한 내용을 반영",
       "type": "llm",
@@ -180,7 +180,7 @@
       }
     },
     {
-      "node_id": "cost_calculation",
+      "id": "cost_calculation",
       "node_name": "비용 정산",
       "description": "전체 워크플로우의 LLM 비용 계산",
       "type": "function",
@@ -195,15 +195,15 @@
   "start_node": "data_ingestion",
   "end_node": "cost_calculation",
   "edges": [
-    {"from": "data_ingestion", "to": "category_dispatcher"},
-    {"from": "category_dispatcher", "to": "saas_analyzer_with_failure"},
-    {"from": "saas_analyzer_with_failure", "to": "foreach_article_analysis"},
-    {"from": "foreach_article_analysis", "to": "low_confidence_filter"},
-    {"from": "low_confidence_filter", "to": "human_approval_request", "condition": "low_confidence"},
-    {"from": "low_confidence_filter", "to": "aggregate_report", "condition": "high_confidence"},
-    {"from": "human_approval_request", "to": "aggregate_report"},
-    {"from": "aggregate_report", "to": "user_correction_processing"},
-    {"from": "user_correction_processing", "to": "cost_calculation"}
+    {"source": "data_ingestion", "target": "category_dispatcher"},
+    {"source": "category_dispatcher", "target": "saas_analyzer_with_failure"},
+    {"source": "saas_analyzer_with_failure", "target": "foreach_article_analysis"},
+    {"source": "foreach_article_analysis", "target": "low_confidence_filter"},
+    {"source": "low_confidence_filter", "target": "human_approval_request", "condition": "low_confidence"},
+    {"source": "low_confidence_filter", "target": "aggregate_report", "condition": "high_confidence"},
+    {"source": "human_approval_request", "target": "aggregate_report"},
+    {"source": "aggregate_report", "target": "user_correction_processing"},
+    {"source": "user_correction_processing", "target": "cost_calculation"}
   ],
   "metadata": {
     "test_category": "complex_integration",

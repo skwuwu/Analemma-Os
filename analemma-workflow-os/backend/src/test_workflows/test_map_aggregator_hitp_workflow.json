@@ -49,19 +49,12 @@
             }
         },
         {
-            "id": "hitp_node",
-            "type": "hitp",
+            "id": "hitp_approval_node",
+            "type": "operator",
+            "hitp": true,
             "config": {
-                "message": "Aggregation 완료. 아래 데이터에서 [TEST_RESULT: ✅ SUCCESS]를 확인하고 승인하세요.",
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "feedback": {
-                            "type": "string",
-                            "description": "결과에 대한 피드백"
-                        }
-                    }
-                }
+                "code": "print('HITP approval node - waiting for human approval')\nstate['hitp_message'] = 'Aggregation 완료. TEST_RESULT를 확인하고 승인하세요.'\nresult = {'status': 'awaiting_human_approval'}\nstate['hitp_result'] = result",
+                "output_key": "hitp_result"
             }
         }
     ],
@@ -76,7 +69,8 @@
         },
         {
             "source": "validator_node",
-            "target": "hitp_node"
+            "target": "hitp_approval_node",
+            "type": "hitp"
         }
     ],
     "start_node": "parallel_node"
