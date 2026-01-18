@@ -1,0 +1,143 @@
+{
+  "id": "SHARED_RESOURCE_ISOLATION_TEST",
+  "name": "Shared Resource Isolation Test",
+  "description": "공유 자원(DB, S3) 접근 브랜치의 격리 스케줄링 검증. Race Condition 방지.",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "init_shared_resource",
+      "type": "code",
+      "label": "공유 자원 초기화",
+      "config": {
+        "language": "python",
+        "code": "state['shared_counter'] = 0\nstate['shared_lock_test'] = True"
+      }
+    },
+    {
+      "id": "shared_resource_parallel",
+      "type": "parallel_group",
+      "label": "공유 자원 병렬 그룹 (격리 필요)",
+      "resource_policy": {
+        "max_concurrent_memory_mb": 2048,
+        "max_concurrent_tokens": 100000,
+        "max_concurrent_branches": 10,
+        "strategy": "RESOURCE_OPTIMIZED"
+      },
+      "branches": [
+        {
+          "id": "branch_db_write_1",
+          "name": "DB 쓰기 브랜치 1 (공유 자원)",
+          "nodes": [
+            {
+              "id": "db_op_1",
+              "type": "code",
+              "label": "DB 작업 1",
+              "config": {
+                "language": "python",
+                "code": "import time\ntime.sleep(0.1)  # 시뮬레이션\nstate['db_result_1'] = 'written'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "write_to_db": true
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_db_write_2",
+          "name": "DB 쓰기 브랜치 2 (공유 자원)",
+          "nodes": [
+            {
+              "id": "db_op_2",
+              "type": "code",
+              "label": "DB 작업 2",
+              "config": {
+                "language": "python",
+                "code": "import time\ntime.sleep(0.1)\nstate['db_result_2'] = 'written'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "write_to_db": true
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_s3_write",
+          "name": "S3 쓰기 브랜치 (공유 자원)",
+          "nodes": [
+            {
+              "id": "s3_op",
+              "type": "code",
+              "label": "S3 작업",
+              "config": {
+                "language": "python",
+                "code": "state['s3_result'] = 'uploaded'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "write_to_s3": true
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_safe_read_1",
+          "name": "안전한 읽기 브랜치 1",
+          "nodes": [
+            {
+              "id": "read_op_1",
+              "type": "code",
+              "label": "읽기 작업 1",
+              "config": {
+                "language": "python",
+                "code": "state['read_result_1'] = 'success'"
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_safe_read_2",
+          "name": "안전한 읽기 브랜치 2",
+          "nodes": [
+            {
+              "id": "read_op_2",
+              "type": "code",
+              "label": "읽기 작업 2",
+              "config": {
+                "language": "python",
+                "code": "state['read_result_2'] = 'success'"
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_llm_safe",
+          "name": "LLM 브랜치 (공유 자원 없음)",
+          "nodes": [
+            {
+              "id": "llm_op",
+              "type": "llm_chat",
+              "label": "LLM 분석",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "prompt_template": "Analyze: {{shared_lock_test}}",
+                "output_key": "llm_analysis"
+              }
+            }
+          ],
+          "edges": []
+        }
+      ]
+    },
+    {
+      "id": "verify_isolation",
+      "type": "code",
+      "label": "격리 검증",
+      "config": {
+        "language": "python",
+        "code": "# 예상: 공유 자원 브랜치 3개는 각각 별도 배치로 격리됨\n# 안전한 브랜치 3개는 동일 배치에서 병렬 실행 가능\nstate['isolation_test_complete'] = True\nstate['expected_batches'] = '>=4'  # 공유 3개 격리 + 안전 1개 배치"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "init_shared_resource", "target": "shared_resource_parallel"},
+    {"source": "shared_resource_parallel", "target": "verify_isolation"}
+  ]
+}

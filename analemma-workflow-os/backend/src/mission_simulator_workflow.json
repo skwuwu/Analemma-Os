@@ -54,7 +54,11 @@
                     "HYPER_REPORT",
                     "MULTIMODAL_VISION",
                     "HYPER_STRESS_V3",
-                    "MULTIMODAL_COMPLEX"
+                    "MULTIMODAL_COMPLEX",
+                    "PARALLEL_SCHEDULER_TEST",
+                    "COST_OPTIMIZED_PARALLEL_TEST",
+                    "SPEED_GUARDRAIL_TEST",
+                    "SHARED_RESOURCE_ISOLATION_TEST"
                 ]
             },
             "Next": "InitializeSimulator"

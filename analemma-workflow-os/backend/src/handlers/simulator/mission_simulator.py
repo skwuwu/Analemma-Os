@@ -410,6 +410,57 @@ SCENARIOS = {
         'expected_status': 'SUCCEEDED',
         'verify_func': 'verify_multimodal_complex',
         'timeout_seconds': 300  # 5분 타임아웃 (복잡한 비디오+이미지 처리)
+    },
+    # ========================================================================
+    # 🔀 Kernel Dynamic Scheduling Test Scenarios
+    # ========================================================================
+    'PARALLEL_SCHEDULER_TEST': {
+        'name': 'Scenario AC: Parallel Scheduler with Resource Policy',
+        'description': '병렬 스케줄러(Pattern 3) 테스트: RESOURCE_OPTIMIZED 전략으로 브랜치 배치 분할 검증',
+        'test_keyword': 'PARALLEL_SCHEDULER_TEST',
+        'input_data': {
+            'parallel_scheduler_test': True,
+            'resource_policy_strategy': 'RESOURCE_OPTIMIZED'
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_parallel_scheduler',
+        'timeout_seconds': 180
+    },
+    'COST_OPTIMIZED_PARALLEL_TEST': {
+        'name': 'Scenario AD: Cost Optimized Parallel Scheduling',
+        'description': 'COST_OPTIMIZED 전략: 토큰 사용량 기준 배치 분할로 비용 폭증 방지',
+        'test_keyword': 'COST_OPTIMIZED_PARALLEL_TEST',
+        'input_data': {
+            'cost_optimized_test': True,
+            'resource_policy_strategy': 'COST_OPTIMIZED'
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_cost_optimized_parallel',
+        'timeout_seconds': 180
+    },
+    'SPEED_GUARDRAIL_TEST': {
+        'name': 'Scenario AE: Speed Optimized with Guardrail',
+        'description': 'SPEED_OPTIMIZED 전략에서 계정 동시성 제한 초과 시 가드레일 작동 검증',
+        'test_keyword': 'SPEED_GUARDRAIL_TEST',
+        'input_data': {
+            'guardrail_test': True,
+            'resource_policy_strategy': 'SPEED_OPTIMIZED'
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_speed_guardrail',
+        'timeout_seconds': 120
+    },
+    'SHARED_RESOURCE_ISOLATION_TEST': {
+        'name': 'Scenario AF: Shared Resource Isolation Scheduling',
+        'description': '공유 자원(DB, S3) 접근 브랜치의 격리 스케줄링 검증 (Race Condition 방지)',
+        'test_keyword': 'SHARED_RESOURCE_ISOLATION_TEST',
+        'input_data': {
+            'shared_resource_test': True,
+            'expected_isolation': True
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_shared_resource_isolation',
+        'timeout_seconds': 180
     }
 }
 
@@ -443,6 +494,11 @@ TEST_WORKFLOW_MAPPINGS = {
     # Multimodal & Advanced Scenarios
     'MULTIMODAL_VISION': 'test_vision_workflow',  # Gemini Vision 멀티모달 이미지 분석
     'MULTIMODAL_COMPLEX': 'extreme_product_page_workflow',  # 비디오 + 이미지 멀티모달 복합 분석
+    # 🔀 Kernel Dynamic Scheduling Test Workflows
+    'PARALLEL_SCHEDULER_TEST': 'test_parallel_scheduler_workflow',  # 병렬 스케줄러 RESOURCE_OPTIMIZED
+    'COST_OPTIMIZED_PARALLEL_TEST': 'test_cost_optimized_parallel_workflow',  # COST_OPTIMIZED 전략
+    'SPEED_GUARDRAIL_TEST': 'test_speed_guardrail_workflow',  # SPEED_OPTIMIZED 가드레일
+    'SHARED_RESOURCE_ISOLATION_TEST': 'test_shared_resource_isolation_workflow',  # 공유 자원 격리
 }
 
 

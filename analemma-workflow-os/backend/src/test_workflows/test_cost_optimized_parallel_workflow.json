@@ -1,0 +1,103 @@
+{
+  "id": "COST_OPTIMIZED_PARALLEL_TEST",
+  "name": "Cost Optimized Parallel Scheduler Test",
+  "description": "COST_OPTIMIZED 전략 테스트: 토큰 사용량 기준으로 배치 분할. 비용 폭증 방지 검증.",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "setup",
+      "type": "code",
+      "label": "테스트 설정",
+      "config": {
+        "language": "python",
+        "code": "state['documents'] = [f'Long document content {i} ' * 100 for i in range(10)]\nstate['queries'] = [f'Complex query {i}' for i in range(15)]"
+      }
+    },
+    {
+      "id": "cost_aware_parallel",
+      "type": "parallel_group",
+      "label": "비용 인지 병렬 그룹",
+      "resource_policy": {
+        "max_concurrent_memory_mb": 2048,
+        "max_concurrent_tokens": 30000,
+        "max_concurrent_branches": 5,
+        "strategy": "COST_OPTIMIZED"
+      },
+      "branches": [
+        {
+          "id": "branch_doc_summarize",
+          "name": "문서 요약 (토큰 Heavy)",
+          "nodes": [
+            {
+              "id": "doc_foreach",
+              "type": "for_each",
+              "config": {
+                "input_list_key": "documents",
+                "output_key": "summaries",
+                "sub_node_config": {
+                  "nodes": [
+                    {
+                      "id": "summarize_llm",
+                      "type": "llm_chat",
+                      "config": {
+                        "model": "gemini-2.0-flash",
+                        "prompt_template": "Summarize: {{item}}",
+                        "output_key": "summary"
+                      }
+                    }
+                  ],
+                  "edges": []
+                }
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_query_process",
+          "name": "쿼리 처리 (토큰 Medium)",
+          "nodes": [
+            {
+              "id": "query_llm",
+              "type": "llm_chat",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "prompt_template": "Process queries: {{queries}}",
+                "output_key": "query_results"
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_light_calc",
+          "name": "경량 계산",
+          "nodes": [
+            {
+              "id": "calc_code",
+              "type": "code",
+              "config": {
+                "language": "python",
+                "code": "state['calc_result'] = sum(range(1000))"
+              }
+            }
+          ],
+          "edges": []
+        }
+      ]
+    },
+    {
+      "id": "verify",
+      "type": "code",
+      "label": "결과 검증",
+      "config": {
+        "language": "python",
+        "code": "state['cost_test_complete'] = True\nstate['branch_count'] = 3"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "setup", "target": "cost_aware_parallel"},
+    {"source": "cost_aware_parallel", "target": "verify"}
+  ]
+}

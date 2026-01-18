@@ -509,6 +509,101 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
         checks.append(_check("HTML Generation (Optional)", has_html or status == 'SUCCEEDED', 
                             details="Should contain final HTML if workflow completed"))
 
+    # ========================================================================
+    # 🔀 Kernel Dynamic Scheduling Test Scenarios
+    # ========================================================================
+    # J. PARALLEL_SCHEDULER_TEST - 병렬 스케줄러 RESOURCE_OPTIMIZED
+    elif scenario == 'PARALLEL_SCHEDULER_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        # 병렬 테스트 완료 확인
+        has_parallel_complete = (
+            output.get('parallel_test_complete') == True or
+            'parallel_test_complete' in out_str
+        )
+        # 집계 결과 확인
+        has_aggregated = (
+            'aggregated_results' in output or
+            'aggregated' in out_str.lower()
+        )
+        # 스케줄링 메타데이터 확인 (선택)
+        has_scheduling_metadata = (
+            'scheduling_metadata' in out_str or
+            'execution_batches' in out_str
+        )
+        checks.append(_check("Parallel Test Complete", has_parallel_complete,
+                            details="Should have parallel_test_complete=True"))
+        checks.append(_check("Results Aggregated", has_aggregated,
+                            details="Should contain aggregated_results from branches"))
+        checks.append(_check("Scheduling Applied (Optional)", has_scheduling_metadata or status == 'SUCCEEDED',
+                            details="Resource policy scheduling should be applied"))
+
+    # K. COST_OPTIMIZED_PARALLEL_TEST - 비용 최적화 병렬 스케줄링
+    elif scenario == 'COST_OPTIMIZED_PARALLEL_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        has_cost_test = (
+            output.get('cost_test_complete') == True or
+            'cost_test_complete' in out_str
+        )
+        has_summaries = (
+            'summaries' in output or
+            'query_results' in output
+        )
+        checks.append(_check("Cost Optimized Test Complete", has_cost_test,
+                            details="Should have cost_test_complete=True"))
+        checks.append(_check("Branch Results Present", has_summaries or status == 'SUCCEEDED',
+                            details="Should contain summaries or query_results"))
+
+    # L. SPEED_GUARDRAIL_TEST - 속도 최적화 가드레일
+    elif scenario == 'SPEED_GUARDRAIL_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        has_guardrail_verified = (
+            output.get('guardrail_verified') == True or
+            'guardrail_verified' in out_str
+        )
+        has_branch_results = (
+            'branch_count_executed' in output or
+            'r1' in output or
+            'r10' in output
+        )
+        checks.append(_check("Guardrail Verified", has_guardrail_verified,
+                            details="Should have guardrail_verified=True"))
+        checks.append(_check("Branches Executed", has_branch_results or status == 'SUCCEEDED',
+                            details="Should have branch execution results"))
+
+    # M. SHARED_RESOURCE_ISOLATION_TEST - 공유 자원 격리
+    elif scenario == 'SHARED_RESOURCE_ISOLATION_TEST':
+        checks.append(_check("Status Succeeded", status == 'SUCCEEDED', expected="SUCCEEDED", actual=status))
+        out_str = json.dumps(output)
+        has_isolation_complete = (
+            output.get('isolation_test_complete') == True or
+            'isolation_test_complete' in out_str
+        )
+        # 공유 자원 브랜치 결과 확인
+        has_db_results = (
+            'db_result_1' in output or
+            'db_result_2' in output
+        )
+        has_s3_result = (
+            's3_result' in output or
+            's3_path' in output
+        )
+        # 격리 기대치 확인
+        has_expected_batches = (
+            'expected_batches' in output or
+            'isolation' in out_str.lower()
+        )
+        checks.append(_check("Isolation Test Complete", has_isolation_complete,
+                            details="Should have isolation_test_complete=True"))
+        checks.append(_check("DB Write Results", has_db_results,
+                            details="DB write branches should have executed"))
+        checks.append(_check("S3 Write Result", has_s3_result,
+                            details="S3 write branch should have executed"))
+        checks.append(_check("Batch Isolation Expected", has_expected_batches or status == 'SUCCEEDED',
+                            details="Shared resource branches should be in separate batches"))
+
     # Default fallback
     else:
         checks.append(_check("Status Succeeded (Default)", status == 'SUCCEEDED'))

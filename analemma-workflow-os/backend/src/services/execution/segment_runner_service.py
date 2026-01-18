@@ -39,6 +39,44 @@ SEGMENT_STATUS_COMPLETED = "COMPLETED"
 SEGMENT_STATUS_SKIPPED = "SKIPPED"
 SEGMENT_STATUS_FAILED = "FAILED"
 
+# ============================================================================
+# 🔀 [Kernel] Parallel Scheduler Constants
+# ============================================================================
+# 기본 동시성 제한 (Lambda 계정 수준)
+DEFAULT_MAX_CONCURRENT_MEMORY_MB = 3072  # 3GB (Lambda 3개 동시 실행 가정)
+DEFAULT_MAX_CONCURRENT_TOKENS = 100000   # 분당 토큰 제한
+DEFAULT_MAX_CONCURRENT_BRANCHES = 10     # 최대 동시 브랜치 수
+
+# 스케줄링 전략
+STRATEGY_SPEED_OPTIMIZED = "SPEED_OPTIMIZED"      # 최대한 병렬 실행
+STRATEGY_RESOURCE_OPTIMIZED = "RESOURCE_OPTIMIZED" # 자원 효율 우선
+STRATEGY_COST_OPTIMIZED = "COST_OPTIMIZED"        # 비용 최소화
+
+# 브랜치 예상 자원 기본값
+DEFAULT_BRANCH_MEMORY_MB = 256
+DEFAULT_BRANCH_TOKENS = 5000
+
+# 계정 수준 하드 리밋 (SPEED_OPTIMIZED에서도 체크)
+ACCOUNT_LAMBDA_CONCURRENCY_LIMIT = 100  # AWS 기본 동시성 제한
+ACCOUNT_MEMORY_HARD_LIMIT_MB = 10240    # 10GB 하드 리밋
+
+# 상태 병합 정책
+MERGE_POLICY_OVERWRITE = "OVERWRITE"      # 나중 값이 덮어씀 (기본)
+MERGE_POLICY_APPEND_LIST = "APPEND_LIST"  # 리스트는 합침
+MERGE_POLICY_KEEP_FIRST = "KEEP_FIRST"    # 첫 번째 값 유지
+MERGE_POLICY_CONFLICT_ERROR = "ERROR"     # 충돌 시 에러
+
+# 리스트 병합이 필요한 키 패턴
+LIST_MERGE_KEY_PATTERNS = [
+    '__new_history_logs',
+    '__kernel_actions', 
+    '_results',
+    '_items',
+    '_outputs',
+    'collected_',
+    'aggregated_'
+]
+
 
 class SegmentRunnerService:
     def __init__(self):
@@ -59,7 +97,84 @@ class SegmentRunnerService:
         return self._s3_client
 
     # ========================================================================
-    # 🛡️ [Pattern 1] Segment-Level Self-Healing: 세그먼트 내부 동적 분할
+    # � [Utility] State Merge: 무결성 보장 상태 병합
+    # ========================================================================
+    def _should_merge_as_list(self, key: str) -> bool:
+        """
+        이 키가 리스트 병합 대상인지 확인
+        """
+        for pattern in LIST_MERGE_KEY_PATTERNS:
+            if pattern in key or key.startswith(pattern):
+                return True
+        return False
+
+    def _merge_states(
+        self,
+        base_state: Dict[str, Any],
+        new_state: Dict[str, Any],
+        merge_policy: str = MERGE_POLICY_APPEND_LIST
+    ) -> Dict[str, Any]:
+        """
+        🔧 무결성 보장 상태 병합
+        
+        정책:
+        - OVERWRITE: 단순 덮어쓰기 (기존 동작)
+        - APPEND_LIST: 리스트 키는 합침, 나머지는 덮어씀
+        - KEEP_FIRST: 이미 존재하는 키는 유지
+        - ERROR: 키 충돌 시 예외 발생
+        
+        특별 처리:
+        - __new_history_logs, __kernel_actions 등은 항상 리스트 병합
+        - _로 시작하는 내부 키는 특별 취급
+        """
+        if merge_policy == MERGE_POLICY_OVERWRITE:
+            result = base_state.copy()
+            result.update(new_state)
+            return result
+        
+        result = base_state.copy()
+        conflicts = []
+        
+        for key, new_value in new_state.items():
+            if key not in result:
+                # 새 키: 그냥 추가
+                result[key] = new_value
+                continue
+            
+            existing_value = result[key]
+            
+            # 리스트 병합 대상 키 확인
+            if self._should_merge_as_list(key):
+                if isinstance(existing_value, list) and isinstance(new_value, list):
+                    result[key] = existing_value + new_value
+                elif isinstance(new_value, list):
+                    result[key] = [existing_value] + new_value if existing_value else new_value
+                elif isinstance(existing_value, list):
+                    result[key] = existing_value + [new_value] if new_value else existing_value
+                else:
+                    result[key] = [existing_value, new_value]
+                continue
+            
+            # 정책에 따른 처리
+            if merge_policy == MERGE_POLICY_KEEP_FIRST:
+                # 기존 값 유지
+                continue
+            elif merge_policy == MERGE_POLICY_CONFLICT_ERROR:
+                if existing_value != new_value:
+                    conflicts.append(key)
+            else:
+                # APPEND_LIST 기본: 리스트가 아니면 덮어씀
+                result[key] = new_value
+        
+        if conflicts:
+            logger.warning(f"[Merge] State conflicts detected on keys: {conflicts}")
+            if merge_policy == MERGE_POLICY_CONFLICT_ERROR:
+                raise ValueError(f"State merge conflict on keys: {conflicts}")
+        
+        return result
+
+    # ========================================================================
+    # �🛡️ [Pattern 1] Segment-Level Self-Healing: 세그먼트 내부 동적 분할
     # ========================================================================
     def _estimate_segment_memory(self, segment_config: Dict[str, Any], state: Dict[str, Any]) -> int:
         """
@@ -284,10 +399,14 @@ class SegmentRunnerService:
                         sub_seg, current_state, auth_user_id, split_depth + 1
                     )
                     
-                    # 상태 병합
+                    # 🔧 무결성 보장 상태 병합 (리스트 키는 합침)
                     if isinstance(sub_result, dict):
-                        current_state.update(sub_result)
-                        all_logs.extend(sub_result.get('__new_history_logs', []))
+                        current_state = self._merge_states(
+                            current_state, 
+                            sub_result,
+                            merge_policy=MERGE_POLICY_APPEND_LIST
+                        )
+                        # all_logs는 이미 _merge_states에서 처리됨
                     
                     kernel_actions.append({
                         'action': 'SPLIT_EXECUTE',
@@ -447,6 +566,303 @@ class SegmentRunnerService:
         logger.info(f"[Kernel] 🔧 Injected {len(recovery_segments)} recovery segments after segment {after_segment_id}")
         
         return self._save_manifest_to_s3(new_manifest, manifest_s3_path)
+
+    # ========================================================================
+    # 🔀 [Pattern 3] Parallel Scheduler: 인프라 인지형 병렬 스케줄링
+    # ========================================================================
+    def _estimate_branch_resources(self, branch: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, int]:
+        """
+        브랜치의 예상 자원 요구량 추정
+        
+        Returns:
+            {
+                'memory_mb': 예상 메모리 (MB),
+                'tokens': 예상 토큰 수,
+                'llm_calls': LLM 호출 횟수,
+                'has_shared_resource': 공유 자원 접근 여부
+            }
+        """
+        nodes = branch.get('nodes', [])
+        if not nodes:
+            return {
+                'memory_mb': DEFAULT_BRANCH_MEMORY_MB,
+                'tokens': 0,
+                'llm_calls': 0,
+                'has_shared_resource': False
+            }
+        
+        memory_mb = 50  # 기본 오버헤드
+        tokens = 0
+        llm_calls = 0
+        has_shared_resource = False
+        
+        for node in nodes:
+            node_type = node.get('type', '')
+            config = node.get('config', {})
+            
+            # 메모리 추정
+            memory_mb += 10  # 노드당 기본 10MB
+            
+            if node_type in ('llm_chat', 'aiModel'):
+                memory_mb += 50  # LLM 노드 추가 메모리
+                llm_calls += 1
+                # 토큰 추정: 프롬프트 길이 기반
+                prompt = config.get('prompt', '') or config.get('system_prompt', '')
+                tokens += len(prompt) // 4 + 500  # 대략적 토큰 추정 + 응답 예상
+                
+            elif node_type == 'for_each':
+                items_key = config.get('input_list_key', '')
+                if items_key and items_key in state:
+                    items = state.get(items_key, [])
+                    if isinstance(items, list):
+                        memory_mb += len(items) * 5
+                        # for_each 내부에 LLM이 있으면 토큰 폭증
+                        sub_nodes = config.get('sub_node_config', {}).get('nodes', [])
+                        for sub_node in sub_nodes:
+                            if sub_node.get('type') in ('llm_chat', 'aiModel'):
+                                tokens += len(items) * 1000  # 아이템당 1000 토큰 예상
+                                llm_calls += len(items)
+            
+            # 공유 자원 접근 감지
+            if node_type in ('db_write', 's3_write', 'api_call'):
+                has_shared_resource = True
+            if config.get('write_to_db') or config.get('write_to_s3'):
+                has_shared_resource = True
+        
+        return {
+            'memory_mb': memory_mb,
+            'tokens': tokens,
+            'llm_calls': llm_calls,
+            'has_shared_resource': has_shared_resource
+        }
+
+    def _bin_pack_branches(
+        self,
+        branches: List[Dict[str, Any]],
+        resource_estimates: List[Dict[str, int]],
+        resource_policy: Dict[str, Any]
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        🎯 Bin Packing 알고리즘: 브랜치를 실행 배치로 그룹화
+        
+        전략:
+        1. 무거운 브랜치 먼저 배치 (First Fit Decreasing)
+        2. 각 배치의 총 자원이 제한을 초과하지 않도록 구성
+        3. 공유 자원 접근 브랜치는 별도 배치
+        
+        Returns:
+            [[batch1_branches], [batch2_branches], ...]
+        """
+        max_memory = resource_policy.get('max_concurrent_memory_mb', DEFAULT_MAX_CONCURRENT_MEMORY_MB)
+        max_tokens = resource_policy.get('max_concurrent_tokens', DEFAULT_MAX_CONCURRENT_TOKENS)
+        max_branches = resource_policy.get('max_concurrent_branches', DEFAULT_MAX_CONCURRENT_BRANCHES)
+        strategy = resource_policy.get('strategy', STRATEGY_RESOURCE_OPTIMIZED)
+        
+        # 브랜치와 자원 추정치 결합 후 크기순 정렬 (내림차순)
+        indexed_branches = list(zip(branches, resource_estimates, range(len(branches))))
+        
+        # 전략에 따른 정렬 기준
+        if strategy == STRATEGY_COST_OPTIMIZED:
+            # 토큰 많은 것 먼저 (비용이 큰 작업 순차 처리)
+            indexed_branches.sort(key=lambda x: x[1]['tokens'], reverse=True)
+        else:
+            # 메모리 많은 것 먼저 (기본)
+            indexed_branches.sort(key=lambda x: x[1]['memory_mb'], reverse=True)
+        
+        # 공유 자원 접근 브랜치 분리
+        shared_resource_branches = []
+        normal_branches = []
+        
+        for branch, estimate, idx in indexed_branches:
+            if estimate['has_shared_resource']:
+                shared_resource_branches.append((branch, estimate, idx))
+            else:
+                normal_branches.append((branch, estimate, idx))
+        
+        # Bin Packing (First Fit Decreasing)
+        batches: List[List[Tuple]] = []
+        batch_resources: List[Dict[str, int]] = []
+        
+        for branch, estimate, idx in normal_branches:
+            placed = False
+            
+            for i, batch in enumerate(batches):
+                current = batch_resources[i]
+                
+                # 이 배치에 추가 가능한지 확인
+                new_memory = current['memory_mb'] + estimate['memory_mb']
+                new_tokens = current['tokens'] + estimate['tokens']
+                new_count = len(batch) + 1
+                
+                if (new_memory <= max_memory and 
+                    new_tokens <= max_tokens and 
+                    new_count <= max_branches):
+                    
+                    batch.append((branch, estimate, idx))
+                    batch_resources[i] = {
+                        'memory_mb': new_memory,
+                        'tokens': new_tokens
+                    }
+                    placed = True
+                    break
+            
+            if not placed:
+                # 새 배치 생성
+                batches.append([(branch, estimate, idx)])
+                batch_resources.append({
+                    'memory_mb': estimate['memory_mb'],
+                    'tokens': estimate['tokens']
+                })
+        
+        # 공유 자원 브랜치는 각각 별도 배치 (Race Condition 방지)
+        for branch, estimate, idx in shared_resource_branches:
+            batches.append([(branch, estimate, idx)])
+            batch_resources.append({
+                'memory_mb': estimate['memory_mb'],
+                'tokens': estimate['tokens']
+            })
+        
+        # 결과 변환: 브랜치만 추출
+        result = []
+        for batch in batches:
+            result.append([item[0] for item in batch])
+        
+        return result
+
+    def _schedule_parallel_group(
+        self,
+        segment_config: Dict[str, Any],
+        state: Dict[str, Any],
+        segment_id: int
+    ) -> Dict[str, Any]:
+        """
+        🔀 병렬 그룹 스케줄링: resource_policy에 따라 실행 배치 결정
+        
+        Returns:
+            {
+                'status': 'PARALLEL_GROUP' | 'SCHEDULED_PARALLEL',
+                'branches': [...] (원본 또는 스케줄된 배치),
+                'execution_batches': [[...], [...]] (배치 구조),
+                'scheduling_metadata': {...}
+            }
+        """
+        branches = segment_config.get('branches', [])
+        resource_policy = segment_config.get('resource_policy', {})
+        
+        # resource_policy가 없으면 기본 병렬 실행
+        if not resource_policy:
+            logger.info(f"[Scheduler] No resource_policy, using default parallel execution for {len(branches)} branches")
+            return {
+                'status': 'PARALLEL_GROUP',
+                'branches': branches,
+                'execution_batches': [branches],  # 단일 배치
+                'scheduling_metadata': {
+                    'strategy': 'DEFAULT',
+                    'total_branches': len(branches),
+                    'batch_count': 1
+                }
+            }
+        
+        strategy = resource_policy.get('strategy', STRATEGY_RESOURCE_OPTIMIZED)
+        
+        # SPEED_OPTIMIZED: 가드레일 체크 후 최대 병렬 실행
+        if strategy == STRATEGY_SPEED_OPTIMIZED:
+            # 🛡️ 계정 수준 하드 리밋 체크 (시스템 패닉 방지)
+            if len(branches) > ACCOUNT_LAMBDA_CONCURRENCY_LIMIT:
+                logger.warning(f"[Scheduler] ⚠️ SPEED_OPTIMIZED but branch count ({len(branches)}) "
+                              f"exceeds account concurrency limit ({ACCOUNT_LAMBDA_CONCURRENCY_LIMIT})")
+                # 하드 리밋 적용하여 배치 분할
+                forced_policy = {
+                    'max_concurrent_branches': ACCOUNT_LAMBDA_CONCURRENCY_LIMIT,
+                    'max_concurrent_memory_mb': ACCOUNT_MEMORY_HARD_LIMIT_MB,
+                    'strategy': STRATEGY_SPEED_OPTIMIZED
+                }
+                # 자원 추정 및 배치 분할
+                resource_estimates = [self._estimate_branch_resources(b, state) for b in branches]
+                execution_batches = self._bin_pack_branches(branches, resource_estimates, forced_policy)
+                
+                logger.info(f"[Scheduler] 🛡️ Guardrail applied: {len(execution_batches)} batches")
+                return {
+                    'status': 'SCHEDULED_PARALLEL',
+                    'branches': branches,
+                    'execution_batches': execution_batches,
+                    'scheduling_metadata': {
+                        'strategy': strategy,
+                        'total_branches': len(branches),
+                        'batch_count': len(execution_batches),
+                        'guardrail_applied': True,
+                        'reason': 'Account concurrency limit exceeded'
+                    }
+                }
+            
+            logger.info(f"[Scheduler] SPEED_OPTIMIZED: All {len(branches)} branches in parallel")
+            return {
+                'status': 'PARALLEL_GROUP',
+                'branches': branches,
+                'execution_batches': [branches],
+                'scheduling_metadata': {
+                    'strategy': strategy,
+                    'total_branches': len(branches),
+                    'batch_count': 1,
+                    'guardrail_applied': False
+                }
+            }
+        
+        # 자원 추정
+        resource_estimates = []
+        total_memory = 0
+        total_tokens = 0
+        
+        for branch in branches:
+            estimate = self._estimate_branch_resources(branch, state)
+            resource_estimates.append(estimate)
+            total_memory += estimate['memory_mb']
+            total_tokens += estimate['tokens']
+        
+        logger.info(f"[Scheduler] Resource estimates: {total_memory}MB memory, {total_tokens} tokens, "
+                   f"{len(branches)} branches")
+        
+        # 제한 확인
+        max_memory = resource_policy.get('max_concurrent_memory_mb', DEFAULT_MAX_CONCURRENT_MEMORY_MB)
+        max_tokens = resource_policy.get('max_concurrent_tokens', DEFAULT_MAX_CONCURRENT_TOKENS)
+        
+        # 제한 내라면 단일 배치
+        if total_memory <= max_memory and total_tokens <= max_tokens:
+            logger.info(f"[Scheduler] Resources within limits, single batch execution")
+            return {
+                'status': 'PARALLEL_GROUP',
+                'branches': branches,
+                'execution_batches': [branches],
+                'scheduling_metadata': {
+                    'strategy': strategy,
+                    'total_branches': len(branches),
+                    'batch_count': 1,
+                    'total_memory_mb': total_memory,
+                    'total_tokens': total_tokens
+                }
+            }
+        
+        # Bin Packing으로 배치 생성
+        execution_batches = self._bin_pack_branches(branches, resource_estimates, resource_policy)
+        
+        logger.info(f"[Scheduler] 🔧 Created {len(execution_batches)} execution batches from {len(branches)} branches")
+        for i, batch in enumerate(execution_batches):
+            batch_memory = sum(self._estimate_branch_resources(b, state)['memory_mb'] for b in batch)
+            logger.info(f"[Scheduler]   Batch {i+1}: {len(batch)} branches, ~{batch_memory}MB")
+        
+        return {
+            'status': 'SCHEDULED_PARALLEL',
+            'branches': branches,
+            'execution_batches': execution_batches,
+            'scheduling_metadata': {
+                'strategy': strategy,
+                'total_branches': len(branches),
+                'batch_count': len(execution_batches),
+                'total_memory_mb': total_memory,
+                'total_tokens': total_tokens,
+                'resource_policy': resource_policy
+            }
+        }
 
     def _trigger_child_workflow(self, event: Dict[str, Any], branch_config: Dict[str, Any], auth_user_id: str, quota_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -608,19 +1024,54 @@ class SegmentRunnerService:
         
         # [Critical Fix] parallel_group 타입 세그먼트는 바로 PARALLEL_GROUP status 반환
         # ASL의 ProcessParallelSegments가 branches를 받아서 Map으로 병렬 실행함
+        # 🔀 [Pattern 3] 병렬 스케줄러 적용
         segment_type = segment_config.get('type') if isinstance(segment_config, dict) else None
         if segment_type == 'parallel_group':
             branches = segment_config.get('branches', [])
             logger.info(f"🔀 Parallel group detected with {len(branches)} branches")
+            
+            # 병렬 스케줄러 호출
+            schedule_result = self._schedule_parallel_group(
+                segment_config=segment_config,
+                state=initial_state,
+                segment_id=segment_id
+            )
+            
+            # SCHEDULED_PARALLEL: 배치별 순차 실행 필요
+            if schedule_result['status'] == 'SCHEDULED_PARALLEL':
+                execution_batches = schedule_result['execution_batches']
+                metadata = schedule_result['scheduling_metadata']
+                
+                logger.info(f"[Scheduler] 🔧 Scheduled {metadata['total_branches']} branches into "
+                           f"{metadata['batch_count']} batches (strategy: {metadata['strategy']})")
+                
+                return {
+                    "status": "SCHEDULED_PARALLEL",
+                    "final_state": initial_state,
+                    "final_state_s3_path": None,
+                    "next_segment_to_run": segment_id + 1,
+                    "new_history_logs": [],
+                    "error_info": None,
+                    "branches": branches,
+                    "execution_batches": execution_batches,
+                    "segment_type": "scheduled_parallel",
+                    "scheduling_metadata": metadata,
+                    "segment_id": segment_id
+                }
+            
+            # PARALLEL_GROUP: 기본 병렬 실행
             return {
                 "status": "PARALLEL_GROUP",
                 "final_state": initial_state,
                 "final_state_s3_path": None,
-                "next_segment_to_run": segment_id + 1,  # aggregator로 이동
+                "next_segment_to_run": segment_id + 1,
                 "new_history_logs": [],
                 "error_info": None,
                 "branches": branches,
-                "segment_type": "parallel_group"
+                "execution_batches": schedule_result.get('execution_batches', [branches]),
+                "segment_type": "parallel_group",
+                "scheduling_metadata": schedule_result.get('scheduling_metadata'),
+                "segment_id": segment_id
             }
         
         # 🛡️ [Pattern 2] 커널 검증: 이 세그먼트가 SKIPPED 상태인가?

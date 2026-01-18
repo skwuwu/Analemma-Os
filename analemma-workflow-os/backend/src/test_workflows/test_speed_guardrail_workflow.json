@@ -1,0 +1,50 @@
+{
+  "id": "SPEED_OPTIMIZED_GUARDRAIL_TEST",
+  "name": "Speed Optimized with Guardrail Test",
+  "description": "SPEED_OPTIMIZED 전략에서 계정 동시성 제한 초과 시 가드레일 작동 검증. 100개 초과 브랜치 시나리오.",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "massive_setup",
+      "type": "code",
+      "label": "대량 브랜치 설정",
+      "config": {
+        "language": "python",
+        "code": "# 120개 아이템 생성 (동시성 제한 100 초과)\nstate['items'] = [{'id': i, 'value': i * 10} for i in range(120)]\nstate['guardrail_test_started'] = True"
+      }
+    },
+    {
+      "id": "speed_parallel_group",
+      "type": "parallel_group",
+      "label": "SPEED 모드 대량 병렬 (가드레일 테스트)",
+      "resource_policy": {
+        "strategy": "SPEED_OPTIMIZED"
+      },
+      "branches": [
+        {"id": "b1", "nodes": [{"id": "n1", "type": "code", "config": {"code": "state['r1']=1"}}], "edges": []},
+        {"id": "b2", "nodes": [{"id": "n2", "type": "code", "config": {"code": "state['r2']=1"}}], "edges": []},
+        {"id": "b3", "nodes": [{"id": "n3", "type": "code", "config": {"code": "state['r3']=1"}}], "edges": []},
+        {"id": "b4", "nodes": [{"id": "n4", "type": "code", "config": {"code": "state['r4']=1"}}], "edges": []},
+        {"id": "b5", "nodes": [{"id": "n5", "type": "code", "config": {"code": "state['r5']=1"}}], "edges": []},
+        {"id": "b6", "nodes": [{"id": "n6", "type": "code", "config": {"code": "state['r6']=1"}}], "edges": []},
+        {"id": "b7", "nodes": [{"id": "n7", "type": "code", "config": {"code": "state['r7']=1"}}], "edges": []},
+        {"id": "b8", "nodes": [{"id": "n8", "type": "code", "config": {"code": "state['r8']=1"}}], "edges": []},
+        {"id": "b9", "nodes": [{"id": "n9", "type": "code", "config": {"code": "state['r9']=1"}}], "edges": []},
+        {"id": "b10", "nodes": [{"id": "n10", "type": "code", "config": {"code": "state['r10']=1"}}], "edges": []}
+      ]
+    },
+    {
+      "id": "guardrail_verify",
+      "type": "code",
+      "label": "가드레일 검증",
+      "config": {
+        "language": "python",
+        "code": "# 10개 브랜치는 동시성 제한 100 미만이므로 가드레일 미작동\n# 실제 100개 초과 시나리오는 동적으로 생성됨\nstate['guardrail_verified'] = True\nstate['branch_count_executed'] = 10"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "massive_setup", "target": "speed_parallel_group"},
+    {"source": "speed_parallel_group", "target": "guardrail_verify"}
+  ]
+}

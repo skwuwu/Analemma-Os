@@ -1,0 +1,209 @@
+{
+  "id": "PARALLEL_SCHEDULER_TEST",
+  "name": "Parallel Scheduler & Dynamic Scheduling Test",
+  "description": "병렬 스케줄러(Pattern 3)와 동적 분할(Pattern 1) 테스트용 워크플로우. resource_policy를 통해 브랜치 배치 스케줄링을 검증합니다.",
+  "version": "1.0.0",
+  "test_scenarios": [
+    "RESOURCE_OPTIMIZED: 메모리 제한으로 인한 배치 분할",
+    "COST_OPTIMIZED: 토큰 제한으로 인한 배치 분할", 
+    "SPEED_OPTIMIZED: 가드레일 적용 검증",
+    "공유 자원 브랜치 격리"
+  ],
+  "nodes": [
+    {
+      "id": "input_generator",
+      "type": "code",
+      "label": "테스트 입력 생성",
+      "config": {
+        "language": "python",
+        "code": "# 테스트용 대량 데이터 생성\nproducts = [{'id': i, 'name': f'Product_{i}', 'category': f'cat_{i%5}'} for i in range(50)]\nusers = [{'id': i, 'name': f'User_{i}'} for i in range(20)]\nreports = [{'id': i, 'type': f'type_{i%3}'} for i in range(30)]\n\nstate['products'] = products\nstate['users'] = users  \nstate['reports'] = reports\nstate['test_started'] = True"
+      }
+    },
+    {
+      "id": "parallel_heavy_branches",
+      "type": "parallel_group",
+      "label": "무거운 병렬 브랜치 그룹 (스케줄링 필요)",
+      "resource_policy": {
+        "max_concurrent_memory_mb": 1024,
+        "max_concurrent_tokens": 50000,
+        "max_concurrent_branches": 3,
+        "strategy": "RESOURCE_OPTIMIZED"
+      },
+      "branches": [
+        {
+          "id": "branch_product_analysis",
+          "name": "상품 분석 브랜치 (Heavy)",
+          "nodes": [
+            {
+              "id": "product_llm",
+              "type": "llm_chat",
+              "label": "상품 분석 LLM",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a product analyst. Analyze the given products and provide insights about pricing, categories, and market positioning. Consider seasonal trends and competitor analysis.",
+                "prompt_template": "Analyze these products: {{products}}. Provide detailed market analysis.",
+                "output_key": "product_analysis"
+              }
+            },
+            {
+              "id": "product_foreach",
+              "type": "for_each",
+              "label": "개별 상품 처리",
+              "config": {
+                "input_list_key": "products",
+                "output_key": "product_details",
+                "sub_node_config": {
+                  "nodes": [
+                    {
+                      "id": "product_detail_llm",
+                      "type": "llm_chat",
+                      "config": {
+                        "model": "gemini-2.0-flash",
+                        "prompt_template": "Generate SEO description for: {{item.name}}",
+                        "output_key": "seo_text"
+                      }
+                    }
+                  ],
+                  "edges": []
+                }
+              }
+            }
+          ],
+          "edges": [
+            {"source": "product_llm", "target": "product_foreach"}
+          ]
+        },
+        {
+          "id": "branch_user_analysis",
+          "name": "사용자 분석 브랜치 (Medium)",
+          "nodes": [
+            {
+              "id": "user_llm",
+              "type": "llm_chat",
+              "label": "사용자 분석 LLM",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a user behavior analyst.",
+                "prompt_template": "Analyze user patterns: {{users}}",
+                "output_key": "user_analysis"
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_report_generation",
+          "name": "리포트 생성 브랜치 (Heavy + Shared Resource)",
+          "has_shared_resource": true,
+          "nodes": [
+            {
+              "id": "report_llm",
+              "type": "llm_chat",
+              "label": "리포트 생성 LLM",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a report generator. Create comprehensive business reports.",
+                "prompt_template": "Generate reports for: {{reports}}. Include executive summary, charts description, and recommendations.",
+                "output_key": "generated_reports"
+              }
+            },
+            {
+              "id": "report_s3_save",
+              "type": "code",
+              "label": "S3 저장 (공유 자원)",
+              "config": {
+                "language": "python",
+                "code": "# 공유 자원 접근 시뮬레이션\nstate['report_saved'] = True\nstate['s3_path'] = 's3://bucket/reports/output.json'",
+                "write_to_s3": true
+              }
+            }
+          ],
+          "edges": [
+            {"source": "report_llm", "target": "report_s3_save"}
+          ]
+        },
+        {
+          "id": "branch_lightweight_1",
+          "name": "경량 브랜치 1",
+          "nodes": [
+            {
+              "id": "light_code_1",
+              "type": "code",
+              "label": "경량 처리 1",
+              "config": {
+                "language": "python",
+                "code": "state['light_result_1'] = 'processed'"
+              }
+            }
+          ],
+          "edges": []
+        },
+        {
+          "id": "branch_lightweight_2",
+          "name": "경량 브랜치 2",
+          "nodes": [
+            {
+              "id": "light_code_2",
+              "type": "code",
+              "label": "경량 처리 2",
+              "config": {
+                "language": "python",
+                "code": "state['light_result_2'] = 'processed'"
+              }
+            }
+          ],
+          "edges": []
+        }
+      ]
+    },
+    {
+      "id": "aggregator",
+      "type": "code",
+      "label": "결과 집계",
+      "config": {
+        "language": "python",
+        "code": "# 모든 브랜치 결과 집계\nstate['aggregated_results'] = {\n    'product_analysis': state.get('product_analysis', 'N/A'),\n    'user_analysis': state.get('user_analysis', 'N/A'),\n    'report_saved': state.get('report_saved', False),\n    'light_results': [state.get('light_result_1'), state.get('light_result_2')]\n}\nstate['parallel_test_complete'] = True"
+      }
+    },
+    {
+      "id": "dynamic_split_test",
+      "type": "for_each",
+      "label": "동적 분할 테스트 (Pattern 1)",
+      "config": {
+        "input_list_key": "products",
+        "output_key": "split_test_results",
+        "sub_node_config": {
+          "nodes": [
+            {
+              "id": "heavy_processing",
+              "type": "llm_chat",
+              "config": {
+                "model": "gemini-2.0-flash",
+                "prompt_template": "Deep analysis for {{item.name}}: market positioning, competitor analysis, pricing strategy, and growth opportunities.",
+                "output_key": "deep_analysis"
+              }
+            }
+          ],
+          "edges": []
+        }
+      }
+    },
+    {
+      "id": "final_summary",
+      "type": "llm_chat",
+      "label": "최종 요약",
+      "config": {
+        "model": "gemini-2.0-flash",
+        "system_prompt": "You are a business analyst summarizing test results.",
+        "prompt_template": "Summarize the parallel scheduling test results:\n- Aggregated: {{aggregated_results}}\n- Split test count: {{split_test_results.length}}",
+        "output_key": "final_summary"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "input_generator", "target": "parallel_heavy_branches"},
+    {"source": "parallel_heavy_branches", "target": "aggregator"},
+    {"source": "aggregator", "target": "dynamic_split_test"},
+    {"source": "dynamic_split_test", "target": "final_summary"}
+  ]
+}
