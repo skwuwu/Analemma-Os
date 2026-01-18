@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import json
+import random
 from typing import Dict, Any, Optional, List, Tuple
 
 # [v2.1] 중앙 집중식 재시도 유틸리티
@@ -38,6 +39,30 @@ SEGMENT_STATUS_RUNNING = "RUNNING"
 SEGMENT_STATUS_COMPLETED = "COMPLETED"
 SEGMENT_STATUS_SKIPPED = "SKIPPED"
 SEGMENT_STATUS_FAILED = "FAILED"
+
+# ============================================================================
+# 🛡️ [Kernel] Aggressive Retry & Partial Success Constants
+# ============================================================================
+# 커널 내부 재시도 횟수 (Step Functions 레벨 재시도 전에 먼저 시도)
+KERNEL_MAX_RETRIES = 3
+# 재시도 간격 (지수 백오프 기준)
+KERNEL_RETRY_BASE_DELAY = 1.0
+# 재시도 가능한 에러 패턴
+RETRYABLE_ERROR_PATTERNS = [
+    'ThrottlingException',
+    'ServiceUnavailable',
+    'TooManyRequestsException',
+    'ProvisionedThroughputExceeded',
+    'InternalServerError',
+    'ConnectionError',
+    'TimeoutError',
+    'ReadTimeoutError',
+    'ConnectTimeoutError',
+    'BrokenPipeError',
+    'ResourceNotFoundException',  # S3 eventual consistency
+]
+# 부분 성공 활성화 (세그먼트 실패해도 워크플로우 계속 진행)
+ENABLE_PARTIAL_SUCCESS = True
 
 # ============================================================================
 # 🔀 [Kernel] Parallel Scheduler Constants
@@ -864,6 +889,134 @@ class SegmentRunnerService:
             }
         }
 
+    # ========================================================================
+    # 🔀 [Aggregator] 병렬 브랜치 결과 집계
+    # ========================================================================
+    def _handle_aggregator(self, event: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        병렬 브랜치 실행 결과를 집계하여 단일 상태로 병합
+        
+        ASL의 AggregateParallelResults에서 호출됨:
+        - parallel_results: 각 브랜치의 실행 결과 배열
+        - current_state: 병렬 실행 전 상태
+        - map_error: (선택) Map 전체 실패 시 에러 정보
+        
+        Returns:
+            병합된 최종 상태 + 다음 세그먼트 정보
+        """
+        parallel_results = event.get('parallel_results', [])
+        base_state = event.get('current_state', {})
+        segment_to_run = event.get('segment_to_run', 0)
+        workflow_id = event.get('workflowId') or event.get('workflow_id')
+        auth_user_id = event.get('ownerId') or event.get('owner_id')
+        map_error = event.get('map_error')  # 🛡️ Map 전체 에러 정보
+        
+        logger.info(f"[Aggregator] 🔀 Aggregating {len(parallel_results)} branch results"
+                   + (f" (map_error present)" if map_error else ""))
+        
+        # 1. 모든 브랜치 결과 병합
+        aggregated_state = base_state.copy()
+        all_history_logs = []
+        branch_errors = []
+        successful_branches = 0
+        
+        # 🛡️ Map 에러가 있으면 기록
+        if map_error:
+            branch_errors.append({
+                'branch_id': '__MAP_ERROR__',
+                'error': map_error
+            })
+            logger.warning(f"[Aggregator] ⚠️ Map execution failed: {map_error}")
+        
+        for i, branch_result in enumerate(parallel_results):
+            if not isinstance(branch_result, dict):
+                logger.warning(f"[Aggregator] Branch {i} result is not a dict: {type(branch_result)}")
+                continue
+            
+            branch_id = branch_result.get('branch_id', f'branch_{i}')
+            branch_status = branch_result.get('branch_status', 'UNKNOWN')
+            branch_state = branch_result.get('final_state', {})
+            branch_logs = branch_result.get('new_history_logs', [])
+            error_info = branch_result.get('error_info')
+            
+            logger.info(f"[Aggregator] Branch {branch_id}: status={branch_status}")
+            
+            # 에러 수집 (부분 실패 지원)
+            if error_info:
+                branch_errors.append({
+                    'branch_id': branch_id,
+                    'error': error_info
+                })
+            
+            if branch_status in ('COMPLETE', 'SUCCEEDED'):
+                successful_branches += 1
+            
+            # 상태 병합 (리스트 키는 합침)
+            if isinstance(branch_state, dict):
+                aggregated_state = self._merge_states(
+                    aggregated_state,
+                    branch_state,
+                    merge_policy=MERGE_POLICY_APPEND_LIST
+                )
+            
+            # 히스토리 로그 수집
+            if isinstance(branch_logs, list):
+                all_history_logs.extend(branch_logs)
+        
+        # 2. 집계 메타데이터 추가
+        aggregated_state['__aggregator_metadata'] = {
+            'total_branches': len(parallel_results),
+            'successful_branches': successful_branches,
+            'failed_branches': len(branch_errors),
+            'aggregated_at': time.time()
+        }
+        
+        if branch_errors:
+            aggregated_state['__branch_errors'] = branch_errors
+        
+        # 3. 상태 저장 (S3 오프로딩 포함)
+        s3_bucket = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET")
+        
+        final_state, output_s3_path = self.state_manager.handle_state_storage(
+            state=aggregated_state,
+            auth_user_id=auth_user_id,
+            workflow_id=workflow_id,
+            segment_id=segment_to_run,
+            bucket=s3_bucket,
+            threshold=self.threshold
+        )
+        
+        # 4. 다음 세그먼트 결정
+        # aggregator 다음은 일반적으로 워크플로우 완료이지만,
+        # partition_map에서 next_segment를 확인
+        partition_map = event.get('partition_map', [])
+        total_segments = event.get('total_segments', len(partition_map) if partition_map else 1)
+        next_segment = segment_to_run + 1
+        
+        # 완료 여부 판단
+        is_complete = next_segment >= total_segments
+        
+        logger.info(f"[Aggregator] ✅ Aggregation complete: "
+                   f"{successful_branches}/{len(parallel_results)} branches succeeded, "
+                   f"next_segment={next_segment if not is_complete else 'COMPLETE'}")
+        
+        return {
+            "status": "COMPLETE" if is_complete else "SUCCEEDED",
+            "final_state": final_state,
+            "final_state_s3_path": output_s3_path,
+            "next_segment_to_run": None if is_complete else next_segment,
+            "new_history_logs": all_history_logs,
+            "error_info": branch_errors if branch_errors else None,
+            "branches": None,
+            "segment_type": "aggregator",
+            "segment_id": segment_to_run,
+            "aggregator_metadata": {
+                'total_branches': len(parallel_results),
+                'successful_branches': successful_branches,
+                'failed_branches': len(branch_errors)
+            }
+        }
+
     def _trigger_child_workflow(self, event: Dict[str, Any], branch_config: Dict[str, Any], auth_user_id: str, quota_id: str) -> Optional[Dict[str, Any]]:
         """
         Triggers a Child Step Function (Standard Orchestrator) for complex branches.
@@ -930,9 +1083,126 @@ class SegmentRunnerService:
             logger.error(f"Failed to trigger child workflow: {e}")
             return None
 
+    # ========================================================================
+    # 🛡️ [Kernel Defense] Aggressive Retry Helper
+    # ========================================================================
+    def _is_retryable_error(self, error: Exception) -> bool:
+        """
+        에러가 재시도 가능한지 판단
+        """
+        error_str = str(error)
+        error_type = type(error).__name__
+        
+        for pattern in RETRYABLE_ERROR_PATTERNS:
+            if pattern in error_str or pattern in error_type:
+                return True
+        
+        # Boto3 ClientError 체크
+        if hasattr(error, 'response'):
+            error_code = error.response.get('Error', {}).get('Code', '')
+            for pattern in RETRYABLE_ERROR_PATTERNS:
+                if pattern in error_code:
+                    return True
+        
+        return False
+
+    def _execute_with_kernel_retry(
+        self,
+        segment_config: Dict[str, Any],
+        initial_state: Dict[str, Any],
+        auth_user_id: str,
+        event: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """
+        🛡️ 커널 레벨 공격적 재시도
+        
+        Step Functions 레벨 재시도 전에 Lambda 내부에서 먼저 해결 시도.
+        - 네트워크 에러, 일시적 서비스 장애 시 재시도
+        - 지수 백오프 + 지터 적용
+        
+        Returns:
+            (result_state, error_info) - 성공 시 error_info는 None
+        """
+        last_error = None
+        retry_history = []
+        
+        for attempt in range(KERNEL_MAX_RETRIES + 1):
+            try:
+                # 커널 동적 분할 활성화 여부 확인
+                enable_kernel_split = os.environ.get('ENABLE_KERNEL_SPLIT', 'true').lower() == 'true'
+                
+                if enable_kernel_split and isinstance(segment_config, dict):
+                    # 🛡️ [Pattern 1] 자동 분할 실행
+                    result_state = self._execute_with_auto_split(
+                        segment_config=segment_config,
+                        initial_state=initial_state,
+                        auth_user_id=auth_user_id,
+                        split_depth=segment_config.get('_split_depth', 0)
+                    )
+                else:
+                    # 기존 로직: 직접 실행
+                    result_state = run_workflow(
+                        config_json=segment_config,
+                        initial_state=initial_state,
+                        ddb_table_name=os.environ.get("JOB_TABLE"),
+                        user_api_keys={},
+                        run_config={"user_id": auth_user_id}
+                    )
+                
+                # 성공
+                if attempt > 0:
+                    logger.info(f"[Kernel Retry] ✅ Succeeded after {attempt} retries")
+                    # 재시도 이력 기록
+                    if isinstance(result_state, dict):
+                        result_state['__kernel_retry_history'] = retry_history
+                
+                return result_state, None
+                
+            except Exception as e:
+                last_error = e
+                retry_info = {
+                    'attempt': attempt + 1,
+                    'error': str(e),
+                    'error_type': type(e).__name__,
+                    'timestamp': time.time(),
+                    'retryable': self._is_retryable_error(e)
+                }
+                retry_history.append(retry_info)
+                
+                if attempt < KERNEL_MAX_RETRIES and self._is_retryable_error(e):
+                    # 지수 백오프 + 지터
+                    delay = KERNEL_RETRY_BASE_DELAY * (2 ** attempt) + random.uniform(0, 1)
+                    logger.warning(
+                        f"[Kernel Retry] ⚠️ Attempt {attempt + 1}/{KERNEL_MAX_RETRIES + 1} failed: {e}. "
+                        f"Retrying in {delay:.2f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    # 재시도 불가능 또는 최대 횟수 도달
+                    logger.error(
+                        f"[Kernel Retry] ❌ All {attempt + 1} attempts failed. "
+                        f"Last error: {e}"
+                    )
+                    break
+        
+        # 모든 재시도 실패 - 에러 정보 반환
+        error_info = {
+            'error': str(last_error),
+            'error_type': type(last_error).__name__,
+            'retry_attempts': len(retry_history),
+            'retry_history': retry_history,
+            'retryable': self._is_retryable_error(last_error) if last_error else False
+        }
+        
+        return initial_state, error_info
+
     def execute_segment(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main execution logic for a workflow segment.
+        
+        🛡️ [Kernel Defense] 두 가지 방어 메커니즘:
+        1. Aggressive Retry: 커널 내부에서 먼저 재시도
+        2. Partial Success: 실패해도 SUCCEEDED 반환 + 에러 메타데이터 기록
         """
         # [Fix] 이벤트에서 MOCK_MODE를 읽어서 환경 변수로 주입
         # 이렇게 하면 모든 하위 함수들(invoke_bedrock_model 등)이 MOCK_MODE를 인식함
@@ -940,6 +1210,14 @@ class SegmentRunnerService:
         if event_mock_mode in ('true', '1', 'yes', 'on'):
             os.environ['MOCK_MODE'] = 'true'
             logger.info("🧪 MOCK_MODE enabled from event payload")
+        
+        # ====================================================================
+        # 🔀 [Aggregator] 병렬 결과 집계 처리
+        # ASL의 AggregateParallelResults에서 호출됨
+        # ====================================================================
+        segment_type_param = event.get('segment_type')
+        if segment_type_param == 'aggregator':
+            return self._handle_aggregator(event)
         
         # 0. Check for Branch Offloading
         branch_config = event.get('branch_config')
@@ -1114,32 +1392,69 @@ class SegmentRunnerService:
             except Exception as e:
                 logger.warning("User check failed, but proceeding if possible: %s", e)
 
-        # 7. Execute Workflow Segment
-        # 🛡️ [Pattern 1] 메모리 기반 자동 분할 적용
-        user_api_keys = {} # Should be resolved from Secrets Manager or Repo
-        
+        # 7. Execute Workflow Segment with Kernel Defense
+        # 🛡️ [Kernel Defense] Aggressive Retry + Partial Success
         start_time = time.time()
         
-        # 커널 동적 분할 활성화 여부 확인
-        enable_kernel_split = os.environ.get('ENABLE_KERNEL_SPLIT', 'true').lower() == 'true'
+        result_state, execution_error = self._execute_with_kernel_retry(
+            segment_config=segment_config,
+            initial_state=initial_state,
+            auth_user_id=auth_user_id,
+            event=event
+        )
         
-        if enable_kernel_split and isinstance(segment_config, dict):
-            # 🛡️ [Pattern 1] 자동 분할 실행
-            result_state = self._execute_with_auto_split(
-                segment_config=segment_config,
-                initial_state=initial_state,
+        execution_time = time.time() - start_time
+        
+        # 🛡️ [Partial Success] 실패해도 SUCCEEDED 반환 + 에러 메타데이터 기록
+        if execution_error and ENABLE_PARTIAL_SUCCESS:
+            logger.warning(
+                f"[Kernel] ⚠️ Segment {segment_id} failed but returning PARTIAL_SUCCESS. "
+                f"Error: {execution_error['error']}"
+            )
+            
+            # 에러 정보를 상태에 기록
+            if isinstance(result_state, dict):
+                result_state['__segment_error'] = execution_error
+                result_state['__segment_status'] = 'PARTIAL_FAILURE'
+                result_state['__failed_segment_id'] = segment_id
+            
+            # Partial Success 커널 로그
+            kernel_log = {
+                'action': 'PARTIAL_SUCCESS',
+                'segment_id': segment_id,
+                'error': execution_error['error'],
+                'error_type': execution_error['error_type'],
+                'retry_attempts': execution_error['retry_attempts'],
+                'timestamp': time.time()
+            }
+            
+            # 🚨 핵심: FAILED 대신 SUCCEEDED 반환 (ToleratedFailureThreshold 방지)
+            final_state, output_s3_path = self.state_manager.handle_state_storage(
+                state=result_state,
                 auth_user_id=auth_user_id,
-                split_depth=segment_config.get('_split_depth', 0)
+                workflow_id=workflow_id,
+                segment_id=segment_id,
+                bucket=s3_bucket,
+                threshold=self.threshold
             )
-        else:
-            # 기존 로직: 직접 실행
-            result_state = run_workflow(
-                config_json=segment_config,
-                initial_state=initial_state,
-                ddb_table_name=os.environ.get("JOB_TABLE"),
-                user_api_keys=user_api_keys,
-                run_config={"user_id": auth_user_id}
-            )
+            
+            total_segments = event.get('total_segments', 1)
+            next_segment = segment_id + 1
+            
+            return {
+                "status": "SUCCEEDED",  # 🛡️ Partial Success: FAILED 대신 SUCCEEDED
+                "final_state": final_state,
+                "final_state_s3_path": output_s3_path,
+                "next_segment_to_run": next_segment if next_segment < total_segments else None,
+                "new_history_logs": [],
+                "error_info": execution_error,  # 에러 정보는 메타데이터로 전달
+                "branches": None,
+                "segment_type": "partial_failure",
+                "kernel_action": kernel_log,
+                "segment_id": segment_id,
+                "execution_time": execution_time,
+                "_partial_success": True  # 클라이언트가 부분 실패 감지용
+            }
         
         execution_time = time.time() - start_time
         

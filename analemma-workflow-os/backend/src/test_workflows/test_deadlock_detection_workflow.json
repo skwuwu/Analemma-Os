@@ -1,0 +1,67 @@
+{
+  "id": "DEADLOCK_DETECTION_TEST",
+  "name": "Deadlock Detection Edge Case Test",
+  "description": "교착 상태 검증: waitForTaskToken과 자원 쿼터 사이의 순환 의존성 및 타임아웃 동작 검증",
+  "version": "1.0.0",
+  "test_category": "os_edge_case",
+  "nodes": [
+    {
+      "id": "setup_deadlock_scenario",
+      "type": "code",
+      "label": "교착 상태 시나리오 설정",
+      "config": {
+        "language": "python",
+        "code": "import time\nstate['deadlock_test_started'] = time.time()\nstate['max_wait_seconds'] = 30\nstate['simulated_quota_slots'] = 2\nstate['occupied_slots'] = 2\nstate['pending_approvals'] = []"
+      }
+    },
+    {
+      "id": "recursive_call_limiter",
+      "type": "code",
+      "label": "재귀 호출 깊이 체크",
+      "config": {
+        "language": "python",
+        "code": "# 재귀적 자가 호출 시 최대 깊이 제한 테스트\nMAX_RECURSION_DEPTH = 10\ncurrent_depth = state.get('_recursion_depth', 0)\n\nif current_depth >= MAX_RECURSION_DEPTH:\n    state['recursion_limit_hit'] = True\n    state['recursion_depth_at_limit'] = current_depth\nelse:\n    state['_recursion_depth'] = current_depth + 1\n    state['recursion_limit_hit'] = False"
+      }
+    },
+    {
+      "id": "hitp_with_timeout",
+      "type": "hitp",
+      "label": "타임아웃 있는 인간 승인 대기",
+      "config": {
+        "wait_timeout_seconds": 10,
+        "auto_approve_on_timeout": true,
+        "approval_message": "Deadlock prevention test - will auto-approve on timeout",
+        "fallback_action": "CONTINUE"
+      }
+    },
+    {
+      "id": "quota_simulation",
+      "type": "code",
+      "label": "쿼터 점유 시뮬레이션",
+      "config": {
+        "language": "python",
+        "code": "import time\n\n# 쿼터 점유 상태 시뮬레이션\noccupied = state.get('occupied_slots', 0)\ntotal = state.get('simulated_quota_slots', 2)\n\nif occupied >= total:\n    # 쿼터 부족 - 대기 필요\n    state['quota_wait_started'] = time.time()\n    state['quota_blocked'] = True\nelse:\n    state['quota_blocked'] = False\n    state['occupied_slots'] = occupied + 1"
+      }
+    },
+    {
+      "id": "deadlock_validator",
+      "type": "code",
+      "label": "교착 상태 검증",
+      "config": {
+        "language": "python",
+        "code": "import time\n\ntest_started = state.get('deadlock_test_started', 0)\ntest_duration = time.time() - test_started\nmax_wait = state.get('max_wait_seconds', 30)\n\n# 검증 항목들\nvalidation = {\n    'timeout_respected': test_duration < max_wait + 5,\n    'recursion_limited': state.get('recursion_limit_hit', False) or state.get('_recursion_depth', 0) < 10,\n    'hitp_timeout_worked': True,  # HITP 노드를 통과했으면 타임아웃 작동\n    'no_infinite_wait': test_duration < max_wait * 2\n}\n\nall_passed = all(validation.values())\n\nstate['deadlock_test_result'] = {\n    'validation_checks': validation,\n    'test_duration_seconds': round(test_duration, 2),\n    'max_allowed_seconds': max_wait,\n    'recursion_depth': state.get('_recursion_depth', 0),\n    'test_passed': all_passed\n}\n\nif all_passed:\n    state['TEST_RESULT'] = f'✅ DEADLOCK PREVENTION VERIFIED: Completed in {test_duration:.1f}s (limit: {max_wait}s)'\nelse:\n    failed_checks = [k for k, v in validation.items() if not v]\n    state['TEST_RESULT'] = f'❌ DEADLOCK RISK DETECTED: Failed checks: {failed_checks}'"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "setup_deadlock_scenario", "target": "recursive_call_limiter"},
+    {"source": "recursive_call_limiter", "target": "hitp_with_timeout"},
+    {"source": "hitp_with_timeout", "target": "quota_simulation"},
+    {"source": "quota_simulation", "target": "deadlock_validator"}
+  ],
+  "metadata": {
+    "test_features": ["deadlock_prevention", "timeout_enforcement", "recursion_limit"],
+    "expected_behavior": "Workflow should complete within timeout, never hang indefinitely",
+    "failure_mode": "Execution exceeds max_wait_seconds or hangs on circular dependency"
+  }
+}

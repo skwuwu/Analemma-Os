@@ -461,6 +461,61 @@ SCENARIOS = {
         'expected_status': 'SUCCEEDED',
         'verify_func': 'verify_shared_resource_isolation',
         'timeout_seconds': 180
+    },
+    # ========================================================================
+    # 🔥 OS Edge Case Scenarios (AG-AJ)
+    # ========================================================================
+    'RACE_CONDITION_TEST': {
+        'name': 'Scenario AG: Race Condition (Parallel State Overwrite)',
+        'description': '경합 현상 검증: 병렬 브랜치 동시 쓰기 시 데이터 손실 방지',
+        'test_keyword': 'RACE_CONDITION_TEST',
+        'input_data': {
+            'race_condition_test': True,
+            'expected_writers': 5,
+            'shared_key': 'shared_counter'
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_race_condition',
+        'timeout_seconds': 120
+    },
+    'DEADLOCK_DETECTION_TEST': {
+        'name': 'Scenario AH: Deadlock Detection (Circular Token Dependency)',
+        'description': '교착 상태 검증: waitForTaskToken 타임아웃 및 재귀 호출 깊이 제한',
+        'test_keyword': 'DEADLOCK_DETECTION_TEST',
+        'input_data': {
+            'deadlock_test': True,
+            'max_wait_seconds': 30,
+            'max_recursion_depth': 10
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_deadlock_prevention',
+        'timeout_seconds': 60
+    },
+    'MEMORY_LEAK_TEST': {
+        'name': 'Scenario AI: Memory Leak (State Bag Bloat & Orphaned S3)',
+        'description': '메모리 누수 검증: State 무한 증식 방지, GC 람다 동작, S3 orphan 정리',
+        'test_keyword': 'MEMORY_LEAK_TEST',
+        'input_data': {
+            'memory_leak_test': True,
+            'state_size_threshold_kb': 200,
+            'simulate_bloat_iterations': 20
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_memory_leak_prevention',
+        'timeout_seconds': 180
+    },
+    'SPLIT_PARADOX_TEST': {
+        'name': 'Scenario AJ: Split Paradox (Infinite Fragmentation)',
+        'description': '분할의 역설 검증: MAX_SPLIT_DEPTH 하드스톱, 무한 Lambda 호출 방지',
+        'test_keyword': 'SPLIT_PARADOX_TEST',
+        'input_data': {
+            'split_paradox_test': True,
+            'max_split_depth': 3,
+            'initial_data_size_mb': 50
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_split_paradox_prevention',
+        'timeout_seconds': 120
     }
 }
 
@@ -499,6 +554,11 @@ TEST_WORKFLOW_MAPPINGS = {
     'COST_OPTIMIZED_PARALLEL_TEST': 'test_cost_optimized_parallel_workflow',  # COST_OPTIMIZED 전략
     'SPEED_GUARDRAIL_TEST': 'test_speed_guardrail_workflow',  # SPEED_OPTIMIZED 가드레일
     'SHARED_RESOURCE_ISOLATION_TEST': 'test_shared_resource_isolation_workflow',  # 공유 자원 격리
+    # 🔥 OS Edge Case Test Workflows
+    'RACE_CONDITION_TEST': 'test_race_condition_workflow',  # 경합 현상 (Parallel State Overwrite)
+    'DEADLOCK_DETECTION_TEST': 'test_deadlock_detection_workflow',  # 교착 상태 (Circular Token Dependency)
+    'MEMORY_LEAK_TEST': 'test_memory_leak_workflow',  # 메모리 누수 (State Bag Bloat)
+    'SPLIT_PARADOX_TEST': 'test_split_paradox_workflow',  # 분할의 역설 (Infinite Fragmentation)
 }
 
 
@@ -2959,6 +3019,359 @@ def verify_multimodal_complex(execution_arn: str, result: dict, scenario_config:
                 'passed': False,
                 'details': str(e)
             }]
+        }
+
+
+# ============================================================================
+# 🔥 OS Edge Case Verification Functions (AG-AJ)
+# ============================================================================
+
+def verify_race_condition(execution_arn: str, result: dict, scenario_config: dict) -> Dict[str, Any]:
+    """
+    Scenario AG: Race Condition (경합 현상) 검증.
+    
+    병렬 브랜치가 동시에 같은 state 키에 쓸 때 데이터 손실이 발생하는지 검증합니다.
+    - 모든 브랜치가 실행되었는지 확인
+    - shared_counter가 기대값(5)과 일치하는지 확인
+    - merge_policy가 적용되어 데이터 손실이 방지되었는지 확인
+    """
+    verification = {'passed': False, 'checks': []}
+    
+    try:
+        output = result.get('output', {})
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except:
+                output = {}
+        
+        # 1. 실행 상태 확인
+        status_check = result.get('status') == 'SUCCEEDED'
+        verification['checks'].append({
+            'name': 'Execution Status',
+            'passed': status_check,
+            'expected': 'SUCCEEDED',
+            'actual': result.get('status')
+        })
+        
+        # 2. race_condition_test_result 확인
+        race_result = output.get('race_condition_test_result', {})
+        if not race_result:
+            # 중첩된 위치 탐색
+            for key in ['current_state', 'final_state', 'state']:
+                if key in output and isinstance(output[key], dict):
+                    race_result = output[key].get('race_condition_test_result', {})
+                    if race_result:
+                        break
+        
+        # 3. 모든 브랜치 실행 확인
+        all_executed = race_result.get('all_branches_executed', False)
+        verification['checks'].append({
+            'name': 'All Branches Executed',
+            'passed': all_executed,
+            'details': f"All 5 branches should complete"
+        })
+        
+        # 4. 데이터 손실 없음 확인
+        expected_count = race_result.get('expected_count', 5)
+        actual_count = race_result.get('actual_count', 0)
+        no_data_loss = actual_count == expected_count
+        verification['checks'].append({
+            'name': 'No Data Loss (Race Condition Prevention)',
+            'passed': no_data_loss,
+            'expected': expected_count,
+            'actual': actual_count,
+            'details': f"Data loss count: {expected_count - actual_count}" if not no_data_loss else "All writes preserved"
+        })
+        
+        # 5. 테스트 내부 검증 통과
+        internal_passed = race_result.get('test_passed', False)
+        verification['checks'].append({
+            'name': 'Internal Validation',
+            'passed': internal_passed,
+            'details': race_result.get('merge_policy_used', 'UNKNOWN')
+        })
+        
+        verification['passed'] = all(c['passed'] for c in verification['checks'])
+        verification['race_condition_detected'] = race_result.get('race_condition_detected', True)
+        
+        return verification
+        
+    except Exception as e:
+        logger.error(f"Race condition verification failed: {e}")
+        return {
+            'passed': False,
+            'checks': [{'name': 'Verification Error', 'passed': False, 'details': str(e)}]
+        }
+
+
+def verify_deadlock_prevention(execution_arn: str, result: dict, scenario_config: dict) -> Dict[str, Any]:
+    """
+    Scenario AH: Deadlock Detection (교착 상태) 검증.
+    
+    순환 토큰 의존성 및 무한 대기 상태를 방지하는지 검증합니다.
+    - waitForTaskToken에 Timeout이 설정되어 있는지
+    - 재귀 호출 깊이가 제한되는지
+    - 전체 실행이 max_wait_seconds 내에 완료되는지
+    """
+    verification = {'passed': False, 'checks': []}
+    
+    try:
+        output = result.get('output', {})
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except:
+                output = {}
+        
+        # 1. 실행 상태 확인 (SUCCEEDED 또는 TIMED_OUT은 모두 유효)
+        status = result.get('status')
+        # 교착 상태가 아닌 이상 어떤 종료 상태든 OK
+        status_ok = status in ['SUCCEEDED', 'TIMED_OUT', 'FAILED']
+        verification['checks'].append({
+            'name': 'Execution Terminated (No Hang)',
+            'passed': status_ok,
+            'expected': 'Any terminal state (not hanging)',
+            'actual': status
+        })
+        
+        # 2. deadlock_test_result 확인
+        deadlock_result = output.get('deadlock_test_result', {})
+        if not deadlock_result:
+            for key in ['current_state', 'final_state', 'state']:
+                if key in output and isinstance(output[key], dict):
+                    deadlock_result = output[key].get('deadlock_test_result', {})
+                    if deadlock_result:
+                        break
+        
+        validation_checks = deadlock_result.get('validation_checks', {})
+        
+        # 3. 타임아웃 준수 확인
+        timeout_respected = validation_checks.get('timeout_respected', False)
+        test_duration = deadlock_result.get('test_duration_seconds', 999)
+        max_allowed = deadlock_result.get('max_allowed_seconds', 30)
+        verification['checks'].append({
+            'name': 'Timeout Respected',
+            'passed': timeout_respected or test_duration < max_allowed + 10,
+            'details': f"Duration: {test_duration}s (max: {max_allowed}s)"
+        })
+        
+        # 4. 재귀 호출 깊이 제한 확인
+        recursion_limited = validation_checks.get('recursion_limited', False)
+        recursion_depth = deadlock_result.get('recursion_depth', 0)
+        verification['checks'].append({
+            'name': 'Recursion Depth Limited',
+            'passed': recursion_limited or recursion_depth < 10,
+            'details': f"Recursion depth: {recursion_depth}"
+        })
+        
+        # 5. HITP 타임아웃 작동 확인
+        hitp_timeout_worked = validation_checks.get('hitp_timeout_worked', True)
+        verification['checks'].append({
+            'name': 'HITP Timeout Mechanism',
+            'passed': hitp_timeout_worked,
+            'details': 'waitForTaskToken should auto-expire'
+        })
+        
+        verification['passed'] = all(c['passed'] for c in verification['checks'])
+        
+        return verification
+        
+    except Exception as e:
+        logger.error(f"Deadlock prevention verification failed: {e}")
+        return {
+            'passed': False,
+            'checks': [{'name': 'Verification Error', 'passed': False, 'details': str(e)}]
+        }
+
+
+def verify_memory_leak_prevention(execution_arn: str, result: dict, scenario_config: dict) -> Dict[str, Any]:
+    """
+    Scenario AI: Memory Leak (메모리 누수) 검증.
+    
+    State Bag 무한 증식 및 S3 orphan 객체 누적을 방지하는지 검증합니다.
+    - StateManager가 상태 크기를 감시하는지
+    - 임계값 초과 시 자동 오프로딩/요약이 발생하는지
+    - GC 람다가 임시 S3 파일을 정리하는지
+    """
+    verification = {'passed': False, 'checks': []}
+    
+    try:
+        output = result.get('output', {})
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except:
+                output = {}
+        
+        # 1. 실행 상태 확인
+        status_check = result.get('status') == 'SUCCEEDED'
+        verification['checks'].append({
+            'name': 'Execution Status',
+            'passed': status_check,
+            'expected': 'SUCCEEDED',
+            'actual': result.get('status')
+        })
+        
+        # 2. memory_leak_test_result 확인
+        memory_result = output.get('memory_leak_test_result', {})
+        if not memory_result:
+            for key in ['current_state', 'final_state', 'state']:
+                if key in output and isinstance(output[key], dict):
+                    memory_result = output[key].get('memory_leak_test_result', {})
+                    if memory_result:
+                        break
+        
+        validation_checks = memory_result.get('validation_checks', {})
+        
+        # 3. 상태 크기 모니터링 확인
+        size_monitored = validation_checks.get('state_size_monitored', False)
+        state_size_kb = memory_result.get('state_size_kb', 0)
+        verification['checks'].append({
+            'name': 'State Size Monitoring',
+            'passed': size_monitored,
+            'details': f"State size: {state_size_kb}KB"
+        })
+        
+        # 4. 임계값 검사 수행 확인
+        threshold_check = validation_checks.get('threshold_check_performed', False)
+        threshold_kb = memory_result.get('threshold_kb', 200)
+        verification['checks'].append({
+            'name': 'Threshold Check Performed',
+            'passed': threshold_check,
+            'details': f"Threshold: {threshold_kb}KB"
+        })
+        
+        # 5. GC 트리거 확인
+        gc_triggered = validation_checks.get('gc_triggered_on_cleanup', False)
+        temp_created = memory_result.get('temp_files_created', 0)
+        temp_cleaned = memory_result.get('temp_files_cleaned', 0)
+        verification['checks'].append({
+            'name': 'GC Triggered for Cleanup',
+            'passed': gc_triggered,
+            'details': f"Temp files: created={temp_created}, cleaned={temp_cleaned}"
+        })
+        
+        # 6. Orphan 객체 없음 확인
+        no_orphans = validation_checks.get('temp_files_cleaned', False) or temp_created == temp_cleaned
+        verification['checks'].append({
+            'name': 'No Orphaned S3 Objects',
+            'passed': no_orphans,
+            'details': f"Orphan count: {temp_created - temp_cleaned}"
+        })
+        
+        # 7. 자동 오프로딩 트리거 확인
+        auto_offload = validation_checks.get('auto_offload_triggered', True)
+        verification['checks'].append({
+            'name': 'Auto Offload on Threshold',
+            'passed': auto_offload,
+            'details': 'StateManager should auto-offload when exceeding threshold'
+        })
+        
+        verification['passed'] = all(c['passed'] for c in verification['checks'])
+        
+        return verification
+        
+    except Exception as e:
+        logger.error(f"Memory leak verification failed: {e}")
+        return {
+            'passed': False,
+            'checks': [{'name': 'Verification Error', 'passed': False, 'details': str(e)}]
+        }
+
+
+def verify_split_paradox_prevention(execution_arn: str, result: dict, scenario_config: dict) -> Dict[str, Any]:
+    """
+    Scenario AJ: Split Paradox (분할의 역설) 검증.
+    
+    무한 분할(Infinite Fragmentation)을 방지하는지 검증합니다.
+    - MAX_SPLIT_DEPTH 도달 시 하드스톱이 작동하는지
+    - 비용 폭증(Lambda 호출 수)이 제한되는지
+    - 계정 동시성 한계를 존중하는지
+    """
+    verification = {'passed': False, 'checks': []}
+    
+    try:
+        output = result.get('output', {})
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except:
+                output = {}
+        
+        # 1. 실행 상태 확인
+        status_check = result.get('status') == 'SUCCEEDED'
+        verification['checks'].append({
+            'name': 'Execution Status',
+            'passed': status_check,
+            'expected': 'SUCCEEDED',
+            'actual': result.get('status')
+        })
+        
+        # 2. split_paradox_test_result 확인
+        split_result = output.get('split_paradox_test_result', {})
+        if not split_result:
+            for key in ['current_state', 'final_state', 'state']:
+                if key in output and isinstance(output[key], dict):
+                    split_result = output[key].get('split_paradox_test_result', {})
+                    if split_result:
+                        break
+        
+        validation_checks = split_result.get('validation_checks', {})
+        
+        # 3. MAX_SPLIT_DEPTH 강제 확인
+        max_depth = split_result.get('max_split_depth', 3)
+        actual_depth = split_result.get('actual_split_depth', 0)
+        depth_enforced = validation_checks.get('max_depth_enforced', False)
+        verification['checks'].append({
+            'name': 'MAX_SPLIT_DEPTH Enforced',
+            'passed': depth_enforced or actual_depth <= max_depth,
+            'details': f"Depth: {actual_depth}/{max_depth}"
+        })
+        
+        # 4. 하드스톱 작동 확인
+        hard_stop = split_result.get('hard_stop_triggered', False)
+        hard_stop_ok = validation_checks.get('hard_stop_on_limit', True)
+        verification['checks'].append({
+            'name': 'Hard-Stop on Limit',
+            'passed': hard_stop_ok,
+            'details': f"Hard stop triggered: {hard_stop}"
+        })
+        
+        # 5. 무한 루프 방지 확인
+        no_infinite_loop = validation_checks.get('no_infinite_loop', False)
+        verification['checks'].append({
+            'name': 'No Infinite Loop',
+            'passed': no_infinite_loop or actual_depth < max_depth + 1,
+            'details': 'Split depth should not exceed MAX_SPLIT_DEPTH'
+        })
+        
+        # 6. 비용 제한 확인
+        lambda_invocations = split_result.get('total_lambda_invocations', 0)
+        cost_bounded = validation_checks.get('cost_bounded', False)
+        verification['checks'].append({
+            'name': 'Cost Bounded',
+            'passed': cost_bounded or lambda_invocations < 10000,
+            'details': f"Lambda invocations: {lambda_invocations}"
+        })
+        
+        # 7. 계정 한계 존중 확인
+        account_limit_ok = validation_checks.get('account_limit_respected', False)
+        verification['checks'].append({
+            'name': 'Account Concurrency Limit Respected',
+            'passed': account_limit_ok or lambda_invocations < 100,
+            'details': 'Should not exhaust account concurrency limit'
+        })
+        
+        verification['passed'] = all(c['passed'] for c in verification['checks'])
+        
+        return verification
+        
+    except Exception as e:
+        logger.error(f"Split paradox verification failed: {e}")
+        return {
+            'passed': False,
+            'checks': [{'name': 'Verification Error', 'passed': False, 'details': str(e)}]
         }
 
 

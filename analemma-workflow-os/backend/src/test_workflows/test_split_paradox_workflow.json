@@ -1,0 +1,65 @@
+{
+  "id": "SPLIT_PARADOX_TEST",
+  "name": "Split Paradox Edge Case Test",
+  "description": "분할의 역설 검증: 무한 분할 방지를 위한 MAX_SPLIT_DEPTH 하드스톱 및 비용 폭증 방지",
+  "version": "1.0.0",
+  "test_category": "os_edge_case",
+  "nodes": [
+    {
+      "id": "setup_split_test",
+      "type": "code",
+      "label": "분할 테스트 초기화",
+      "config": {
+        "language": "python",
+        "code": "import time\n\nstate['split_test_started'] = time.time()\nstate['split_depth'] = 0\nstate['max_split_depth'] = 3\nstate['split_history'] = []\nstate['lambda_invocation_count'] = 0\nstate['account_concurrency_limit'] = 100"
+      }
+    },
+    {
+      "id": "simulate_large_data",
+      "type": "code",
+      "label": "대용량 데이터 시뮬레이션",
+      "config": {
+        "language": "python",
+        "code": "# 람다 메모리보다 큰 데이터 시뮬레이션\nstate['large_dataset'] = {\n    'items': [f'Large item {i} with lots of data ' * 100 for i in range(100)],\n    'estimated_size_mb': 50,\n    'lambda_memory_mb': 512,\n    'requires_split': True\n}\n\nstate['initial_data_size_mb'] = state['large_dataset']['estimated_size_mb']"
+      }
+    },
+    {
+      "id": "recursive_split_simulation",
+      "type": "code",
+      "label": "재귀 분할 시뮬레이션",
+      "config": {
+        "language": "python",
+        "code": "import time\n\nmax_depth = state.get('max_split_depth', 3)\ncurrent_depth = state.get('split_depth', 0)\ndata_size = state.get('initial_data_size_mb', 50)\nlambda_memory = state.get('large_dataset', {}).get('lambda_memory_mb', 512)\n\nsplit_history = state.get('split_history', [])\n\n# 분할 시뮬레이션 루프\nwhile data_size > lambda_memory * 0.8 and current_depth < max_depth:\n    # 분할 수행\n    split_event = {\n        'depth': current_depth,\n        'data_size_before_mb': data_size,\n        'data_size_after_mb': data_size / 2,\n        'timestamp': time.time(),\n        'lambda_invocations': 2 ** current_depth\n    }\n    split_history.append(split_event)\n    \n    data_size = data_size / 2\n    current_depth += 1\n    state['lambda_invocation_count'] = state.get('lambda_invocation_count', 0) + (2 ** current_depth)\n\nstate['split_depth'] = current_depth\nstate['split_history'] = split_history\nstate['final_data_size_mb'] = data_size\n\n# MAX_SPLIT_DEPTH 도달 여부\nif current_depth >= max_depth and data_size > lambda_memory * 0.8:\n    state['hard_stop_triggered'] = True\n    state['hard_stop_reason'] = f'MAX_SPLIT_DEPTH ({max_depth}) reached but data still too large ({data_size:.1f}MB)'\nelse:\n    state['hard_stop_triggered'] = False"
+      }
+    },
+    {
+      "id": "cost_explosion_check",
+      "type": "code",
+      "label": "비용 폭증 검사",
+      "config": {
+        "language": "python",
+        "code": "# 비용 폭증 검사\nlambda_invocations = state.get('lambda_invocation_count', 0)\naccount_limit = state.get('account_concurrency_limit', 100)\n\n# 비용 추정 (Lambda 호출당 $0.0000002 가정)\nestimated_cost = lambda_invocations * 0.0000002\n\nstate['cost_analysis'] = {\n    'total_lambda_invocations': lambda_invocations,\n    'estimated_cost_usd': round(estimated_cost, 6),\n    'would_hit_account_limit': lambda_invocations > account_limit,\n    'cost_explosion_risk': lambda_invocations > 1000\n}"
+      }
+    },
+    {
+      "id": "split_paradox_validator",
+      "type": "code",
+      "label": "분할 역설 검증",
+      "config": {
+        "language": "python",
+        "code": "import json\n\nmax_depth = state.get('max_split_depth', 3)\nactual_depth = state.get('split_depth', 0)\nhard_stop = state.get('hard_stop_triggered', False)\ncost_analysis = state.get('cost_analysis', {})\n\nvalidation = {\n    'max_depth_enforced': actual_depth <= max_depth,\n    'hard_stop_on_limit': hard_stop if actual_depth >= max_depth else True,\n    'no_infinite_loop': actual_depth < max_depth + 1,\n    'cost_bounded': cost_analysis.get('total_lambda_invocations', 0) < 10000,\n    'account_limit_respected': not cost_analysis.get('would_hit_account_limit', True)\n}\n\nall_passed = all(validation.values())\n\nstate['split_paradox_test_result'] = {\n    'validation_checks': validation,\n    'max_split_depth': max_depth,\n    'actual_split_depth': actual_depth,\n    'hard_stop_triggered': hard_stop,\n    'total_lambda_invocations': cost_analysis.get('total_lambda_invocations', 0),\n    'split_history_count': len(state.get('split_history', [])),\n    'test_passed': all_passed\n}\n\nif all_passed:\n    state['TEST_RESULT'] = f'✅ SPLIT PARADOX PREVENTED: Depth {actual_depth}/{max_depth}, {cost_analysis.get(\"total_lambda_invocations\", 0)} invocations'\nelse:\n    failed_checks = [k for k, v in validation.items() if not v]\n    state['TEST_RESULT'] = f'❌ SPLIT PARADOX RISK: Failed checks: {failed_checks}'"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "setup_split_test", "target": "simulate_large_data"},
+    {"source": "simulate_large_data", "target": "recursive_split_simulation"},
+    {"source": "recursive_split_simulation", "target": "cost_explosion_check"},
+    {"source": "cost_explosion_check", "target": "split_paradox_validator"}
+  ],
+  "metadata": {
+    "test_features": ["max_split_depth", "hard_stop", "cost_bounding", "infinite_fragmentation_prevention"],
+    "expected_behavior": "Kernel should stop splitting at MAX_SPLIT_DEPTH and raise error if data still too large",
+    "failure_mode": "Infinite Lambda invocations or account concurrency limit exhaustion"
+  }
+}

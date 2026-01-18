@@ -1,0 +1,120 @@
+{
+  "id": "RACE_CONDITION_TEST",
+  "name": "Race Condition Edge Case Test",
+  "description": "경합 현상 검증: 병렬 브랜치들이 동시에 같은 state 키에 쓰기 시도 시 데이터 손실 방지 검증",
+  "version": "1.0.0",
+  "test_category": "os_edge_case",
+  "nodes": [
+    {
+      "id": "setup_shared_state",
+      "type": "code",
+      "label": "공유 상태 초기화",
+      "config": {
+        "language": "python",
+        "code": "import time\nstate['shared_counter'] = 0\nstate['race_test_started'] = time.time()\nstate['expected_final_count'] = 5\nstate['branch_results'] = []"
+      }
+    },
+    {
+      "id": "parallel_writers",
+      "type": "parallel_group",
+      "label": "동시 쓰기 브랜치들",
+      "resource_policy": {
+        "strategy": "SPEED_OPTIMIZED",
+        "max_concurrent_branches": 5,
+        "shared_resource_keys": ["shared_counter", "branch_results"]
+      },
+      "config": {
+        "branches": [
+          {
+            "id": "branch_writer_1",
+            "name": "Writer Branch 1",
+            "nodes": [
+              {
+                "id": "write_1",
+                "type": "code",
+                "config": {
+                  "language": "python",
+                  "code": "import time\ntime.sleep(0.1)\ncurrent = state.get('shared_counter', 0)\nstate['shared_counter'] = current + 1\nstate['branch_1_wrote'] = True\nstate['branch_1_timestamp'] = time.time()"
+                }
+              }
+            ]
+          },
+          {
+            "id": "branch_writer_2",
+            "name": "Writer Branch 2",
+            "nodes": [
+              {
+                "id": "write_2",
+                "type": "code",
+                "config": {
+                  "language": "python",
+                  "code": "import time\ntime.sleep(0.05)\ncurrent = state.get('shared_counter', 0)\nstate['shared_counter'] = current + 1\nstate['branch_2_wrote'] = True\nstate['branch_2_timestamp'] = time.time()"
+                }
+              }
+            ]
+          },
+          {
+            "id": "branch_writer_3",
+            "name": "Writer Branch 3",
+            "nodes": [
+              {
+                "id": "write_3",
+                "type": "code",
+                "config": {
+                  "language": "python",
+                  "code": "import time\ntime.sleep(0.15)\ncurrent = state.get('shared_counter', 0)\nstate['shared_counter'] = current + 1\nstate['branch_3_wrote'] = True\nstate['branch_3_timestamp'] = time.time()"
+                }
+              }
+            ]
+          },
+          {
+            "id": "branch_writer_4",
+            "name": "Writer Branch 4",
+            "nodes": [
+              {
+                "id": "write_4",
+                "type": "code",
+                "config": {
+                  "language": "python",
+                  "code": "import time\ntime.sleep(0.08)\ncurrent = state.get('shared_counter', 0)\nstate['shared_counter'] = current + 1\nstate['branch_4_wrote'] = True\nstate['branch_4_timestamp'] = time.time()"
+                }
+              }
+            ]
+          },
+          {
+            "id": "branch_writer_5",
+            "name": "Writer Branch 5",
+            "nodes": [
+              {
+                "id": "write_5",
+                "type": "code",
+                "config": {
+                  "language": "python",
+                  "code": "import time\ntime.sleep(0.12)\ncurrent = state.get('shared_counter', 0)\nstate['shared_counter'] = current + 1\nstate['branch_5_wrote'] = True\nstate['branch_5_timestamp'] = time.time()"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "race_condition_validator",
+      "type": "code",
+      "label": "경합 조건 검증",
+      "config": {
+        "language": "python",
+        "code": "import json\n\n# 모든 브랜치가 실행되었는지 확인\nbranches_executed = [\n    state.get('branch_1_wrote', False),\n    state.get('branch_2_wrote', False),\n    state.get('branch_3_wrote', False),\n    state.get('branch_4_wrote', False),\n    state.get('branch_5_wrote', False)\n]\n\nall_executed = all(branches_executed)\nexpected_count = state.get('expected_final_count', 5)\nactual_count = state.get('shared_counter', 0)\n\n# 경합 조건 검출: 카운터가 기대값과 다르면 데이터 손실 발생\nrace_detected = actual_count != expected_count\n\nstate['race_condition_test_result'] = {\n    'all_branches_executed': all_executed,\n    'expected_count': expected_count,\n    'actual_count': actual_count,\n    'race_condition_detected': race_detected,\n    'data_loss_count': expected_count - actual_count if race_detected else 0,\n    'merge_policy_used': state.get('_merge_policy', 'UNKNOWN'),\n    'test_passed': all_executed and not race_detected\n}\n\nif race_detected:\n    state['TEST_RESULT'] = f'⚠️ RACE CONDITION DETECTED: Expected {expected_count}, got {actual_count}. Data loss: {expected_count - actual_count}'\nelse:\n    state['TEST_RESULT'] = f'✅ RACE CONDITION PREVENTED: All {actual_count} writes preserved'"
+      }
+    }
+  ],
+  "edges": [
+    {"source": "setup_shared_state", "target": "parallel_writers"},
+    {"source": "parallel_writers", "target": "race_condition_validator"}
+  ],
+  "metadata": {
+    "test_features": ["race_condition_detection", "parallel_write_isolation", "merge_policy"],
+    "expected_behavior": "Kernel should either serialize writes or use namespace isolation to prevent data loss",
+    "failure_mode": "If race condition occurs, shared_counter < 5"
+  }
+}

@@ -649,7 +649,41 @@
               "new_history_logs.$": "$.Payload.new_history_logs"
             },
             "ResultPath": "$.execution_result",
+            "Retry": [
+              {
+                "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "Lambda.Unknown"],
+                "IntervalSeconds": 2,
+                "MaxAttempts": 3,
+                "BackoffRate": 2
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": ["States.ALL"],
+                "ResultPath": "$.branch_error",
+                "Next": "HandleBranchError"
+              }
+            ],
             "Next": "CheckBranchNext"
+          },
+          "HandleBranchError": {
+            "Type": "Pass",
+            "Comment": "🛡️ [Kernel Defense] 브랜치 에러를 Partial Success로 변환",
+            "Parameters": {
+              "status": "PARTIAL_FAILURE",
+              "final_state.$": "$.state_data.current_state",
+              "final_state_s3_path": null,
+              "next_segment_to_run": null,
+              "new_history_logs": [],
+              "error_info": {
+                "error.$": "$.branch_error.Error",
+                "cause.$": "$.branch_error.Cause",
+                "branch_id.$": "$.state_data.branch_id",
+                "segment_to_run.$": "$.state_data.segment_to_run"
+              }
+            },
+            "ResultPath": "$.execution_result",
+            "Next": "BranchComplete"
           },
           "CheckBranchNext": {
             "Type": "Choice",
@@ -724,7 +758,58 @@
           }
         }
       },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Comment": "🛡️ [Kernel Defense] Map 에러 시 부분 결과로 Aggregator 진행",
+          "ResultPath": "$.map_error",
+          "Next": "HandleMapError"
+        }
+      ],
       "Next": "AggregateParallelResults"
+    },
+    "HandleMapError": {
+      "Type": "Pass",
+      "Comment": "🛡️ [Kernel Defense] Map 전체 실패 시 빈 결과로 Aggregator 호출",
+      "Parameters": {
+        "status": "MAP_ERROR",
+        "error_info": {
+          "error.$": "$.map_error.Error",
+          "cause.$": "$.map_error.Cause"
+        },
+        "parallel_results": []
+      },
+      "ResultPath": "$.parallel_results_wrapper",
+      "Next": "AggregateParallelResultsFromError"
+    },
+    "AggregateParallelResultsFromError": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Comment": "🛡️ [Kernel Defense] Map 에러 후 부분 결과 집계",
+      "Parameters": {
+        "FunctionName": "${SegmentRunnerArn}",
+        "InvocationType": "RequestResponse",
+        "Payload": {
+          "segment_type": "aggregator",
+          "parallel_results.$": "$.parallel_results_wrapper.parallel_results",
+          "map_error.$": "$.parallel_results_wrapper.error_info",
+          "workflow_config.$": "$.state_data.workflow_config",
+          "current_state.$": "$.state_data.current_state",
+          "ownerId.$": "$.state_data.ownerId",
+          "workflowId.$": "$.state_data.workflowId",
+          "segment_to_run.$": "$.state_data.segment_to_run",
+          "idempotency_key.$": "$.state_data.idempotency_key"
+        }
+      },
+      "ResultSelector": {
+        "status.$": "$.Payload.status",
+        "final_state.$": "$.Payload.final_state",
+        "final_state_s3_path.$": "$.Payload.final_state_s3_path",
+        "next_segment_to_run.$": "$.Payload.next_segment_to_run",
+        "new_history_logs.$": "$.Payload.new_history_logs"
+      },
+      "ResultPath": "$.execution_result",
+      "Next": "UpdateStateData"
     },
     "AggregateParallelResults": {
       "Type": "Task",
