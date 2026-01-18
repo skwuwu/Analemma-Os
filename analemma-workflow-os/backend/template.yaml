@@ -2197,7 +2197,7 @@ Resources:
         # [Critical Fix #2] S3 ItemReader/ResultWriter 권한
         - S3CrudPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
-        # Distributed Map 실행 권한
+        # Distributed Map 실행 권한 + Child Workflow 트리거 권한
         - Statement:
           - Effect: Allow
             Action:
@@ -2205,7 +2205,12 @@ Resources:
               - states:DescribeExecution
               - states:StopExecution
             Resource: 
+              # execution 리소스 (Distributed Map 내부 실행)
               - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
+              # stateMachine 리소스 (Child Workflow 트리거용)
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+              # Standard Orchestrator (있는 경우)
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
 
   # --- Express Workflow removed due to managed-rule creation limitations ---
   # Event History limit mitigation is now handled through:
