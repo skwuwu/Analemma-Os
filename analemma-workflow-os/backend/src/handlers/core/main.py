@@ -65,27 +65,26 @@ except ImportError:
 # 2. State Schema Definition
 # -----------------------------------------------------------------------------
 
-# Minimal WorkflowState - flexible dict-based state used at runtime
-# Annotated is CRITICAL for history accumulation (reducer)
+# NOTE: WorkflowState TypedDict는 타입 힌트/문서화 목적으로만 유지됩니다.
+# 실제 LangGraph 1.0+ 실행 시에는 DynamicWorkflowBuilder에서 
+# Annotated[Dict[str, Any], merge_state_dict] 스키마를 사용하여
+# 동적 키를 완벽하게 지원합니다.
+#
+# 이 TypedDict는 IDE 자동완성 및 정적 분석에 활용됩니다.
 class WorkflowState(TypedDict, total=False):
     user_query: str
     user_api_keys: Dict[str, str]
     step_history: List[str]
     # Messages list that accumulates instead of overwriting
     messages: Annotated[List[Dict[str, Any]], add_messages]
-    # Allow dynamic keys via loose typing mechanism in LangGraph (implicit)
     # Common dynamic fields
     item: Any  # For for_each operations
     result: Any  # General result storage
     
     # --- Skills Integration ---
-    # List of skill IDs to inject into context at runtime
     injected_skills: List[str]
-    # Reference to active context (for large skill payloads offloaded to S3)
     active_context_ref: str
-    # Hydrated skill data loaded during Context Hydration phase
-    active_skills: Dict[str, Any]  # skill_id -> HydratedSkill
-    # Accumulated execution logs for skill invocations
+    active_skills: Dict[str, Any]
     skill_execution_log: Annotated[List[Dict[str, Any]], operator.add]
 
 

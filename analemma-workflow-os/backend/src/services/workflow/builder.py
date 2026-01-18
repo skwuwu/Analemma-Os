@@ -59,6 +59,37 @@ class LightweightSubgraphState(TypedDict, total=False):
     skill_execution_log: List[Dict[str, Any]]
 
 
+# ============================================================================
+# [Critical Fix] LangGraph 1.0+ 동적 상태 관리
+# Annotated + Reducer 패턴으로 부분 업데이트 지원
+# ============================================================================
+def merge_state_dict(existing: Dict[str, Any], updated: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    상태 병합 Reducer: 기존 키는 유지, 새로운 키는 추가/덮어쓰기.
+    
+    LangGraph 1.0+에서 노드가 '업데이트할 필드만' 반환해도
+    기존 state와 자동으로 병합됩니다.
+    
+    이 방식의 장점:
+    1. 델타(Delta)만 전송 → 메모리 효율적 (서버리스 최적화)
+    2. 동적 키 완전 지원 → 테스트용 키(loop_count 등) 누락 없음
+    3. Time Machine 디버깅 → 모든 동적 변수가 스냅샷에 기록됨
+    4. 감사관 AI 정합성 → 시스템 외적 변화 감지 가능
+    """
+    if existing is None:
+        existing = {}
+    if updated is None:
+        return existing
+    new_state = dict(existing)
+    new_state.update(updated)
+    return new_state
+
+
+# Annotated 타입 별칭: StateGraph에 전달할 상태 스키마
+# 노드는 업데이트할 필드만 반환하면 merge_state_dict가 기존 state와 합쳐줍니다
+DynamicWorkflowState = Annotated[Dict[str, Any], merge_state_dict]
+
+
 # 서브그래프에서 부모로 전파해야 하는 누적 필드 목록
 SUBGRAPH_ACCUMULATOR_FIELDS = frozenset({"step_history", "skill_execution_log"})
 # 서브그래프 입력 시 자동 상속되는 공통 필드
@@ -199,12 +230,12 @@ class DynamicWorkflowBuilder:
         # Cache for compiled subgraphs (avoid recompilation)
         self._subgraph_cache: Dict[str, Any] = {}
         
-        # [Performance Optimization] 서브그래프는 경량 상태 스키마 사용
-        if use_lightweight_state:
-            self.graph = StateGraph(LightweightSubgraphState)
-            logger.debug(f"Using LightweightSubgraphState for: {' > '.join(self.parent_path)}")
-        else:
-            self.graph = StateGraph(WorkflowState)
+        # [Critical Fix] LangGraph 1.0+ 호환성: Annotated + Reducer 패턴
+        # DynamicWorkflowState = Annotated[Dict[str, Any], merge_state_dict]
+        # 노드가 업데이트할 필드만 반환해도 merge_state_dict가 기존 state와 병합
+        # 이 방식은 델타만 전송하므로 서버리스 환경에서 메모리 효율적
+        self.graph = StateGraph(DynamicWorkflowState)
+        logger.debug(f"Using DynamicWorkflowState (Annotated Dict + Reducer) for: {' > '.join(self.parent_path)}")
     
     def _get_subgraph_definition(self, node_def: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -452,14 +483,15 @@ class DynamicWorkflowBuilder:
         # First, try NODE_REGISTRY for registered handlers
         registry_func = NODE_REGISTRY.get(node_type)
         if registry_func and callable(registry_func):
-            def _registry_node(state: WorkflowState, config=None) -> Any:
+            def _registry_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
                 node_id = node_def.get('id', f'unknown_{node_type}')
                 logger.info(f"🔧 Executing {node_type} node: {node_id}")
                 try:
                     # Standard interface: pass state and node_def as config
                     result = registry_func(state, node_def)
                     logger.info(f"✅ {node_type} node {node_id} completed")
-                    return result
+                    # [Annotated + Reducer] 업데이트만 반환
+                    return result if isinstance(result, dict) else {}
                 except Exception as e:
                     logger.error(f"🚨 {node_type} node {node_id} failed: {e}")
                     raise
@@ -470,7 +502,7 @@ class DynamicWorkflowBuilder:
             # Direct import for llm_chat if not in registry
             try:
                 from src.handlers.core.main import llm_chat_runner
-                def _llm_node(state: WorkflowState, config=None) -> Any:
+                def _llm_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
                     node_id = node_def.get('id', 'unknown_llm')
                     node_config = node_def.get('config', {}).copy()  # Avoid mutation
                     node_config['id'] = node_id
@@ -489,12 +521,15 @@ class DynamicWorkflowBuilder:
         elif node_type == "operator":
             try:
                 from src.handlers.core.main import operator_runner
-                def _operator_node(state: WorkflowState, config=None) -> Any:
+                def _operator_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
                     node_id = node_def.get('id', 'unknown_operator')
                     logger.info(f"🔧 Executing operator node: {node_id}")
                     try:
                         result = operator_runner(state, node_def)
-                        logger.info(f"✅ Operator node {node_id} completed")
+                        logger.info(f"✅ Operator node {node_id} completed with {len(result)} updates")
+                        # [Annotated + Reducer] 업데이트만 반환
+                        # DynamicWorkflowState의 merge_state_dict reducer가 
+                        # 기존 state와 자동으로 병합합니다
                         return result
                     except Exception as e:
                         logger.error(f"🚨 Operator node {node_id} failed: {e}")
@@ -507,8 +542,10 @@ class DynamicWorkflowBuilder:
             # Triggers are handled like operators
             try:
                 from src.handlers.core.main import operator_runner
-                def _trigger_node(state: WorkflowState, config=None) -> Any:
-                    return operator_runner(state, node_def)
+                def _trigger_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
+                    result = operator_runner(state, node_def)
+                    # [Annotated + Reducer] 업데이트만 반환
+                    return result
                 return _trigger_node
             except ImportError:
                 pass
