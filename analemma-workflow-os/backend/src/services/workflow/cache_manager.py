@@ -21,7 +21,7 @@ import hashlib
 import json
 import logging
 from typing import Dict, Any, Optional, Tuple
-from src.dataclasses import dataclass
+from dataclasses import dataclass
 from collections import OrderedDict
 
 logger = logging.getLogger(__name__)

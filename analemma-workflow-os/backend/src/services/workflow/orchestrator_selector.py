@@ -20,7 +20,7 @@ import os
 import json
 import logging
 from typing import Dict, Any, Tuple, Optional
-from src.dataclasses import dataclass
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 

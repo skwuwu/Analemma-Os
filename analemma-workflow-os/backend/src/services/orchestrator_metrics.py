@@ -14,7 +14,7 @@ Monitor the performance and effectiveness of dynamic orchestrator selection thro
 import time
 import logging
 from typing import Dict, Any, Optional
-from src.dataclasses import dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
