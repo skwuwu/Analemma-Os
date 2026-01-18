@@ -2,7 +2,7 @@
   "id": "SHARED_RESOURCE_ISOLATION_TEST",
   "name": "Shared Resource Isolation Test",
   "description": "공유 자원(DB, S3) 접근 브랜치의 격리 스케줄링 검증. Race Condition 방지.",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "nodes": [
     {
       "id": "init_shared_resource",
@@ -10,7 +10,7 @@
       "label": "공유 자원 초기화",
       "config": {
         "language": "python",
-        "code": "state['shared_counter'] = 0\nstate['shared_lock_test'] = True"
+        "code": "# [Fix] aggregated_ 접두사 사용으로 리스트 병합 보장\nstate['aggregated_counters'] = []\nstate['shared_lock_test'] = True\nstate['expected_branch_count'] = 6"
       }
     },
     {
@@ -34,7 +34,7 @@
               "label": "DB 작업 1",
               "config": {
                 "language": "python",
-                "code": "import time\ntime.sleep(0.1)  # 시뮬레이션\nstate['db_result_1'] = 'written'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "code": "import time\ntime.sleep(0.1)  # 시뮬레이션\nstate['db_result_1'] = 'written'\n# [Fix] aggregated_ 접두사로 리스트 병합 보장\nstate['aggregated_counters'] = state.get('aggregated_counters', []) + ['db_write_1']",
                 "write_to_db": true
               }
             }
@@ -51,7 +51,7 @@
               "label": "DB 작업 2",
               "config": {
                 "language": "python",
-                "code": "import time\ntime.sleep(0.1)\nstate['db_result_2'] = 'written'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "code": "import time\ntime.sleep(0.1)\nstate['db_result_2'] = 'written'\nstate['aggregated_counters'] = state.get('aggregated_counters', []) + ['db_write_2']",
                 "write_to_db": true
               }
             }
@@ -68,7 +68,7 @@
               "label": "S3 작업",
               "config": {
                 "language": "python",
-                "code": "state['s3_result'] = 'uploaded'\nstate['shared_counter'] = state.get('shared_counter', 0) + 1",
+                "code": "state['s3_result'] = 'uploaded'\nstate['aggregated_counters'] = state.get('aggregated_counters', []) + ['s3_write']",
                 "write_to_s3": true
               }
             }
@@ -85,7 +85,7 @@
               "label": "읽기 작업 1",
               "config": {
                 "language": "python",
-                "code": "state['read_result_1'] = 'success'"
+                "code": "state['read_result_1'] = 'success'\nstate['aggregated_counters'] = state.get('aggregated_counters', []) + ['read_1']"
               }
             }
           ],
@@ -101,7 +101,7 @@
               "label": "읽기 작업 2",
               "config": {
                 "language": "python",
-                "code": "state['read_result_2'] = 'success'"
+                "code": "state['read_result_2'] = 'success'\nstate['aggregated_counters'] = state.get('aggregated_counters', []) + ['read_2']"
               }
             }
           ],
@@ -120,19 +120,30 @@
                 "prompt_template": "Analyze: {{shared_lock_test}}",
                 "output_key": "llm_analysis"
               }
+            },
+            {
+              "id": "llm_counter",
+              "type": "code",
+              "label": "LLM 카운터",
+              "config": {
+                "language": "python",
+                "code": "state['aggregated_counters'] = state.get('aggregated_counters', []) + ['llm_analysis']"
+              }
             }
           ],
-          "edges": []
+          "edges": [
+            {"source": "llm_op", "target": "llm_counter"}
+          ]
         }
       ]
     },
     {
       "id": "verify_isolation",
       "type": "code",
-      "label": "격리 검증",
+      "label": "격리 검증 (강화된 Assert)",
       "config": {
         "language": "python",
-        "code": "# 예상: 공유 자원 브랜치 3개는 각각 별도 배치로 격리됨\n# 안전한 브랜치 3개는 동일 배치에서 병렬 실행 가능\nstate['isolation_test_complete'] = True\nstate['expected_batches'] = '>=4'  # 공유 3개 격리 + 안전 1개 배치"
+        "code": "# ========== 강화된 격리 검증 ==========\n# 1. 모든 브랜치 실행 확인\nexpected_count = state.get('expected_branch_count', 6)\naggregated = state.get('aggregated_counters', [])\nactual_count = len(aggregated)\n\n# 2. 각 브랜치 결과 개별 확인\ndb1_ok = state.get('db_result_1') == 'written'\ndb2_ok = state.get('db_result_2') == 'written'\ns3_ok = state.get('s3_result') == 'uploaded'\nread1_ok = state.get('read_result_1') == 'success'\nread2_ok = state.get('read_result_2') == 'success'\nllm_ok = state.get('llm_analysis') is not None\n\n# 3. 데이터 무손실 검증 (Critical Assert)\nall_branches_executed = all([db1_ok, db2_ok, s3_ok, read1_ok, read2_ok, llm_ok])\nno_data_loss = actual_count >= expected_count  # 리스트 병합으로 모든 값 보존\n\n# 4. 결과 저장\nstate['isolation_test_result'] = {\n    'expected_count': expected_count,\n    'actual_count': actual_count,\n    'aggregated_items': aggregated,\n    'all_branches_executed': all_branches_executed,\n    'no_data_loss': no_data_loss,\n    'individual_results': {\n        'db_result_1': db1_ok,\n        'db_result_2': db2_ok,\n        's3_result': s3_ok,\n        'read_result_1': read1_ok,\n        'read_result_2': read2_ok,\n        'llm_analysis': llm_ok\n    }\n}\n\nstate['isolation_test_complete'] = True\n\n# 5. 최종 판정\nif all_branches_executed and no_data_loss:\n    state['TEST_RESULT'] = f'✅ ISOLATION SUCCESS: All {actual_count} branches executed, no data loss'\nelse:\n    missing = expected_count - actual_count\n    state['TEST_RESULT'] = f'❌ ISOLATION FAILED: Expected {expected_count}, got {actual_count}. Data loss: {missing}'"
       }
     }
   ],

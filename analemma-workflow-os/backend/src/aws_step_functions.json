@@ -1327,7 +1327,7 @@
     "NotifyExecutionFailure": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
-      "Comment": "🚀 Fire-and-forget: Publish workflow failure event to EventBridge for async processing",
+      "Comment": "[Fix] 워크플로우 실패 이벤트 발행 - 원본 실행 입력에서 안전하게 참조 (Catch 시에도 동작)",
       "Parameters": {
         "Entries": [
           {
@@ -1343,12 +1343,10 @@
               "notification_type": "execution_progress",
               "status": "FAILED",
               "message": "Workflow execution failed",
-              "ownerId.$": "$.state_data.ownerId",
-              "userId.$": "$.state_data.ownerId",
-              "workflowId.$": "$.state_data.workflowId",
-              "error_info.$": "$.execution_result.error_info",
-              "partition_error.$": "$.partition_error",
-              "async_error.$": "$.async_error"
+              "ownerId.$": "$$.Execution.Input.state_data.ownerId",
+              "userId.$": "$$.Execution.Input.state_data.ownerId",
+              "workflowId.$": "$$.Execution.Input.state_data.workflowId",
+              "error.$": "States.JsonToString($)"
             }
           }
         ]

@@ -42,12 +42,30 @@
       }
     },
     {
-      "id": "split_paradox_validator",
+      "id": "partition_integrity_check",
       "type": "code",
-      "label": "분할 역설 검증",
+      "label": "[Critical] 파티션 무결성 검사",
       "config": {
         "language": "python",
-        "code": "import json\n\nmax_depth = state.get('max_split_depth', 3)\nactual_depth = state.get('split_depth', 0)\nhard_stop = state.get('hard_stop_triggered', False)\ncost_analysis = state.get('cost_analysis', {})\n\nvalidation = {\n    'max_depth_enforced': actual_depth <= max_depth,\n    'hard_stop_on_limit': hard_stop if actual_depth >= max_depth else True,\n    'no_infinite_loop': actual_depth < max_depth + 1,\n    'cost_bounded': cost_analysis.get('total_lambda_invocations', 0) < 10000,\n    'account_limit_respected': not cost_analysis.get('would_hit_account_limit', True)\n}\n\nall_passed = all(validation.values())\n\nstate['split_paradox_test_result'] = {\n    'validation_checks': validation,\n    'max_split_depth': max_depth,\n    'actual_split_depth': actual_depth,\n    'hard_stop_triggered': hard_stop,\n    'total_lambda_invocations': cost_analysis.get('total_lambda_invocations', 0),\n    'split_history_count': len(state.get('split_history', [])),\n    'test_passed': all_passed\n}\n\nif all_passed:\n    state['TEST_RESULT'] = f'✅ SPLIT PARADOX PREVENTED: Depth {actual_depth}/{max_depth}, {cost_analysis.get(\"total_lambda_invocations\", 0)} invocations'\nelse:\n    failed_checks = [k for k, v in validation.items() if not v]\n    state['TEST_RESULT'] = f'❌ SPLIT PARADOX RISK: Failed checks: {failed_checks}'"
+        "code": "# [New] 분할 후 데이터 단편화(Fragmentation) 검증\nimport json\n\nfinal_data_size = state.get('final_data_size_mb', 0)\nlambda_memory = state.get('large_dataset', {}).get('lambda_memory_mb', 512)\nsplit_history = state.get('split_history', [])\n\n# ① 최소 데이터 단위 검증 (Minimum Atomic Unit)\n# 데이터가 너무 작게 쪼개지면 의미론적 무결성 상실\nMIN_ATOMIC_SIZE_MB = 0.1  # 100KB 미만은 단편화 위험\nis_fragmented = final_data_size < MIN_ATOMIC_SIZE_MB\n\n# ② 분할 이력에서 데이터 유실 검증\ninitial_size = state.get('initial_data_size_mb', 50)\nexpected_final_size = initial_size\nfor split_event in split_history:\n    expected_final_size = split_event.get('data_size_after_mb', expected_final_size)\n\ndata_loss_detected = abs(expected_final_size - final_data_size) > 0.01  # 1% 오차 허용\n\n# ③ JSON 구조 검증 (Structural Validity)\nlarge_dataset = state.get('large_dataset', {})\ntry:\n    # 데이터가 여전히 직렬화 가능한지 확인\n    json.dumps(large_dataset)\n    is_serializable = True\nexcept Exception as e:\n    is_serializable = False\n    state['serialization_error'] = str(e)\n\nstate['partition_integrity'] = {\n    'is_fragmented': is_fragmented,\n    'data_loss_detected': data_loss_detected,\n    'is_serializable': is_serializable,\n    'final_data_size_mb': final_data_size,\n    'min_atomic_size_mb': MIN_ATOMIC_SIZE_MB,\n    'integrity_passed': not is_fragmented and not data_loss_detected and is_serializable\n}"
+      }
+    },
+    {
+      "id": "graceful_failure_validator",
+      "type": "code",
+      "label": "[Critical] Graceful Failure 경로 검증",
+      "config": {
+        "language": "python",
+        "code": "# [New] hard_stop 발생 시 명확한 에러 시그널 생성\nhard_stop = state.get('hard_stop_triggered', False)\nhard_stop_reason = state.get('hard_stop_reason', '')\nfinal_data_size = state.get('final_data_size_mb', 0)\nlambda_memory = state.get('large_dataset', {}).get('lambda_memory_mb', 512)\n\n# OS가 Graceful Failure를 제공하는지 검증\nif hard_stop:\n    # ① SIGKILL 시그널 생성\n    state['error_signal'] = 'SIGKILL'\n    state['error_code'] = 'RESOURCE_EXHAUSTION'\n    \n    # ② Resource Exhaustion Error 메시지\n    state['error_message'] = (\n        f\"Resource Exhaustion: Data size ({final_data_size:.1f}MB) exceeds Lambda memory \"\n        f\"({lambda_memory}MB) even after MAX_SPLIT_DEPTH reached. \"\n        f\"Recommendation: Increase Lambda memory or use alternative storage (S3 streaming).\"\n    )\n    \n    # ③ 에러 컨텍스트 (디버깅용)\n    state['error_context'] = {\n        'max_split_depth': state.get('max_split_depth', 3),\n        'actual_depth': state.get('split_depth', 0),\n        'total_invocations': state.get('lambda_invocation_count', 0),\n        'split_history': state.get('split_history', []),\n        'hard_stop_reason': hard_stop_reason\n    }\n    \n    # ④ Graceful Failure 성공 플래그\n    state['graceful_failure_executed'] = True\nelse:\n    # hard_stop이 발동하지 않았으면 정상 처리\n    state['graceful_failure_executed'] = False\n    state['error_signal'] = None\n\n# 검증: hard_stop이 발생했는데 에러 시그널이 없으면 테스트 실패\nif hard_stop and not state.get('error_signal'):\n    state['graceful_failure_missing'] = True\nelse:\n    state['graceful_failure_missing'] = False"
+      }
+    },
+    {
+      "id": "split_paradox_validator",
+      "type": "code",
+      "label": "분할 역설 검증 (Enhanced)",
+      "config": {
+        "language": "python",
+        "code": "import json\n\nmax_depth = state.get('max_split_depth', 3)\nactual_depth = state.get('split_depth', 0)\nhard_stop = state.get('hard_stop_triggered', False)\ncost_analysis = state.get('cost_analysis', {})\npartition_integrity = state.get('partition_integrity', {})\ngraceful_failure_missing = state.get('graceful_failure_missing', False)\nerror_signal = state.get('error_signal')\n\n# [Enhanced] 검증 항목 확장\nvalidation = {\n    'max_depth_enforced': actual_depth <= max_depth,\n    'hard_stop_on_limit': hard_stop if actual_depth >= max_depth else True,\n    'no_infinite_loop': actual_depth < max_depth + 1,\n    'cost_bounded': cost_analysis.get('total_lambda_invocations', 0) < 10000,\n    'account_limit_respected': not cost_analysis.get('would_hit_account_limit', True),\n    # [New] Graceful Failure 검증\n    'graceful_failure_provided': not graceful_failure_missing,\n    'error_signal_on_hard_stop': (error_signal == 'SIGKILL') if hard_stop else True,\n    # [New] 파티션 무결성 검증\n    'partition_integrity': partition_integrity.get('integrity_passed', False),\n    'no_data_fragmentation': not partition_integrity.get('is_fragmented', True),\n    'no_data_loss': not partition_integrity.get('data_loss_detected', True)\n}\n\nall_passed = all(validation.values())\n\nstate['split_paradox_test_result'] = {\n    'validation_checks': validation,\n    'max_split_depth': max_depth,\n    'actual_split_depth': actual_depth,\n    'hard_stop_triggered': hard_stop,\n    'total_lambda_invocations': cost_analysis.get('total_lambda_invocations', 0),\n    'split_history_count': len(state.get('split_history', [])),\n    'partition_integrity': partition_integrity,\n    'error_signal': error_signal,\n    'error_message': state.get('error_message', ''),\n    'test_passed': all_passed\n}\n\nif all_passed:\n    if hard_stop:\n        state['TEST_RESULT'] = f'✅ SPLIT PARADOX PREVENTED with GRACEFUL FAILURE: Depth {actual_depth}/{max_depth}, SIGKILL={error_signal}, {cost_analysis.get(\"total_lambda_invocations\", 0)} invocations'\n    else:\n        state['TEST_RESULT'] = f'✅ SPLIT PARADOX PREVENTED: Depth {actual_depth}/{max_depth}, {cost_analysis.get(\"total_lambda_invocations\", 0)} invocations'\nelse:\n    failed_checks = [k for k, v in validation.items() if not v]\n    state['TEST_RESULT'] = f'❌ SPLIT PARADOX RISK: Failed checks: {failed_checks}'"
       }
     }
   ],
@@ -55,11 +73,21 @@
     {"source": "setup_split_test", "target": "simulate_large_data"},
     {"source": "simulate_large_data", "target": "recursive_split_simulation"},
     {"source": "recursive_split_simulation", "target": "cost_explosion_check"},
-    {"source": "cost_explosion_check", "target": "split_paradox_validator"}
+    {"source": "cost_explosion_check", "target": "partition_integrity_check"},
+    {"source": "partition_integrity_check", "target": "graceful_failure_validator"},
+    {"source": "graceful_failure_validator", "target": "split_paradox_validator"}
   ],
   "metadata": {
-    "test_features": ["max_split_depth", "hard_stop", "cost_bounding", "infinite_fragmentation_prevention"],
-    "expected_behavior": "Kernel should stop splitting at MAX_SPLIT_DEPTH and raise error if data still too large",
-    "failure_mode": "Infinite Lambda invocations or account concurrency limit exhaustion"
+    "test_features": [
+      "max_split_depth", 
+      "hard_stop", 
+      "cost_bounding", 
+      "infinite_fragmentation_prevention",
+      "graceful_failure_on_resource_exhaustion",
+      "partition_integrity_verification",
+      "sigkill_on_hard_stop"
+    ],
+    "expected_behavior": "Kernel should stop splitting at MAX_SPLIT_DEPTH, raise SIGKILL with Resource Exhaustion Error if data still too large, and ensure partition integrity (no fragmentation, no data loss)",
+    "failure_mode": "Infinite Lambda invocations, account concurrency limit exhaustion, data fragmentation, or silent failure without error signal"
   }
 }

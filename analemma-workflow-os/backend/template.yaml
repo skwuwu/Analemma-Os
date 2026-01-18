@@ -530,6 +530,8 @@ Resources:
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
         Command: ["src.handlers.core.segment_runner_handler.lambda_handler"]
+      Timeout: 300  # 5분 - 대용량 페이로드 및 LLM 호출 시간 고려
+      MemorySize: 1024  # 대용량 페이로드 처리를 위한 메모리 증가
       Environment:
         Variables:
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
