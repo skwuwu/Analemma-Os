@@ -133,8 +133,9 @@ class SegmentRunnerService:
         s3_bucket = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET")
         
         # 3. Load State (Inline or S3)
+        # [Critical Fix] Step Functions passes state as 'current_state', not 'state'
         state_s3_path = event.get('state_s3_path')
-        initial_state = event.get('state', {})
+        initial_state = event.get('current_state') or event.get('state', {})
         
         if state_s3_path:
             initial_state = self.state_manager.download_state_from_s3(state_s3_path)
