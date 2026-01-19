@@ -10,8 +10,8 @@
       "description": "Collect 50+ RSS feeds or 200+ technical documents (scenario exceeding 256KB)",
       "type": "llm_chat",
       "llm_config": {
-        "provider": "bedrock",
-        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "provider": "google",
+        "model_id": "gemini-1.5-pro",
         "temperature": 0.3,
         "max_tokens": 4096,
         "system_prompt": "You are a data engineer collecting global technology trends. Collect data from 50+ news sources and return it in structured JSON format.",
@@ -19,9 +19,16 @@
       },
       "input_variables": ["categories"],
       "output_key": "raw_data_collection",
+      "s3_offloading": {
+        "enabled": true,
+        "threshold_kb": 200,
+        "store_as_pointer": true,
+        "pointer_key": "raw_data_s3_ref"
+      },
       "metadata": {
         "expected_payload_size_kb": 350,
-        "test_s3_offloading": true
+        "test_s3_offloading": true,
+        "model_rationale": "Gemini 1.5 Pro for complex data collection requiring large context window"
       }
     },
     {
@@ -36,8 +43,8 @@
         "sub_node_config": {
           "type": "llm_chat",
           "config": {
-            "provider": "bedrock",
-            "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "provider": "google",
+            "model_id": "gemini-1.5-flash-8b",
             "temperature": 0.2,
             "max_tokens": 2048,
             "system_prompt": "You are a technical document classification expert. Classify the given article into the correct category.",
@@ -47,7 +54,8 @@
       },
       "metadata": {
         "test_parallel_execution": true,
-        "expected_segments": 4
+        "expected_segments": 4,
+        "model_rationale": "Gemini 1.5 Flash 8B for cost-optimized high-speed classification"
       }
     },
     {
@@ -56,8 +64,8 @@
       "description": "Intentional API error during SaaS category analysis",
       "type": "llm_chat",
       "llm_config": {
-        "provider": "bedrock",
-        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "provider": "google",
+        "model_id": "gemini-1.5-pro",
         "temperature": 0.5,
         "max_tokens": 3072,
         "system_prompt": "You are a SaaS trend analyst. Analyze the given data, but intentionally fail the first 2 times (for testing purposes).",
@@ -69,12 +77,14 @@
         "max_retries": 3,
         "base_delay": 2.0,
         "exponential_backoff": true,
-        "adaptive_model_routing": true
+        "adaptive_model_routing": true,
+        "fallback_models": ["gemini-1.5-flash", "gemini-1.5-flash-8b"]
       },
       "metadata": {
         "test_error_injection": true,
         "test_model_switching": true,
-        "expected_initial_failures": 2
+        "expected_initial_failures": 2,
+        "model_rationale": "Gemini 1.5 Pro primary, with Flash fallback for adaptive routing"
       }
     },
     {
@@ -89,8 +99,8 @@
         "sub_node_config": {
           "type": "llm_chat",
           "config": {
-            "provider": "bedrock",
-            "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "provider": "google",
+            "model_id": "gemini-1.5-flash",
             "temperature": 0.3,
             "max_tokens": 1024,
             "system_prompt": "당신은 개별 기술 기사를 심층 분석하는 전문가입니다.",
@@ -98,9 +108,16 @@
           }
         }
       },
+      "s3_offloading": {
+        "enabled": true,
+        "threshold_kb": 100,
+        "store_as_pointer": true,
+        "pointer_key": "article_analysis_s3_ref"
+      },
       "metadata": {
         "test_foreach_iteration": true,
-        "test_state_preservation": true
+        "test_state_preservation": true,
+        "model_rationale": "Gemini 1.5 Flash for balanced speed and quality in sequential analysis"
       }
     },
     {
@@ -123,38 +140,78 @@
       "id": "human_approval_request",
       "node_name": "사용자 승인 대기 (HITL)",
       "description": "낮은 신뢰도 항목에 대한 사용자 검토 요청",
-      "type": "operator",
+      "type": "hitp",
       "approval_config": {
         "timeout_seconds": 3600,
         "fallback_action": "skip_low_confidence",
-        "notification_channels": ["email", "websocket"]
+        "notification_channels": ["email", "websocket"],
+        "state_recovery": {
+          "checkpoint_enabled": true,
+          "checkpoint_interval_seconds": 300,
+          "persist_to_dynamodb": true,
+          "recovery_validation": {
+            "verify_state_integrity": true,
+            "verify_task_token_valid": true,
+            "verify_lambda_context_restoration": true
+          }
+        }
       },
       "input_variables": ["detailed_article_analysis", "confidence_check_result"],
       "output_key": "human_approval_result",
       "metadata": {
         "test_hitl": true,
         "test_task_token_persistence": true,
-        "test_state_recovery": true
+        "test_state_recovery": true,
+        "validation_checklist": {
+          "lambda_cold_start_recovery": "MUST_VERIFY_LOCALLY",
+          "dynamodb_state_consistency": "MUST_VERIFY_LOCALLY",
+          "task_token_expiry_handling": "MUST_VERIFY_LOCALLY",
+          "partial_approval_resume": "MUST_VERIFY_LOCALLY"
+        },
+        "critical_note": "Step Functions Task Token은 영속적이나, Lambda 컨텍스트 종료 후 재개 시 상태 복구 로직을 로컬 테스트에서 반드시 재검증할 것"
       }
     },
     {
       "id": "aggregate_report",
       "node_name": "최종 리포트 집계",
-      "description": "모든 분석 결과를 하나의 리포트로 통합",
+      "description": "모든 분석 결과를 하나의 리포트로 통합 (S3 포인터 리더 방식)",
       "type": "llm_chat",
       "llm_config": {
-        "provider": "bedrock",
-        "model_id": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "provider": "google",
+        "model_id": "gemini-1.5-pro",
         "temperature": 0.4,
         "max_tokens": 8192,
         "system_prompt": "당신은 기술 트렌드 리포트 작성 전문가입니다. 모든 분석 결과를 통합하여 경영진용 요약 리포트를 작성하세요.",
-        "user_prompt_template": "다음 분석 결과를 통합하여 최종 리포트를 작성하세요:\n\n카테고리별 분석:\n{{ categorized_data | tojson }}\n\nSaaS 심층 분석:\n{{ saas_analysis | tojson }}\n\n개별 기사 분석:\n{{ detailed_article_analysis | tojson }}\n\n{% if human_approval_result is defined %}사용자 피드백:\n{{ human_approval_result | tojson }}\n{% endif %}\n\n다음 항목을 포함하세요:\n1. 핵심 요약 (Executive Summary)\n2. 분야별 주요 트렌드\n3. 비즈니스 임팩트 분석\n4. 향후 전략 제언\n5. 상세 데이터 테이블"
+        "user_prompt_template": "다음 분석 결과를 통합하여 최종 리포트를 작성하세요:\n\n카테고리별 분석:\n{{ categorized_data_summary | tojson }}\n\nSaaS 심층 분석:\n{{ saas_analysis_summary | tojson }}\n\n개별 기사 분석 요약:\n{{ article_analysis_summary | tojson }}\n\n{% if human_approval_result is defined %}사용자 피드백:\n{{ human_approval_result | tojson }}\n{% endif %}\n\n다음 항목을 포함하세요:\n1. 핵심 요약 (Executive Summary)\n2. 분야별 주요 트렌드\n3. 비즈니스 임팩트 분석\n4. 향후 전략 제언\n5. 상세 데이터 테이블"
       },
-      "input_variables": ["categorized_data", "saas_analysis", "detailed_article_analysis", "human_approval_result"],
+      "s3_pointer_reader": {
+        "enabled": true,
+        "strategy": "LAZY_LOAD_WITH_SUMMARY",
+        "pointer_inputs": {
+          "raw_data_s3_ref": {
+            "load_mode": "SUMMARY_ONLY",
+            "summary_max_tokens": 2000,
+            "output_key": "categorized_data_summary"
+          },
+          "article_analysis_s3_ref": {
+            "load_mode": "SUMMARY_ONLY",
+            "summary_max_tokens": 3000,
+            "output_key": "article_analysis_summary"
+          }
+        },
+        "memory_optimization": {
+          "max_inline_size_kb": 50,
+          "compress_large_objects": true,
+          "stream_from_s3": true
+        }
+      },
+      "input_variables": ["categorized_data_summary", "saas_analysis_summary", "article_analysis_summary", "human_approval_result"],
       "output_key": "final_report",
       "metadata": {
         "test_aggregation": true,
-        "expected_output_size_kb": 50
+        "expected_output_size_kb": 50,
+        "model_rationale": "Gemini 1.5 Pro for complex aggregation with 1M token context window",
+        "memory_management_note": "S3 포인터 리더로 커널 메모리 압박 최소화, 요약본만 인라인 로드"
       }
     },
     {
@@ -163,8 +220,8 @@
       "description": "사용자가 최종 리포트에서 수정한 내용을 반영",
       "type": "llm_chat",
       "llm_config": {
-        "provider": "bedrock",
-        "model_id": "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "provider": "google",
+        "model_id": "gemini-1.5-flash",
         "temperature": 0.1,
         "max_tokens": 2048,
         "system_prompt": "당신은 사용자 피드백 분석 전문가입니다. 사용자의 수정사항에서 패턴을 추출하여 향후 개선을 위한 지침을 생성하세요.",
@@ -174,7 +231,8 @@
       "output_key": "correction_guidelines",
       "metadata": {
         "test_distiller": true,
-        "test_feedback_loop": true
+        "test_feedback_loop": true,
+        "model_rationale": "Gemini 1.5 Flash for fast pattern extraction from user feedback"
       }
     },
     {
@@ -207,15 +265,31 @@
     "test_category": "complex_integration",
     "test_features": [
       "s3_offloading",
+      "s3_pointer_reader",
+      "lazy_load_with_summary",
       "parallel_map",
       "sequential_foreach",
       "error_injection",
       "adaptive_routing",
       "hitl",
       "state_persistence",
+      "state_recovery_validation",
       "distiller",
-      "cost_tracking"
+      "cost_tracking",
+      "memory_optimization"
     ],
+    "model_stack": {
+      "primary_complex": "gemini-1.5-pro",
+      "primary_fast": "gemini-1.5-flash",
+      "ultra_fast_classification": "gemini-1.5-flash-8b",
+      "rationale": "Gemini 모델 스택으로 통일 - Pro는 복합 분석, Flash는 고속 처리, Flash-8B는 분류 최적화"
+    },
+    "memory_management": {
+      "strategy": "S3_POINTER_READER",
+      "inline_threshold_kb": 50,
+      "large_payload_handling": "LAZY_LOAD_WITH_SUMMARY",
+      "rationale": "커널 메모리 압박 최소화를 위해 대용량 데이터는 S3 포인터로 참조, 요약본만 인라인 로드"
+    },
     "expected_duration_seconds": 180,
     "expected_token_usage": 25000,
     "expected_llm_calls": 30

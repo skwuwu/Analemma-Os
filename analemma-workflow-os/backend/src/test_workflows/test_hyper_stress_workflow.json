@@ -1,62 +1,215 @@
 {
-    "workflow_name": "Hyper Stress V3 Test Workflow",
-    "description": "V3 stress test with nested Map, Multi-HITL, and partial sync",
+    "workflow_name": "Hyper Stress V4 Test Workflow",
+    "description": "[EXTREME] V4 stress test: 루프 내부 HITL + Parallel 데이터 레이스 + 메모리 격리 검증",
+    "version": "4.0.0",
+    "test_category": "extreme_stress",
     "nodes": [
         {
             "id": "stress_init",
-            "type": "operator",
+            "type": "code",
+            "label": "극한 스트레스 테스트 초기화",
             "config": {
-                "code": "print(\"Hyper Stress V3 initialization\")\nouter_items = state.get('expected_outer_count', 4)\nstate['outer_loop_items'] = list(range(outer_items))\nstate['inner_items_per_outer'] = [2, 3, 2, 3]  # Total 10\nstate['multi_hitl_points'] = [1, 3]  # HITL at positions 1 and 3\nstate['stress_metrics'] = {'nested_map_count': 0, 'hitl_count': 0}\nprint(f\"Stress test configured: {outer_items} outer items, {sum(state['inner_items_per_outer'])} total inner items\")",
+                "language": "python",
+                "code": "import time\nimport json\n\nprint('[HYPER STRESS V4] Extreme stress test initialization')\n\nouter_items = state.get('expected_outer_count', 4)\nstate['outer_loop_items'] = list(range(outer_items))\nstate['inner_items_per_outer'] = [2, 3, 2, 3]  # Total 10 inner iterations\nstate['hitl_trigger_positions'] = [1, 3]  # HITL inside loop at positions 1 and 3\n\n# 메모리 격리 검증을 위한 브랜치별 고유 ID\nstate['branch_isolation_tokens'] = {\n    'branch_alpha': f'ALPHA_{int(time.time() * 1000)}',\n    'branch_beta': f'BETA_{int(time.time() * 1000) + 1}'\n}\n\nstate['stress_metrics'] = {\n    'nested_map_count': 0,\n    'hitl_inside_loop_count': 0,\n    'loop_pointer_recoveries': 0,\n    'parallel_race_detected': False,\n    'isolation_violations': []\n}\n\nstate['loop_state_checkpoints'] = []  # 루프 포인터 복구 테스트용\n\nprint(f'Configured: {outer_items} outer × variable inner = {sum(state[\"inner_items_per_outer\"])} total iterations')\nprint(f'HITL will trigger INSIDE loop at positions: {state[\"hitl_trigger_positions\"]}')\nprint(f'Parallel branches: {list(state[\"branch_isolation_tokens\"].keys())}')",
                 "output_key": "stress_config"
             }
         },
         {
-            "id": "outer_map_processor",
-            "type": "for_each",
-            "config": {
-                "input_list_key": "outer_loop_items",
-                "output_key": "outer_map_results",
-                "max_iterations": 5,
-                "sub_node_config": {
-                    "type": "operator",
-                    "config": {
-                        "code": "outer_idx = state.get('item', 0)\ninner_items_per_outer = state.get('inner_items_per_outer', [2, 3, 2, 3])\ninner_count = inner_items_per_outer[outer_idx] if outer_idx < len(inner_items_per_outer) else 2\nstate['current_inner_items'] = list(range(inner_count))\nstate['outer_idx_processed'] = outer_idx\nstate['nested_map_count'] = state.get('nested_map_count', 0) + 1\nprint(f\"Processing outer item {outer_idx} with {inner_count} inner items\")",
-                        "output_key": "inner_config"
-                    }
+            "id": "parallel_race_test",
+            "type": "parallel_group",
+            "label": "[CRITICAL] 병렬 데이터 레이스 시뮬레이션",
+            "description": "여러 브랜치가 동시에 중첩 루프를 돌며 메모리 격리 검증",
+            "resource_policy": {
+                "isolation_mode": "STRICT_BRANCH_ISOLATION",
+                "merge_strategy": "ISOLATED_RESULTS_MERGE",
+                "race_detection": true
+            },
+            "branches": [
+                {
+                    "id": "branch_alpha",
+                    "name": "Alpha Branch (A→B 순서)",
+                    "nodes": [
+                        {
+                            "id": "alpha_loop_processor",
+                            "type": "for_each",
+                            "label": "Alpha 중첩 루프 (HITL 내장)",
+                            "config": {
+                                "input_list_key": "outer_loop_items",
+                                "output_key": "alpha_loop_results",
+                                "max_iterations": 5,
+                                "loop_pointer_tracking": {
+                                    "enabled": true,
+                                    "checkpoint_key": "alpha_loop_pointer",
+                                    "persist_on_hitl": true
+                                },
+                                "sub_workflow": {
+                                    "nodes": [
+                                        {
+                                            "id": "alpha_pre_process",
+                                            "type": "code",
+                                            "config": {
+                                                "language": "python",
+                                                "code": "import time\n\nouter_idx = state.get('_for_each_index', 0)\nbranch_token = state.get('branch_isolation_tokens', {}).get('branch_alpha', 'UNKNOWN')\n\n# 루프 포인터 체크포인트 저장 (복구 테스트용)\ncheckpoint = {\n    'branch': 'alpha',\n    'outer_idx': outer_idx,\n    'timestamp': time.time(),\n    'branch_token': branch_token\n}\ncheckpoints = state.get('loop_state_checkpoints', [])\ncheckpoints.append(checkpoint)\nstate['loop_state_checkpoints'] = checkpoints\nstate['alpha_current_loop_pointer'] = outer_idx\n\nprint(f'[Alpha] Processing outer item {outer_idx}, token={branch_token}')"
+                                            }
+                                        },
+                                        {
+                                            "id": "alpha_hitl_inside_loop",
+                                            "type": "hitp",
+                                            "label": "[극한] 루프 내부 HITL",
+                                            "config": {
+                                                "conditional_trigger": {
+                                                    "expression": "state.get('_for_each_index', 0) in state.get('hitl_trigger_positions', [])",
+                                                    "trigger_on_true": true
+                                                },
+                                                "wait_timeout_seconds": 30,
+                                                "auto_approve_on_timeout": true,
+                                                "approval_message": "[Alpha] 루프 내부 HITL - 현재 포인터 복구 테스트",
+                                                "loop_pointer_preservation": {
+                                                    "save_current_index": true,
+                                                    "save_iteration_state": true,
+                                                    "recovery_validation": true
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "id": "alpha_post_process",
+                                            "type": "code",
+                                            "config": {
+                                                "language": "python",
+                                                "code": "outer_idx = state.get('_for_each_index', 0)\nexpected_pointer = state.get('alpha_current_loop_pointer', -1)\n\n# HITL 후 루프 포인터가 정확히 복구되었는지 검증\nif outer_idx == expected_pointer:\n    state['loop_pointer_recoveries'] = state.get('loop_pointer_recoveries', 0) + 1\n    print(f'[Alpha] ✓ Loop pointer correctly recovered: {outer_idx}')\nelse:\n    state['stress_metrics']['isolation_violations'].append({\n        'type': 'LOOP_POINTER_MISMATCH',\n        'branch': 'alpha',\n        'expected': expected_pointer,\n        'actual': outer_idx\n    })\n    print(f'[Alpha] ✗ Loop pointer mismatch: expected {expected_pointer}, got {outer_idx}')\n\nstate['alpha_processed_count'] = state.get('alpha_processed_count', 0) + 1"
+                                            }
+                                        }
+                                    ],
+                                    "edges": [
+                                        {"source": "alpha_pre_process", "target": "alpha_hitl_inside_loop"},
+                                        {"source": "alpha_hitl_inside_loop", "target": "alpha_post_process"}
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                },
+                {
+                    "id": "branch_beta",
+                    "name": "Beta Branch (B→A 순서, 역방향)",
+                    "nodes": [
+                        {
+                            "id": "beta_loop_processor",
+                            "type": "for_each",
+                            "label": "Beta 중첩 루프 (역순 + HITL 내장)",
+                            "config": {
+                                "input_list_key": "outer_loop_items",
+                                "output_key": "beta_loop_results",
+                                "max_iterations": 5,
+                                "iteration_order": "REVERSE",
+                                "loop_pointer_tracking": {
+                                    "enabled": true,
+                                    "checkpoint_key": "beta_loop_pointer",
+                                    "persist_on_hitl": true
+                                },
+                                "sub_workflow": {
+                                    "nodes": [
+                                        {
+                                            "id": "beta_pre_process",
+                                            "type": "code",
+                                            "config": {
+                                                "language": "python",
+                                                "code": "import time\n\nouter_idx = state.get('_for_each_index', 0)\nbranch_token = state.get('branch_isolation_tokens', {}).get('branch_beta', 'UNKNOWN')\n\n# 루프 포인터 체크포인트 저장\ncheckpoint = {\n    'branch': 'beta',\n    'outer_idx': outer_idx,\n    'timestamp': time.time(),\n    'branch_token': branch_token\n}\ncheckpoints = state.get('loop_state_checkpoints', [])\ncheckpoints.append(checkpoint)\nstate['loop_state_checkpoints'] = checkpoints\nstate['beta_current_loop_pointer'] = outer_idx\n\n# Alpha의 토큰이 Beta에 섞여 들어왔는지 검사 (데이터 레이스 감지)\nalpha_token = state.get('branch_isolation_tokens', {}).get('branch_alpha', '')\nif 'ALPHA' in str(state.get('beta_loop_results', [])):\n    state['stress_metrics']['parallel_race_detected'] = True\n    state['stress_metrics']['isolation_violations'].append({\n        'type': 'CROSS_BRANCH_CONTAMINATION',\n        'from': 'alpha',\n        'to': 'beta',\n        'evidence': 'Alpha token found in Beta results'\n    })\n\nprint(f'[Beta] Processing outer item {outer_idx} (REVERSE), token={branch_token}')"
+                                            }
+                                        },
+                                        {
+                                            "id": "beta_hitl_inside_loop",
+                                            "type": "hitp",
+                                            "label": "[극한] 루프 내부 HITL (Beta)",
+                                            "config": {
+                                                "conditional_trigger": {
+                                                    "expression": "state.get('_for_each_index', 0) in state.get('hitl_trigger_positions', [])",
+                                                    "trigger_on_true": true
+                                                },
+                                                "wait_timeout_seconds": 30,
+                                                "auto_approve_on_timeout": true,
+                                                "approval_message": "[Beta] 루프 내부 HITL - 역순 포인터 복구 테스트",
+                                                "loop_pointer_preservation": {
+                                                    "save_current_index": true,
+                                                    "save_iteration_state": true,
+                                                    "recovery_validation": true
+                                                }
+                                            }
+                                        },
+                                        {
+                                            "id": "beta_post_process",
+                                            "type": "code",
+                                            "config": {
+                                                "language": "python",
+                                                "code": "outer_idx = state.get('_for_each_index', 0)\nexpected_pointer = state.get('beta_current_loop_pointer', -1)\n\n# HITL 후 루프 포인터 복구 검증\nif outer_idx == expected_pointer:\n    state['loop_pointer_recoveries'] = state.get('loop_pointer_recoveries', 0) + 1\n    print(f'[Beta] ✓ Loop pointer correctly recovered: {outer_idx}')\nelse:\n    state['stress_metrics']['isolation_violations'].append({\n        'type': 'LOOP_POINTER_MISMATCH',\n        'branch': 'beta',\n        'expected': expected_pointer,\n        'actual': outer_idx\n    })\n    print(f'[Beta] ✗ Loop pointer mismatch: expected {expected_pointer}, got {outer_idx}')\n\nstate['beta_processed_count'] = state.get('beta_processed_count', 0) + 1"
+                                            }
+                                        }
+                                    ],
+                                    "edges": [
+                                        {"source": "beta_pre_process", "target": "beta_hitl_inside_loop"},
+                                        {"source": "beta_hitl_inside_loop", "target": "beta_post_process"}
+                                    ]
+                                }
+                            }
+                        }
+                    ]
                 }
-            }
+            ]
         },
         {
-            "id": "hitl_checkpoint",
-            "type": "operator",
+            "id": "isolation_validator",
+            "type": "code",
+            "label": "[Kernel] 메모리 격리 및 데이터 레이스 검증",
             "config": {
-                "code": "outer_results = state.get('outer_map_results', [])\nprocessed_count = len(outer_results)\nmulti_hitl_points = state.get('multi_hitl_points', [])\nif processed_count > 0 and (processed_count - 1) in multi_hitl_points:\n    state['hitl_count'] = state.get('hitl_count', 0) + 1\n    state['hitl_status'] = 'PAUSED_FOR_APPROVAL'\n    print(f'HITL checkpoint triggered after processing {processed_count} items')\nelse:\n    state['hitl_status'] = 'AUTO_APPROVED'\n    print(f'Auto-approved after processing {processed_count} items')"
+                "language": "python",
+                "code": "import json\n\nprint('[ISOLATION VALIDATOR] Checking memory isolation and data race')\n\nalpha_results = state.get('alpha_loop_results', [])\nbeta_results = state.get('beta_loop_results', [])\ncheckpoints = state.get('loop_state_checkpoints', [])\nmetrics = state.get('stress_metrics', {})\n\n# 실패 원인 상세 기록용\nfailure_details = []\n\n# ① 브랜치 격리 검증\nalpha_token = state.get('branch_isolation_tokens', {}).get('branch_alpha', '')\nbeta_token = state.get('branch_isolation_tokens', {}).get('branch_beta', '')\nalpha_contaminated = 'BETA' in str(alpha_results)\nbeta_contaminated = 'ALPHA' in str(beta_results)\n\nisolation_checks = {\n    'alpha_isolated': not alpha_contaminated,\n    'beta_isolated': not beta_contaminated,\n    'no_cross_contamination': not alpha_contaminated and not beta_contaminated\n}\n\nif alpha_contaminated:\n    failure_details.append({'check': 'alpha_isolated', 'reason': 'Beta 토큰이 Alpha 결과에서 발견됨', 'evidence': 'Alpha token: ' + alpha_token, 'debug_hint': '브랜치 격리 정책 확인'})\nif beta_contaminated:\n    failure_details.append({'check': 'beta_isolated', 'reason': 'Alpha 토큰이 Beta 결과에서 발견됨', 'evidence': 'Beta token: ' + beta_token, 'debug_hint': '브랜치 격리 정책 확인'})\n\n# ② 루프 포인터 복구 검증\nalpha_checkpoints = [c for c in checkpoints if c.get('branch') == 'alpha']\nbeta_checkpoints = [c for c in checkpoints if c.get('branch') == 'beta']\nloop_recoveries = state.get('loop_pointer_recoveries', 0)\n\npointer_checks = {\n    'alpha_checkpoints_saved': len(alpha_checkpoints) > 0,\n    'beta_checkpoints_saved': len(beta_checkpoints) > 0,\n    'loop_pointers_recovered': loop_recoveries > 0\n}\n\nif len(alpha_checkpoints) == 0:\n    failure_details.append({'check': 'alpha_checkpoints_saved', 'reason': 'Alpha 체크포인트 저장 실패', 'expected': '>0', 'actual': 0, 'debug_hint': 'alpha_pre_process 노드 확인'})\nif len(beta_checkpoints) == 0:\n    failure_details.append({'check': 'beta_checkpoints_saved', 'reason': 'Beta 체크포인트 저장 실패', 'expected': '>0', 'actual': 0, 'debug_hint': 'beta_pre_process 노드 확인'})\nif loop_recoveries == 0:\n    failure_details.append({'check': 'loop_pointers_recovered', 'reason': 'HITL 후 포인터 복구 0회', 'expected': '>0', 'actual': 0, 'debug_hint': '_for_each_index 복원 로직 확인'})\n\n# ③ 데이터 레이스 감지\nrace_detected = metrics.get('parallel_race_detected', False)\nviolations = metrics.get('isolation_violations', [])\n\nrace_checks = {\n    'no_race_detected': not race_detected,\n    'no_isolation_violations': len(violations) == 0\n}\n\nif race_detected:\n    failure_details.append({'check': 'no_race_detected', 'reason': '병렬 데이터 레이스 발생', 'debug_hint': 'STRICT_BRANCH_ISOLATION 적용 확인'})\nfor v in violations:\n    failure_details.append({'check': 'no_isolation_violations', 'reason': '격리 위반: ' + str(v.get('type', 'UNKNOWN')), 'evidence': json.dumps(v), 'debug_hint': str(v.get('branch', 'unknown')) + ' 브랜치 확인'})\n\nstate['isolation_validation'] = {\n    'isolation_checks': isolation_checks,\n    'pointer_checks': pointer_checks,\n    'race_checks': race_checks,\n    'violations_detail': violations,\n    'failure_details': failure_details\n}\n\nprint('Isolation checks: ' + str(isolation_checks))\nprint('Pointer checks: ' + str(pointer_checks))\nprint('Race checks: ' + str(race_checks))\nif failure_details:\n    print('\\nISOLATION FAILURE DETAILS (' + str(len(failure_details)) + ' issues):')\n    for fd in failure_details:\n        print('  - [' + fd['check'] + '] ' + fd['reason'])\n        if 'debug_hint' in fd: print('    Hint: ' + fd['debug_hint'])"
             }
         },
         {
             "id": "stress_validator",
-            "type": "operator",
+            "type": "code",
+            "label": "극한 스트레스 테스트 종합 검증",
             "config": {
-                "code": "outer_results = state.get('outer_map_results', [])\nnested_map_count = len(outer_results)\nhitl_count = state.get('hitl_count', 0)\nexpected_nested = state.get('expected_outer_count', 4)\nif nested_map_count >= expected_nested:\n    state['TEST_RESULT'] = f'✅ SUCCESS: Nested Map 완료 ({nested_map_count} cycles, {hitl_count} HITLs)'\nelse:\n    state['TEST_RESULT'] = f'❌ FAILURE: Nested Map 불완전 ({nested_map_count}/{expected_nested})'\nprint(f'Hyper Stress V3 test result: {state[\"TEST_RESULT\"]}')"
+                "language": "python",
+                "code": "import json\n\nprint('[HYPER STRESS V4] Final validation')\n\nalpha_results = state.get('alpha_loop_results', [])\nbeta_results = state.get('beta_loop_results', [])\nisolation_validation = state.get('isolation_validation', {})\nmetrics = state.get('stress_metrics', {})\n\nfailure_report = {'summary': [], 'details': [], 'debug_context': {}}\n\nalpha_count = len(alpha_results)\nbeta_count = len(beta_results)\nexpected_count = state.get('expected_outer_count', 4)\nloop_recoveries = state.get('loop_pointer_recoveries', 0)\n\n# ① 루프 완료 검증\nloop_checks = {\n    'alpha_loop_complete': alpha_count >= expected_count,\n    'beta_loop_complete': beta_count >= expected_count,\n    'parallel_loops_synchronized': abs(alpha_count - beta_count) <= 1\n}\n\nif not loop_checks['alpha_loop_complete']:\n    failure_report['details'].append({'category': 'LOOP', 'check': 'alpha_loop_complete', 'reason': 'Alpha 루프 조기 종료', 'expected': expected_count, 'actual': alpha_count, 'debug_hint': 'max_iterations 또는 예외 확인'})\nif not loop_checks['beta_loop_complete']:\n    failure_report['details'].append({'category': 'LOOP', 'check': 'beta_loop_complete', 'reason': 'Beta 루프 조기 종료', 'expected': expected_count, 'actual': beta_count, 'debug_hint': 'REVERSE 순서 처리 확인'})\nif not loop_checks['parallel_loops_synchronized']:\n    failure_report['details'].append({'category': 'LOOP', 'check': 'parallel_loops_synchronized', 'reason': '병렬 루프 비동기 (Alpha:' + str(alpha_count) + ', Beta:' + str(beta_count) + ')', 'difference': abs(alpha_count - beta_count), 'debug_hint': '브랜치 실행 시간 불균형 확인'})\n\n# ② HITL 내부 루프 검증\nhitl_trigger_positions = state.get('hitl_trigger_positions', [])\n\nhitl_checks = {\n    'hitl_triggered_inside_loop': loop_recoveries > 0,\n    'loop_pointer_preserved_after_hitl': len(metrics.get('isolation_violations', [])) == 0\n}\n\nif not hitl_checks['hitl_triggered_inside_loop']:\n    failure_report['details'].append({'category': 'HITL', 'check': 'hitl_triggered_inside_loop', 'reason': '루프 내 HITL 미트리거 또는 포인터 복구 실패', 'recoveries': loop_recoveries, 'trigger_positions': hitl_trigger_positions, 'debug_hint': 'conditional_trigger 표현식 확인'})\nif not hitl_checks['loop_pointer_preserved_after_hitl']:\n    violations = metrics.get('isolation_violations', [])\n    failure_report['details'].append({'category': 'HITL', 'check': 'loop_pointer_preserved_after_hitl', 'reason': 'HITL 후 포인터 손실 (' + str(len(violations)) + '건)', 'violations': violations, 'debug_hint': '_for_each_index 복원 로직 확인'})\n\n# ③ 격리 검증 결과 통합\nisolation_checks = isolation_validation.get('isolation_checks', {})\npointer_checks = isolation_validation.get('pointer_checks', {})\nrace_checks = isolation_validation.get('race_checks', {})\nfor fd in isolation_validation.get('failure_details', []):\n    fd['category'] = 'ISOLATION'\n    failure_report['details'].append(fd)\n\nall_loop_passed = all(loop_checks.values())\nall_hitl_passed = all(hitl_checks.values())\nall_isolation_passed = all(isolation_checks.values())\nall_pointer_passed = all(pointer_checks.values())\nall_race_passed = all(race_checks.values())\nall_passed = all_loop_passed and all_hitl_passed and all_isolation_passed and all_pointer_passed and all_race_passed\n\nif not all_loop_passed: failure_report['summary'].append('LOOP_COMPLETION')\nif not all_hitl_passed: failure_report['summary'].append('HITL_INSIDE_LOOP')\nif not all_isolation_passed: failure_report['summary'].append('BRANCH_ISOLATION')\nif not all_pointer_passed: failure_report['summary'].append('POINTER_RECOVERY')\nif not all_race_passed: failure_report['summary'].append('DATA_RACE')\n\nfailure_report['debug_context'] = {\n    'alpha_count': alpha_count, 'beta_count': beta_count, 'expected': expected_count,\n    'loop_recoveries': loop_recoveries, 'hitl_positions': hitl_trigger_positions,\n    'total_checkpoints': len(state.get('loop_state_checkpoints', [])),\n    'violations_count': len(metrics.get('isolation_violations', []))\n}\n\nstate['stress_test_result'] = {\n    'loop_checks': loop_checks, 'hitl_checks': hitl_checks,\n    'isolation_checks': isolation_checks, 'pointer_checks': pointer_checks, 'race_checks': race_checks,\n    'alpha_iterations': alpha_count, 'beta_iterations': beta_count, 'expected_iterations': expected_count,\n    'loop_pointer_recoveries': loop_recoveries, 'isolation_violations': len(metrics.get('isolation_violations', [])),\n    'all_passed': all_passed, 'failure_report': failure_report if not all_passed else None\n}\n\nif all_passed:\n    state['TEST_RESULT'] = 'HYPER STRESS V4 PASSED: Alpha=' + str(alpha_count) + ', Beta=' + str(beta_count) + ', Recoveries=' + str(loop_recoveries) + ', Isolation=OK'\n    state['VALIDATION_STATUS'] = 'PASSED'\n    print('Extreme stress test PASSED')\nelse:\n    state['TEST_RESULT'] = 'HYPER STRESS V4 FAILED: ' + str(failure_report['summary'])\n    state['VALIDATION_STATUS'] = 'FAILED'\n    print('\\n' + '='*60)\n    print('HYPER STRESS V4 FAILURE REPORT')\n    print('='*60)\n    print('\\n[SUMMARY] ' + str(failure_report['summary']))\n    print('\\n[CONTEXT] ' + json.dumps(failure_report['debug_context'], indent=2))\n    print('\\n[DETAILS] (' + str(len(failure_report['details'])) + ' issues)')\n    for i, fd in enumerate(failure_report['details'], 1):\n        print('\\n  #' + str(i) + ' [' + str(fd.get('category','?')) + '] ' + str(fd.get('check','?')))\n        print('      Reason: ' + str(fd.get('reason','?')))\n        if 'expected' in fd: print('      Expected: ' + str(fd['expected']) + ', Actual: ' + str(fd.get('actual','?')))\n        if 'debug_hint' in fd: print('      Hint: ' + str(fd['debug_hint']))\n    print('\\n' + '='*60)\n\nprint('\\nFinal: ' + state['TEST_RESULT'])"
             }
         }
     ],
     "edges": [
         {
             "source": "stress_init",
-            "target": "outer_map_processor",
+            "target": "parallel_race_test",
             "type": "normal"
         },
         {
-            "source": "outer_map_processor",
-            "target": "hitl_checkpoint",
+            "source": "parallel_race_test",
+            "target": "isolation_validator",
             "type": "normal"
         },
         {
-            "source": "hitl_checkpoint",
+            "source": "isolation_validator",
             "target": "stress_validator",
             "type": "normal"
         }
     ],
-    "start_node": "stress_init"
+    "start_node": "stress_init",
+    "metadata": {
+        "test_features": [
+            "hitl_inside_loop",
+            "loop_pointer_recovery",
+            "parallel_data_race_simulation",
+            "branch_memory_isolation",
+            "cross_contamination_detection",
+            "reverse_iteration_order",
+            "checkpoint_based_recovery",
+            "concurrent_nested_loops"
+        ],
+        "extreme_scenarios": {
+            "hitl_inside_loop": "루프 진행 중 HITL 발생 시 '현재 몇 번째 루프였는지' 포인터를 잃어버리는 버그 검증",
+            "parallel_race": "여러 브랜치가 동시에 중첩 루프를 돌릴 때 메모리 격리가 깨져서 다른 브랜치의 루프 카운트가 섞이는지 검증",
+            "reverse_iteration": "Alpha는 정방향, Beta는 역방향으로 루프 실행하여 순서 독립성 검증"
+        },
+        "expected_behavior": "커널은: 1) 루프 내부 HITL 후 정확한 인덱스로 복구, 2) 병렬 브랜치 간 완전한 메모리 격리 유지, 3) 데이터 레이스 없이 결과 병합",
+        "failure_mode": "루프 포인터 손실로 인한 무한 루프, 브랜치 간 상태 오염, 데이터 레이스로 인한 결과 불일치"
+    }
 }
