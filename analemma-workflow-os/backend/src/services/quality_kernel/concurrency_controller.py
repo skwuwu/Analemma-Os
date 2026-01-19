@@ -35,7 +35,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DistributedStateConfig:
     """분산 상태 관리 설정"""
-    table_name: str = "analemma-kernel-state"
+    # 환경 변수에서 테이블 이름 가져오기 (template.yaml에서 설정)
+    table_name: str = field(
+        default_factory=lambda: os.getenv("KERNEL_STATE_TABLE", "analemma-kernel-state")
+    )
     state_key: str = "global-concurrency-state"
     ttl_seconds: int = 3600  # 1시간
     enable_distributed: bool = True  # False면 로컬 모드

@@ -109,12 +109,76 @@ RETRY_MAX_DELAY = float(os.getenv("GEMINI_RETRY_MAX_DELAY", "60.0"))
 RETRY_EXPONENTIAL_BASE = 2
 
 
+def with_exponential_backoff(
+    max_attempts: int = RETRY_MAX_ATTEMPTS,
+    base_delay: float = RETRY_BASE_DELAY,
+    max_delay: float = RETRY_MAX_DELAY,
+    exponential_base: int = RETRY_EXPONENTIAL_BASE,
+    retryable_exceptions: tuple = (Exception,)
+):
+    """
+    Exponential Backoff with Jitter decorator for Gemini API calls.
+    
+    Args:
+        max_attempts: Maximum retry attempts (default: 5)
+        base_delay: Initial delay in seconds (default: 1.0)
+        max_delay: Maximum delay cap in seconds (default: 60.0)
+        exponential_base: Base for exponential calculation (default: 2)
+        retryable_exceptions: Tuple of exceptions to retry on
+        
+    Returns:
+        Decorated function with retry logic
+    """
+    import random
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except retryable_exceptions as e:
+                    last_exception = e
+                    
+                    # Check if it's a non-retryable error
+                    error_str = str(e).lower()
+                    if any(x in error_str for x in ['invalid', 'unauthorized', 'forbidden', 'not found']):
+                        logger.warning(f"Non-retryable error on attempt {attempt}: {e}")
+                        raise
+                    
+                    if attempt == max_attempts:
+                        logger.error(f"All {max_attempts} attempts exhausted. Last error: {e}")
+                        raise
+                    
+                    # Calculate delay with exponential backoff + jitter
+                    delay = min(
+                        max_delay,
+                        base_delay * (exponential_base ** (attempt - 1))
+                    )
+                    # Add jitter (±25%)
+                    jitter = delay * random.uniform(-0.25, 0.25)
+                    actual_delay = max(0.1, delay + jitter)
+                    
+                    logger.warning(
+                        f"Attempt {attempt}/{max_attempts} failed: {e}. "
+                        f"Retrying in {actual_delay:.2f}s..."
+                    )
+                    time.sleep(actual_delay)
+            
+            # Should not reach here, but just in case
+            if last_exception:
+                raise last_exception
+            
+        return wrapper
+    return decorator
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Constants & Retry Config
 # ═══════════════════════════════════════════════════════════════════════════════
-RETRY_MAX_ATTEMPTS = int(os.getenv("GEMINI_RETRY_MAX_ATTEMPTS", "5"))
-RETRY_BASE_DELAY = float(os.getenv("GEMINI_RETRY_BASE_DELAY", "1.0"))
-RETRY_MAX_DELAY = float(os.getenv("GEMINI_RETRY_MAX_DELAY", "60.0"))
+MAX_IMAGES_PER_REQUEST = 16  # Vertex AI limit
 
 MAX_IMAGES_PER_REQUEST = 16  # Vertex AI limit
 

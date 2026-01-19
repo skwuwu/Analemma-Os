@@ -574,6 +574,8 @@ Resources:
           # 🚀 [NEW] Step Functions 개선사항 관련 환경 변수
           ALLOW_UNSAFE_EXECUTION: "false"
           FORCE_CHILD_WORKFLOW: "false"
+          # 🛡️ [Quality Kernel] Distributed state table for concurrency control
+          KERNEL_STATE_TABLE: !Ref KernelStateTable
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkflowsTableV3
@@ -581,6 +583,9 @@ Resources:
             TableName: !Ref IdempotencyTableV3
         - DynamoDBCrudPolicy:
             TableName: !Ref UsersTableV3
+        # 🛡️ [Quality Kernel] Distributed state synchronization
+        - DynamoDBCrudPolicy:
+            TableName: !Ref KernelStateTable
         - S3CrudPolicy:
              BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
         # 🚀 [NEW] EventBridge 발행 권한 추가
@@ -2778,6 +2783,37 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🛡️ [Quality Kernel] Distributed State Table
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ConcurrencyController v2.0의 분산 상태 동기화를 위한 테이블
+  # - DynamoDB Atomic Counter로 전역 동시성 추적
+  # - 워크플로우별 예산 사용량 동기화
+  # - Fast Track 우선순위 처리 상태 관리
+  KernelStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "analemma-kernel-state-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Purpose
+          Value: QualityKernelDistributedState
+        - Key: Component
+          Value: ConcurrencyController
 
   # --- NodeStats Collector Lambda ---
   # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트
