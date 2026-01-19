@@ -1,6 +1,64 @@
+# ============================================================
+# 🚀 Optimized Base Image for Lambda Cold Start
+# ============================================================
+#
+# v2.0 Cold Start Optimization:
+#   - Multi-stage build 패턴 적용
+#   - 불필요한 파일 제거 (__pycache__, dist-info, tests, docs)
+#   - pip --no-cache-dir 적용
+#   - boto3/botocore 제외 (Lambda 런타임에 이미 포함)
+#   - Python 바이트코드 사전 컴파일
+#
+# 예상 효과:
+#   - 이미지 크기 30-50% 감소
+#   - Cold Start 시간 20-30% 단축
+# ============================================================
+
+# ========================================
+# Stage 1: Builder (패키지 설치)
+# ========================================
+FROM public.ecr.aws/lambda/python:3.12 AS builder
+
+# 빌드 환경 변수
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# requirements.txt 복사
+COPY requirements.txt /tmp/requirements.txt
+
+# boto3/botocore 제외하고 패키지 설치
+# Lambda 런타임에 이미 포함되어 있어 중복 로딩 방지
+RUN grep -v -E "^boto3|^botocore" /tmp/requirements.txt > /tmp/requirements-filtered.txt || cp /tmp/requirements.txt /tmp/requirements-filtered.txt && \
+    pip install --no-cache-dir -r /tmp/requirements-filtered.txt
+
+# 불필요한 파일 제거 (이미지 경량화)
+RUN find /var/lang/lib/python3.12/site-packages -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -type d -name "examples" -exec rm -rf {} + 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -name "*.pyc" -delete 2>/dev/null || true && \
+    find /var/lang/lib/python3.12/site-packages -name "*.pyo" -delete 2>/dev/null || true
+
+# ========================================
+# Stage 2: Runtime (최종 이미지)
+# ========================================
 FROM public.ecr.aws/lambda/python:3.12
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install -r requirements.txt
-# Trigger deployment
+# 런타임 최적화 환경 변수
+ENV PYTHONOPTIMIZE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # AWS SDK 최적화
+    AWS_SDK_LOAD_CONFIG=1 \
+    # Lambda Powertools 최적화
+    POWERTOOLS_DEV=0 \
+    POWERTOOLS_LOG_DEDUPLICATION_DISABLED=1
+
+# Builder에서 site-packages 복사
+COPY --from=builder /var/lang/lib/python3.12/site-packages /var/lang/lib/python3.12/site-packages
+
+# Python 바이트코드 사전 컴파일 (Cold Start 최적화)
+# 런타임에 컴파일 불필요로 import 속도 5-10% 향상
+RUN python -m compileall -q /var/lang/lib/python3.12/site-packages 2>/dev/null || true

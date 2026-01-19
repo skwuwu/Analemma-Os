@@ -1,0 +1,245 @@
+{
+  "workflow_id": "test_cost_guardrails_v1",
+  "name": "Test Cost Guardrails - 비용 가드레일 테스트",
+  "description": "4단계 비용 가드레일 시스템 테스트: Retry Guard, Budget Watchdog, Adaptive Threshold, Drift Detector",
+  "version": "1.0.0",
+  "kernel_level": "RING_1_QUALITY",
+  
+  "test_scenarios": [
+    {
+      "scenario_id": "retry_guard_test",
+      "name": "Retry Guard - 재생성 쿼터 제한 테스트",
+      "description": "MAX_REGENERATION_ATTEMPTS(3회) 초과 시 FORCE_BEST_EFFORT 반환 확인",
+      "test_steps": [
+        {
+          "step": 1,
+          "action": "generate_low_quality_content",
+          "expected_verdict": "FAIL",
+          "expected_retry": true
+        },
+        {
+          "step": 2,
+          "action": "regenerate_still_low_quality",
+          "expected_verdict": "FAIL",
+          "expected_threshold": 0.5,
+          "note": "임계값 0.7 → 0.5 하향"
+        },
+        {
+          "step": 3,
+          "action": "regenerate_still_low_quality",
+          "expected_verdict": "FAIL",
+          "expected_threshold": 0.3,
+          "note": "임계값 0.5 → 0.3 하향"
+        },
+        {
+          "step": 4,
+          "action": "attempt_fourth_regeneration",
+          "expected_guardrail": "RETRY_QUOTA_EXCEEDED",
+          "expected_action": "FORCE_BEST_EFFORT",
+          "expected_user_message": "최대 재시도 횟수에 도달했습니다"
+        }
+      ],
+      "assertions": {
+        "max_attempts": 3,
+        "final_action": "FORCE_BEST_EFFORT",
+        "guardrail_triggered": true
+      }
+    },
+    {
+      "scenario_id": "budget_watchdog_test",
+      "name": "Budget Watchdog - 비용 서킷 브레이커 테스트",
+      "description": "누적 비용 $0.5 초과 시 EMERGENCY_STOP 발동 확인",
+      "budget_config": {
+        "max_budget_usd": 0.5,
+        "warning_threshold": 0.8,
+        "emergency_threshold": 0.95
+      },
+      "test_steps": [
+        {
+          "step": 1,
+          "action": "consume_40_percent_budget",
+          "simulated_cost_usd": 0.2,
+          "expected_status": "normal"
+        },
+        {
+          "step": 2,
+          "action": "consume_to_80_percent",
+          "simulated_cost_usd": 0.2,
+          "cumulative_cost": 0.4,
+          "expected_status": "warning_zone",
+          "expected_behavior": "LOWER_THRESHOLD"
+        },
+        {
+          "step": 3,
+          "action": "exceed_budget",
+          "simulated_cost_usd": 0.15,
+          "cumulative_cost": 0.55,
+          "expected_guardrail": "EMERGENCY_BUDGET_BREACH",
+          "expected_action": "EMERGENCY_STOP"
+        }
+      ],
+      "cost_formula": "Σ(Input_Tokens × P_in + Output_Tokens × P_out)",
+      "pricing_reference": {
+        "gemini-1.5-pro": { "input": 1.25, "output": 5.0 },
+        "gemini-1.5-flash": { "input": 0.075, "output": 0.30 },
+        "gemini-1.5-flash-8b": { "input": 0.0375, "output": 0.15 }
+      }
+    },
+    {
+      "scenario_id": "adaptive_threshold_test",
+      "name": "Adaptive Threshold - 단계적 품질 완화 테스트",
+      "description": "재시도 횟수에 따른 임계값 하향 확인",
+      "threshold_schedule": {
+        "attempt_0": { "threshold": 0.7, "mode": "Strict" },
+        "attempt_1": { "threshold": 0.5, "mode": "Balanced" },
+        "attempt_2": { "threshold": 0.3, "mode": "Pass-through" },
+        "attempt_3": { "threshold": 0.2, "mode": "Minimal" }
+      },
+      "test_steps": [
+        {
+          "step": 1,
+          "quality_score": 0.45,
+          "current_threshold": 0.7,
+          "verdict": "FAIL",
+          "next_threshold": 0.5
+        },
+        {
+          "step": 2,
+          "quality_score": 0.45,
+          "current_threshold": 0.5,
+          "verdict": "FAIL",
+          "next_threshold": 0.3
+        },
+        {
+          "step": 3,
+          "quality_score": 0.45,
+          "current_threshold": 0.3,
+          "verdict": "PASS",
+          "note": "0.45 > 0.3이므로 Pass-through에서 통과"
+        }
+      ],
+      "model_switching": {
+        "enabled": true,
+        "strategy": [
+          { "attempt": 1, "model": "gemini-1.5-pro", "purpose": "고품질 시도" },
+          { "attempt": 2, "model": "gemini-1.5-flash", "purpose": "다른 스타일" },
+          { "attempt": 3, "model": "gemini-1.5-flash-8b", "purpose": "팩트 위주" }
+        ]
+      }
+    },
+    {
+      "scenario_id": "drift_detector_test",
+      "name": "Drift Detector - 시맨틱 드리프트 감지 테스트",
+      "description": "이전 답변과 95% 이상 유사 + 품질 미개선 시 루프 탈출",
+      "similarity_threshold": 0.95,
+      "test_steps": [
+        {
+          "step": 1,
+          "response": "AI는 다양한 분야에서 활용될 수 있는 기술입니다.",
+          "quality_score": 0.35,
+          "similarity_to_previous": null
+        },
+        {
+          "step": 2,
+          "response": "인공지능은 여러 분야에서 사용될 수 있는 기술입니다.",
+          "quality_score": 0.36,
+          "similarity_to_previous": 0.92,
+          "improvement": 0.01,
+          "verdict": "CONTINUE",
+          "note": "유사도 92% < 95%, 계속 시도"
+        },
+        {
+          "step": 3,
+          "response": "AI는 다양한 영역에서 활용될 수 있는 기술입니다.",
+          "quality_score": 0.35,
+          "similarity_to_previous": 0.96,
+          "improvement": -0.01,
+          "verdict": "SEMANTIC_DRIFT_DETECTED",
+          "expected_action": "ESCALATE_TO_HITL",
+          "user_message": "AI가 해당 요청에 대해 유의미한 품질 개선을 하지 못하고 있습니다"
+        }
+      ],
+      "drift_detection_formula": {
+        "is_stuck": "similarity >= 0.95 AND quality_improvement < 0.05",
+        "action": "ESCALATE_TO_HITL"
+      }
+    },
+    {
+      "scenario_id": "combined_guardrails_test",
+      "name": "Combined Guardrails - 통합 가드레일 우선순위 테스트",
+      "description": "여러 가드레일 동시 발동 시 우선순위 확인",
+      "priority_order": [
+        { "priority": 1, "guardrail": "EMERGENCY_BUDGET_BREACH", "reason": "비용 초과는 최우선" },
+        { "priority": 2, "guardrail": "RETRY_QUOTA_EXCEEDED", "reason": "무한루프 방지" },
+        { "priority": 3, "guardrail": "SEMANTIC_DRIFT_DETECTED", "reason": "개선불가 감지" },
+        { "priority": 4, "guardrail": "BUDGET_LIMIT_WARNING", "reason": "예산 경고" },
+        { "priority": 5, "guardrail": "ALLOW_REGENERATION", "reason": "정상 재시도" }
+      ],
+      "test_cases": [
+        {
+          "case": "budget_and_retry_both_exceeded",
+          "conditions": {
+            "retry_count": 4,
+            "budget_ratio": 1.1
+          },
+          "expected_trigger": "EMERGENCY_BUDGET_BREACH",
+          "note": "예산 초과가 재시도 초과보다 우선"
+        },
+        {
+          "case": "retry_exceeded_with_drift",
+          "conditions": {
+            "retry_count": 4,
+            "similarity": 0.97,
+            "budget_ratio": 0.5
+          },
+          "expected_trigger": "RETRY_QUOTA_EXCEEDED",
+          "note": "쿼터 초과가 드리프트보다 우선"
+        }
+      ]
+    }
+  ],
+  
+  "guardrail_summary": {
+    "retry_guard": {
+      "max_attempts": 3,
+      "action_on_exceed": "FORCE_BEST_EFFORT",
+      "cost_saving": "HIGH",
+      "description": "무한 재생성 방지"
+    },
+    "budget_watchdog": {
+      "max_budget_usd": 0.5,
+      "warning_at": "80%",
+      "emergency_at": "95%",
+      "action_on_exceed": "EMERGENCY_STOP",
+      "cost_saving": "HIGH",
+      "description": "비용 폭증 방지"
+    },
+    "adaptive_threshold": {
+      "initial": 0.7,
+      "degradation_steps": [0.7, 0.5, 0.3, 0.2],
+      "action": "LOWER_THRESHOLD",
+      "cost_saving": "MEDIUM",
+      "description": "단계적 품질 완화"
+    },
+    "drift_detector": {
+      "similarity_threshold": 0.95,
+      "improvement_threshold": 0.05,
+      "action": "ESCALATE_TO_HITL",
+      "cost_saving": "HIGH",
+      "description": "개선불가 루프 탈출"
+    }
+  },
+  
+  "expected_outcomes": {
+    "fork_bomb_prevention": "4단계 가드레일로 무한 재귀 비용 폭증 원천 차단",
+    "safe_failure_mode": "품질 미달 시 '안전한 실패' 보장 (Best-Effort 또는 HITL)",
+    "cost_predictability": "예산 내 실행 보장 ($0.5 hard limit)",
+    "availability": "가용성 우선 - 낮은 품질이라도 결과 반환"
+  },
+  
+  "os_philosophy": {
+    "kill_low_quality": "품질이 낮으면 죽이는 기술",
+    "save_on_cost": "비용이 넘치면 살려주는 기술",
+    "enterprise_grade": "두 기술의 균형으로 상용 OS 가치 실현"
+  }
+}

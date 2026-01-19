@@ -26,6 +26,19 @@ except ImportError:
     get_security_guard = None
     RingLevel = None
 
+# 🛡️ [v2.3] 4단계 아키텍처: Concurrency Controller
+try:
+    from src.services.quality_kernel.concurrency_controller import (
+        ConcurrencyControllerV2,
+        get_concurrency_controller,
+        LoadLevel
+    )
+    CONCURRENCY_CONTROLLER_AVAILABLE = True
+except ImportError:
+    CONCURRENCY_CONTROLLER_AVAILABLE = False
+    get_concurrency_controller = None
+    ConcurrencyControllerV2 = None
+
 # Services
 from src.services.state.state_manager import StateManager, mask_pii_in_state
 from src.services.recovery.self_healing_service import SelfHealingService
@@ -129,6 +142,9 @@ class SegmentRunnerService:
         
         # 🛡️ [v2.2] Ring Protection Security Guard
         self._security_guard = None
+        
+        # 🛡️ [v2.3] 4단계 아키텍처: Concurrency Controller
+        self._concurrency_controller = None
     
     @property
     def security_guard(self):
@@ -136,6 +152,22 @@ class SegmentRunnerService:
         if self._security_guard is None and RING_PROTECTION_AVAILABLE:
             self._security_guard = get_security_guard()
         return self._security_guard
+    
+    @property
+    def concurrency_controller(self):
+        """Lazy Concurrency Controller initialization"""
+        if self._concurrency_controller is None and CONCURRENCY_CONTROLLER_AVAILABLE:
+            # Reserved Concurrency 200 (template.yaml에서 설정)
+            reserved = int(os.environ.get('RESERVED_CONCURRENCY', 200))
+            max_budget = float(os.environ.get('MAX_BUDGET_USD', 10.0))
+            self._concurrency_controller = get_concurrency_controller(
+                workflow_id="segment_runner",
+                reserved_concurrency=reserved,
+                max_budget_usd=max_budget,
+                enable_batching=True,
+                enable_throttling=True
+            )
+        return self._concurrency_controller
     
     @property
     def s3_client(self):
@@ -1326,10 +1358,44 @@ class SegmentRunnerService:
         """
         Main execution logic for a workflow segment.
         
-        🛡️ [Kernel Defense] 두 가지 방어 메커니즘:
-        1. Aggressive Retry: 커널 내부에서 먼저 재시도
-        2. Partial Success: 실패해도 SUCCEEDED 반환 + 에러 메타데이터 기록
+        🛡️ [Kernel Defense] 4단계 방어 메커니즘:
+        1. Reserved Concurrency: Lambda 레벨 동시성 제한 (template.yaml)
+        2. Kernel Scheduling: 부하 평탄화 + 배치 처리
+        3. Intelligent Retry: 적응형 품질 임계값 + 정보 증류
+        4. Budget/Drift Guardrail: 비용 서킷 브레이커 + 시맨틱 드리프트 감지
         """
+        execution_start_time = time.time()
+        
+        # ====================================================================
+        # 🛡️ [2단계] Pre-Execution Check: 동시성 및 예산 체크
+        # ====================================================================
+        if CONCURRENCY_CONTROLLER_AVAILABLE and self.concurrency_controller:
+            pre_check = self.concurrency_controller.pre_execution_check()
+            if not pre_check.get('can_proceed', True):
+                logger.error(f"[Kernel] ❌ Pre-execution check failed: {pre_check.get('reason')}")
+                return {
+                    "status": "HALTED",
+                    "final_state": {},
+                    "final_state_s3_path": None,
+                    "next_segment_to_run": None,
+                    "new_history_logs": [],
+                    "error_info": {
+                        "error": pre_check.get('reason', 'Unknown'),
+                        "error_type": "ConcurrencyControlHalt",
+                        "budget_status": pre_check.get('budget_status')
+                    },
+                    "branches": None,
+                    "segment_type": "halted",
+                    "segment_id": event.get('segment_id', 0),
+                    "kernel_stats": self.concurrency_controller.get_comprehensive_stats()
+                }
+            
+            # 로드 레벨 로깅
+            snapshot = pre_check.get('snapshot')
+            if snapshot and snapshot.load_level.value in ['high', 'critical']:
+                logger.warning(f"[Kernel] ⚠️ High load detected: {snapshot.load_level.value} "
+                             f"({snapshot.active_executions}/{snapshot.reserved_concurrency})")
+        
         # [Fix] 이벤트에서 MOCK_MODE를 읽어서 환경 변수로 주입
         # 이렇게 하면 모든 하위 함수들(invoke_bedrock_model 등)이 MOCK_MODE를 인식함
         event_mock_mode = event.get('MOCK_MODE', '').lower()

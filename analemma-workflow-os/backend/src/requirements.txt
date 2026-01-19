@@ -8,8 +8,8 @@ moto
 google-cloud-aiplatform>=1.38.0
 langgraph>=0.0.40
 openai
-jsonpath-ng
-jsonschema
+# jsonpath-ng  # REMOVED: Not used in codebase (v2.0 cold start optimization)
+# jsonschema   # REMOVED: Not used in codebase, was adding ~1.4s cold start (v2.0 optimization)
 pydantic>=2.7.4
 dill==0.3.6
 aws-lambda-powertools

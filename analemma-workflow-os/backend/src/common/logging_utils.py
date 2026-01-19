@@ -2,6 +2,11 @@
 Structured logging utility module
 JSON structured logging and correlation ID tracking using AWS Lambda Powertools
 
+v2.0 Cold Start Optimization:
+    - Lazy Import 패턴 적용
+    - aws_lambda_powertools는 실제 사용 시점에 로드
+    - 모듈 레벨 초기화 제거
+
 Usage:
     from src.common.logging_utils import get_logger, log_execution_context
     
@@ -14,19 +19,49 @@ Usage:
 
 import os
 import functools
-from typing import Any, Dict, Optional
-from aws_lambda_powertools import Logger, Tracer, Metrics
-from aws_lambda_powertools.logging import correlation_paths
-from aws_lambda_powertools.metrics import MetricUnit
+from typing import Any, Dict, Optional, TYPE_CHECKING
+
+# TYPE_CHECKING: 타입 힌트용으로만 import (런타임에는 로드 안 됨)
+if TYPE_CHECKING:
+    from aws_lambda_powertools import Logger, Tracer, Metrics
+    from aws_lambda_powertools.metrics import MetricUnit
 
 
 # 글로벌 인스턴스 (Lambda 컨테이너 재사용 최적화)
-_logger_instances: Dict[str, Logger] = {}
-_tracer = Tracer()
-_metrics = Metrics()
+_logger_instances: Dict[str, "Logger"] = {}
+_tracer: Optional["Tracer"] = None
+_metrics: Optional["Metrics"] = None
+
+# Lazy import 캐시
+_powertools_loaded = False
+_Logger = None
+_Tracer = None
+_Metrics = None
+_MetricUnit = None
+_correlation_paths = None
 
 
-def get_logger(name: str = None, level: str = None) -> Logger:
+def _ensure_powertools_loaded():
+    """AWS Lambda Powertools를 필요 시점에 로드"""
+    global _powertools_loaded, _Logger, _Tracer, _Metrics, _MetricUnit, _correlation_paths
+    
+    if _powertools_loaded:
+        return
+    
+    # 실제 사용 시점에만 import (Cold Start 최적화)
+    from aws_lambda_powertools import Logger, Tracer, Metrics
+    from aws_lambda_powertools.logging import correlation_paths
+    from aws_lambda_powertools.metrics import MetricUnit
+    
+    _Logger = Logger
+    _Tracer = Tracer
+    _Metrics = Metrics
+    _MetricUnit = MetricUnit
+    _correlation_paths = correlation_paths
+    _powertools_loaded = True
+
+
+def get_logger(name: str = None, level: str = None) -> "Logger":
     """
     구조화된 Logger 인스턴스를 반환합니다.
     
@@ -37,6 +72,8 @@ def get_logger(name: str = None, level: str = None) -> Logger:
     Returns:
         Logger: AWS Lambda Powertools Logger 인스턴스
     """
+    _ensure_powertools_loaded()  # Lazy load
+    
     if name is None:
         name = __name__
     
@@ -46,7 +83,7 @@ def get_logger(name: str = None, level: str = None) -> Logger:
     
     # 새 로거 생성
     log_level = level or os.getenv("LOG_LEVEL", "INFO")
-    logger = Logger(
+    logger = _Logger(
         service=os.getenv("AWS_LAMBDA_FUNCTION_NAME", "analemma-backend"),
         level=log_level,
         child=True if name != __name__ else False
@@ -56,13 +93,23 @@ def get_logger(name: str = None, level: str = None) -> Logger:
     return logger
 
 
-def get_tracer() -> Tracer:
+def get_tracer() -> "Tracer":
     """X-Ray 트레이서 인스턴스를 반환합니다."""
+    global _tracer
+    _ensure_powertools_loaded()  # Lazy load
+    
+    if _tracer is None:
+        _tracer = _Tracer()
     return _tracer
 
 
-def get_metrics() -> Metrics:
+def get_metrics() -> "Metrics":
     """CloudWatch 메트릭 인스턴스를 반환합니다."""
+    global _metrics
+    _ensure_powertools_loaded()  # Lazy load
+    
+    if _metrics is None:
+        _metrics = _Metrics()
     return _metrics
 
 
@@ -80,11 +127,12 @@ def log_execution_context(func):
     """
     @functools.wraps(func)
     def wrapper(event, context):
+        _ensure_powertools_loaded()  # Lazy load
         logger = get_logger(func.__module__)
         
         # Lambda 컨텍스트 정보 자동 주입
         with logger.inject_lambda_context(
-            correlation_id_path=correlation_paths.API_GATEWAY_HTTP,
+            correlation_id_path=_correlation_paths.API_GATEWAY_HTTP,
             log_event=True
         ):
             # 추가 컨텍스트 정보
@@ -142,7 +190,7 @@ def log_external_service_call(service_name: str, operation: str):
                 )
                 metrics.add_metric(
                     name=f"{service_name}_{operation}_success",
-                    unit=MetricUnit.Count,
+                    unit=_MetricUnit.Count,
                     value=1
                 )
                 
@@ -162,7 +210,7 @@ def log_external_service_call(service_name: str, operation: str):
                 )
                 metrics.add_metric(
                     name=f"{service_name}_{operation}_error",
-                    unit=MetricUnit.Count,
+                    unit=_MetricUnit.Count,
                     value=1
                 )
                 raise

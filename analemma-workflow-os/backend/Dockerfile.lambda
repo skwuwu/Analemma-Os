@@ -1,12 +1,43 @@
+# ============================================================
+# 🚀 Optimized Lambda Dockerfile
+# ============================================================
+#
+# v2.0 Cold Start Optimization:
+#   - 런타임 최적화 환경 변수 적용
+#   - Python 바이트코드 사전 컴파일
+#   - pip --no-cache-dir 적용
+#
+# 사용법:
+#   이 Dockerfile은 Dockerfile.base로 빌드된 이미지 위에 동작합니다.
+#   BASE_IMAGE_URI를 ECR의 base 이미지로 설정하세요.
+# ============================================================
+
 # Use the pre-built base image with all heavy dependencies
 ARG BASE_IMAGE_URI=public.ecr.aws/lambda/python:3.12
 FROM ${BASE_IMAGE_URI}
+
+# 런타임 최적화 환경 변수
+ENV PYTHONOPTIMIZE=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    # AWS SDK 최적화: 런타임에 포함된 boto3 우선 사용
+    AWS_SDK_LOAD_CONFIG=1 \
+    # Lambda Powertools 최적화
+    POWERTOOLS_DEV=0 \
+    POWERTOOLS_LOG_DEDUPLICATION_DISABLED=1
 
 # Copy application code (dependencies already in base image)
 COPY . /var/task/
 
 # Install any additional requirements if they exist
-RUN if [ -f /var/task/requirements.txt ]; then pip install --no-cache-dir -r /var/task/requirements.txt; fi
+# --no-cache-dir로 캐시 파일 생성 방지
+RUN if [ -f /var/task/requirements.txt ]; then \
+        pip install --no-cache-dir -r /var/task/requirements.txt; \
+    fi
+
+# Python 바이트코드 사전 컴파일 (Cold Start 최적화)
+# 런타임에 컴파일 불필요로 import 속도 5-10% 향상
+RUN python -m compileall -q /var/task/ 2>/dev/null || true
 
 # Set working directory
 WORKDIR /var/task

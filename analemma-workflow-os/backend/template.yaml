@@ -523,6 +523,9 @@ Resources:
             TableName: !Ref UsersTableV3
 
   # SegmentRunnerFunction - Heavy dependencies required (langgraph, etc.)
+  # 🛡️ [1단계: Reserved Concurrency] 워크플로우 엔진 동시성 제한
+  # - 에이전트 폭주가 시스템 전체를 마비시키지 않도록 Isolation
+  # - 계정 한도 1000 보호 (이 함수: 200, 다른 중요 함수들: 나머지)
   SegmentRunnerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -531,9 +534,31 @@ Resources:
       ImageConfig:
         Command: ["src.handlers.core.segment_runner_handler.lambda_handler"]
       Timeout: 300  # 5분 - 대용량 페이로드 및 LLM 호출 시간 고려
-      MemorySize: 1024  # 대용량 페이로드 처리를 위한 메모리 증가
+      # 🚀 [v2.0 Cold Start 최적화] 메모리 상향: 1024 → 2048 MB
+      # - vCPU 2배 할당으로 패키지 로딩 속도 ~2배 향상
+      # - Cold Start 비용 = (시간 × 메모리 가격), 시간 절반이면 비용 상쇄
+      MemorySize: 2048
+      # 🛡️ Reserved Concurrency: 계정 한도 1000 중 200 예약
+      ReservedConcurrentExecutions: 200
       Environment:
         Variables:
+          # ============================================
+          # 🚀 [v2.0 Cold Start 최적화] Python 런타임 환경 변수
+          # ============================================
+          # PYTHONOPTIMIZE=1: assert문 및 __debug__ 코드 무시, 바이트코드 크기 감소
+          PYTHONOPTIMIZE: "1"
+          # PYTHONDONTWRITEBYTECODE=1: 읽기 전용 Lambda 파일시스템에 .pyc 쓰기 시도 방지
+          PYTHONDONTWRITEBYTECODE: "1"
+          # PYTHONUNBUFFERED=1: stdout/stderr 버퍼링 비활성화 (로그 즉시 출력)
+          PYTHONUNBUFFERED: "1"
+          # ============================================
+          # AWS Lambda Powertools 최적화
+          # ============================================
+          POWERTOOLS_DEV: "0"
+          POWERTOOLS_LOG_DEDUPLICATION_DISABLED: "1"
+          # ============================================
+          # 기존 환경 변수
+          # ============================================
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
           USERS_TABLE: !Ref UsersTableV3
           IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
@@ -572,6 +597,8 @@ Resources:
             Action: bedrock:InvokeModel*
             Resource: "*"
 
+  # 🛡️ [Reserved Concurrency] 디자인 어시스턴트 동시성 제한
+  # - 계정 한도 1000 중 50개 예약
   DesignAssistantFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -580,6 +607,8 @@ Resources:
       ImageConfig:
         Command: ["src.handlers.core.agentic_designer_handler.lambda_handler"]
       Timeout: 900
+      # 🛡️ Reserved Concurrency: 계정 한도 1000 중 50 예약
+      ReservedConcurrentExecutions: 50
       Environment:
         Variables:
           # [JWT Validation]
@@ -639,6 +668,9 @@ Resources:
           - "GET"
           - "POST"
 
+  # 🛡️ [Reserved Concurrency] 비동기 LLM 핸들러 동시성 제한
+  # - ECS Fargate 백업이 있으므로 Lambda 한도 초과 시 오버플로우 가능
+  # - 계정 한도 1000 중 100개 예약
   AsyncLLMHandlerFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -647,6 +679,8 @@ Resources:
       ImageConfig:
         Command: ["src.handlers.core.async_llm_handler.lambda_handler"]
       Timeout: 900
+      # 🛡️ Reserved Concurrency: 계정 한도 1000 중 100 예약
+      ReservedConcurrentExecutions: 100
       Environment:
         Variables:
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
@@ -1677,6 +1711,9 @@ Resources:
   # [REMOVED] Placeholder AggregateReportFunction - 존재하지 않는 핸들러 참조
   # 시뮬레이터용은 SimulatorAggregateReportFunction (src.handlers.simulator.aggregate_report)
 
+  # 🛡️ [Reserved Concurrency] 청크 처리 함수 동시성 제한
+  # - Distributed Map에서 병렬 호출되어 폭발적 동시성 발생 가능
+  # - 계정 한도 1000 중 150개 예약 (Map 병렬도 제어)
   ProcessSegmentChunkFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -1686,6 +1723,8 @@ Resources:
         Command: ["src.handlers.core.process_segment_chunk.lambda_handler"]
       Timeout: 900  # 15분 - 청크 처리 최대 시간
       MemorySize: 2048  # 청크 내 여러 세그먼트 처리를 위한 큰 메모리
+      # 🛡️ Reserved Concurrency: 계정 한도 1000 중 150 예약 (Distributed Map 폭발 방지)
+      ReservedConcurrentExecutions: 150
       # 🚨 [Critical Fix] /tmp 공간 확장 - 캐시 최적화
       EphemeralStorage:
         Size: 1024  # 1GB /tmp 공간 (기본 512MB에서 확장)

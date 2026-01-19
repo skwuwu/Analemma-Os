@@ -1,12 +1,27 @@
-boto3
-botocore
-croniter
+# ============================================
+# Common Lambda Layer - Essential Shared Dependencies
+# ============================================
+#
+# v2.0 Cold Start Optimization:
+#   - boto3/botocore 제외 (Lambda 런타임에 이미 포함)
+#   - 최소 필수 패키지만 포함
+#   - 무거운 패키지는 heavy 레이어로 분리
+#
+# 주의: boto3를 여기에 추가하지 마세요!
+# Lambda 런타임에 이미 포함되어 있어 중복 로딩됩니다.
+# ============================================
 
-# If additional common (small) libs are required by many functions, add
-# them here. Heavy ML/LLM-related packages were moved to layers/llm.
+# [REMOVED] boto3 - Lambda 런타임에 기본 포함
+# [REMOVED] botocore - Lambda 런타임에 기본 포함
+
+# Cron expression parsing (lightweight)
+croniter
 
 # Runtime dependencies required by LFU handler for JWT validation and streaming
 # (placed here so they can be shared across functions via a Lambda Layer).
 requests
 python-jose
+
+# AWS Lambda Powertools - Structured logging, tracing, metrics
+# 필수: 모든 핸들러에서 사용
 aws-lambda-powertools
