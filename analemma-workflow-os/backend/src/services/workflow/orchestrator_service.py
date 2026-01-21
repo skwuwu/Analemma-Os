@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # 🛡️ [P2] 허용된 노드 타입 목록 - 잘못된 시나리오는 애초에 검증 단계에서 차단
 ALLOWED_NODE_TYPES = {
     # Core types
-    "operator", "llm", "prompt", "retriever", "tool",
+    "operator", "llm_chat", "prompt", "retriever", "tool",
     # Flow control
     "branch", "router", "parallel_group", "aggregator", "join", "for_each",
     # Special
@@ -39,8 +39,10 @@ ALLOWED_NODE_TYPES = {
 # 🔄 별칭(Alias) 매핑 - field_validator에서 정규 타입으로 변환됨
 NODE_TYPE_ALIASES = {
     "code": "operator",      # 'code'는 'operator'의 별칭
-    "aimodel": "llm",        # [Fix] support legacy/frontend type
-    "aiModel": "llm",        # [Fix] case-sensitive match
+    "llm": "llm_chat",       # [Fix] standardize on llm_chat
+    "aimodel": "llm_chat",   # [Fix] support legacy/frontend type
+    "aiModel": "llm_chat",   # [Fix] case-sensitive match
+    "openai_chat": "llm_chat", # Support vendor specific type
 }
 
 class EdgeModel(BaseModel):

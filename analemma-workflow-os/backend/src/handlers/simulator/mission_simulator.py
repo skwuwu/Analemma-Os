@@ -3556,3 +3556,16 @@ def lambda_handler(event, context):
         'summary': summary,
         'results': results
     }
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Analemma Mission Simulator CLI")
+    parser.add_argument("--scenario", nargs="+", help="Scenarios to run (e.g. HAPPY_PATH PII_TEST)")
+    args = parser.parse_args()
+    
+    event = {}
+    if args.scenario:
+        event['scenarios'] = args.scenario
+    
+    lambda_handler(event, None)

@@ -97,7 +97,7 @@ class WorkflowState(TypedDict, total=False):
 # 🛡️ [P2] 허용된 노드 타입 목록 - 잘못된 시나리오는 애초에 검증 단계에서 차단
 ALLOWED_NODE_TYPES = {
     # Core types
-    "operator", "llm", "prompt", "retriever", "tool",
+    "operator", "llm_chat", "prompt", "retriever", "tool",
     # Flow control
     "branch", "router", "parallel_group", "aggregator", "join", "for_each",
     # Special

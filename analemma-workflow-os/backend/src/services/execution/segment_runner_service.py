@@ -1724,13 +1724,15 @@ class SegmentRunnerService:
             # SCHEDULED_PARALLEL: 배치별 순차 실행 필요
             if schedule_result['status'] == 'SCHEDULED_PARALLEL':
                 execution_batches = schedule_result['execution_batches']
-                metadata = schedule_result['scheduling_metadata']
-                
                 # 🛡️ [P1 Fix] Inject scheduling_metadata into state for test verification
-                initial_state['__scheduling_metadata'] = metadata
+                meta = schedule_result.get('scheduling_metadata', {})
+                batch_count = meta.get('batch_count', 1)
+                
+                initial_state['scheduling_metadata'] = meta
+                initial_state['batch_count_actual'] = batch_count
                 
                 # 🛡️ [P1 Fix] SPEED_GUARDRAIL_TEST requires this flag when splitting occurs
-                if metadata['strategy'] == 'SPEED_OPTIMIZED' and metadata['batch_count'] > 1:
+                if meta.get('strategy') == 'SPEED_OPTIMIZED' and batch_count > 1:
                     initial_state['guardrail_verified'] = True
                 
                 logger.info(f"[Scheduler] 🔧 Scheduled {metadata['total_branches']} branches into "
@@ -1751,7 +1753,9 @@ class SegmentRunnerService:
             
             # PARALLEL_GROUP: 기본 병렬 실행
             # 🛡️ [P1 Fix] Inject scheduling_metadata into state for test verification (Consistent with SCHEDULED_PARALLEL)
-            initial_state['__scheduling_metadata'] = schedule_result.get('scheduling_metadata')
+            meta = schedule_result.get('scheduling_metadata', {})
+            initial_state['scheduling_metadata'] = meta
+            initial_state['batch_count_actual'] = meta.get('batch_count', 1)
             
             return _finalize_response({
                 "status": "PARALLEL_GROUP",
@@ -1763,7 +1767,7 @@ class SegmentRunnerService:
                 "branches": valid_branches,  # 유효한 브랜치만
                 "execution_batches": schedule_result.get('execution_batches', [valid_branches]),
                 "segment_type": "parallel_group",
-                "scheduling_metadata": schedule_result.get('scheduling_metadata')
+                "scheduling_metadata": meta
             })
         
         # 🛡️ [Pattern 2] 커널 검증: 이 세그먼트가 SKIPPED 상태인가?
