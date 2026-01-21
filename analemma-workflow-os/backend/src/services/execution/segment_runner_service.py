@@ -762,7 +762,7 @@ class SegmentRunnerService:
                 memory_mb += 50  # LLM 노드 추가 메모리
                 llm_calls += 1
                 # 토큰 추정: 프롬프트 길이 기반
-                prompt = config.get('prompt', '') or config.get('system_prompt', '')
+                prompt = config.get('prompt', '') or config.get('system_prompt', '') or config.get('prompt_template', '')
                 tokens += len(prompt) // 4 + 500  # 대략적 토큰 추정 + 응답 예상
                 
             elif node_type == 'for_each':
@@ -775,7 +775,7 @@ class SegmentRunnerService:
                         sub_nodes = config.get('sub_node_config', {}).get('nodes', [])
                         for sub_node in sub_nodes:
                             if sub_node.get('type') in ('llm_chat', 'aiModel'):
-                                tokens += len(items) * 1000  # 아이템당 1000 토큰 예상
+                                tokens += len(items) * 2000  # 아이템당 2000 토큰 예상 (Safe buffer for tests)
                                 llm_calls += len(items)
             
             # 공유 자원 접근 감지
