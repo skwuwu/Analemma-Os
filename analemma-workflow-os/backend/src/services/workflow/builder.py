@@ -498,7 +498,7 @@ class DynamicWorkflowBuilder:
             return _registry_node
 
         # Fallback for special cases or legacy types
-        if node_type in ("llm_chat", "aiModel"):
+        if node_type in ("llm_chat", "aiModel", "llm", "aimodel"):
             # Direct import for llm_chat if not in registry
             try:
                 from src.handlers.core.main import llm_chat_runner

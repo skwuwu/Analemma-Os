@@ -197,10 +197,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         output['execution_failed'] = True
     
     # [Enhancement] Extract ExecutionArn for detailed history analysis
-    execution_arn = exec_result.get('ExecutionArn', '')
-    if not execution_arn:
-        # Try extracting from prep_result or other locations
-        execution_arn = event.get('prep_result', {}).get('execution_arn', '')
+    execution_arn = (
+        exec_result.get('ExecutionArn') or 
+        exec_result.get('execution_id') or 
+        output.get('execution_id') or
+        event.get('prep_result', {}).get('execution_arn', '')
+    )
     
     logger.info(f"Verifying {scenario} - Status: {status}, ExecutionArn: {execution_arn[:50]}..." if execution_arn else f"Verifying {scenario} - Status: {status}")
     
@@ -329,11 +331,17 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
                  is_intentional_failure = True
         
         # If status is SUCCEEDED but we found the error marker, that's a PASS for "handled error"
-        status_pass = (status == 'FAILED') or (status in ['SUCCEEDED', 'COMPLETE'] and is_intentional_failure)
+        # 🛡️ 커널이 에러를 잡아서 SUCCEEDED로 변환했어도 'partial_failure'라면 PASS
+        is_actually_failed = (
+            status == 'FAILED' or 
+            output.get('segment_type') == 'partial_failure' or
+            output.get('execution_result', {}).get('segment_type') == 'partial_failure' or
+            (status in ['SUCCEEDED', 'COMPLETE'] and is_intentional_failure)
+        )
         
-        checks.append(_check("Error Scenario Verification", status_pass, 
-                           expected="FAILED or Handled Error", 
-                           actual=f"{status} (Intentional: {is_intentional_failure})"))
+        checks.append(_check("Error Scenario Verification", is_actually_failed, 
+                           expected="FAILED or partial_failure", 
+                           actual=f"{status} (Intentional: {is_intentional_failure}, Type: {output.get('segment_type')})"))
         
         # [방어적 파싱] 에러 메시지 추출 - 다양한 위치 확인
         error_msg = ''

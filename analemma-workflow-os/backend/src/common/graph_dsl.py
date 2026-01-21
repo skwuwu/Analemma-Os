@@ -117,7 +117,7 @@ class WorkflowNode(BaseModel):
     id: str
     type: Literal[
         "operator", "llm_chat", "api_call", "db_query", "for_each", 
-        "route_draft_quality", "group", "subgraph", "aiModel",
+        "route_draft_quality", "group", "subgraph", "aiModel", "llm",
         "parallel", "distributed_map", "route_condition", 
         "retry_wrapper", "error_handler", "wait_for_approval"
     ]

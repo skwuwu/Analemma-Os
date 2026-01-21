@@ -26,15 +26,21 @@ logger = logging.getLogger(__name__)
 
 # 🛡️ [P2] 허용된 노드 타입 목록 - 잘못된 시나리오는 애초에 검증 단계에서 차단
 ALLOWED_NODE_TYPES = {
+    # Core types
     "operator", "llm", "prompt", "retriever", "tool",
-    "branch", "router", "parallel_group", "aggregator", "join",
+    # Flow control
+    "branch", "router", "parallel_group", "aggregator", "join", "for_each",
+    # Special
     "input", "output", "start", "end", "hitp", "pause",
+    # Subgraph
     "subgraph", "subgraph_ref",
 }
 
 # 🔄 별칭(Alias) 매핑 - field_validator에서 정규 타입으로 변환됨
 NODE_TYPE_ALIASES = {
-    "code": "operator",
+    "code": "operator",      # 'code'는 'operator'의 별칭
+    "aimodel": "llm",        # [Fix] support legacy/frontend type
+    "aiModel": "llm",        # [Fix] case-sensitive match
 }
 
 class EdgeModel(BaseModel):

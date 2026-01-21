@@ -758,7 +758,7 @@ class SegmentRunnerService:
             # 메모리 추정
             memory_mb += 10  # 노드당 기본 10MB
             
-            if node_type in ('llm_chat', 'aiModel'):
+            if node_type in ('llm_chat', 'aiModel', 'llm', 'aimodel'):
                 memory_mb += 50  # LLM 노드 추가 메모리
                 llm_calls += 1
                 # 토큰 추정: 프롬프트 길이 기반
