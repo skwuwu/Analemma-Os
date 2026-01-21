@@ -532,7 +532,7 @@
     },
     "CheckSegmentStatus": {
       "Type": "Choice",
-      "Comment": "Check execution status: PARALLEL_GROUP, PAUSE, FAILED, or COMPLETE",
+      "Comment": "Check execution status: CONTINUE, PARALLEL_GROUP, PAUSE, FAILED, or COMPLETE",
       "Choices": [
         {
           "Variable": "$.execution_result.status",
@@ -543,6 +543,12 @@
           "Variable": "$.execution_result.status",
           "StringEquals": "COMPLETE",
           "Next": "PublishSucceededEvent"
+        },
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "CONTINUE",
+          "Comment": "More segments to process - continue the execution loop",
+          "Next": "PrepareNextSegment"
         },
         {
           "Variable": "$.execution_result.status",
@@ -571,7 +577,7 @@
           "Next": "WaitForCallback"
         }
       ],
-      "Default": "CheckForNextSegment"
+      "Default": "PublishSucceededEvent"
     },
     "ProcessParallelSegments": {
       "Type": "Map",
@@ -708,6 +714,7 @@
           },
           "CheckBranchNext": {
             "Type": "Choice",
+            "Comment": "Check if branch should continue or complete",
             "Choices": [
               {
                 "Variable": "$.execution_result.status",
@@ -715,8 +722,9 @@
                 "Next": "BranchComplete"
               },
               {
-                "Variable": "$.execution_result.next_segment_to_run",
-                "IsPresent": true,
+                "Variable": "$.execution_result.status",
+                "StringEquals": "CONTINUE",
+                "Comment": "More segments in branch - continue execution",
                 "Next": "UpdateBranchSegment"
               }
             ],
@@ -998,7 +1006,7 @@
     },
     "CheckForNextSegment": {
       "Type": "Choice",
-      "Comment": "Check if there is a next segment to run, or if workflow is complete",
+      "Comment": "Check if there is a next segment to run, or if workflow is complete. Default safely terminates.",
       "Choices": [
         {
           "And": [
@@ -1027,9 +1035,15 @@
             }
           ],
           "Next": "PublishSucceededEvent"
+        },
+        {
+          "Variable": "$.execution_result.status",
+          "StringEquals": "CONTINUE",
+          "Comment": "Explicit CONTINUE status - continue to next segment",
+          "Next": "PrepareNextSegment"
         }
       ],
-      "Default": "PrepareNextSegment"
+      "Default": "PublishSucceededEvent"
     },
     "WaitForCallback": {
       "Type": "Task",
@@ -1226,11 +1240,12 @@
     },
     "PrepareNextSegment": {
       "Type": "Choice",
-      "Comment": "Check if there is a next segment to run, or if workflow is complete",
+      "Comment": "Check if there is a next segment to run (must be a valid number), or if workflow is complete",
       "Choices": [
         {
           "Variable": "$.execution_result.next_segment_to_run",
-          "IsPresent": true,
+          "IsNumeric": true,
+          "Comment": "next_segment_to_run is a valid number - continue to next segment",
           "Next": "UpdateSegmentToRun"
         }
       ],

@@ -1996,7 +1996,7 @@ class SegmentRunnerService:
         
         # 아직 실행할 세그먼트가 남아있음
         return _finalize_response({
-            "status": "SUCCEEDED",
+            "status": "CONTINUE",  # 🛡️ [Fix] Explicit status for loop continuation (was 'SUCCEEDED')
             "final_state": final_state,
             "final_state_s3_path": output_s3_path,
             "next_segment_to_run": next_segment,
