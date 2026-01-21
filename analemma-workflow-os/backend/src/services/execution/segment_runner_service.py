@@ -1452,7 +1452,13 @@ class SegmentRunnerService:
         # Step Functions Choice 상태에서 null 참조를 방지하기 위해 반드시 포함되어야 함
         # ====================================================================
         _total_segments = _safe_get_total_segments(event)
-        _segment_id = event.get('segment_id') or event.get('segment_to_run', 0)
+        
+        # 🛡️ [Critical Fix] explicit None handling for segment_id
+        # .get('key') returns None if key exists but value is null, which 'or' propagates
+        _seg_id_val = event.get('segment_id')
+        if _seg_id_val is None:
+            _seg_id_val = event.get('segment_to_run')
+        _segment_id = _seg_id_val if _seg_id_val is not None else 0
         
         def _finalize_response(res: Dict[str, Any]) -> Dict[str, Any]:
             """
@@ -1532,7 +1538,11 @@ class SegmentRunnerService:
         auth_user_id = event.get('ownerId') or event.get('owner_id') or event.get('user_id')
         workflow_id = event.get('workflowId') or event.get('workflow_id')
         # 🚀 [Hybrid Mode] Support both segment_id (hybrid) and segment_to_run (legacy)
-        segment_id = event.get('segment_id') or event.get('segment_to_run', 0)
+        # 🛡️ [Critical Fix] explicit None checking to prevent TypeError in comparisons
+        _seg_id_cand = event.get('segment_id')
+        if _seg_id_cand is None:
+            _seg_id_cand = event.get('segment_to_run')
+        segment_id = _seg_id_cand if _seg_id_cand is not None else 0
         
         # [Critical Fix] S3 bucket for large payload offloading - ensure non-empty string
         s3_bucket_raw = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET") or ""
