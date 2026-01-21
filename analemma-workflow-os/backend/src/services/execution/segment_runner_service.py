@@ -1726,6 +1726,9 @@ class SegmentRunnerService:
                 execution_batches = schedule_result['execution_batches']
                 metadata = schedule_result['scheduling_metadata']
                 
+                # 🛡️ [P1 Fix] Inject scheduling_metadata into state for test verification
+                initial_state['__scheduling_metadata'] = metadata
+                
                 logger.info(f"[Scheduler] 🔧 Scheduled {metadata['total_branches']} branches into "
                            f"{metadata['batch_count']} batches (strategy: {metadata['strategy']})")
                 
@@ -1743,6 +1746,9 @@ class SegmentRunnerService:
                 })
             
             # PARALLEL_GROUP: 기본 병렬 실행
+            # 🛡️ [P1 Fix] Inject scheduling_metadata into state for test verification (Consistent with SCHEDULED_PARALLEL)
+            initial_state['__scheduling_metadata'] = schedule_result.get('scheduling_metadata')
+            
             return _finalize_response({
                 "status": "PARALLEL_GROUP",
                 "final_state": mask_pii_in_state(initial_state),
