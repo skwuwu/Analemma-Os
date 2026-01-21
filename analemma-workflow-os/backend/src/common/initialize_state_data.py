@@ -204,8 +204,9 @@ def _calculate_dynamic_concurrency(
         logger.warning(f"Failed to load user tier for concurrency calculation: {e}")
     
     # 4. 🛡️ [Concurrency Protection] OS-level upper limit clamping
-    # Ensure overall system stability according to account concurrency limit (10)
-    MAX_OS_LIMIT = 2  # Response to account concurrency limit of 10 (to be increased upon approval request)
+    # Ensure overall system stability according to account concurrency limit
+    # Increased from 2 to 5 to enable proper testing of parallel scheduling strategies
+    MAX_OS_LIMIT = 5  # Allows testing of batch splitting and speed guardrails
     clamped_concurrency = min(calculated_concurrency, MAX_OS_LIMIT)
     
     if calculated_concurrency > MAX_OS_LIMIT:
