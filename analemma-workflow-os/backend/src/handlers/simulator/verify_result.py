@@ -319,7 +319,21 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
         
     # D. Error Handling - 의도적 실패 테스트 (강화된 검증)
     elif scenario in ['ERROR_HANDLING', 'STANDARD_ERROR_HANDLING']:
-        checks.append(_check("Status Failed", status == 'FAILED', expected="FAILED", actual=status))
+        # [Fix] Handled errors in Step Functions result in SUCCEEDED status.
+        # We should check if it failed OR if it succeeded with the expected error info.
+        is_intentional_failure = False
+        if isinstance(output, dict):
+             err_info = output.get('execution_result', {}).get('error_info', {})
+             err_msg = err_info.get('Error', err_info.get('error', ''))
+             if 'FAIL_TEST' in str(err_msg):
+                 is_intentional_failure = True
+        
+        # If status is SUCCEEDED but we found the error marker, that's a PASS for "handled error"
+        status_pass = (status == 'FAILED') or (status in ['SUCCEEDED', 'COMPLETE'] and is_intentional_failure)
+        
+        checks.append(_check("Error Scenario Verification", status_pass, 
+                           expected="FAILED or Handled Error", 
+                           actual=f"{status} (Intentional: {is_intentional_failure})"))
         
         # [방어적 파싱] 에러 메시지 추출 - 다양한 위치 확인
         error_msg = ''

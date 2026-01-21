@@ -99,7 +99,7 @@ ALLOWED_NODE_TYPES = {
     # Core types
     "operator", "llm", "prompt", "retriever", "tool",
     # Flow control
-    "branch", "router", "parallel_group", "aggregator", "join",
+    "branch", "router", "parallel_group", "aggregator", "join", "for_each",
     # Special
     "input", "output", "start", "end", "hitp", "pause",
     # Subgraph
@@ -108,7 +108,9 @@ ALLOWED_NODE_TYPES = {
 
 # 🔄 별칭(Alias) 매핑 - field_validator에서 정규 타입으로 변환됨
 NODE_TYPE_ALIASES = {
-    "code": "operator",  # 'code'는 'operator'의 별칭
+    "code": "operator",      # 'code'는 'operator'의 별칭
+    "aimodel": "llm",        # [Fix] support legacy/frontend type
+    "aiModel": "llm",        # [Fix] case-sensitive match
 }
 
 class EdgeModel(BaseModel):
