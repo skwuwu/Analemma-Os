@@ -95,9 +95,13 @@ def _analyze_error_handling_flow(execution_arn: str, expected_error_marker: str 
                     if error_info:
                         result["error_info_present"] = True
                         result["error_details"] = error_info
+                        result["error_details"] = error_info
                         # Check if error message contains expected marker
-                        error_msg = error_info.get('error', '')
-                        if expected_error_marker in error_msg:
+                        # [Fix] Handle both 'Error' (SFN standard) and 'error' (custom) keys
+                        error_msg = error_info.get('Error', error_info.get('error', ''))
+                        cause_msg = error_info.get('Cause', error_info.get('cause', ''))
+                        
+                        if expected_error_marker in error_msg or expected_error_marker in cause_msg:
                             result["error_message_correct"] = True
                 except Exception as e:
                     logger.warning(f"Failed to parse NotifyExecutionFailure input: {e}")
