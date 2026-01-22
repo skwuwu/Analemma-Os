@@ -672,6 +672,12 @@
           "Next": "NotifyExecutionFailure"
         },
         {
+          "Variable": "$.execution_result.segment_type",
+          "StringEquals": "partial_failure",
+          "Comment": "[v3.1 Fix] PARTIAL_FAILURE도 실패로 처리",
+          "Next": "NotifyExecutionFailure"
+        },
+        {
           "Variable": "$.execution_result.status",
           "StringEquals": "PARALLEL_GROUP",
           "Next": "ProcessParallelSegmentsDistributed"

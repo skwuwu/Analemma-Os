@@ -223,7 +223,7 @@ SCENARIOS = {
     'COST_GUARDRAIL': {
         'name': 'Scenario J: Cost Guardrail',
         'description': 'Bedrock 비용 폭주 방지 검증',
-        'test_keyword': 'LOOP_LIMIT_DYNAMIC',
+        'test_keyword': 'COST_GUARDRAIL',
         'expected_status': 'SUCCEEDED',
         'verify_func': 'verify_cost_guardrail'
     },
@@ -592,6 +592,7 @@ TEST_WORKFLOW_MAPPINGS = {
     'E2E_S3_LARGE_DATA': 'test_s3_large_workflow',
     'MAP_AGGREGATOR_TEST': 'test_map_aggregator_workflow',
     'LOOP_LIMIT_DYNAMIC': 'test_loop_limit_dynamic_workflow',
+    'COST_GUARDRAIL': 'test_cost_guardrails_workflow',  # 비용 가드레일 검증
     'HYPER_REPORT': 'test_hyper_report_workflow',  # 하이퍼-리포트 시나리오
     'HYPER_STRESS_V3': 'test_hyper_stress_workflow',  # V3 하이퍼-스트레스 시나리오
     # Multimodal & Advanced Scenarios
