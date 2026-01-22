@@ -1463,36 +1463,42 @@ class SegmentRunnerService:
         
         def _finalize_response(res: Dict[str, Any]) -> Dict[str, Any]:
             """
-            🛡️ [P0] 모든 return 경로에 필수 메타데이터 강제 주입
-            Step Functions ASL에서 $.total_segments, $.segment_id를 참조하므로
-            어떤 경로에서 return 되더라도 이 필드들이 반드시 포함되어야 함
+            🛡️ [v3.3 Standard Envelope] Universal Response Wrapper
+            Ensures ALL return paths conform to Step Functions contract with guaranteed metadata.
             
-            🛡️ [v3.1 Zero-Exception] Standard Envelope Pattern
-            모든 상황에서 Step Functions가 기대하는 모든 필드에 기본값 보장
-            - guardrail_verified: 가드레일 검증 여부
-            - batch_count_actual: 실제 배치 수
-            - scheduling_metadata: 스케줄링 메타데이터
+            1. Extract metadata from final_state (or defaults).
+            2. Inject back into final_state (persistence).
+            3. Inject into top-level response (ResultSelector access).
             """
             res.setdefault('total_segments', _total_segments)
             res.setdefault('segment_id', _segment_id)
             
-            # 🛡️ [v3.1] Extract standard metadata from final_state with fallback defaults
+            # 🛡️ Extract standard metadata with fallback defaults
             final_state = res.get('final_state', {})
             if not isinstance(final_state, dict):
                 final_state = {}
             
-            # 🛡️ Standard Envelope: 필수 필드 기본값 보장
+            # Explicitly extract to ensure we get a value (defaulting to False/1/{})
+            gv = final_state.get('guardrail_verified', False)
+            bca = final_state.get('batch_count_actual', 1)
+            sm = final_state.get('scheduling_metadata', {})
+            
             standard_metadata = {
-                'guardrail_verified': final_state.get('guardrail_verified', False),
-                'batch_count_actual': final_state.get('batch_count_actual', 1),
-                'scheduling_metadata': final_state.get('scheduling_metadata', {}),
+                'guardrail_verified': gv,
+                'batch_count_actual': bca,
+                'scheduling_metadata': sm,
                 'state_size_threshold': self.threshold
             }
             
-            # 🛡️ Top-level 평탄화: Step Functions ResultSelector 에러 방지
-            for key, default_value in standard_metadata.items():
-                res.setdefault(key, default_value)
+            # 🛡️ 1. Inject into final_state (Persistence)
+            # This ensures the next step in SFN receives these values in its input state
+            if isinstance(res.get('final_state'), dict):
+                res['final_state'].update(standard_metadata)
             
+            # 🛡️ 2. Inject into Top-level (SFN ResultSelector Access)
+            for key, value in standard_metadata.items():
+                res[key] = value
+                
             return res
         
         # ====================================================================
