@@ -536,7 +536,24 @@ SCENARIOS = {
     # ═══════════════════════════════════════════════════════════════════════════
     # 🕐 Time Machine Hyper Stress Test Scenario (AM)
     # ═══════════════════════════════════════════════════════════════════════════
-    'TIME_MACHINE_HYPER_STRESS': {
+        # ═══════════════════════════════════════════════════════════════════════════
+    # 🩹 Self-Healing E2E Test Scenario (AN)
+    # ═══════════════════════════════════════════════════════════════════════════
+    'SELF_HEALING_TEST': {
+        'name': 'Scenario AN: Self-Healing E2E Test',
+        'description': '🩹 Self-Healing 전체 플로우 검증: 에러 발생 → 메타데이터 전파 → 복구 실행 → 성공 완료',
+        'test_keyword': 'SELF_HEALING_TEST',
+        'input_data': {
+            'self_healing_test': True,
+            'trigger_intentional_error': True,
+            'enable_auto_correction': True,
+            'max_healing_attempts': 3
+        },
+        'expected_status': 'SUCCEEDED',
+        'verify_func': 'verify_self_healing',
+        'timeout_seconds': 180
+    },
+'TIME_MACHINE_HYPER_STRESS': {
         'name': 'Scenario AM: Time Machine Hyper Stress',
         'description': '🕐 타임머신 극한 테스트: 체크포인트 폭풍(30~50), 브랜치 폭발(10), 연쇄 롤백(depth 5+), Gemini 과부하, Auto-Fix 스트레스, State Poisoning 복구',
         'test_keyword': 'TIME_MACHINE_HYPER_STRESS',
@@ -612,6 +629,8 @@ TEST_WORKFLOW_MAPPINGS = {
     'RING_PROTECTION_ATTACK_TEST': 'test_ring_protection_attack_workflow',  # Ring Protection 공격 시뮬레이션
     # 🕐 Time Machine Hyper Stress
     'TIME_MACHINE_HYPER_STRESS': 'test_time_machine_hyper_stress_workflow',  # 타임머신 극한 테스트
+    # 🩹 Self-Healing E2E Test
+    'SELF_HEALING_TEST': 'test_self_healing_workflow',  # Self-Healing E2E
 }
 
 
@@ -3893,3 +3912,5 @@ if __name__ == "__main__":
         event['scenarios'] = args.scenario
     
     lambda_handler(event, None)
+
+

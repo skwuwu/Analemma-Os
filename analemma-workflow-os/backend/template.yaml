@@ -1538,6 +1538,39 @@ Resources:
             Path: /collect
             Method: POST
 
+  # --- [NEW] Auto Healing Trigger Function (v3.9 Hybrid Architecture) ---
+  # 🩹 Step Functions 실패 시 EventBridge에서 자동 트리거
+  # - 에러 분류 (Deterministic vs Semantic)
+  # - Deterministic: QuickFixExecutor 호출 (자동 복구)
+  # - Semantic: AWAITING_MANUAL_HEALING 상태 설정
+  AutoHealingTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.auto_healing_trigger.lambda_handler"]
+      FunctionName: !Sub "auto-healing-trigger-${StageName}"
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          QUICK_FIX_FUNCTION_NAME: !Sub "quick-fix-executor-${StageName}"
+          NOTIFICATION_BUS_NAME: !Ref WorkflowEventBus
+          MAX_SELF_HEALING_ATTEMPTS: "3"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref WorkflowEventBus
+        - Statement:
+          - Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource:
+              - !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:quick-fix-executor-${StageName}"
+
   # --- Indexer Function (Execution History Storage) ---
   IndexerFunction:
     Type: AWS::Serverless::Function
@@ -3245,6 +3278,60 @@ Resources:
       FunctionName: !Ref S3CleanupFunction
       Principal: events.amazonaws.com
       SourceArn: !GetAtt WorkflowFailureS3CleanupRule.Arn
+
+  # --- [NEW] EventBridge Rule for Self-Healing (v3.9 Hybrid Architecture) ---
+  # 🩹 자동 에러 분류 및 복구 경로 분기
+  # - Deterministic Errors: 자동 복구 (QuickFixExecutor 호출)
+  # - Semantic Errors: 수동 대기 (AWAITING_MANUAL_HEALING 상태)
+  WorkflowFailureSelfHealingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-self-healing"
+      Description: "Trigger auto-healing for Step Functions failures"
+      EventPattern:
+        source:
+          - aws.states
+        detail-type:
+          - Step Functions Execution Status Change
+        detail:
+          stateMachineArn:
+            - !GetAtt StepFunctionOrchestrator.Arn
+            - !GetAtt StepFunctionDistributedOrchestrator.Arn
+          status:
+            - FAILED
+      State: ENABLED
+      Targets:
+        - Id: SelfHealingTarget
+          Arn: !GetAtt AutoHealingTriggerFunction.Arn
+          InputTransformer:
+            InputPathsMap:
+              executionArn: "$.detail.executionArn"
+              status: "$.detail.status"
+              error: "$.detail.error"
+              cause: "$.detail.cause"
+            InputTemplate: |
+              {
+                "detail": {
+                  "executionArn": <executionArn>,
+                  "status": <status>,
+                  "error_type": <error>,
+                  "error_message": <cause>
+                }
+              }
+          RetryPolicy:
+            MaximumEventAgeInSeconds: 1800  # 30 minutes
+            MaximumRetryAttempts: 1
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # --- [NEW] Self-Healing Trigger Lambda Permission ---
+  AutoHealingTriggerFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AutoHealingTriggerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt WorkflowFailureSelfHealingRule.Arn
 
   # --- [NEW] Dead Letter Queue for EventBridge Targets ---
   # Enterprise-grade resilience: failed events are queued for retry/manual processing
