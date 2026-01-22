@@ -1537,7 +1537,7 @@ class SegmentRunnerService:
         # ====================================================================
         segment_type_param = event.get('segment_type')
         if segment_type_param == 'aggregator':
-            return self._handle_aggregator(event)
+            return _finalize_response(self._handle_aggregator(event))
         
         # 0. Check for Branch Offloading
         branch_config = event.get('branch_config')
