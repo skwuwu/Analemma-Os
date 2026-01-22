@@ -21,7 +21,7 @@ import os
 import time
 import uuid
 import boto3
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime, timezone, timedelta
 
 # Logger setup

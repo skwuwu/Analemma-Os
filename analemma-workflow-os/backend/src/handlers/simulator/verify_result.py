@@ -3,7 +3,7 @@ import json
 import boto3
 import os
 import uuid
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import logging
 from datetime import datetime
 
