@@ -994,7 +994,10 @@ class SegmentRunnerService:
                     'total_branches': len(branches),
                     'batch_count': 1,
                     'total_memory_mb': total_memory,
-                    'total_tokens': total_tokens
+                    'total_tokens': total_tokens,
+                    # 🛡️ [v3.4] Deep Evidence Metrics
+                    'total_tokens_calculated': total_tokens,
+                    'actual_concurrency_limit': max_tokens
                 }
             }
         
@@ -1016,6 +1019,9 @@ class SegmentRunnerService:
                 'batch_count': len(execution_batches),
                 'total_memory_mb': total_memory,
                 'total_tokens': total_tokens,
+                # 🛡️ [v3.4] Deep Evidence Metrics
+                'total_tokens_calculated': total_tokens,
+                'actual_concurrency_limit': max_tokens,
                 'resource_policy': resource_policy
             }
         }

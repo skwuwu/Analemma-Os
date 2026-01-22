@@ -242,33 +242,57 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "report_s3_path": report_s3_path
     }
 
+def _get_recursive_value(data: Dict[str, Any], keys: List[str]) -> Optional[Any]:
+    """Helper to safely extract nested values"""
+    current = data
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return None
+    return current
+
 def _check_false_positive(scenario: str, output: Dict[str, Any]) -> Tuple[bool, str]:
     """
-    🛡️ Anti-False Positive Check
-    Detects logical contradictions where a test claims to pass but missing critical work evidence.
+    🛡️ [v3.4] Deep Evidence Anti-False Positive Check
+    
+    Validates logical consistency using structured data access only.
+    No loose string matching allowed for critical path verification.
     """
-    # 0. Skip strictly logical checks for basic scenarios that don't involve complex kernel logic
+    # 0. Skip strictly logical checks for basic scenarios
     if scenario in ['HAPPY_PATH', 'PII_TEST', 'STANDARD_HAPPY_PATH', 'STANDARD_PII_TEST', 'API_CONNECTIVITY']:
         return True, "Standard check skipped"
 
-    # 1. Cost Optimized Strategy: Must track tokens
+    # 1. Critical Evidence Existence Check (Cross-Validation)
+    if 'OPTIMIZED' in scenario or 'GUARDRAIL' in scenario:
+        # v3.3 Standard Response must define these
+        if 'total_segments' not in output:
+             return False, "Critical Evidence Missing: total_segments not persistent"
+             
+    # 2. Cost Optimized Strategy: Must have precise token tracking
     if 'COST_OPTIMIZED' in scenario:
         strategy = output.get('resource_policy_strategy') or output.get('strategy')
-        # If strategy is claimed to be COST_OPTIMIZED, we MUST see token usage
         if strategy == 'COST_OPTIMIZED':
-            total_tokens = output.get('total_tokens', 0)
-            if not total_tokens and output.get('batch_split_occurred'):
-                # Paradox: Split occurred (implies processing) but 0 tokens recorded
-                return False, "False Positive: Batch split reported but 0 tokens tracked"
+            # v3.4 New Metric: total_tokens_calculated
+            tokens = output.get('total_tokens_calculated') or output.get('total_tokens', 0)
             
-    # 2. Speed Guardrail: High branch count must trigger splitting
-    if 'SPEED_GUARDRAIL' in scenario:
-        branch_count = output.get('branch_count', 0)
-        batch_count = output.get('batch_count', 0)
-        # If we have many branches (e.g. 100+), we expect batching
-        if branch_count > 50 and batch_count <= 1:
-             return False, f"False Positive: {branch_count} branches but no batch splitting detected"
+            if tokens == 0 or tokens is None:
+                return False, "False Positive: COST_OPTIMIZED reported but 0 tokens calculated"
+                
+            # Cross-validate with batching
+            batch_count = output.get('batch_count_actual') or output.get('batch_count', 0)
+            if batch_count > 1 and tokens < 100:
+                 return False, f"Logical Contradiction: {batch_count} batches for only {tokens} tokens"
 
+    # 3. Speed Guardrail: High branch count must trigger splitting
+    if 'SPEED_GUARDRAIL' in scenario:
+        branch_count = output.get('branch_count') or _get_recursive_value(output, ['scheduling_metadata', 'total_branches']) or 0
+        batch_count = output.get('batch_count_actual') or output.get('batch_count') or 0
+        
+        # If we have many branches (e.g. 50+), we expect batching or specific metadata
+        if branch_count > 50 and batch_count <= 1:
+             return False, f"False Positive: {branch_count} branches but no batch splitting detected (Batches: {batch_count})"
+             
     return True, "Integrity OK"
 
 def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], execution_arn: str = "") -> Dict[str, Any]:
@@ -342,16 +366,11 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
         # [Fix] S3 path can be in multiple locations - check deeper paths
         # Check in output, execution_result, and nested state_data
         has_s3_reference = (
-            's3://' in out_str or 
-            'state_s3_path' in out_str or 
-            'final_state_s3_path' in out_str or
-            (isinstance(output, dict) and output.get('final_state_s3_path')) or
-            (isinstance(output, dict) and output.get('execution_result', {}).get('final_state_s3_path')) or
-            (isinstance(output, dict) and output.get('state_data', {}).get('state_s3_path')) or
-            # Also check for large payload marker indicating S3 should have been used
-            (isinstance(output, dict) and output.get('large_s3_result'))
+            output.get('large_s3_result') is True or
+            's3://' in out_str
         )
-        checks.append(_check("S3 Path Present", has_s3_reference, "Output should contain S3 reference"))
+        checks.append(_check("S3 Payload Integrity", has_s3_reference, 
+                           details="Should define large_s3_result=True or contain s3:// path"))
         
     # D. Error Handling - 의도적 실패 테스트 (강화된 검증)
     elif scenario in ['ERROR_HANDLING', 'STANDARD_ERROR_HANDLING', 'DLQ_RECOVERY', 'STANDARD_DLQ_RECOVERY']:
@@ -387,16 +406,24 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
     elif 'COST_OPTIMIZED_PARALLEL' in scenario:
         checks.append(_check("Status Succeeded", status == 'SUCCEEDED'))
         
-        # Work Evidence: Token Tracking & Strategy
+        # [v3.4] Deep Evidence: Use explicit calculated metrics
         strategy = output.get('resource_policy_strategy') or output.get('strategy')
-        total_tokens = output.get('total_tokens', 0)
+        total_tokens = output.get('total_tokens_calculated') or output.get('total_tokens', 0)
+        limit = output.get('actual_concurrency_limit', 2000) # Default to 2000 from test config
         
         checks.append(_check("Strategy Correct", strategy == 'COST_OPTIMIZED', expected="COST_OPTIMIZED", actual=strategy))
         checks.append(_check("Token Tracking Active", total_tokens > 0, details=f"Tracked {total_tokens} tokens"))
         
-        # Verify batching logic if applicable (though this depends on branching factor)
-        if output.get('batch_split_occurred'):
-             checks.append(_check("Batch Splitting Applied", True))
+        # Verify batching logic strictly
+        batch_count = output.get('batch_count_actual') or output.get('batch_count', 0)
+        expected_batches = (total_tokens // limit) if limit > 0 else 1
+        
+        # Allow some buffer in expectation, but enforce splitting if load is high
+        should_split = total_tokens > limit
+        checks.append(_check("Batch Splitting Logic", 
+                           (batch_count > 1) if should_split else True,
+                           expected=f">1 batches (Load {total_tokens} > Limit {limit})",
+                           actual=f"{batch_count} batches"))
 
     # F. Speed Guardrail Test
     elif 'SPEED_GUARDRAIL' in scenario:
