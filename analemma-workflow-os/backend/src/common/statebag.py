@@ -22,8 +22,8 @@ class StateBag(dict):
         """
         val = super().get(key, default)
         
-        # 🛡️ Core Defense: If we got a value (val) but it is None, 
-        # AND the user provided a specific default (not None), 
+        # 🛡️ Core Defense: If we got a value (val) but it is None,
+        # AND the user provided a specific default (not None),
         # prefer the default to avoid NoneType crashes downstream.
         if val is None and default is not None:
             return default
@@ -32,7 +32,7 @@ class StateBag(dict):
 
     def __getitem__(self, key: str) -> Any:
         """
-        Safe item access: 
+        Safe item access:
         1. Suppress KeyError (return None)
         2. If key exists but value is None, return None (Standard behavior, but safe)
         """
@@ -56,3 +56,17 @@ def ensure_state_bag(state: Any) -> StateBag:
     # Fallback for unexpected types
     logger.warning(f"StateBag received non-dict type: {type(state)}. Returning empty StateBag.")
     return StateBag({})
+
+def normalize_inplace(event: Dict[str, Any], remove_state_data: bool = False):
+    """
+    🛡️ [v3.6] 외부 이벤트를 커널 규격으로 정규화
+    ImportModuleError를 해결하기 위해 이 함수가 반드시 이 파일에 정의되어야 함
+    """
+    if not isinstance(event, dict): return
+    
+    # StateBag 주입
+    if 'current_state' in event:
+        event['current_state'] = ensure_state_bag(event['current_state'])
+    
+    if remove_state_data and 'state_data' in event:
+        del event['state_data']
