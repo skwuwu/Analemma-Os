@@ -775,13 +775,15 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
         out_str = json.dumps(output)
         # [v3.9] Structured Multimodal Verification
         # 단순 문자열 매칭이 아닌 구조적 필드 확인 (False Positive 방지)
-        video_analysis = output.get('video_analysis') or output.get('video_result')
-        has_video_struct = isinstance(video_analysis, dict) or isinstance(video_analysis, list)
+        # [Fix] video_analysis_output 키도 확인
+        video_analysis = output.get('video_analysis') or output.get('video_result') or output.get('video_analysis_output')
+        has_video_struct = isinstance(video_analysis, dict) or isinstance(video_analysis, list) or isinstance(video_analysis, str)
         
         # Fallback to loose match ONLY if structure missing and loose match is strong
         has_video_loose = (
             'video_chunks' in output or
-            'video_track' in out_str.lower()
+            'video_track' in out_str.lower() or
+            'video_analysis_output' in output
         )
         
         image_analysis = output.get('image_analysis') or output.get('spec_sheet_analysis')

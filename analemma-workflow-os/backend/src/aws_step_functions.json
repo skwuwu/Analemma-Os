@@ -578,8 +578,8 @@
         {
           "Variable": "$.execution_result.status",
           "StringEquals": "SEQUENTIAL_BRANCH",
-          "Comment": "Single branch optimization: skip parallel execution",
-          "Next": "CheckForNextSegment"
+          "Comment": "Single branch optimization: use inner_partition_map for sequential execution",
+          "Next": "PrepareSequentialBranch"
         },
         {
           "Variable": "$.execution_result.status",
@@ -598,6 +598,39 @@
         }
       ],
       "Default": "PublishSucceededEvent"
+    },
+    "PrepareSequentialBranch": {
+      "Type": "Pass",
+      "Comment": "[SEQUENTIAL_BRANCH] Replace partition_map with inner_partition_map for sequential branch execution",
+      "Parameters": {
+        "workflow_config.$": "$.state_data.workflow_config",
+        "current_state.$": "$.execution_result.final_state",
+        "state_s3_path.$": "$.execution_result.final_state_s3_path",
+        "partition_map.$": "$.execution_result.inner_partition_map",
+        "partition_map_s3_path": "",
+        "segment_manifest.$": "$.state_data.segment_manifest",
+        "segment_manifest_s3_path.$": "$.state_data.segment_manifest_s3_path",
+        "total_segments.$": "$.execution_result.inner_segment_count",
+        "ownerId.$": "$.state_data.ownerId",
+        "segment_to_run": 0,
+        "idempotency_key.$": "$.state_data.idempotency_key",
+        "quota_reservation_id.$": "$.state_data.quota_reservation_id",
+        "workflowId.$": "$.state_data.workflowId",
+        "max_concurrency.$": "$.state_data.max_concurrency",
+        "distributed_mode.$": "$.state_data.distributed_mode",
+        "state_durations.$": "$.state_data.state_durations",
+        "last_update_time.$": "$.state_data.last_update_time",
+        "start_time.$": "$.state_data.start_time",
+        "state_history.$": "$.state_data.state_history",
+        "max_loop_iterations.$": "$.state_data.max_loop_iterations",
+        "max_branch_iterations.$": "$.state_data.max_branch_iterations",
+        "loop_counter.$": "$.state_data.loop_counter",
+        "llm_segments.$": "$.state_data.llm_segments",
+        "hitp_segments.$": "$.state_data.hitp_segments",
+        "sequential_branch_id.$": "$.execution_result.branch_id"
+      },
+      "ResultPath": "$.state_data",
+      "Next": "ExecuteSegment"
     },
     "ProcessParallelSegments": {
       "Type": "Map",
@@ -776,8 +809,8 @@
               {
                 "Variable": "$.execution_result.status",
                 "StringEquals": "SEQUENTIAL_BRANCH",
-                "Comment": "Sequential branch - continue with next inner segment",
-                "Next": "UpdateBranchSegment"
+                "Comment": "Sequential branch - switch to inner_partition_map",
+                "Next": "UpdateBranchToSequential"
               },
               {
                 "Variable": "$.execution_result.status",
@@ -829,6 +862,38 @@
             },
             "ResultPath": "$.state_data",
             "Next": "CheckBranchLoopLimit"
+          },
+          "UpdateBranchToSequential": {
+            "Type": "Pass",
+            "Comment": "[SEQUENTIAL_BRANCH] Replace partition_map with inner_partition_map in branch context",
+            "Parameters": {
+              "workflow_config.$": "$.state_data.workflow_config",
+              "current_state.$": "$.execution_result.final_state",
+              "state_history.$": "$.state_data.state_history",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "segment_to_run": 0,
+              "idempotency_key.$": "$.state_data.idempotency_key",
+              "quota_reservation_id.$": "$.state_data.quota_reservation_id",
+              "partition_map.$": "$.execution_result.inner_partition_map",
+              "branch_config.$": "$.state_data.branch_config",
+              "partition_map_s3_path": "",
+              "segment_manifest.$": "$.state_data.segment_manifest",
+              "segment_manifest_s3_path.$": "$.state_data.segment_manifest_s3_path",
+              "state_durations.$": "$.state_data.state_durations",
+              "last_update_time.$": "$.state_data.last_update_time",
+              "start_time.$": "$.state_data.start_time",
+              "loop_counter.$": "$.state_data.loop_counter",
+              "max_loop_iterations.$": "$.state_data.max_loop_iterations",
+              "max_branch_iterations.$": "$.state_data.max_branch_iterations",
+              "max_concurrency.$": "$.state_data.max_concurrency",
+              "distributed_mode.$": "$.state_data.distributed_mode",
+              "llm_segments.$": "$.state_data.llm_segments",
+              "hitp_segments.$": "$.state_data.hitp_segments",
+              "sequential_branch_id.$": "$.execution_result.branch_id"
+            },
+            "ResultPath": "$.state_data",
+            "Next": "ExecuteBranchSegment"
           },
           "CheckBranchLoopLimit": {
             "Type": "Choice",

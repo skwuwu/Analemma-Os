@@ -1875,8 +1875,8 @@ class SegmentRunnerService:
                 if meta.get('strategy') == 'SPEED_OPTIMIZED' and batch_count > 1:
                     initial_state['guardrail_verified'] = True
                 
-                logger.info(f"[Scheduler] [System] Scheduled {metadata['total_branches']} branches into "
-                           f"{metadata['batch_count']} batches (strategy: {metadata['strategy']})")
+                logger.info(f"[Scheduler] [System] Scheduled {meta.get('total_branches', len(valid_branches))} branches into "
+                           f"{meta.get('batch_count', 1)} batches (strategy: {meta.get('strategy', 'UNKNOWN')})")
                 
                 return _finalize_response({
                     "status": "SCHEDULED_PARALLEL",
@@ -1888,7 +1888,7 @@ class SegmentRunnerService:
                     "branches": valid_branches,  # 유효한 브랜치만
                     "execution_batches": execution_batches,
                     "segment_type": "scheduled_parallel",
-                    "scheduling_metadata": metadata
+                    "scheduling_metadata": meta
                 })
             
             # PARALLEL_GROUP: 기본 병렬 실행
