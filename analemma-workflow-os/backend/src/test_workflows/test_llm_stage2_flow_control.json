@@ -1,0 +1,298 @@
+{
+    "workflow_name": "test_llm_stage2_flow_control",
+    "description": "Stage 2: Flow Control (Map/Loop/HITL) + COST_GUARDRAIL - 토큰 제한 및 상태 복구 검증",
+    "version": "1.0.0",
+    "metadata": {
+        "stage": 2,
+        "guardrails": [
+            "COST_GUARDRAIL"
+        ],
+        "safety_limits": {
+            "max_iterations": 3,
+            "max_tokens_total": 10000,
+            "max_tokens_per_node": 2000,
+            "timeout_seconds": 180,
+            "action_on_exceed": "fail"
+        },
+        "time_machine_test": {
+            "enabled": true,
+            "verify_token_reset_on_rollback": true
+        }
+    },
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "워크플로우 시작",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_start_time"
+            }
+        },
+        {
+            "id": "init_token_counter",
+            "type": "operator_official",
+            "label": "토큰 카운터 초기화",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "accumulated_tokens": 0
+                        },
+                        {
+                            "iteration_count": 0
+                        },
+                        {
+                            "max_iterations": 3
+                        }
+                    ]
+                },
+                "output_key": "guardrail_state"
+            }
+        },
+        {
+            "id": "prepare_items",
+            "type": "operator_official",
+            "label": "3개 아이템 준비",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "items_to_process": [
+                                {
+                                    "id": "item_1",
+                                    "text": "Cloud computing enables scalable infrastructure.",
+                                    "quality_threshold": 0.7
+                                },
+                                {
+                                    "id": "item_2",
+                                    "text": "Machine learning transforms data into insights.",
+                                    "quality_threshold": 0.7
+                                },
+                                {
+                                    "id": "item_3",
+                                    "text": "Serverless architectures reduce operational overhead.",
+                                    "quality_threshold": 0.7
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "output_key": "input_items"
+            }
+        },
+        {
+            "id": "parallel_process",
+            "type": "for_each",
+            "label": "3개 아이템 병렬 가공",
+            "config": {
+                "input_list_key": "input_items.items_to_process",
+                "item_key": "current_item",
+                "max_iterations": 3,
+                "output_key": "processed_items",
+                "sub_node_config": {
+                    "type": "llm_chat",
+                    "config": {
+                        "provider": "gemini",
+                        "model": "gemini-2.0-flash",
+                        "system_prompt": "You are a text quality analyzer. Rate the given text and improve it if quality is below threshold. Always respond with a JSON object containing 'quality_score' (0-1), 'improved_text', and 'reason'.",
+                        "prompt_content": "Analyze and improve this text. Quality threshold: {{item.quality_threshold}}\n\nText: {{item.text}}\n\nRespond with JSON: {quality_score, improved_text, reason}",
+                        "max_tokens": 300,
+                        "temperature": 0.3,
+                        "output_key": "item_result"
+                    }
+                },
+                "cost_policy": {
+                    "max_tokens_per_node": 2000,
+                    "action_on_exceed": "fail"
+                }
+            }
+        },
+        {
+            "id": "aggregate_results",
+            "type": "operator_official",
+            "label": "결과 취합",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "processed_items",
+                "params": {
+                    "operation": "count"
+                },
+                "output_key": "processed_count"
+            }
+        },
+        {
+            "id": "check_quality",
+            "type": "operator_official",
+            "label": "품질 기준 검사",
+            "config": {
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.processed_count >= 3",
+                    "then": "quality_passed",
+                    "else": "quality_failed"
+                },
+                "output_key": "quality_check_result"
+            }
+        },
+        {
+            "id": "loop_decision",
+            "type": "operator_official",
+            "label": "재시도 결정 (COST_GUARDRAIL 체크)",
+            "config": {
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.quality_check_result == 'quality_passed' || $.guardrail_state.iteration_count >= $.guardrail_state.max_iterations",
+                    "then": "proceed_to_hitl",
+                    "else": "retry_processing"
+                },
+                "output_key": "loop_decision"
+            }
+        },
+        {
+            "id": "increment_counter",
+            "type": "operator_official",
+            "label": "반복 카운터 증가",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "iteration_incremented": true
+                        }
+                    ]
+                },
+                "output_key": "counter_update"
+            }
+        },
+        {
+            "id": "record_state_for_hitl",
+            "type": "operator_official",
+            "label": "HITL 전 상태 스냅샷",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "pre_hitl_timestamp"
+            }
+        },
+        {
+            "id": "hitl_approval",
+            "type": "hitl",
+            "label": "최종 승인 대기 (Human-in-the-Loop)",
+            "config": {
+                "prompt": "3개 아이템 처리 완료. 최종 승인하시겠습니까?",
+                "timeout_seconds": 120,
+                "options": [
+                    "approve",
+                    "reject",
+                    "rollback"
+                ],
+                "output_key": "hitl_decision"
+            }
+        },
+        {
+            "id": "handle_hitl_decision",
+            "type": "operator_official",
+            "label": "HITL 결정 처리",
+            "config": {
+                "strategy": "switch_case",
+                "input_key": "hitl_decision",
+                "params": {
+                    "cases": {
+                        "approve": "approved",
+                        "reject": "rejected",
+                        "rollback": "time_machine_triggered"
+                    },
+                    "default": "approved"
+                },
+                "output_key": "final_decision"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "label": "최종 결과 정리",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE"
+                        },
+                        {
+                            "stage": 2
+                        },
+                        {
+                            "test": "flow_control_cost_guardrail"
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "init_token_counter"
+        },
+        {
+            "source": "init_token_counter",
+            "target": "prepare_items"
+        },
+        {
+            "source": "prepare_items",
+            "target": "parallel_process"
+        },
+        {
+            "source": "parallel_process",
+            "target": "aggregate_results"
+        },
+        {
+            "source": "aggregate_results",
+            "target": "check_quality"
+        },
+        {
+            "source": "check_quality",
+            "target": "loop_decision"
+        },
+        {
+            "source": "loop_decision",
+            "target": "record_state_for_hitl",
+            "condition": "proceed_to_hitl"
+        },
+        {
+            "source": "loop_decision",
+            "target": "increment_counter",
+            "condition": "retry_processing"
+        },
+        {
+            "source": "increment_counter",
+            "target": "parallel_process"
+        },
+        {
+            "source": "record_state_for_hitl",
+            "target": "hitl_approval"
+        },
+        {
+            "source": "hitl_approval",
+            "target": "handle_hitl_decision"
+        },
+        {
+            "source": "handle_hitl_decision",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "test_mode": "flow_control",
+        "cost_guardrail_enabled": true
+    }
+}

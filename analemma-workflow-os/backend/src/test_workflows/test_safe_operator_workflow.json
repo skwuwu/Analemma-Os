@@ -1,0 +1,310 @@
+{
+    "workflow_name": "test_safe_operator_workflow",
+    "description": "E2E test workflow for Safe Operator (operator_official) featuring various transformation strategies",
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "Initialize Test Data",
+            "config": {
+                "strategy": "echo",
+                "input_key": "test_data",
+                "output_key": "raw_data"
+            }
+        },
+        {
+            "id": "parse_json",
+            "type": "operator_official",
+            "label": "Parse JSON String",
+            "config": {
+                "strategy": "json_parse",
+                "input": "{{json_input}}",
+                "output_key": "parsed_data"
+            }
+        },
+        {
+            "id": "filter_active",
+            "type": "operator_official",
+            "label": "Filter Active Items",
+            "config": {
+                "strategy": "list_filter",
+                "input_key": "items",
+                "params": {
+                    "condition": "$.status == 'active'"
+                },
+                "output_key": "active_items"
+            }
+        },
+        {
+            "id": "extract_names",
+            "type": "operator_official",
+            "label": "Extract Names from Items",
+            "config": {
+                "strategy": "list_map",
+                "input_key": "active_items",
+                "params": {
+                    "field": "name"
+                },
+                "output_key": "active_names"
+            }
+        },
+        {
+            "id": "count_items",
+            "type": "operator_official",
+            "label": "Count Active Items",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "active_items",
+                "params": {
+                    "operation": "count"
+                },
+                "output_key": "active_count"
+            }
+        },
+        {
+            "id": "sum_prices",
+            "type": "operator_official",
+            "label": "Sum Prices",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "active_items",
+                "params": {
+                    "operation": "sum",
+                    "field": "price"
+                },
+                "output_key": "total_price"
+            }
+        },
+        {
+            "id": "format_message",
+            "type": "operator_official",
+            "label": "Format Output Message",
+            "config": {
+                "strategy": "string_template",
+                "params": {
+                    "template": "Found {{active_count}} active items with total price: ${{total_price}}"
+                },
+                "output_key": "summary_message"
+            }
+        },
+        {
+            "id": "pick_fields",
+            "type": "operator_official",
+            "label": "Pick Specific Fields",
+            "config": {
+                "strategy": "pick_fields",
+                "input_key": "user_profile",
+                "params": {
+                    "fields": [
+                        "name",
+                        "email"
+                    ]
+                },
+                "output_key": "safe_profile"
+            }
+        },
+        {
+            "id": "check_threshold",
+            "type": "operator_official",
+            "label": "Check Price Threshold",
+            "config": {
+                "strategy": "if_else",
+                "input_key": "total_price",
+                "params": {
+                    "condition": "$.total_price > 100",
+                    "then": "high_value",
+                    "else": "normal"
+                },
+                "output_key": "price_tier"
+            }
+        },
+        {
+            "id": "generate_id",
+            "type": "operator_official",
+            "label": "Generate Transaction ID",
+            "config": {
+                "strategy": "uuid_generate",
+                "output_key": "transaction_id"
+            }
+        },
+        {
+            "id": "hash_data",
+            "type": "operator_official",
+            "label": "Hash Summary",
+            "config": {
+                "strategy": "hash_sha256",
+                "input_key": "summary_message",
+                "output_key": "summary_hash"
+            }
+        },
+        {
+            "id": "timestamp",
+            "type": "operator_official",
+            "label": "Add Timestamp",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "processed_at"
+            }
+        },
+        {
+            "id": "group_by_category",
+            "type": "operator_official",
+            "label": "Group Items by Category",
+            "config": {
+                "strategy": "list_group_by",
+                "input_key": "items",
+                "params": {
+                    "field": "category"
+                },
+                "output_key": "items_by_category"
+            }
+        },
+        {
+            "id": "sort_by_price",
+            "type": "operator_official",
+            "label": "Sort by Price (Descending)",
+            "config": {
+                "strategy": "list_sort",
+                "input_key": "active_items",
+                "params": {
+                    "field": "price",
+                    "order": "desc"
+                },
+                "output_key": "sorted_items"
+            }
+        },
+        {
+            "id": "math_calc",
+            "type": "operator_official",
+            "label": "Calculate Average Price",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "active_items",
+                "params": {
+                    "operation": "avg",
+                    "field": "price"
+                },
+                "output_key": "average_price"
+            }
+        },
+        {
+            "id": "round_average",
+            "type": "operator_official",
+            "label": "Round Average",
+            "config": {
+                "strategy": "math_round",
+                "input_key": "average_price",
+                "params": {
+                    "decimals": 2
+                },
+                "output_key": "average_price_rounded"
+            }
+        },
+        {
+            "id": "build_output",
+            "type": "operator_official",
+            "label": "Merge Final Output",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "success"
+                        },
+                        {
+                            "workflow": "test_safe_operator"
+                        }
+                    ]
+                },
+                "output_key": "final_metadata"
+            }
+        },
+        {
+            "id": "end",
+            "type": "operator_official",
+            "label": "Finalize",
+            "config": {
+                "strategy": "deep_set",
+                "params": {
+                    "path": "result.completed",
+                    "value": true
+                },
+                "output_key": "final_state"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "parse_json"
+        },
+        {
+            "source": "parse_json",
+            "target": "filter_active"
+        },
+        {
+            "source": "filter_active",
+            "target": "extract_names"
+        },
+        {
+            "source": "extract_names",
+            "target": "count_items"
+        },
+        {
+            "source": "count_items",
+            "target": "sum_prices"
+        },
+        {
+            "source": "sum_prices",
+            "target": "format_message"
+        },
+        {
+            "source": "format_message",
+            "target": "pick_fields"
+        },
+        {
+            "source": "pick_fields",
+            "target": "check_threshold"
+        },
+        {
+            "source": "check_threshold",
+            "target": "generate_id"
+        },
+        {
+            "source": "generate_id",
+            "target": "hash_data"
+        },
+        {
+            "source": "hash_data",
+            "target": "timestamp"
+        },
+        {
+            "source": "timestamp",
+            "target": "group_by_category"
+        },
+        {
+            "source": "group_by_category",
+            "target": "sort_by_price"
+        },
+        {
+            "source": "sort_by_price",
+            "target": "math_calc"
+        },
+        {
+            "source": "math_calc",
+            "target": "round_average"
+        },
+        {
+            "source": "round_average",
+            "target": "build_output"
+        },
+        {
+            "source": "build_output",
+            "target": "end"
+        }
+    ],
+    "start_node": "start"
+}

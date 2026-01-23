@@ -1,0 +1,80 @@
+{
+    "workflow_name": "test_llm_thinking_workflow",
+    "description": "LI-C: Gemini Thinking Mode 테스트 - Chain of Thought 추론",
+    "version": "1.0.0",
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "start_time"
+            }
+        },
+        {
+            "id": "thinking_llm_call",
+            "type": "llm_chat",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "enable_thinking": true,
+                "thinking_budget_tokens": 2048,
+                "system_prompt": "You are a logical reasoning expert. Show your step-by-step thinking process before giving the final answer.",
+                "prompt_content": "{{prompt}}",
+                "max_tokens": 1024,
+                "temperature": 0.2,
+                "output_key": "llm_output"
+            }
+        },
+        {
+            "id": "check_reasoning",
+            "type": "operator_official",
+            "config": {
+                "strategy": "regex_match",
+                "input_key": "llm_output",
+                "params": {
+                    "pattern": "(because|therefore|so|step|first|then|finally)",
+                    "case_insensitive": true
+                },
+                "output_key": "has_reasoning"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE",
+                            "test_type": "thinking_mode"
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "thinking_llm_call"
+        },
+        {
+            "source": "thinking_llm_call",
+            "target": "check_reasoning"
+        },
+        {
+            "source": "check_reasoning",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "prompt": "A farmer has 17 sheep. All but 9 die. How many sheep are left? Show your reasoning step by step."
+    }
+}

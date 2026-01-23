@@ -1,0 +1,125 @@
+{
+    "workflow_name": "test_llm_structured_workflow",
+    "description": "LI-B: Structured Output 테스트 - Gemini Response Schema",
+    "version": "1.0.0",
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "start_time"
+            }
+        },
+        {
+            "id": "structured_llm_call",
+            "type": "llm_chat",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a programming expert. Always respond with valid JSON matching the provided schema.",
+                "prompt_content": "{{prompt}}",
+                "max_tokens": 1024,
+                "temperature": 0.3,
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "languages": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {
+                                        "type": "string"
+                                    },
+                                    "use_case": {
+                                        "type": "string"
+                                    },
+                                    "popularity_rank": {
+                                        "type": "integer"
+                                    }
+                                },
+                                "required": [
+                                    "name",
+                                    "use_case"
+                                ]
+                            }
+                        }
+                    },
+                    "required": [
+                        "languages"
+                    ]
+                },
+                "output_key": "structured_output_raw"
+            }
+        },
+        {
+            "id": "parse_response",
+            "type": "operator_official",
+            "config": {
+                "strategy": "json_parse",
+                "input_key": "structured_output_raw",
+                "params": {
+                    "strict": false,
+                    "default": {
+                        "languages": []
+                    }
+                },
+                "output_key": "structured_output"
+            }
+        },
+        {
+            "id": "extract_names",
+            "type": "operator_official",
+            "config": {
+                "strategy": "list_map",
+                "input": "{{structured_output.languages}}",
+                "params": {
+                    "field": "name"
+                },
+                "output_key": "language_names"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE",
+                            "test_type": "structured_output"
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "structured_llm_call"
+        },
+        {
+            "source": "structured_llm_call",
+            "target": "parse_response"
+        },
+        {
+            "source": "parse_response",
+            "target": "extract_names"
+        },
+        {
+            "source": "extract_names",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "prompt": "List 3 programming languages with their main use cases."
+    }
+}

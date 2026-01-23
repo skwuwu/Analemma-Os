@@ -1,0 +1,424 @@
+{
+    "workflow_name": "test_llm_stage5_hyper_stress",
+    "description": "Stage 5: 최종 Hyper Stress - 3단계 재귀, Partial Failure, Context Caching, ALL_GUARDRAILS",
+    "version": "1.0.0",
+    "metadata": {
+        "stage": 5,
+        "guardrails": [
+            "COST_GUARDRAIL",
+            "SPEED_GUARDRAIL",
+            "LOOP_GUARDRAIL",
+            "RECURSION_GUARDRAIL"
+        ],
+        "safety_limits": {
+            "max_iterations": 10,
+            "max_tokens_total": 50000,
+            "max_concurrency": 5,
+            "max_recursion_depth": 3,
+            "timeout_seconds": 300,
+            "action_on_exceed": "graceful_stop"
+        },
+        "stress_test": {
+            "partial_failure_at_depth": 2,
+            "partial_failure_branch_id": "branch_2",
+            "verify_state_isolation": true,
+            "verify_context_caching": true,
+            "target_tei_percentage": 50
+        }
+    },
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "워크플로우 시작",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_start_time"
+            }
+        },
+        {
+            "id": "init_guardrails",
+            "type": "operator_official",
+            "label": "ALL_GUARDRAILS 초기화",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "guardrail_state": {
+                                "total_tokens_used": 0,
+                                "cached_tokens": 0,
+                                "current_depth": 0,
+                                "max_depth": 3,
+                                "iteration_count": 0,
+                                "max_iterations": 10,
+                                "concurrent_tasks": 0,
+                                "max_concurrent": 5
+                            }
+                        }
+                    ]
+                },
+                "output_key": "guardrails"
+            }
+        },
+        {
+            "id": "load_document",
+            "type": "operator_official",
+            "label": "대규모 프로젝트 문서 로드",
+            "config": {
+                "strategy": "default_value",
+                "input_key": "document_content",
+                "params": {
+                    "default": "[대규모 프로젝트 문서 - S3에서 로드 필요]",
+                    "treat_empty_as_null": true
+                },
+                "output_key": "loaded_document"
+            }
+        },
+        {
+            "id": "analyze_document_depth_0",
+            "type": "llm_chat",
+            "label": "[Depth 0] 문서 분석 및 문제점 추출",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "enable_context_caching": true,
+                "cache_ttl_seconds": 300,
+                "system_prompt": "You are a project analyzer. Identify issues from the document that require visual evidence. Be thorough but concise. Respond with JSON.",
+                "prompt_content": "Analyze this project document and identify issues that require image evidence for verification:\n\n{{loaded_document}}\n\nProvide a JSON array of issues with: id, title, severity (critical/high/medium), requires_image_evidence (boolean), image_hint.",
+                "max_tokens": 2048,
+                "temperature": 0.3,
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "issues": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string"
+                                    },
+                                    "title": {
+                                        "type": "string"
+                                    },
+                                    "severity": {
+                                        "type": "string"
+                                    },
+                                    "requires_image_evidence": {
+                                        "type": "boolean"
+                                    },
+                                    "image_hint": {
+                                        "type": "string"
+                                    }
+                                }
+                            }
+                        },
+                        "analysis_context_hash": {
+                            "type": "string"
+                        }
+                    }
+                },
+                "output_key": "document_analysis_raw"
+            }
+        },
+        {
+            "id": "parse_issues",
+            "type": "operator_official",
+            "label": "이슈 목록 파싱",
+            "config": {
+                "strategy": "json_parse",
+                "input_key": "document_analysis_raw",
+                "params": {
+                    "strict": false,
+                    "default": {
+                        "issues": []
+                    }
+                },
+                "output_key": "parsed_issues"
+            }
+        },
+        {
+            "id": "filter_image_required",
+            "type": "operator_official",
+            "label": "이미지 증거 필요 항목 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input": "{{parsed_issues.issues}}",
+                "params": {
+                    "condition": "$.requires_image_evidence == true"
+                },
+                "output_key": "issues_requiring_images"
+            }
+        },
+        {
+            "id": "depth_1_vision_analysis",
+            "type": "for_each",
+            "label": "[Depth 1] 이미지 증거 수집 (재귀 진입)",
+            "config": {
+                "input_list_key": "issues_requiring_images",
+                "item_key": "current_issue",
+                "max_iterations": 5,
+                "max_concurrency": 3,
+                "output_key": "depth_1_results",
+                "recursion_depth": 1,
+                "sub_node_config": {
+                    "type": "llm_chat",
+                    "config": {
+                        "provider": "gemini",
+                        "model": "gemini-2.0-flash",
+                        "enable_context_caching": true,
+                        "system_prompt": "You are analyzing an issue that requires visual evidence. Describe what evidence would be needed and provide a mock analysis result.",
+                        "prompt_content": "Issue: {{item.title}}\nSeverity: {{item.severity}}\nImage Hint: {{item.image_hint}}\n\nProvide analysis with: evidence_found (boolean), confidence (0-1), findings (string), requires_deeper_analysis (boolean).",
+                        "max_tokens": 512,
+                        "temperature": 0.3,
+                        "output_key": "vision_evidence"
+                    }
+                },
+                "partial_failure_config": {
+                    "enabled": true,
+                    "fail_branch_id": "branch_2",
+                    "error_type": "simulated_timeout"
+                }
+            }
+        },
+        {
+            "id": "check_partial_failure",
+            "type": "operator_official",
+            "label": "Partial Failure 체크 및 복구",
+            "config": {
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.depth_1_results.partial_failures",
+                    "then": "has_failures",
+                    "else": "all_success"
+                },
+                "output_key": "failure_check"
+            }
+        },
+        {
+            "id": "filter_needs_deeper",
+            "type": "operator_official",
+            "label": "심층 분석 필요 항목 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input_key": "depth_1_results",
+                "params": {
+                    "condition": "$.requires_deeper_analysis == true"
+                },
+                "output_key": "needs_depth_2"
+            }
+        },
+        {
+            "id": "depth_2_deep_analysis",
+            "type": "for_each",
+            "label": "[Depth 2] 심층 분석 (재귀 2단계)",
+            "config": {
+                "input_list_key": "needs_depth_2",
+                "item_key": "deep_item",
+                "max_iterations": 3,
+                "output_key": "depth_2_results",
+                "recursion_depth": 2,
+                "sub_node_config": {
+                    "type": "llm_chat",
+                    "config": {
+                        "provider": "gemini",
+                        "model": "gemini-2.0-flash",
+                        "enable_context_caching": true,
+                        "system_prompt": "You are performing deep analysis. This is Depth 2 of recursive analysis.",
+                        "prompt_content": "Deep analyze: {{item.findings}}\n\nProvide: root_cause, recommended_action, requires_human_approval (boolean).",
+                        "max_tokens": 512,
+                        "temperature": 0.2,
+                        "output_key": "deep_analysis"
+                    }
+                }
+            }
+        },
+        {
+            "id": "filter_needs_hitl",
+            "type": "operator_official",
+            "label": "HITL 필요 항목 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input_key": "depth_2_results",
+                "params": {
+                    "condition": "$.requires_human_approval == true"
+                },
+                "output_key": "needs_hitl"
+            }
+        },
+        {
+            "id": "depth_3_hitl_approval",
+            "type": "hitl",
+            "label": "[Depth 3] 인간 최종 결재 (재귀 3단계 + HITL)",
+            "config": {
+                "prompt": "심층 분석 완료. 다음 항목들에 대해 최종 승인이 필요합니다.",
+                "data_key": "needs_hitl",
+                "timeout_seconds": 180,
+                "options": [
+                    "approve_all",
+                    "approve_partial",
+                    "reject",
+                    "request_revision"
+                ],
+                "output_key": "hitl_decision",
+                "recursion_depth": 3
+            }
+        },
+        {
+            "id": "calculate_tei",
+            "type": "operator_official",
+            "label": "Token Efficiency Index 계산",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "tei_calculation": "cached_tokens / total_prompt_tokens * 100"
+                        }
+                    ]
+                },
+                "output_key": "tei_metadata"
+            }
+        },
+        {
+            "id": "aggregate_all_results",
+            "type": "operator_official",
+            "label": "전체 상태 병합 (Recursive StateBag 검증)",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "depth_0_analysis": "{{parsed_issues}}"
+                        },
+                        {
+                            "depth_1_results": "{{depth_1_results}}"
+                        },
+                        {
+                            "depth_2_results": "{{depth_2_results}}"
+                        },
+                        {
+                            "depth_3_hitl": "{{hitl_decision}}"
+                        }
+                    ]
+                },
+                "output_key": "merged_state"
+            }
+        },
+        {
+            "id": "generate_final_report",
+            "type": "llm_chat",
+            "label": "최종 아키텍처 리포트 생성",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "enable_context_caching": true,
+                "system_prompt": "You are generating a final architecture report. Synthesize all analysis from multiple depths.",
+                "prompt_content": "Generate a comprehensive architecture report based on:\n- Document Analysis: {{parsed_issues.issues}}\n- Visual Evidence: {{depth_1_results}}\n- Deep Analysis: {{depth_2_results}}\n- Human Approvals: {{hitl_decision}}\n\nInclude: executive_summary, critical_findings, recommendations, risk_assessment.",
+                "max_tokens": 2048,
+                "temperature": 0.4,
+                "output_key": "final_report_raw"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "label": "최종 결과 정리",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE"
+                        },
+                        {
+                            "stage": 5
+                        },
+                        {
+                            "test": "hyper_stress_all_guardrails"
+                        },
+                        {
+                            "recursion_depth_reached": 3
+                        },
+                        {
+                            "partial_failure_handled": true
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "init_guardrails"
+        },
+        {
+            "source": "init_guardrails",
+            "target": "load_document"
+        },
+        {
+            "source": "load_document",
+            "target": "analyze_document_depth_0"
+        },
+        {
+            "source": "analyze_document_depth_0",
+            "target": "parse_issues"
+        },
+        {
+            "source": "parse_issues",
+            "target": "filter_image_required"
+        },
+        {
+            "source": "filter_image_required",
+            "target": "depth_1_vision_analysis"
+        },
+        {
+            "source": "depth_1_vision_analysis",
+            "target": "check_partial_failure"
+        },
+        {
+            "source": "check_partial_failure",
+            "target": "filter_needs_deeper"
+        },
+        {
+            "source": "filter_needs_deeper",
+            "target": "depth_2_deep_analysis"
+        },
+        {
+            "source": "depth_2_deep_analysis",
+            "target": "filter_needs_hitl"
+        },
+        {
+            "source": "filter_needs_hitl",
+            "target": "depth_3_hitl_approval"
+        },
+        {
+            "source": "depth_3_hitl_approval",
+            "target": "calculate_tei"
+        },
+        {
+            "source": "calculate_tei",
+            "target": "aggregate_all_results"
+        },
+        {
+            "source": "aggregate_all_results",
+            "target": "generate_final_report"
+        },
+        {
+            "source": "generate_final_report",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "document_content": "# Analemma OS Architecture Document\n\n## Overview\nAnalemma OS is a complex distributed workflow system with multiple components.\n\n## Issues Identified\n1. Memory leak in segment_runner_service.py (requires screenshot of memory graph)\n2. Race condition in parallel state merge (requires diagram of timing)\n3. Security vulnerability in operator_runner exec() (requires code review image)\n4. Performance degradation under load (requires benchmark chart)\n5. UI rendering issue on mobile (requires mobile screenshot)\n\n## Architecture Diagrams\n[Referenced images are stored in S3]\n\n## Risk Assessment\nMultiple high-severity issues require visual verification before production deployment.",
+        "test_mode": "hyper_stress",
+        "all_guardrails_enabled": true
+    }
+}

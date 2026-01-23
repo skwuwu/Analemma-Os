@@ -733,8 +733,23 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             if provider == "bedrock":
                 # Bedrock fallback (existing logic)
                 meta["provider"] = "bedrock"
+                
+                # [Fix] Map Gemini model names to Bedrock equivalents
+                # When falling back from Gemini, the model variable may contain Gemini model names
+                bedrock_model_map = {
+                    "gemini-2.0-flash": "anthropic.claude-3-haiku-20240307-v1:0",
+                    "gemini-1.5-pro": "anthropic.claude-3-sonnet-20240229-v1:0",
+                    "gemini-1.5-flash": "anthropic.claude-3-haiku-20240307-v1:0",
+                    "gemini-1.5-flash-8b": "anthropic.claude-3-haiku-20240307-v1:0",
+                }
+                bedrock_model_id = bedrock_model_map.get(model, model)  # Use original if not in map
+                
+                # Log model mapping if applied
+                if bedrock_model_id != model:
+                    logger.info(f"Model mapped for Bedrock: {model} -> {bedrock_model_id}")
+                
                 resp = invoke_bedrock_model(
-                    model_id=model,
+                    model_id=bedrock_model_id,
                     system_prompt=system_prompt,
                     user_prompt=prompt,
                     max_tokens=max_tokens,
@@ -1726,10 +1741,106 @@ def register_node(name: str, func: Callable) -> None:
 # Register Nodes
 register_node("operator", operator_runner)
 register_node("operator_custom", operator_runner)  # 사용자 정의 코드/sets 전용 (MOCK_MODE에서만 exec 허용)
-# Placeholder for curated/safe official operator integrations (e.g., Gmail/GDrive templates)
+
+# -----------------------------------------------------------------------------
+# Safe Operator Official Runner - Production-ready built-in transformations
+# -----------------------------------------------------------------------------
 def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("operator_official is reserved for curated official integrations (e.g., Gmail/GDrive) and is not yet implemented.")
+    """
+    Execute safe, built-in transformation strategies without exec().
+    
+    Production-ready operator that provides 50+ transformation strategies:
+    - JSON/Object: json_parse, deep_get, pick_fields, merge_objects, etc.
+    - List: list_filter, list_map, list_reduce, list_sort, etc.
+    - String: string_template, regex_extract, string_case, etc.
+    - Type: to_int, to_date, coerce_type, etc.
+    - Control: if_else, switch_case, default_value, etc.
+    - Encoding: base64_encode, url_encode, hash_sha256, uuid_generate, etc.
+    - Math: math_round, math_clamp, math_expression, etc.
+    
+    Config schema:
+    {
+        "type": "operator_official",
+        "id": "my_transform",
+        "config": {
+            "strategy": "list_filter",       # Required: strategy name
+            "input": "{{items}}",            # Optional: input template (defaults to state)
+            "input_key": "items",            # Alternative: direct state key
+            "params": {                       # Strategy-specific parameters
+                "condition": "$.active == true"
+            },
+            "output_key": "filtered_items"   # Optional: output key (defaults to {node_id}_result)
+        }
+    }
+    """
+    from src.services.operators.operator_strategies import execute_strategy, get_available_strategies
+    
+    node_id = config.get("id", "operator_official")
+    
+    # Extract config (support both flat and nested config)
+    inner_config = config.get("config", {})
+    strategy = inner_config.get("strategy") or config.get("strategy")
+    
+    if not strategy:
+        raise ValueError(
+            f"operator_official node '{node_id}' requires 'strategy'. "
+            f"Available: {get_available_strategies()}"
+        )
+    
+    # Resolve input
+    input_template = inner_config.get("input") or config.get("input")
+    input_key = inner_config.get("input_key") or config.get("input_key")
+    
+    if input_template:
+        # Render template against state
+        input_value = _render_template(input_template, state)
+    elif input_key:
+        # Direct state key access
+        input_value = _get_nested_value(state, input_key)
+    else:
+        # Use entire state as input
+        input_value = state
+    
+    # Get strategy parameters
+    params = inner_config.get("params", {}) or config.get("params", {})
+    
+    # Render any templates in params
+    if isinstance(params, dict):
+        params = _render_template(params, state)
+    
+    # Execute strategy
+    try:
+        result = execute_strategy(strategy, input_value, params, state)
+    except AssertionError as e:
+        # Assert strategy failed - propagate as error
+        raise ValueError(f"Assertion failed in node '{node_id}': {e}")
+    except Exception as e:
+        # Check for fallback handling
+        error_handling = inner_config.get("error_handling") or config.get("error_handling", "fail")
+        fallback = inner_config.get("fallback") or config.get("fallback")
+        
+        if error_handling == "fallback" and fallback is not None:
+            logger.warning(f"[operator_official] {node_id} failed, using fallback: {e}")
+            result = _render_template(fallback, state) if isinstance(fallback, str) else fallback
+        elif error_handling == "skip":
+            logger.warning(f"[operator_official] {node_id} failed, skipping: {e}")
+            return {f"{node_id}_skipped": True, f"{node_id}_error": str(e)}
+        else:
+            raise
+    
+    # Build output
+    output_key = inner_config.get("output_key") or config.get("output_key") or f"{node_id}_result"
+    
+    output = {output_key: result}
+    
+    # Update step history
+    current_history = state.get("step_history", [])
+    output["step_history"] = current_history + [f"{node_id}:operator_official:{strategy}"]
+    
+    return output
+
 register_node("operator_official", operator_official_runner)
+register_node("safe_operator", operator_official_runner)  # Alias for operator_official
 register_node("llm_chat", llm_chat_runner)
 register_node("video_chunker", video_chunker_runner)
 register_node("aiModel", llm_chat_runner)  # aiModel은 llm_chat과 동일하게 처리

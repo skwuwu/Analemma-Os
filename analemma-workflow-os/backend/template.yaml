@@ -20,7 +20,7 @@ Parameters:
     Description: Deployment stage name (e.g., dev, prod).
   MockMode:
     Type: String
-    Default: "true"
+    Default: "false"
     AllowedValues: ["true", "false"]
     Description: Enable mock mode for LLM responses (true/false).
   CognitoIssuerUrl:
@@ -2298,6 +2298,87 @@ Resources:
   # 2. Dynamic concurrency control - reduces parallel load
   # 3. Payload compression and S3 offloading - reduces event size
   # 4. Warning notifications for very large workflows (>200 segments)
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🧠 LLM Simulator - Production LLM Integration Testing (MOCK_MODE=false)
+  # ═══════════════════════════════════════════════════════════════════════════
+  
+  # Verify LLM Test Lambda - 테스트 결과 검증
+  VerifyLLMTestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.verify_llm_test.lambda_handler"]
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          STAGE_NAME: !Ref StageName
+      Policies:
+        - CloudWatchPutMetricPolicy: {}
+
+  # LLM Simulator Trigger Lambda - Step Functions 실행 트리거
+  LLMSimulatorTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.llm_simulator.lambda_handler"]
+      Timeout: 900  # 15분 - 전체 테스트 스위트 실행
+      MemorySize: 512
+      Environment:
+        Variables:
+          STAGE_NAME: !Ref StageName
+          MOCK_MODE: "false"  # 🚨 실제 LLM 호출!
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !Ref StepFunctionDistributedOrchestrator
+          LLM_SIMULATOR_STATE_MACHINE_ARN: !Ref LLMSimulatorStateMachine
+          METRIC_NAMESPACE: "Analemma/LLMSimulator"
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt LLMSimulatorStateMachine.Name
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionOrchestrator.Name
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionDistributedOrchestrator.Name
+        - CloudWatchPutMetricPolicy: {}
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:DescribeExecution
+              - states:GetExecutionHistory
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*"
+
+  # LLM Simulator Step Functions State Machine
+  LLMSimulatorStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub "LLMSimulator-${StageName}"
+      DefinitionUri: src/aws_llm_simulator.json
+      DefinitionSubstitutions:
+        InitializeStateDataArn: !GetAtt InitializeStateDataFunction.Arn
+        SegmentRunnerArn: !GetAtt SegmentRunnerFunction.Arn
+        AggregateDistributedResultsArn: !GetAtt AggregateDistributedResultsFunction.Arn
+        VerifyLLMTestArn: !GetAtt VerifyLLMTestFunction.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref InitializeStateDataFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SegmentRunnerFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AggregateDistributedResultsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref VerifyLLMTestFunction
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - CloudWatchPutMetricPolicy: {}
 
   WorkflowsTableV3:
     Type: AWS::DynamoDB::Table

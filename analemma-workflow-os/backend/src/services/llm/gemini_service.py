@@ -242,6 +242,7 @@ GCP_LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 GCP_SERVICE_ACCOUNT_KEY = os.getenv("GCP_SERVICE_ACCOUNT_KEY", "")  # JSON string
 
 _vertexai_initialized = False
+_vertexai_init_error: Optional[str] = None  # Store initialization failure reason
 
 
 def _init_vertexai() -> bool:
@@ -253,7 +254,7 @@ def _init_vertexai() -> bool:
     - GCP_LOCATION: Vertex AI region (default: us-central1)
     - GCP_SERVICE_ACCOUNT_KEY: Service Account JSON (optional, uses ADC if not provided)
     """
-    global _vertexai_initialized
+    global _vertexai_initialized, _vertexai_init_error
     if _vertexai_initialized:
         return True
     
@@ -287,20 +288,25 @@ def _init_vertexai() -> bool:
                         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
             except Exception as e:
                 logger.warning(f"Failed to get Vertex AI config from Secrets Manager: {e}")
+                _vertexai_init_error = f"Secrets Manager fallback failed: {e}"
         
         if not project_id:
-            logger.error("GCP_PROJECT_ID not configured")
+            _vertexai_init_error = "GCP_PROJECT_ID not configured and Secrets Manager fallback failed"
+            logger.error(_vertexai_init_error)
             return False
         
         vertexai.init(project=project_id, location=GCP_LOCATION)
         _vertexai_initialized = True
+        _vertexai_init_error = None  # Clear any previous error
         logger.info(f"Vertex AI initialized: project={project_id}, location={GCP_LOCATION}")
         return True
         
-    except ImportError:
-        logger.error("google-cloud-aiplatform package not installed")
+    except ImportError as e:
+        _vertexai_init_error = f"google-cloud-aiplatform package not installed: {e}"
+        logger.error(_vertexai_init_error)
         return False
     except Exception as e:
+        _vertexai_init_error = f"Vertex AI init exception: {e}"
         logger.error(f"Failed to initialize Vertex AI: {e}")
         return False
 
@@ -311,17 +317,33 @@ def get_gemini_client():
     
     Returns:
         vertexai.generative_models module (for GenerativeModel creation)
+        
+    Raises:
+        RuntimeError: If Vertex AI initialization fails with clear error message
     """
-    global _gemini_client
+    global _gemini_client, _vertexai_init_error
     if _gemini_client is None:
         if not _init_vertexai():
+            # Provide detailed error message for debugging
+            error_details = _vertexai_init_error or "Unknown initialization error"
+            project_configured = bool(GCP_PROJECT_ID)
+            creds_configured = bool(GCP_SERVICE_ACCOUNT_KEY) or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            
+            error_msg = (
+                f"Vertex AI initialization failed. "
+                f"Details: {error_details}. "
+                f"GCP_PROJECT_ID configured: {project_configured}, "
+                f"Credentials configured: {creds_configured}. "
+                f"Check environment variables or AWS Secrets Manager configuration."
+            )
+            logger.error(error_msg)
             return None
         try:
             from vertexai import generative_models
             _gemini_client = generative_models
             logger.info("GeminiService: Vertex AI client initialized successfully")
         except ImportError:
-            logger.error("google-cloud-aiplatform package not installed")
+            logger.error("google-cloud-aiplatform package not installed. Run: pip install google-cloud-aiplatform")
             return None
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI client: {e}")

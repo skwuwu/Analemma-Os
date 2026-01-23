@@ -1,0 +1,273 @@
+{
+    "workflow_name": "test_llm_stage4_vision_map",
+    "description": "Stage 4: 멀티모달 중급 - 5장 이미지 병렬 분석 + SPEED_GUARDRAIL 동시성 제어 검증",
+    "version": "1.0.0",
+    "metadata": {
+        "stage": 4,
+        "guardrails": [
+            "SPEED_GUARDRAIL"
+        ],
+        "safety_limits": {
+            "max_iterations": 5,
+            "max_tokens_total": 20000,
+            "max_concurrency": 3,
+            "timeout_seconds": 180
+        },
+        "concurrency_test": {
+            "verify_max_concurrent": 3,
+            "verify_timestamp_separation": true,
+            "min_timestamp_gap_ms": 100
+        }
+    },
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "워크플로우 시작",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_start_time"
+            }
+        },
+        {
+            "id": "prepare_images",
+            "type": "operator_official",
+            "label": "5장 이미지 준비",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "image_batch": [
+                                {
+                                    "id": "img_1",
+                                    "uri": "{{image_uri_1}}",
+                                    "expected_category": "electronics"
+                                },
+                                {
+                                    "id": "img_2",
+                                    "uri": "{{image_uri_2}}",
+                                    "expected_category": "clothing"
+                                },
+                                {
+                                    "id": "img_3",
+                                    "uri": "{{image_uri_3}}",
+                                    "expected_category": "food"
+                                },
+                                {
+                                    "id": "img_4",
+                                    "uri": "{{image_uri_4}}",
+                                    "expected_category": "electronics"
+                                },
+                                {
+                                    "id": "img_5",
+                                    "uri": "{{image_uri_5}}",
+                                    "expected_category": "furniture"
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "output_key": "batch_config"
+            }
+        },
+        {
+            "id": "parallel_vision_analysis",
+            "type": "for_each",
+            "label": "5장 이미지 병렬 분석 (max_concurrency: 3)",
+            "config": {
+                "input_list_key": "batch_config.image_batch",
+                "item_key": "current_image",
+                "max_iterations": 5,
+                "max_concurrency": 3,
+                "output_key": "vision_results",
+                "sub_node_config": {
+                    "type": "llm_chat",
+                    "config": {
+                        "provider": "gemini",
+                        "model": "gemini-2.0-flash",
+                        "vision_enabled": true,
+                        "image_sources": [
+                            "{{item.uri}}"
+                        ],
+                        "system_prompt": "You are a product categorizer. Analyze the image and classify the product. Always respond with JSON.",
+                        "prompt_content": "Analyze this product image and provide:\n1. category (electronics/clothing/food/furniture/other)\n2. product_name\n3. estimated_price_range\n4. condition (new/used/unknown)\n5. confidence_score (0-1)\n\nRespond with JSON.",
+                        "max_tokens": 512,
+                        "temperature": 0.3,
+                        "response_schema": {
+                            "type": "object",
+                            "properties": {
+                                "category": {
+                                    "type": "string"
+                                },
+                                "product_name": {
+                                    "type": "string"
+                                },
+                                "estimated_price_range": {
+                                    "type": "string"
+                                },
+                                "condition": {
+                                    "type": "string"
+                                },
+                                "confidence_score": {
+                                    "type": "number"
+                                },
+                                "analysis_timestamp_ms": {
+                                    "type": "integer"
+                                }
+                            }
+                        },
+                        "output_key": "image_analysis"
+                    }
+                },
+                "speed_policy": {
+                    "max_concurrency": 3,
+                    "timeout_seconds": 90,
+                    "backoff_on_throttle": true
+                }
+            }
+        },
+        {
+            "id": "record_timestamps",
+            "type": "operator_official",
+            "label": "병렬 처리 타임스탬프 기록",
+            "config": {
+                "strategy": "list_map",
+                "input_key": "vision_results",
+                "params": {
+                    "field": "analysis_timestamp_ms"
+                },
+                "output_key": "execution_timestamps"
+            }
+        },
+        {
+            "id": "filter_electronics",
+            "type": "operator_official",
+            "label": "electronics 카테고리만 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input_key": "vision_results",
+                "params": {
+                    "condition": "$.category == 'electronics'"
+                },
+                "output_key": "electronics_items"
+            }
+        },
+        {
+            "id": "aggregate_categories",
+            "type": "operator_official",
+            "label": "카테고리별 그룹화",
+            "config": {
+                "strategy": "list_group_by",
+                "input_key": "vision_results",
+                "params": {
+                    "group_by": "category"
+                },
+                "output_key": "grouped_by_category"
+            }
+        },
+        {
+            "id": "count_results",
+            "type": "operator_official",
+            "label": "처리 결과 카운트",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "vision_results",
+                "params": {
+                    "operation": "count"
+                },
+                "output_key": "total_processed"
+            }
+        },
+        {
+            "id": "build_report",
+            "type": "operator_official",
+            "label": "리포트 취합",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "report_type": "category_analysis"
+                        },
+                        {
+                            "generated_at": "{{workflow_start_time}}"
+                        }
+                    ]
+                },
+                "output_key": "report_metadata"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "label": "최종 결과 정리",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE"
+                        },
+                        {
+                            "stage": 4
+                        },
+                        {
+                            "test": "vision_map_speed_guardrail"
+                        },
+                        {
+                            "concurrency_verified": true
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "prepare_images"
+        },
+        {
+            "source": "prepare_images",
+            "target": "parallel_vision_analysis"
+        },
+        {
+            "source": "parallel_vision_analysis",
+            "target": "record_timestamps"
+        },
+        {
+            "source": "record_timestamps",
+            "target": "filter_electronics"
+        },
+        {
+            "source": "filter_electronics",
+            "target": "aggregate_categories"
+        },
+        {
+            "source": "aggregate_categories",
+            "target": "count_results"
+        },
+        {
+            "source": "count_results",
+            "target": "build_report"
+        },
+        {
+            "source": "build_report",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "image_uri_1": "s3://analemma-workflows-dev/test-images/product_electronics_1.jpg",
+        "image_uri_2": "s3://analemma-workflows-dev/test-images/product_clothing_1.jpg",
+        "image_uri_3": "s3://analemma-workflows-dev/test-images/product_food_1.jpg",
+        "image_uri_4": "s3://analemma-workflows-dev/test-images/product_electronics_2.jpg",
+        "image_uri_5": "s3://analemma-workflows-dev/test-images/product_furniture_1.jpg",
+        "test_mode": "vision_map_parallel"
+    }
+}

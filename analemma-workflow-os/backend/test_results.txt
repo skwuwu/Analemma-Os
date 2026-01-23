@@ -1,0 +1,55 @@
+Traceback (most recent call last):
+  File "C:\Users\gimgy\OneDrive\諛뷀깢 ?붾㈃\Analemma-Os\analemma-workflow-os\backend\src\test_workflows\run_complex_analysis_test.py", line 362, in <module>
+============================================================
+Complex Document Analysis Workflow - Integration Test
+============================================================
+Mode: MOCK
+
+============================================================
+Testing Operator Strategies
+============================================================
+
+[Test 1] list_filter - High priority vulnerabilities
+  Input: 3 items
+  Output: 2 high priority items
+  ??PASSED
+
+[Test 2] list_map - Extract titles
+  Output: ['SQL Injection in search', 'JWT validation weakness', 'CORS too permissive']
+  ??PASSED
+
+[Test 3] list_reduce - Count
+  Output: 3
+  ??PASSED
+
+[Test 4] merge_objects - Combine metadata
+  Output: {'base': 'data', 'status': 'COMPLETE', 'version': '1.0'}
+  ??PASSED
+
+[Test 5] json_parse - Parse JSON string
+  Parsed 1254 bytes
+  ??PASSED
+
+[Test 6] timestamp - Generate ISO timestamp
+  Output: 2026-01-23T00:43:37.405288+00:00
+  ??PASSED
+
+[Test 7] uuid_generate
+  Output: 816005e6-88c2-4273-9f70-46ef3e8c8b55
+  ??PASSED
+
+============================================================
+All operator strategy tests PASSED!
+============================================================
+
+============================================================
+Testing LLM Runner (MOCK_MODE=True)
+============================================================
+    main()
+  File "C:\Users\gimgy\OneDrive\諛뷀깢 ?붾㈃\Analemma-Os\analemma-workflow-os\backend\src\test_workflows\run_complex_analysis_test.py", line 354, in main
+    test_llm_runner(mock_mode)
+  File "C:\Users\gimgy\OneDrive\諛뷀깢 ?붾㈃\Analemma-Os\analemma-workflow-os\backend\src\test_workflows\run_complex_analysis_test.py", line 193, in test_llm_runner
+    from handlers.core.main import llm_chat_runner
+  File "C:\Users\gimgy\OneDrive\諛뷀깢 ?붾㈃\Analemma-Os\analemma-workflow-os\backend\src\handlers\core\main.py", line 23, in <module>
+    from src.langchain_core_custom.outputs import LLMResult, Generation
+ModuleNotFoundError: No module named 'src'

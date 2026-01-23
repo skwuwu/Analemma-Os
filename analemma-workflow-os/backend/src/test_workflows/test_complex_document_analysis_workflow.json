@@ -1,0 +1,466 @@
+{
+    "workflow_name": "complex_document_analysis_workflow",
+    "description": "복합 기술 문서 분석 및 액션 아이템 정제 - Gemini 2.0 Thinking Mode, Safe Operator, Subgraph 통합 테스트",
+    "version": "1.0.0",
+    "metadata": {
+        "author": "Analemma OS",
+        "scenario": "50K token 기술 명세서 분석 → 보안 취약점/최적화 제안 추출 → 심층 분석",
+        "features_tested": [
+            "S3 Hydration",
+            "Gemini 2.0 Thinking Mode",
+            "Response Schema (Structured Output)",
+            "operator_official strategies",
+            "Subgraph Recursion",
+            "Recursive Aggregation"
+        ]
+    },
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "1. 워크플로우 초기화",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_start_time"
+            }
+        },
+        {
+            "id": "hydrate_document",
+            "type": "operator_official",
+            "label": "1-1. S3 문서 하이드레이션 확인",
+            "config": {
+                "strategy": "default_value",
+                "input_key": "document_content",
+                "params": {
+                    "default": "[문서가 로드되지 않음 - S3 하이드레이션 실패]",
+                    "treat_empty_as_null": true
+                },
+                "output_key": "hydrated_document"
+            }
+        },
+        {
+            "id": "validate_document",
+            "type": "operator_official",
+            "label": "1-2. 문서 유효성 검증",
+            "config": {
+                "strategy": "if_else",
+                "input_key": "hydrated_document",
+                "params": {
+                    "condition": "$.hydrated_document != '[문서가 로드되지 않음 - S3 하이드레이션 실패]'",
+                    "then": "valid",
+                    "else": "invalid"
+                },
+                "output_key": "document_status"
+            }
+        },
+        {
+            "id": "extract_issues",
+            "type": "llm_chat",
+            "label": "2. 지능적 핵심 추출 (Gemini Thinking Mode)",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "enable_thinking": true,
+                "thinking_budget_tokens": 4096,
+                "system_prompt": "You are an expert security analyst and system architect. Analyze the given technical specification document thoroughly.\n\nYour task:\n1. Identify security vulnerabilities (SQL injection, XSS, auth bypass, etc.)\n2. Find system optimization suggestions (performance, scalability, cost)\n3. Rate each finding with priority: Critical, High, Medium, Low\n4. Provide actionable recommendations\n\nRespond ONLY with valid JSON matching the schema.",
+                "prompt_content": "다음 Analemma OS 기술 명세서를 분석하여 보안 취약점과 시스템 최적화 제안을 추출하세요:\n\n{{hydrated_document}}",
+                "max_tokens": 4096,
+                "temperature": 0.3,
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "security_vulnerabilities": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string"
+                                    },
+                                    "title": {
+                                        "type": "string"
+                                    },
+                                    "description": {
+                                        "type": "string"
+                                    },
+                                    "priority": {
+                                        "type": "string",
+                                        "enum": [
+                                            "Critical",
+                                            "High",
+                                            "Medium",
+                                            "Low"
+                                        ]
+                                    },
+                                    "category": {
+                                        "type": "string"
+                                    },
+                                    "affected_component": {
+                                        "type": "string"
+                                    },
+                                    "recommendation": {
+                                        "type": "string"
+                                    },
+                                    "discovered_at": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "id",
+                                    "title",
+                                    "priority",
+                                    "category"
+                                ]
+                            }
+                        },
+                        "optimization_suggestions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {
+                                        "type": "string"
+                                    },
+                                    "title": {
+                                        "type": "string"
+                                    },
+                                    "description": {
+                                        "type": "string"
+                                    },
+                                    "priority": {
+                                        "type": "string",
+                                        "enum": [
+                                            "Critical",
+                                            "High",
+                                            "Medium",
+                                            "Low"
+                                        ]
+                                    },
+                                    "category": {
+                                        "type": "string"
+                                    },
+                                    "estimated_impact": {
+                                        "type": "string"
+                                    },
+                                    "implementation_effort": {
+                                        "type": "string"
+                                    },
+                                    "discovered_at": {
+                                        "type": "string"
+                                    }
+                                },
+                                "required": [
+                                    "id",
+                                    "title",
+                                    "priority",
+                                    "category"
+                                ]
+                            }
+                        },
+                        "summary": {
+                            "type": "object",
+                            "properties": {
+                                "total_vulnerabilities": {
+                                    "type": "integer"
+                                },
+                                "total_suggestions": {
+                                    "type": "integer"
+                                },
+                                "critical_count": {
+                                    "type": "integer"
+                                },
+                                "high_count": {
+                                    "type": "integer"
+                                }
+                            }
+                        }
+                    },
+                    "required": [
+                        "security_vulnerabilities",
+                        "optimization_suggestions"
+                    ]
+                },
+                "output_key": "llm_analysis_raw"
+            }
+        },
+        {
+            "id": "parse_analysis",
+            "type": "operator_official",
+            "label": "2-1. LLM 응답 파싱",
+            "config": {
+                "strategy": "json_parse",
+                "input_key": "llm_analysis_raw",
+                "params": {
+                    "strict": false,
+                    "default": {
+                        "security_vulnerabilities": [],
+                        "optimization_suggestions": [],
+                        "summary": {
+                            "total_vulnerabilities": 0,
+                            "total_suggestions": 0
+                        }
+                    }
+                },
+                "output_key": "analysis_data"
+            }
+        },
+        {
+            "id": "filter_high_priority_vulns",
+            "type": "operator_official",
+            "label": "3-1. 고위험 보안 취약점 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input": "{{analysis_data.security_vulnerabilities}}",
+                "params": {
+                    "condition": "$.priority in ['Critical', 'High']"
+                },
+                "output_key": "high_priority_vulnerabilities"
+            }
+        },
+        {
+            "id": "filter_high_priority_opts",
+            "type": "operator_official",
+            "label": "3-2. 고우선순위 최적화 제안 필터링",
+            "config": {
+                "strategy": "list_filter",
+                "input": "{{analysis_data.optimization_suggestions}}",
+                "params": {
+                    "condition": "$.priority in ['Critical', 'High']"
+                },
+                "output_key": "high_priority_optimizations"
+            }
+        },
+        {
+            "id": "format_vuln_dates",
+            "type": "operator_official",
+            "label": "3-3. 취약점 날짜 형식 통일",
+            "config": {
+                "strategy": "list_map",
+                "input_key": "high_priority_vulnerabilities",
+                "params": {
+                    "expression": "$.discovered_at"
+                },
+                "output_key": "vuln_dates_extracted"
+            }
+        },
+        {
+            "id": "count_high_priority",
+            "type": "operator_official",
+            "label": "3-4. 고위험 항목 카운트",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "filter_status": "completed"
+                        }
+                    ]
+                },
+                "output_key": "filter_metadata"
+            }
+        },
+        {
+            "id": "prepare_subgraph_input",
+            "type": "operator_official",
+            "label": "4-0. 서브그래프 입력 준비",
+            "config": {
+                "strategy": "list_concat",
+                "input_key": "high_priority_vulnerabilities",
+                "params": {
+                    "arrays": []
+                },
+                "output_key": "items_for_deep_analysis"
+            }
+        },
+        {
+            "id": "deep_analysis_subgraph",
+            "type": "for_each",
+            "label": "4. 심층 분석 서브그래프 (ForEach)",
+            "config": {
+                "input_list_key": "items_for_deep_analysis",
+                "item_key": "current_issue",
+                "max_iterations": 5,
+                "output_key": "deep_analysis_results",
+                "sub_node_config": {
+                    "type": "llm_chat",
+                    "config": {
+                        "provider": "gemini",
+                        "model": "gemini-2.0-flash",
+                        "system_prompt": "You are a senior security engineer. Provide detailed root cause analysis and remediation guide for the given security issue.",
+                        "prompt_content": "다음 보안 취약점에 대해 심층 분석을 수행하세요:\n\n제목: {{item.title}}\n설명: {{item.description}}\n우선순위: {{item.priority}}\n영향 컴포넌트: {{item.affected_component}}\n\n다음을 포함한 상세 분석 보고서를 작성하세요:\n1. 근본 원인 분석 (Root Cause)\n2. 잠재적 공격 시나리오\n3. 단계별 수정 가이드\n4. 검증 방법",
+                        "max_tokens": 1024,
+                        "temperature": 0.2,
+                        "output_key": "detailed_analysis"
+                    }
+                },
+                "metadata": {
+                    "segmentation_policy": "auto"
+                }
+            }
+        },
+        {
+            "id": "aggregate_analysis",
+            "type": "operator_official",
+            "label": "5-1. 심층 분석 결과 취합",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "deep_analysis_results",
+                "params": {
+                    "operation": "count"
+                },
+                "output_key": "analyzed_items_count"
+            }
+        },
+        {
+            "id": "build_final_report",
+            "type": "operator_official",
+            "label": "5-2. 최종 리포트 병합",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "report_version": "1.0"
+                        },
+                        {
+                            "generated_by": "Analemma OS Workflow Engine"
+                        }
+                    ]
+                },
+                "output_key": "report_metadata"
+            }
+        },
+        {
+            "id": "format_markdown_report",
+            "type": "llm_chat",
+            "label": "5-3. 마크다운 리포트 생성",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a report generator. Create a well-formatted Markdown report from the analysis results.",
+                "prompt_content": "다음 분석 결과를 바탕으로 최종 기술 분석 리포트를 마크다운 형식으로 작성하세요:\n\n## 워크플로우 시작 시간\n{{workflow_start_time}}\n\n## 분석 요약\n- 전체 취약점: {{analysis_data.summary.total_vulnerabilities}}개\n- 고위험 취약점: {{high_priority_vulnerabilities}}개 항목 상세 분석 완료\n- 최적화 제안: {{analysis_data.summary.total_suggestions}}개\n\n## 고위험 취약점 목록\n{{high_priority_vulnerabilities}}\n\n## 심층 분석 결과\n분석된 항목 수: {{analyzed_items_count}}\n\n{{deep_analysis_results}}\n\n리포트에 다음 섹션을 포함하세요:\n1. Executive Summary\n2. Critical Findings\n3. Detailed Analysis\n4. Recommendations\n5. Next Steps",
+                "max_tokens": 2048,
+                "temperature": 0.4,
+                "output_key": "final_markdown_report"
+            }
+        },
+        {
+            "id": "add_timestamp",
+            "type": "operator_official",
+            "label": "6-1. 완료 타임스탬프",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_end_time"
+            }
+        },
+        {
+            "id": "calculate_duration",
+            "type": "operator_official",
+            "label": "6-2. 실행 UUID 생성",
+            "config": {
+                "strategy": "uuid_generate",
+                "output_key": "execution_id"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "label": "6. 최종 상태 정리",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE"
+                        },
+                        {
+                            "workflow_name": "complex_document_analysis"
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "hydrate_document"
+        },
+        {
+            "source": "hydrate_document",
+            "target": "validate_document"
+        },
+        {
+            "source": "validate_document",
+            "target": "extract_issues"
+        },
+        {
+            "source": "extract_issues",
+            "target": "parse_analysis"
+        },
+        {
+            "source": "parse_analysis",
+            "target": "filter_high_priority_vulns"
+        },
+        {
+            "source": "parse_analysis",
+            "target": "filter_high_priority_opts"
+        },
+        {
+            "source": "filter_high_priority_vulns",
+            "target": "format_vuln_dates"
+        },
+        {
+            "source": "filter_high_priority_opts",
+            "target": "count_high_priority"
+        },
+        {
+            "source": "format_vuln_dates",
+            "target": "prepare_subgraph_input"
+        },
+        {
+            "source": "count_high_priority",
+            "target": "prepare_subgraph_input"
+        },
+        {
+            "source": "prepare_subgraph_input",
+            "target": "deep_analysis_subgraph"
+        },
+        {
+            "source": "deep_analysis_subgraph",
+            "target": "aggregate_analysis"
+        },
+        {
+            "source": "aggregate_analysis",
+            "target": "build_final_report"
+        },
+        {
+            "source": "build_final_report",
+            "target": "format_markdown_report"
+        },
+        {
+            "source": "format_markdown_report",
+            "target": "add_timestamp"
+        },
+        {
+            "source": "add_timestamp",
+            "target": "calculate_duration"
+        },
+        {
+            "source": "calculate_duration",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "document_content": "s3://analemma-workflows-dev/test-documents/tech_specification_50k.txt",
+        "user_query": "Analyze Analemma OS technical specification for security vulnerabilities and optimization opportunities"
+    }
+}

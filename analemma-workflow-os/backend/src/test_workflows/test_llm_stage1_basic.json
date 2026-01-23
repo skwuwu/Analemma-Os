@@ -1,0 +1,205 @@
+{
+    "workflow_name": "test_llm_stage1_basic",
+    "description": "Stage 1: LLM 동작 기초 - Response Schema 준수 및 json_parse 성능 검증",
+    "version": "1.0.0",
+    "metadata": {
+        "stage": 1,
+        "guardrails": [],
+        "safety_limits": {
+            "max_iterations": 1,
+            "max_tokens_total": 5000,
+            "timeout_seconds": 60
+        }
+    },
+    "nodes": [
+        {
+            "id": "start",
+            "type": "operator_official",
+            "label": "워크플로우 시작",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "iso"
+                },
+                "output_key": "workflow_start_time"
+            }
+        },
+        {
+            "id": "prepare_input",
+            "type": "operator_official",
+            "label": "입력 데이터 준비",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "test_stage": 1
+                        },
+                        {
+                            "test_name": "basic_llm_response_schema"
+                        }
+                    ]
+                },
+                "output_key": "test_metadata"
+            }
+        },
+        {
+            "id": "llm_structured_call",
+            "type": "llm_chat",
+            "label": "LLM Structured Output 호출",
+            "config": {
+                "provider": "gemini",
+                "model": "gemini-2.0-flash",
+                "system_prompt": "You are a text summarizer. Always respond with valid JSON matching the provided schema. Be concise and accurate.",
+                "prompt_content": "Summarize this text in structured format:\n\n{{input_text}}\n\nExtract: main topic, key points (max 3), sentiment (positive/neutral/negative), word count estimate.",
+                "max_tokens": 512,
+                "temperature": 0.3,
+                "response_schema": {
+                    "type": "object",
+                    "properties": {
+                        "main_topic": {
+                            "type": "string"
+                        },
+                        "key_points": {
+                            "type": "array",
+                            "items": {
+                                "type": "string"
+                            },
+                            "maxItems": 3
+                        },
+                        "sentiment": {
+                            "type": "string",
+                            "enum": [
+                                "positive",
+                                "neutral",
+                                "negative"
+                            ]
+                        },
+                        "word_count_estimate": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": [
+                        "main_topic",
+                        "key_points",
+                        "sentiment"
+                    ]
+                },
+                "output_key": "llm_raw_output"
+            }
+        },
+        {
+            "id": "record_parse_start",
+            "type": "operator_official",
+            "label": "파싱 시작 시간 기록",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "epoch_ms"
+                },
+                "output_key": "parse_start_ms"
+            }
+        },
+        {
+            "id": "json_parse",
+            "type": "operator_official",
+            "label": "JSON 파싱 (0.5초 이내 목표)",
+            "config": {
+                "strategy": "json_parse",
+                "input_key": "llm_raw_output",
+                "params": {
+                    "strict": false,
+                    "default": {
+                        "main_topic": "parse_failed",
+                        "key_points": [],
+                        "sentiment": "neutral"
+                    }
+                },
+                "output_key": "parsed_summary"
+            }
+        },
+        {
+            "id": "record_parse_end",
+            "type": "operator_official",
+            "label": "파싱 종료 시간 기록",
+            "config": {
+                "strategy": "timestamp",
+                "params": {
+                    "format": "epoch_ms"
+                },
+                "output_key": "parse_end_ms"
+            }
+        },
+        {
+            "id": "validate_schema",
+            "type": "operator_official",
+            "label": "스키마 필수 필드 검증",
+            "config": {
+                "strategy": "if_else",
+                "input_key": "parsed_summary",
+                "params": {
+                    "condition": "$.parsed_summary.main_topic != 'parse_failed'",
+                    "then": "schema_valid",
+                    "else": "schema_invalid"
+                },
+                "output_key": "schema_validation"
+            }
+        },
+        {
+            "id": "finalize",
+            "type": "operator_official",
+            "label": "결과 정리",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "status": "COMPLETE"
+                        },
+                        {
+                            "stage": 1
+                        },
+                        {
+                            "test": "basic_response_schema"
+                        }
+                    ]
+                },
+                "output_key": "final_status"
+            }
+        }
+    ],
+    "edges": [
+        {
+            "source": "start",
+            "target": "prepare_input"
+        },
+        {
+            "source": "prepare_input",
+            "target": "llm_structured_call"
+        },
+        {
+            "source": "llm_structured_call",
+            "target": "record_parse_start"
+        },
+        {
+            "source": "record_parse_start",
+            "target": "json_parse"
+        },
+        {
+            "source": "json_parse",
+            "target": "record_parse_end"
+        },
+        {
+            "source": "record_parse_end",
+            "target": "validate_schema"
+        },
+        {
+            "source": "validate_schema",
+            "target": "finalize"
+        }
+    ],
+    "start_node": "start",
+    "initial_state": {
+        "input_text": "Analemma OS is a revolutionary AI-first workflow automation platform. It enables complex business logic to be defined and executed as DAG-based workflows with LLM-powered nodes and native operators. Key features include Gemini Thinking Mode, Safe Operators with 62+ strategies, recursive StateBag for state isolation, and seamless Step Functions integration. The platform prioritizes security with Ring Protection and provides real-time observability through WebSocket notifications."
+    }
+}

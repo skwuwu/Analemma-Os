@@ -1,0 +1,157 @@
+{
+    "Comment": "LLM Integration Test Simulator - MOCK_MODE=false로 실제 LLM 호출 검증",
+    "StartAt": "InitializeTest",
+    "States": {
+        "InitializeTest": {
+            "Type": "Pass",
+            "Parameters": {
+                "execution_id.$": "$$.Execution.Id",
+                "start_time.$": "$$.Execution.StartTime",
+                "test_config.$": "$.test_config",
+                "scenario_key.$": "$.scenario_key",
+                "MOCK_MODE": "false"
+            },
+            "ResultPath": "$.test_metadata",
+            "Next": "LoadTestWorkflow"
+        },
+        "LoadTestWorkflow": {
+            "Type": "Task",
+            "Resource": "${InitializeStateDataArn}",
+            "Parameters": {
+                "workflowId.$": "$.workflowId",
+                "ownerId.$": "$.ownerId",
+                "test_workflow_config.$": "$.test_workflow_config",
+                "initial_state.$": "$.initial_state",
+                "MOCK_MODE": "false"
+            },
+            "ResultPath": "$.workflow_data",
+            "Next": "ExecuteWorkflow",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.TaskFailed",
+                        "Lambda.ServiceException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error_info",
+                    "Next": "HandleTestError"
+                }
+            ]
+        },
+        "ExecuteWorkflow": {
+            "Type": "Map",
+            "ItemsPath": "$.workflow_data.segments",
+            "MaxConcurrency": 1,
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "INLINE"
+                },
+                "StartAt": "ProcessSegment",
+                "States": {
+                    "ProcessSegment": {
+                        "Type": "Task",
+                        "Resource": "${SegmentRunnerArn}",
+                        "Parameters": {
+                            "segment.$": "$",
+                            "state_data.$": "$$.Map.Item.Value.state_data",
+                            "MOCK_MODE": "false"
+                        },
+                        "ResultPath": "$.segment_result",
+                        "End": true,
+                        "TimeoutSeconds": 300,
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "States.Timeout",
+                                    "Lambda.ServiceException"
+                                ],
+                                "IntervalSeconds": 5,
+                                "MaxAttempts": 2,
+                                "BackoffRate": 2
+                            }
+                        ]
+                    }
+                }
+            },
+            "ResultPath": "$.segment_results",
+            "Next": "AggregateResults",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error_info",
+                    "Next": "HandleTestError"
+                }
+            ]
+        },
+        "AggregateResults": {
+            "Type": "Task",
+            "Resource": "${AggregateDistributedResultsArn}",
+            "Parameters": {
+                "segment_results.$": "$.segment_results",
+                "test_metadata.$": "$.test_metadata"
+            },
+            "ResultPath": "$.final_state",
+            "Next": "VerifyTestResults",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error_info",
+                    "Next": "HandleTestError"
+                }
+            ]
+        },
+        "VerifyTestResults": {
+            "Type": "Task",
+            "Resource": "${VerifyLLMTestArn}",
+            "Parameters": {
+                "scenario_key.$": "$.test_metadata.scenario_key",
+                "final_state.$": "$.final_state",
+                "test_config.$": "$.test_metadata.test_config",
+                "execution_id.$": "$.test_metadata.execution_id"
+            },
+            "ResultPath": "$.verification_result",
+            "Next": "PrepareTestOutput"
+        },
+        "PrepareTestOutput": {
+            "Type": "Pass",
+            "Parameters": {
+                "status": "SUCCEEDED",
+                "scenario_key.$": "$.test_metadata.scenario_key",
+                "verification.$": "$.verification_result",
+                "final_state.$": "$.final_state",
+                "execution_metadata": {
+                    "execution_id.$": "$.test_metadata.execution_id",
+                    "start_time.$": "$.test_metadata.start_time",
+                    "mock_mode": "false"
+                }
+            },
+            "End": true
+        },
+        "HandleTestError": {
+            "Type": "Pass",
+            "Parameters": {
+                "status": "FAILED",
+                "scenario_key.$": "$.test_metadata.scenario_key",
+                "error.$": "$.error_info",
+                "execution_metadata": {
+                    "execution_id.$": "$.test_metadata.execution_id",
+                    "mock_mode": "false"
+                }
+            },
+            "End": true
+        }
+    }
+}
