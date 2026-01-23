@@ -1696,7 +1696,19 @@ class SegmentRunnerService:
         partition_map = event.get('partition_map')
         partition_map_s3_path = event.get('partition_map_s3_path')
         
-        # 🚀 [Hybrid Mode] Direct segment_config support for MAP_REDUCE/BATCHED modes
+        # � [Critical Fix] Branch Execution: partition_map fallback from branch_config
+        # ASL의 ProcessParallelSegments에서 branch_config에 전체 브랜치 정보가 전달됨
+        # partition_map이 null이면 branch_config.partition_map을 사용
+        branch_config = event.get('branch_config')
+        if not partition_map and branch_config and isinstance(branch_config, dict):
+            branch_partition_map = branch_config.get('partition_map')
+            if branch_partition_map:
+                logger.info(f"[Branch Execution] Using partition_map from branch_config "
+                           f"(branch_id: {branch_config.get('branch_id', 'unknown')}, "
+                           f"segments: {len(branch_partition_map)})")
+                partition_map = branch_partition_map
+        
+        # �🚀 [Hybrid Mode] Direct segment_config support for MAP_REDUCE/BATCHED modes
         direct_segment_config = event.get('segment_config')
         execution_mode = event.get('execution_mode')
         
