@@ -225,21 +225,21 @@ def extract_owner_id_from_event(event: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-def require_authentication(event: Dict[str, Any]) -> str:
+def extract_owner_id_from_fastapi_request(request) -> Optional[str]:
     """
-    Require authentication from API Gateway event and return owner_id.
-    Raises exception if authentication fails.
-
+    Extract owner_id from FastAPI Request object.
+    
     Args:
-        event: API Gateway event
-
+        request: FastAPI Request object
+        
     Returns:
-        User ID
-
-    Raises:
-        ValueError: If authentication fails
+        User ID or None (if authentication fails)
     """
-    owner_id = extract_owner_id_from_event(event)
-    if not owner_id:
-        raise ValueError("Authentication required: Missing or invalid Authorization header")
-    return owner_id
+    try:
+        # Convert FastAPI headers to dict format expected by extract_owner_id_from_event
+        headers = dict(request.headers)
+        fake_event = {"headers": headers}
+        return extract_owner_id_from_event(fake_event)
+    except Exception as e:
+        logger.error(f"Failed to extract owner_id from FastAPI request: {e}")
+        return None

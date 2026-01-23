@@ -367,7 +367,10 @@ def lambda_handler(event, context):
                  # 🛡️ [v2.6 P0 Fix] 유령 'code' 타입 박멸 로직
                  # 상위 데이터 오염을 런타임에서 교정
                  for seg in partition_result.get('partition_map', []):
-                     for node in seg.get('nodes', []):
+                     if seg is None:
+                         logger.warning("🛡️ [Self-Healing] Skipping None segment in partition_map")
+                         continue
+                     for node in (seg.get('nodes', []) if isinstance(seg, dict) else []):
                          if isinstance(node, dict) and node.get('type') == 'code':
                              logger.warning(f"🛡️ [Self-Healing] Aliasing 'code' to 'operator' for node {node.get('id')}")
                              node['type'] = 'operator'
@@ -430,7 +433,10 @@ def lambda_handler(event, context):
             
             # 🛡️ [v2.6 P0 Fix] 유령 'code' 타입 박멸 로직
             for seg in partition_map:
-                for node in seg.get('nodes', []):
+                if seg is None:
+                    logger.warning("🛡️ [Self-Healing] Skipping None segment in partition_map")
+                    continue
+                for node in (seg.get('nodes', []) if isinstance(seg, dict) else []):
                     if isinstance(node, dict) and node.get('type') == 'code':
                         logger.warning(f"🛡️ [Self-Healing] Aliasing 'code' to 'operator' for node {node.get('id')}")
                         node['type'] = 'operator'

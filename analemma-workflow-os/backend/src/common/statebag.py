@@ -19,9 +19,15 @@ class StateBag(dict):
         super().__init__(processed_data)
 
     def _wrap(self, value: Any) -> Any:
-        """Recursively upgrade dicts to StateBag"""
+        """
+        🛡️ Recursively upgrade dicts to StateBag, including inside lists.
+        Also filters out None elements from lists to prevent downstream errors.
+        """
         if isinstance(value, dict) and not isinstance(value, StateBag):
             return StateBag(value)
+        elif isinstance(value, list):
+            # 🛡️ [v3.8] Recursive list defense: wrap dicts inside lists, filter None
+            return [self._wrap(item) for item in value if item is not None]
         return value
 
     def __setitem__(self, key: str, value: Any):

@@ -4,7 +4,7 @@ import os
 import json
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
-from src.common.auth_utils import extract_owner_id_from_event
+from src.common.auth_utils import extract_owner_id_from_fastapi_request
 from src.services.task_service import TaskService
 from src.services.checkpoint_service import CheckpointService
 from src.services.time_machine_service import TimeMachineService
@@ -1231,7 +1231,7 @@ async def dismiss_notification(
         "message": "Notification dismissed successfully"
     }
     """
-    owner_id = extract_owner_id_from_event({"headers": dict(request.headers)}) or "default"
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
     
     service = NotificationCRUDService()
     

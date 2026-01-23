@@ -343,6 +343,10 @@ class SegmentRunnerService:
         foreach_memory = 0
         
         for node in nodes:
+            # 🛡️ [v3.8] None defense in nodes iteration
+            if node is None or not isinstance(node, dict):
+                continue
+                
             node_type = node.get('type', '')
             
             # [Debug] [KERNEL DEBUG] 노드 타입 변질 추적 - code 타입이 발견b되면 로그
@@ -743,6 +747,9 @@ class SegmentRunnerService:
         has_shared_resource = False
         
         for node in nodes:
+            # 🛡️ [v3.8] None defense in nodes iteration
+            if node is None or not isinstance(node, dict):
+                continue
             node_type = node.get('type', '')
             config = node.get('config', {})
             
@@ -1276,6 +1283,9 @@ class SegmentRunnerService:
         }
         
         for node in nodes:
+            # 🛡️ [v3.8] None defense in nodes iteration
+            if node is None or not isinstance(node, dict):
+                continue
             node_id = node.get('id', 'unknown')
             node_type = node.get('type', '')
             config = node.get('config', {})
@@ -1700,7 +1710,10 @@ class SegmentRunnerService:
         # 상위 람다(PartitionService 등)에서 잘못된 타입이 주입될 수 있으므로 런타임 교정
         if segment_config and isinstance(segment_config, dict):
             for node in segment_config.get('nodes', []):
-                if isinstance(node, dict) and node.get('type') == 'code':
+                # 🛡️ [v3.8] None defense
+                if node is None or not isinstance(node, dict):
+                    continue
+                if node.get('type') == 'code':
                     logger.warning(
                         f"[Guard] [Self-Healing] Aliasing 'code' to 'operator' for node {node.get('id')}. "
                         f"This indicates upstream data mutation - investigate PartitionService."

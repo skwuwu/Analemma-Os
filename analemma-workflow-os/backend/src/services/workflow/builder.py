@@ -607,15 +607,33 @@ class DynamicWorkflowBuilder:
             # This is handled specially in _add_nodes, so shouldn't reach here
             raise ValueError(f"Subgraph nodes should be handled in _add_nodes, not _get_node_handler")
 
+        # 🛡️ [v3.9] UI Marker nodes - passthrough (no execution needed)
+        # These are visual/structural markers from frontend, not executable nodes
+        UI_MARKER_TYPES = frozenset({"input", "output", "start", "end"})
+        if node_type in UI_MARKER_TYPES:
+            def _passthrough_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
+                node_id = node_def.get('id', f'unknown_{node_type}')
+                logger.debug(f"⏭️ UI Marker node: {node_id} (passthrough, no-op)")
+                return {}  # No state changes
+            return _passthrough_node
+
         # If no handler found
-        available_types = list(NODE_REGISTRY.keys()) + ["subgraph"]
-        raise ValueError(f"Unknown node type: {node_type}. Available types: {available_types}")
+        available_types = list(NODE_REGISTRY.keys()) + ["subgraph"] + list(UI_MARKER_TYPES)
+        raise ValueError(f"Unknown node type: {node_type}. Available types: {sorted(available_types)}")
 
     def _add_nodes(self):
         """Add all nodes from src.config to the graph, including subgraph nodes."""
         nodes = self.config.get("nodes", [])
         
         for node_def in nodes:
+            # 🛡️ [v3.8] None defense - skip None elements in nodes list
+            if node_def is None:
+                logger.warning("🛡️ [Self-Healing] Skipping None node_def in nodes list")
+                continue
+            if not isinstance(node_def, dict):
+                logger.warning(f"🛡️ [Self-Healing] Skipping non-dict node_def: {type(node_def)}")
+                continue
+                
             node_id = node_def.get("id")
             node_type = node_def.get("type")
 

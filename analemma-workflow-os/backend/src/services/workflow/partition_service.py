@@ -181,7 +181,9 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
         PartitionDepthExceededError: 재귀 깊이 초과 시
         ValueError: 노드 수 제한 초과 시
     """
-    nodes = {n["id"]: n for n in config.get("nodes", [])}
+    # 🛡️ [v3.8] None defense: filter out None elements from nodes list
+    raw_nodes = config.get("nodes", [])
+    nodes = {n["id"]: n for n in raw_nodes if n is not None and isinstance(n, dict) and "id" in n}
     edges = config.get("edges", []) if config.get("edges") else []
     
     # [Critical Fix] 노드 수 제한 검증
@@ -431,15 +433,107 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
             is_merge = len(non_hitp_in) > 1
             is_branch = len(outgoing_edges.get(node_id, [])) > 1
             
+            # 🛡️ [v3.8] 인라인 parallel_group 노드 감지
+            # 노드 자체가 type="parallel_group"이고 branches를 포함하는 경우
+            is_inline_parallel = (
+                node.get("type") == "parallel_group" and 
+                isinstance(node.get("branches"), list) and
+                len(node.get("branches", [])) > 0
+            )
+            
             # [Critical Fix #2] 합류점은 반드시 새 세그먼트 시작
             is_forced_start = node_id in forced_segment_starts
             
             # 세그먼트 분할 트리거 (is_forced_start 추가)
-            if (is_hitp_start or is_llm or is_merge or is_branch or is_forced_start) and local_current_nodes:
+            if (is_hitp_start or is_llm or is_merge or is_branch or is_forced_start or is_inline_parallel) and local_current_nodes:
                 if node_id not in local_current_nodes:
                     flush_local("normal")
             
-            # 병렬 그룹 처리
+            # 🛡️ [v3.8] 인라인 parallel_group 노드 처리 (우선순위 높음)
+            if is_inline_parallel:
+                flush_local("normal")  # 현재까지 저장
+                visited_nodes.add(node_id)
+                
+                # 인라인 branches를 그대로 사용
+                inline_branches = node.get("branches", [])
+                branches_data = []
+                
+                for i, branch in enumerate(inline_branches):
+                    if branch is None:
+                        logger.warning(f"🛡️ [Self-Healing] Skipping None branch in inline parallel_group {node_id}")
+                        continue
+                    
+                    branch_id = branch.get("id", f"B{i}")
+                    branch_nodes = branch.get("nodes", [])
+                    branch_edges = branch.get("edges", [])
+                    
+                    # 브랜치 내부를 서브 파티션으로 처리
+                    branch_partition = []
+                    if branch_nodes:
+                        # 브랜치 내부 노드들로 세그먼트 생성
+                        branch_nodes_map = {}
+                        for bn in branch_nodes:
+                            if bn is not None and isinstance(bn, dict) and "id" in bn:
+                                branch_nodes_map[bn["id"]] = bn
+                        
+                        if branch_nodes_map:
+                            branch_seg = create_segment(
+                                branch_nodes_map, 
+                                branch_edges, 
+                                "normal",
+                                config={"nodes": branch_nodes, "edges": branch_edges}
+                            )
+                            branch_partition.append(branch_seg)
+                    
+                    branch_data = {
+                        "branch_id": branch_id,
+                        "partition_map": branch_partition,
+                        "has_end": False,
+                        "target_node": branch_nodes[0].get("id") if branch_nodes else None
+                    }
+                    branches_data.append(branch_data)
+                    stats["branches"] += 1
+                
+                # Parallel Group 세그먼트 생성
+                if branches_data:
+                    stats["parallel_groups"] += 1
+                    p_seg_id = seg_id_gen.next()
+                    parallel_seg = {
+                        "id": p_seg_id,
+                        "type": "parallel_group",
+                        "branches": branches_data,
+                        "node_ids": [node_id],
+                        "branch_count": len(branches_data),
+                        "resource_policy": node.get("resource_policy", {}),  # 원본 resource_policy 보존
+                        "label": node.get("label", "")
+                    }
+                    local_segments.append(parallel_seg)
+                    
+                    # Aggregator 생성
+                    agg_seg_id = seg_id_gen.next()
+                    aggregator_seg = {
+                        "id": agg_seg_id,
+                        "type": "aggregator",
+                        "nodes": [],
+                        "edges": [],
+                        "node_ids": [],
+                        "source_parallel_group": p_seg_id
+                    }
+                    local_segments.append(aggregator_seg)
+                    
+                    # next 설정
+                    parallel_seg["next_mode"] = "default"
+                    parallel_seg["default_next"] = agg_seg_id
+                
+                # 다음 노드 탐색
+                for out_edge in outgoing_edges.get(node_id, []):
+                    tgt = out_edge.get("target")
+                    if tgt and tgt not in visited_nodes and tgt not in queue:
+                        if not (stop_at_nodes and tgt in stop_at_nodes):
+                            queue.append(tgt)
+                continue
+            
+            # 병렬 그룹 처리 (그래프 분기점 기반)
             if is_branch:
                 flush_local("normal")  # 현재까지 저장
                 

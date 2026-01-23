@@ -24,17 +24,27 @@ logger = logging.getLogger(__name__)
 # Schema Definitions
 # -----------------------------------------------------------------------------
 
-# 🛡️ [P2] 허용된 노드 타입 목록 - 잘못된 시나리오는 애초에 검증 단계에서 차단
+# 🛡️ [P2] 허용된 노드 타입 목록 - NODE_REGISTRY에 핸들러가 등록된 실행 가능한 타입들만 포함
+# ⚠️ 주의: branch, router, join, hitp, pause 등은 Edge로 처리되므로 노드 타입에서 제외
 ALLOWED_NODE_TYPES = {
-    # Core types
-    "operator", "llm_chat", "prompt", "retriever", "tool",
-    # Flow control
-    "branch", "router", "parallel_group", "aggregator", "join", "for_each",
-    # Special
-    "input", "output", "start", "end", "hitp", "pause",
+    # Core execution types
+    "operator", "operator_custom", "operator_official",
+    "llm_chat",
+    # Flow control (노드로 실행됨)
+    "parallel_group", "aggregator", "for_each", "nested_for_each",
     # Subgraph
-    "subgraph", "subgraph_ref",
+    "subgraph",
+    # Infrastructure & Data
+    "api_call", "db_query",
+    # Multimodal & Skills
+    "vision", "video_chunker", "skill_executor",
 }
+
+# 🔗 Edge로 처리되는 타입들 (노드 타입으로 사용 불가)
+EDGE_HANDLED_TYPES = {"branch", "router", "join", "hitp", "pause"}
+
+# 📌 UI 전용 마커 노드 (실행되지 않음)
+UI_MARKER_TYPES = {"input", "output", "start", "end"}
 
 # 🔄 별칭(Alias) 매핑 - field_validator에서 정규 타입으로 변환됨
 NODE_TYPE_ALIASES = {
@@ -49,6 +59,10 @@ class EdgeModel(BaseModel):
     source: constr(min_length=1, max_length=128)
     target: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64) = "edge"
+    # conditional_edge 지원 필드
+    router_func: Optional[str] = None
+    mapping: Optional[Dict[str, str]] = None
+    condition: Optional[str] = None
 
 
 class NodeModel(BaseModel):
@@ -80,10 +94,13 @@ class NodeModel(BaseModel):
         if v in NODE_TYPE_ALIASES:
             return NODE_TYPE_ALIASES[v]
         
-        if v not in ALLOWED_NODE_TYPES:
+        # 🛡️ All accepted types: executable nodes + UI markers (passthrough)
+        all_valid_types = ALLOWED_NODE_TYPES | UI_MARKER_TYPES
+        
+        if v not in all_valid_types:
             raise ValueError(
                 f"Unknown node type: '{v}'. "
-                f"Allowed types: {sorted(ALLOWED_NODE_TYPES)}. "
+                f"Allowed types: {sorted(all_valid_types)}. "
                 f"Aliases: {NODE_TYPE_ALIASES}"
             )
         
