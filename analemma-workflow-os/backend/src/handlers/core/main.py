@@ -388,7 +388,10 @@ def normalize_llm_usage(usage: Dict[str, Any], provider: str) -> Dict[str, Any]:
             normalized["input_tokens"] = usage.get("input_tokens", 0)
             normalized["output_tokens"] = usage.get("output_tokens", 0)
             normalized["cached_tokens"] = usage.get("cached_tokens", 0)
-            normalized["total_tokens"] = usage.get("total_tokens", 0)
+            # [FIX] Always calculate total_tokens to handle Mock responses with total_tokens=0
+            raw_total = usage.get("total_tokens", 0)
+            calculated_total = normalized["input_tokens"] + normalized["output_tokens"]
+            normalized["total_tokens"] = raw_total if raw_total > 0 else calculated_total
             normalized["estimated_cost_usd"] = usage.get("estimated_cost_usd", 0.0)
             
             # Calculate cost savings from caching (75% reduction for cached tokens)

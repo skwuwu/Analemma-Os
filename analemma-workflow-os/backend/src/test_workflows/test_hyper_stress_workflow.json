@@ -54,9 +54,12 @@
                                         },
                                         {
                                             "id": "alpha_hitl_inside_loop",
-                                            "type": "hitp",
+                                            "type": "operator",
+                                            "hitp": true,
                                             "label": "[극한] 루프 내부 HITL",
                                             "config": {
+                                                "language": "python",
+                                                "code": "print('[Alpha HITL] Loop-internal human checkpoint')\nstate['alpha_hitl_triggered'] = True\nhitl_positions = state.get('hitl_trigger_positions', [])\ncurrent_idx = state.get('_for_each_index', 0)\nif current_idx in hitl_positions:\n    state['alpha_hitl_count'] = state.get('alpha_hitl_count', 0) + 1\n    print(f'[Alpha] HITL triggered at index {current_idx}')",
                                                 "conditional_trigger": {
                                                     "expression": "state.get('_for_each_index', 0) in state.get('hitl_trigger_positions', [])",
                                                     "trigger_on_true": true
@@ -81,7 +84,7 @@
                                         }
                                     ],
                                     "edges": [
-                                        {"source": "alpha_pre_process", "target": "alpha_hitl_inside_loop"},
+                                        {"source": "alpha_pre_process", "target": "alpha_hitl_inside_loop", "type": "hitp"},
                                         {"source": "alpha_hitl_inside_loop", "target": "alpha_post_process"}
                                     ]
                                 }
@@ -119,9 +122,12 @@
                                         },
                                         {
                                             "id": "beta_hitl_inside_loop",
-                                            "type": "hitp",
+                                            "type": "operator",
+                                            "hitp": true,
                                             "label": "[극한] 루프 내부 HITL (Beta)",
                                             "config": {
+                                                "language": "python",
+                                                "code": "print('[Beta HITL] Loop-internal human checkpoint')\nstate['beta_hitl_triggered'] = True\nhitl_positions = state.get('hitl_trigger_positions', [])\ncurrent_idx = state.get('_for_each_index', 0)\nif current_idx in hitl_positions:\n    state['beta_hitl_count'] = state.get('beta_hitl_count', 0) + 1\n    print(f'[Beta] HITL triggered at index {current_idx}')",
                                                 "conditional_trigger": {
                                                     "expression": "state.get('_for_each_index', 0) in state.get('hitl_trigger_positions', [])",
                                                     "trigger_on_true": true
@@ -146,7 +152,7 @@
                                         }
                                     ],
                                     "edges": [
-                                        {"source": "beta_pre_process", "target": "beta_hitl_inside_loop"},
+                                        {"source": "beta_pre_process", "target": "beta_hitl_inside_loop", "type": "hitp"},
                                         {"source": "beta_hitl_inside_loop", "target": "beta_post_process"}
                                     ]
                                 }

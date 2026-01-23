@@ -67,11 +67,13 @@ class TokenUsage:
     estimated_cost_usd: float = 0.0
     
     def to_dict(self) -> Dict[str, Any]:
+        # [FIX] Always calculate total_tokens if not explicitly set
+        calculated_total = self.total_tokens if self.total_tokens > 0 else (self.input_tokens + self.output_tokens)
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cached_tokens": self.cached_tokens,
-            "total_tokens": self.total_tokens,
+            "total_tokens": calculated_total,
             "estimated_cost_usd": round(self.estimated_cost_usd, 6)
         }
 

@@ -106,9 +106,12 @@
     },
     {
       "id": "hitp_with_timeout",
-      "type": "hitp",
+      "type": "operator",
+      "hitp": true,
       "label": "타임아웃 Watchdog Timer",
       "config": {
+        "language": "python",
+        "code": "print('[HITL] Watchdog Timer checkpoint - testing timeout mechanism')\nstate['hitp_watchdog_triggered'] = True\nstate['hitp_status'] = 'awaiting_approval_or_timeout'",
         "wait_timeout_seconds": 10,
         "auto_approve_on_timeout": true,
         "approval_message": "Deadlock prevention test - Watchdog will auto-approve on timeout",
@@ -129,7 +132,7 @@
     {"source": "setup_deadlock_scenario", "target": "circular_wait_test"},
     {"source": "circular_wait_test", "target": "deadlock_resolver"},
     {"source": "deadlock_resolver", "target": "recursive_memory_cascade_test"},
-    {"source": "recursive_memory_cascade_test", "target": "hitp_with_timeout"},
+    {"source": "recursive_memory_cascade_test", "target": "hitp_with_timeout", "type": "hitp"},
     {"source": "hitp_with_timeout", "target": "deadlock_validator"}
   ],
   "start_node": "setup_deadlock_scenario",

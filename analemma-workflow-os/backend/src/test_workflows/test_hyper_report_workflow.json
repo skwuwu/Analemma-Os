@@ -41,6 +41,7 @@
         "output_key": "categorized_data",
         "max_iterations": 4,
         "sub_node_config": {
+          "id": "category_classifier",
           "type": "llm_chat",
           "config": {
             "provider": "google",
@@ -97,6 +98,7 @@
         "output_key": "detailed_article_analysis",
         "max_iterations": 20,
         "sub_node_config": {
+          "id": "article_analyzer",
           "type": "llm_chat",
           "config": {
             "provider": "google",
@@ -140,7 +142,13 @@
       "id": "human_approval_request",
       "node_name": "사용자 승인 대기 (HITL)",
       "description": "낮은 신뢰도 항목에 대한 사용자 검토 요청",
-      "type": "hitp",
+      "type": "operator",
+      "hitp": true,
+      "config": {
+        "language": "python",
+        "code": "print('[HITL] Waiting for human approval...')\nstate['hitp_message'] = 'Low confidence items detected. Please review and approve.'\nstate['hitp_status'] = 'awaiting_approval'\nresult = {'status': 'awaiting_human_approval', 'items_to_review': state.get('detailed_article_analysis', {}).get('low_confidence_items', [])}",
+        "output_key": "human_approval_result"
+      },
       "approval_config": {
         "timeout_seconds": 3600,
         "fallback_action": "skip_low_confidence",
@@ -255,7 +263,7 @@
     {"source": "category_dispatcher", "target": "saas_analyzer_with_failure"},
     {"source": "saas_analyzer_with_failure", "target": "foreach_article_analysis"},
     {"source": "foreach_article_analysis", "target": "low_confidence_filter"},
-    {"source": "low_confidence_filter", "target": "human_approval_request", "condition": "low_confidence"},
+    {"source": "low_confidence_filter", "target": "human_approval_request", "type": "hitp", "condition": "low_confidence"},
     {"source": "low_confidence_filter", "target": "aggregate_report", "condition": "high_confidence"},
     {"source": "human_approval_request", "target": "aggregate_report"},
     {"source": "aggregate_report", "target": "user_correction_processing"},

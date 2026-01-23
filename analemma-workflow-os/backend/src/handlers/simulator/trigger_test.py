@@ -32,6 +32,20 @@ TEST_WORKFLOW_MAPPINGS = {
     'MULTIMODAL_VISION': 'test_vision_workflow',  # Gemini Vision 멀티모달 이미지 분석
     'HYPER_STRESS_V3': 'test_hyper_stress_workflow',  # V3 하이퍼-스트레스 시나리오 (Nested Map, Multi-HITL)
     'MULTIMODAL_COMPLEX': 'extreme_product_page_workflow',  # 비디오 + 이미지 멀티모달 복합 분석
+    # 🔀 Kernel Dynamic Scheduling Test Workflows
+    'PARALLEL_SCHEDULER_TEST': 'test_parallel_scheduler_workflow',  # 병렬 스케줄러 RESOURCE_OPTIMIZED
+    'COST_OPTIMIZED_PARALLEL_TEST': 'test_cost_optimized_parallel_workflow',  # COST_OPTIMIZED 전략
+    'SPEED_GUARDRAIL_TEST': 'test_speed_guardrail_workflow',  # SPEED_OPTIMIZED 가드레일
+    'SHARED_RESOURCE_ISOLATION_TEST': 'test_shared_resource_isolation_workflow',  # 공유 자원 격리
+    # 🔥 OS Edge Case Test Workflows
+    'RACE_CONDITION_TEST': 'test_race_condition_workflow',
+    'DEADLOCK_DETECTION_TEST': 'test_deadlock_detection_workflow',
+    'MEMORY_LEAK_TEST': 'test_memory_leak_workflow',
+    'SPLIT_PARADOX_TEST': 'test_split_paradox_workflow',
+    # 🛡️ Ring Protection & Time Machine
+    'RING_PROTECTION_ATTACK_TEST': 'test_ring_protection_attack_workflow',
+    'TIME_MACHINE_HYPER_STRESS': 'test_time_machine_hyper_stress_workflow',
+    'SELF_HEALING_TEST': 'test_self_healing_workflow',
 }
 
 
@@ -258,6 +272,37 @@ SCENARIO_CONFIG = {
             'multimodal_test_enabled': True
         }
     },
+    
+    # 🔀 Kernel Dynamic Scheduling Scenarios
+    'PARALLEL_SCHEDULER_TEST': {
+        'test_keyword': 'PARALLEL_SCHEDULER_TEST',
+        'input_data': {'resource_policy_strategy': 'RESOURCE_OPTIMIZED'}
+    },
+    'COST_OPTIMIZED_PARALLEL_TEST': {
+        'test_keyword': 'COST_OPTIMIZED_PARALLEL_TEST',
+        'input_data': {'resource_policy_strategy': 'COST_OPTIMIZED'}
+    },
+    'SPEED_GUARDRAIL_TEST': {
+        'test_keyword': 'SPEED_GUARDRAIL_TEST',
+        'input_data': {
+            'guardrail_test': True,
+            'resource_policy_strategy': 'SPEED_OPTIMIZED',
+            'force_branch_count': 120,
+            'concurrency_limit': 10
+        }
+    },
+    'SHARED_RESOURCE_ISOLATION_TEST': {
+        'test_keyword': 'SHARED_RESOURCE_ISOLATION_TEST',
+        'input_data': {'shared_resource_test': True}
+    },
+    # 🔥 OS Edge Case Scenarios
+    'RACE_CONDITION_TEST': {'test_keyword': 'RACE_CONDITION_TEST'},
+    'DEADLOCK_DETECTION_TEST': {'test_keyword': 'DEADLOCK_DETECTION_TEST'},
+    'MEMORY_LEAK_TEST': {'test_keyword': 'MEMORY_LEAK_TEST'},
+    'SPLIT_PARADOX_TEST': {'test_keyword': 'SPLIT_PARADOX_TEST'},
+    'RING_PROTECTION_ATTACK_TEST': {'test_keyword': 'RING_PROTECTION_ATTACK_TEST'},
+    'TIME_MACHINE_HYPER_STRESS': {'test_keyword': 'TIME_MACHINE_HYPER_STRESS'},
+    'SELF_HEALING_TEST': {'test_keyword': 'SELF_HEALING_TEST'},
     
     # Standard SFN Scenarios
     'STANDARD_HAPPY_PATH': {'test_keyword': 'COMPLETE'},
