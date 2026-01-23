@@ -1565,10 +1565,13 @@ class SegmentRunnerService:
             for key, value in standard_metadata.items():
                 res[key] = value
             
-            # [Guard] [v3.10] Ensure inner_partition_map always exists (required by ASL ResultSelector)
-            # When segment_type is "final", branches/inner_partition_map may be null, but ASL expects the field
-            res.setdefault('inner_partition_map', [])
+            # [Guard] [v3.10] Ensure ASL ResultSelector required fields always exist
+            # Step Functions JSONPath fails if field is missing, so we ensure fields exist with appropriate values
+            # inner_partition_map: only has value for SEQUENTIAL_BRANCH, otherwise null
+            # branches: only has value for PARALLEL_GROUP, otherwise null  
+            res.setdefault('inner_partition_map', None)
             res.setdefault('branches', None)
+            res.setdefault('branch_id', None)
             
             # [Guard] [v3.9] ASL Passthrough Fields - 입력 이벤트의 메타데이터를 응답에 주입
             # ASL JSONPath는 Lambda 응답을 직접 파싱하므로 필드가 없으면 오류 발생

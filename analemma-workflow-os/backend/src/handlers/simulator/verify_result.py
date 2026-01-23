@@ -467,8 +467,9 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
                            expected=f">1 batches (Load {total_tokens} > Limit {limit})",
                            actual=f"{batch_count} batches"))
 
-    # F. Speed Guardrail Test
-    elif 'SPEED_GUARDRAIL' in scenario:
+    # F. Speed Guardrail Test (LEGACY - for STANDARD_SPEED_GUARDRAIL, not SPEED_GUARDRAIL_TEST)
+    # Note: SPEED_GUARDRAIL_TEST is handled separately at line ~907 with correct verification
+    elif 'SPEED_GUARDRAIL' in scenario and scenario != 'SPEED_GUARDRAIL_TEST':
         checks.append(_check("Status Succeeded", status == 'SUCCEEDED'))
         
         # Work Evidence: Batch Splitting & Guardrail verified

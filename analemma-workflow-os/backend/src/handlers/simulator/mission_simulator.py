@@ -648,7 +648,8 @@ def _load_test_workflow_config(test_keyword: str) -> dict:
     
     # Lambda 컨테이너 내 가능한 경로들
     possible_paths = [
-        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (context=./backend/src)
+        f"/var/task/src/test_workflows/{mapped_workflow_id}.json",  # Lambda container (Dockerfile: COPY . /var/task/)
+        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (legacy)
         f"{base_dir}/backend/src/test_workflows/{mapped_workflow_id}.json",  # Absolute path for local development
         f"./test_workflows/{mapped_workflow_id}.json",
         f"src/test_workflows/{mapped_workflow_id}.json",
