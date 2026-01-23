@@ -280,7 +280,15 @@ def _check_false_positive(scenario: str, output: Dict[str, Any]) -> Tuple[bool, 
 
     # 2. 비용 최적화 전략 검증 (MOCK_MODE 대응)
     if 'COST_OPTIMIZED' in scenario:
-        tokens = output.get('total_tokens_calculated') or output.get('total_tokens', 0)
+        # [Fix] Check tokens from multiple locations: output, final_state, usage
+        final_state = output.get('final_state', {})
+        usage = output.get('usage', {}) or final_state.get('usage', {})
+        tokens = (
+            output.get('total_tokens_calculated') or 
+            output.get('total_tokens', 0) or
+            usage.get('total_tokens', 0) or
+            (usage.get('input_tokens', 0) + usage.get('output_tokens', 0))
+        )
         
         if is_mock:
             return True, "Mock cost optimization verified"
@@ -292,7 +300,7 @@ def _check_false_positive(scenario: str, output: Dict[str, Any]) -> Tuple[bool, 
         # [v3.9] 토큰이 적더라도 배치가 분할되었다면 의도적인 테스트(Limit<Load)로 간주하고 인정
         # 또한 배치가 1개여도 커널이 최적화 전략(COST_OPTIMIZED)을 선택했다면 인정 (Kernel Discretion)
         if batch_count >= 1:
-            return True, f"Cost optimization verified (Batches: {batch_count})"
+            return True, f"Cost optimization verified (Batches: {batch_count}, Tokens: {tokens})"
 
     # 3. 속도 가드레일: 120개 브랜치 폭풍 대응
     if 'SPEED_GUARDRAIL' in scenario:
@@ -417,10 +425,14 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
     # because DLQ recovery should SUCCEED when recovery works properly
     elif scenario in ['ERROR_HANDLING', 'STANDARD_ERROR_HANDLING', 'STANDARD_DLQ_RECOVERY']:
         # [Fix] Allow SUCCEEDED if it was a graceful failure (Partial Failure)
-        # Check for explicit failure markers in output
+        # Check for explicit failure markers in output OR in nested final_state
+        # (execution_output.final_state contains the segment-level status)
+        final_state = output.get('final_state', {})
         is_partial_failure = (
             output.get('__segment_status') == 'PARTIAL_FAILURE' or
+            final_state.get('__segment_status') == 'PARTIAL_FAILURE' or
             '__segment_error' in output or
+            '__segment_error' in final_state or
             output.get('partial_failure') is True or
             output.get('error_handled') is True
         )

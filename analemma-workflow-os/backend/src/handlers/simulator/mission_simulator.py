@@ -647,9 +647,9 @@ def _load_test_workflow_config(test_keyword: str) -> dict:
     base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
     
     # Lambda 컨테이너 내 가능한 경로들
+    # Docker context is backend/src/, so files are at /var/task/ (NOT /var/task/src/)
     possible_paths = [
-        f"/var/task/src/test_workflows/{mapped_workflow_id}.json",  # Lambda container (Dockerfile: COPY . /var/task/)
-        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (legacy)
+        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (context=src/, COPY . /var/task/)
         f"{base_dir}/backend/src/test_workflows/{mapped_workflow_id}.json",  # Absolute path for local development
         f"./test_workflows/{mapped_workflow_id}.json",
         f"src/test_workflows/{mapped_workflow_id}.json",
