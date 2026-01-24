@@ -1939,8 +1939,15 @@ class SegmentRunnerService:
             try:
                 # 🛡️ [P0 Critical] Force offload for Aggregator/Parallel contexts
                 # These cases accumulate data from multiple branches, so always offload regardless of size
-                if force_offload:
-                    logger.info(f"[Kernel] [Force Offload] Aggregator/Parallel context - forcing S3 offload for all large fields")
+                # [Fix] Also force offload if running as a Parallel Branch (to keep Map output small)
+                is_parallel_branch = event.get('branch_config') is not None
+                
+                if force_offload or is_parallel_branch:
+                    if is_parallel_branch:
+                        logger.info(f"[Kernel] [Force Offload] Parallel Branch execution detected - forcing S3 offload to prevent Map payload explosion")
+                    else:
+                        logger.info(f"[Kernel] [Force Offload] Aggregator/Parallel context - forcing S3 offload for all large fields")
+                    
                     response_size = 999999  # Trigger offloading
                     SFN_SIZE_LIMIT = 0  # Force all large fields to S3
                 else:
