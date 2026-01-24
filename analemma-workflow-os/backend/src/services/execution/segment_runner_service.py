@@ -1527,7 +1527,6 @@ class SegmentRunnerService:
         """
         try:
             import boto3
-            import json
             import time
             
             sfn_client = boto3.client('stepfunctions')
@@ -1871,6 +1870,7 @@ class SegmentRunnerService:
             # 🛡️ [P0 Critical] Step 2: Ensure ASL JSONPath Required Fields FIRST
             # These fields MUST exist before any other processing to prevent Step Functions crashes
             res.setdefault('status', 'FAILED')  # Always have a status
+            res.setdefault('segment_type', 'normal')  # 👉 ASL requires this field!
             res.setdefault('new_history_logs', [])  # 👉 This was causing JSONPath errors!
             res.setdefault('final_state', {})
             res.setdefault('total_segments', _total_segments)
@@ -2178,7 +2178,6 @@ class SegmentRunnerService:
             if not partition_map and partition_map_s3_path:
                 try:
                     import boto3
-                    import json
                     s3 = boto3.client('s3')
                     bucket_name = partition_map_s3_path.replace("s3://", "").split("/")[0]
                     key_name = "/".join(partition_map_s3_path.replace("s3://", "").split("/")[1:])
@@ -2631,7 +2630,7 @@ class SegmentRunnerService:
         
         # 8. Handle Output State Storage
         # [Critical] Pre-check result_state size before S3 offload decision
-        import json
+        # Using global json module imported at top of file (Line 5)
         result_state_size = len(json.dumps(result_state, ensure_ascii=False).encode('utf-8')) if result_state else 0
         logger.info(f"[Large Payload Check] result_state size: {result_state_size} bytes ({result_state_size/1024:.1f}KB), "
                    f"s3_bucket: {'SET' if s3_bucket else 'NOT SET'}, threshold: {self.threshold}")
