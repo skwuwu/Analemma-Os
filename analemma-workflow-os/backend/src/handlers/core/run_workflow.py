@@ -497,7 +497,8 @@ def lambda_handler(event, context):
                 idemp_table.put_item(Item=claim_item, ConditionExpression='attribute_not_exists(idempotency_key)')
                 logger.info("Idempotency: claimed key %s (status=IN_PROGRESS, content_hash=%s)", tenant_scoped_key, content_hash)
             except ClientError as e:
-                err_code = e.response.get('Error', {}).get('Code')
+                # [Fix] None defense: e.response['Error']가 None일 수 있음
+                err_code = (e.response.get('Error') or {}).get('Code')
                 # If the key already exists, consult its status to decide next action
                 if err_code == 'ConditionalCheckFailedException':
                     existing = idemp_table.get_item(Key={'idempotency_key': tenant_scoped_key}).get('Item')

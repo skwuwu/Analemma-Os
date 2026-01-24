@@ -78,7 +78,8 @@ class WorkflowRepository:
             )
             return True, None
         except ClientError as e:
-            if e.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+            # [Fix] None defense: e.response['Error']가 None일 수 있음
+            if (e.response.get('Error') or {}).get('Code') == 'ConditionalCheckFailedException':
                 # Try reset when month changed
                 try:
                     self.users_table.update_item(
@@ -89,7 +90,8 @@ class WorkflowRepository:
                     )
                     return True, None
                 except ClientError as e2:
-                    if e2.response.get('Error', {}).get('Code') == 'ConditionalCheckFailedException':
+                    # [Fix] None defense: e2.response['Error']가 None일 수 있음
+                    if (e2.response.get('Error') or {}).get('Code') == 'ConditionalCheckFailedException':
                         return False, 'quota_exceeded'
                     logger.exception('DynamoDB consume_run reset failed')
                     raise

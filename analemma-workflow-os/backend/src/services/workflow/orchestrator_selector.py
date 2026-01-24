@@ -467,11 +467,13 @@ def test_orchestrator_selection(test_cases: Dict[str, Dict[str, Any]]) -> Dict[s
     for case_name, workflow_config in test_cases.items():
         try:
             arn, orchestrator_type, metadata = select_orchestrator(workflow_config)
+            # [Fix] None defense: metadata['complexity']가 None일 수 있음
+            complexity = metadata.get('complexity') or {}
             results[case_name] = {
                 'orchestrator_type': orchestrator_type,
                 'selection_reason': metadata.get('selection_reason'),
-                'complexity_score': metadata.get('complexity', {}).get('complexity_score'),
-                'estimated_events': metadata.get('complexity', {}).get('estimated_events')
+                'complexity_score': complexity.get('complexity_score'),
+                'estimated_events': complexity.get('estimated_events')
             }
         except Exception as e:
             results[case_name] = {'error': str(e)}

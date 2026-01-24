@@ -661,7 +661,8 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     exec_state = _hydrate_state_for_config(state, config)
     
     # 1. Get Retry Config
-    retry_config = config.get("retry_config", {})
+    # [Fix] None defense: config['retry_config']가 None일 수 있음
+    retry_config = config.get("retry_config") or {}
     max_retries = retry_config.get("max_retries", 0)  # Default 0 means single attempt
     base_delay = retry_config.get("base_delay", 1.0)
     
@@ -701,9 +702,10 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             
             # 2. Check Async Conditions
             # node_id already defined above check async
-            model = config.get("model") or config.get("llm_config", {}).get("model_id") or "gpt-3.5-turbo"
-            max_tokens = config.get("max_tokens") or config.get("llm_config", {}).get("max_tokens", 1024)
-            temperature = config.get("temperature") or config.get("llm_config", {}).get("temperature", 0.7)
+            # [Fix] None defense: config['llm_config']가 None일 수 있음
+            model = config.get("model") or (config.get("llm_config") or {}).get("model_id") or "gpt-3.5-turbo"
+            max_tokens = config.get("max_tokens") or (config.get("llm_config") or {}).get("max_tokens", 1024)
+            temperature = config.get("temperature") or (config.get("llm_config") or {}).get("temperature", 0.7)
             
             if should_use_async_llm(config):
                 logger.warning(f"🚨 Async required by heuristic for node {node_id}")
@@ -795,7 +797,8 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         text = str(resp)
                     
                     # Normalize usage statistics
-                    raw_usage = resp.get("metadata", {}).get("token_usage", {})
+                    # [Fix] None defense: resp['metadata']가 None일 수 있음
+                    raw_usage = (resp.get("metadata") or {}).get("token_usage", {})
                     usage = normalize_llm_usage(raw_usage, "gemini")
                     meta["provider"] = "gemini"
                     meta["multimodal"] = len(multimodal_parts) > 0
@@ -1428,11 +1431,12 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     """
     node_id = config.get("id", "nested_foreach")
     input_list_key = config.get("input_list_key", "")
-    nested_config = config.get("nested_config", {})
+    # [Fix] None defense: config['nested_config'], config['metadata']가 None일 수 있음
+    nested_config = config.get("nested_config") or {}
     output_key = config.get("output_key", "nested_results")
     max_outer = config.get("max_outer_iterations", 10)
     max_inner = config.get("max_inner_iterations", 5)
-    metadata = config.get("metadata", {})
+    metadata = config.get("metadata") or {}
     
     logger.info(f"🔄 Nested ForEach starting: {node_id}")
     
@@ -1452,7 +1456,8 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     
     # 내부 설정 추출
     inner_list_key = nested_config.get("input_list_key", "")
-    sub_node_config = nested_config.get("sub_node_config", {})
+    # [Fix] None defense: nested_config['sub_node_config']가 None일 수 있음
+    sub_node_config = nested_config.get("sub_node_config") or {}
     
     if not sub_node_config:
         logger.error(f"Nested ForEach: missing sub_node_config")
@@ -1573,7 +1578,8 @@ def route_draft_quality(state: Dict[str, Any]) -> str:
 def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Executes branches in parallel and merges results."""
     node_id = config.get("id", "parallel_group")
-    branches = config.get("config", {}).get("branches", [])
+    # [Fix] None defense: config['config']가 None일 수 있음
+    branches = (config.get("config") or {}).get("branches", [])
     
     if not branches:
         return {}
@@ -1865,7 +1871,8 @@ def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> D
     node_id = config.get("id", "operator_official")
     
     # Extract config (support both flat and nested config)
-    inner_config = config.get("config", {})
+    # [Fix] None defense: config['config']가 None일 수 있음
+    inner_config = config.get("config") or {}
     strategy = inner_config.get("strategy") or config.get("strategy")
     
     if not strategy:

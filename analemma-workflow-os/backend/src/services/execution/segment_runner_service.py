@@ -169,6 +169,82 @@ def _safe_get_total_segments(event: Dict[str, Any]) -> int:
     return 1
 
 
+def _normalize_node_config(node: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    [Option A] 노드 config에서 None 값을 빈 dict/list로 정규화
+
+    문제점: 프론트엔드나 DB에서 optional 필드가 null로 저장되면
+    Python에서 .get('key', {}).get('nested') 패턴이 실패함
+
+    해결책: 노드 실행 전에 None → {} 정규화
+    """
+    if not isinstance(node, dict):
+        return node or {}
+
+    # 정규화할 필드 목록 (None → {} or [])
+    DICT_FIELDS = [
+        'config', 'llm_config', 'sub_node_config', 'nested_config',
+        'retry_config', 'metadata', 'resource_policy', 'callbacks_config'
+    ]
+    LIST_FIELDS = [
+        'nodes', 'edges', 'branches', 'callbacks', 'input_variables'
+    ]
+
+    for field in DICT_FIELDS:
+        if field in node and node[field] is None:
+            node[field] = {}
+
+    for field in LIST_FIELDS:
+        if field in node and node[field] is None:
+            node[field] = []
+
+    # 재귀적으로 nested config도 정규화
+    if 'config' in node and isinstance(node['config'], dict):
+        _normalize_node_config(node['config'])
+    if 'sub_node_config' in node and isinstance(node['sub_node_config'], dict):
+        _normalize_node_config(node['sub_node_config'])
+    if 'nested_config' in node and isinstance(node['nested_config'], dict):
+        _normalize_node_config(node['nested_config'])
+
+    # nodes 배열 내부도 정규화
+    if 'nodes' in node and isinstance(node['nodes'], list):
+        for child_node in node['nodes']:
+            if isinstance(child_node, dict):
+                _normalize_node_config(child_node)
+
+    return node
+
+
+def _normalize_segment_config(segment_config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    [Option A] 세그먼트 config 전체를 정규화
+    """
+    if not isinstance(segment_config, dict):
+        return segment_config or {}
+
+    # 세그먼트 레벨 필드 정규화
+    if segment_config.get('nodes') is None:
+        segment_config['nodes'] = []
+    if segment_config.get('edges') is None:
+        segment_config['edges'] = []
+    if segment_config.get('branches') is None:
+        segment_config['branches'] = []
+
+    # 각 노드 정규화
+    for node in segment_config.get('nodes', []):
+        if isinstance(node, dict):
+            _normalize_node_config(node)
+
+    # 브랜치 내 노드도 정규화
+    for branch in segment_config.get('branches', []):
+        if isinstance(branch, dict):
+            for node in branch.get('nodes', []):
+                if isinstance(node, dict):
+                    _normalize_node_config(node)
+
+    return segment_config
+
+
 class SegmentRunnerService:
     def __init__(self, s3_bucket: Optional[str] = None):
         self.state_manager = StateManager()
@@ -770,9 +846,11 @@ class SegmentRunnerService:
                     if isinstance(items, list):
                         memory_mb += len(items) * 5
                         # for_each 내부에 LLM이 있으면 토큰 폭증
-                        sub_nodes = config.get('sub_node_config', {}).get('nodes', [])
+                        # [Fix] None defense: config['sub_node_config']가 None일 수 있음
+                        sub_nodes = (config.get('sub_node_config') or {}).get('nodes', [])
                         for sub_node in sub_nodes:
-                            if sub_node.get('type') in ('llm_chat', 'aiModel'):
+                            # [Fix] sub_node가 None일 수 있음
+                            if sub_node and sub_node.get('type') in ('llm_chat', 'aiModel'):
                                 tokens += len(items) * 5000  # 아이템당 5000 토큰 예상 (Aggressive buffer for tests)
                                 llm_calls += len(items)
             
@@ -1409,7 +1487,8 @@ class SegmentRunnerService:
         
         # Boto3 ClientError 체크
         if hasattr(error, 'response'):
-            error_code = error.response.get('Error', {}).get('Code', '')
+            # [Fix] None defense: error.response['Error']가 None일 수 있음
+            error_code = (error.response.get('Error') or {}).get('Code', '')
             for pattern in RETRYABLE_ERROR_PATTERNS:
                 if pattern in error_code:
                     return True
@@ -1864,7 +1943,10 @@ class SegmentRunnerService:
                     # Fallback to dynamic partitioning (handled in _resolve_segment_config)
             
             segment_config = self._resolve_segment_config(workflow_config, partition_map, segment_id)
-        
+
+        # [Option A] 세그먼트 config 정규화 - None 값을 빈 dict/list로 변환
+        segment_config = _normalize_segment_config(segment_config)
+
         # [Guard] [v2.6 P0 Fix] 'code' 타입 오염 방지 Self-Healing
         # 상위 람다(PartitionService 등)에서 잘못된 타입이 주입될 수 있으므로 런타임 교정
         if segment_config and isinstance(segment_config, dict):
@@ -2290,13 +2372,26 @@ class SegmentRunnerService:
             except (ValueError, TypeError):
                 loop_counter = None
 
+        # [Critical Fix] Distributed Map 모드에서는 무조건 S3 오프로딩
+        # 각 iteration 결과가 개별적으로는 작아도 Distributed Map이 모든 결과를
+        # 배열로 수집하면 256KB 제한을 초과할 수 있음
+        # [Fix] distributed_mode가 null(JSON)/None(Python)일 수 있으므로 명시적 True 체크
+        is_distributed_mode = event.get('distributed_mode') is True
+
+        if is_distributed_mode:
+            # Distributed Map: threshold=0으로 강제 오프로딩
+            effective_threshold = 0
+            logger.info(f"[Distributed Map] Forcing S3 offload for iteration result (distributed_mode=True)")
+        else:
+            effective_threshold = self.threshold
+
         final_state, output_s3_path = self.state_manager.handle_state_storage(
             state=result_state,
             auth_user_id=auth_user_id,
             workflow_id=workflow_id,
             segment_id=segment_id,
             bucket=s3_bucket,
-            threshold=self.threshold,
+            threshold=effective_threshold,
             loop_counter=loop_counter
         )
         

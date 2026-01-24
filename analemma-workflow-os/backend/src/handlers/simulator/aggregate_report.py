@@ -81,7 +81,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 data = json.loads(obj['Body'].read())
                 # Extract reason from verification_result checks or error field
-                checks = data.get('verification_result', {}).get('checks', [])
+                # [Fix] None defense: data['verification_result']가 None일 수 있음
+                checks = (data.get('verification_result') or {}).get('checks', [])
                 failed_checks = [c['name'] for c in checks if not c['passed']]
                 details = [c.get('details', '') for c in checks if not c['passed']]
                 return scenario, f"Failed Checks: {failed_checks}. Details: {details}"

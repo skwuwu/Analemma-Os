@@ -517,7 +517,8 @@ class KernelTaskScheduler:
         
         # metadata에서 추출
         if not priority_str:
-            metadata = state.get('metadata', {})
+            # [Fix] None defense: state['metadata']가 None일 수 있음
+            metadata = state.get('metadata') or {}
             priority_str = metadata.get('priority', '').lower()
         
         # 문자열 -> Enum 변환

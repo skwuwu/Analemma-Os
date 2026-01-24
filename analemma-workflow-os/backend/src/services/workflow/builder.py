@@ -285,9 +285,10 @@ class DynamicWorkflowBuilder:
             raise ValueError(f"Circular subgraph reference detected: {subgraph_id} in path {visited}")
         
         visited.add(subgraph_id)
-        
+
         # Check nested subgraphs
-        subgraph_def = self.config.get("subgraphs", {}).get(subgraph_id, {})
+        # [Fix] None defense: self.config['subgraphs']가 None일 수 있음
+        subgraph_def = (self.config.get("subgraphs") or {}).get(subgraph_id, {})
         for node in subgraph_def.get("nodes", []):
             if node.get("type") == "subgraph":
                 nested_ref = node.get("subgraph_ref")

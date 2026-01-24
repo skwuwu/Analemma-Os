@@ -383,7 +383,8 @@ def lambda_handler(event, context):
                 table.put_item(Item=item, ConditionExpression='attribute_not_exists(conversation_id)')
                 logger.info(f"TaskToken stored successfully: conversation_id={conversation_id}, owner_id={owner_id}")
             except ClientError as e:
-                code = e.response.get('Error', {}).get('Code')
+                # [Fix] None defense: e.response['Error']가 None일 수 있음
+                code = (e.response.get('Error') or {}).get('Code')
                 if code == 'ConditionalCheckFailedException':
                     # Already stored by a previous attempt - this is OK (idempotent)
                     logger.info(f"TaskToken already stored (retry detected): conversation_id={conversation_id}")
