@@ -5,6 +5,7 @@ import time
 import json
 import random
 from typing import Dict, Any, Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # [v2.1] Centralized Retry Utility
 try:
@@ -183,7 +184,7 @@ def _normalize_node_config(node: Dict[str, Any]) -> Dict[str, Any]:
 
     # 정규화할 필드 목록 (None → {} or [])
     DICT_FIELDS = [
-        'config', 'llm_config', 'sub_node_config', 'nested_config',
+        'config', 'llm_config', 'sub_node_config', 'sub_workflow', 'nested_config',
         'retry_config', 'metadata', 'resource_policy', 'callbacks_config'
     ]
     LIST_FIELDS = [
@@ -203,6 +204,8 @@ def _normalize_node_config(node: Dict[str, Any]) -> Dict[str, Any]:
         _normalize_node_config(node['config'])
     if 'sub_node_config' in node and isinstance(node['sub_node_config'], dict):
         _normalize_node_config(node['sub_node_config'])
+    if 'sub_workflow' in node and isinstance(node['sub_workflow'], dict):
+        _normalize_node_config(node['sub_workflow'])
     if 'nested_config' in node and isinstance(node['nested_config'], dict):
         _normalize_node_config(node['nested_config'])
 
@@ -234,6 +237,15 @@ def _normalize_segment_config(segment_config: Dict[str, Any]) -> Dict[str, Any]:
     for node in segment_config.get('nodes', []):
         if isinstance(node, dict):
             _normalize_node_config(node)
+            # 🛡️ [P0 Fix] config 내부의 sub_workflow도 정규화 (for_each 노드용)
+            node_config = node.get('config')
+            if isinstance(node_config, dict):
+                sub_workflow = node_config.get('sub_workflow')
+                if isinstance(sub_workflow, dict):
+                    _normalize_node_config(sub_workflow)
+                    for sub_node in sub_workflow.get('nodes', []):
+                        if isinstance(sub_node, dict):
+                            _normalize_node_config(sub_node)
 
     # 브랜치 내 노드도 정규화
     for branch in segment_config.get('branches', []):
@@ -241,6 +253,12 @@ def _normalize_segment_config(segment_config: Dict[str, Any]) -> Dict[str, Any]:
             for node in branch.get('nodes', []):
                 if isinstance(node, dict):
                     _normalize_node_config(node)
+                    # 🛡️ [P0 Fix] 브랜치 내 for_each config의 sub_workflow도 정규화
+                    node_config = node.get('config')
+                    if isinstance(node_config, dict):
+                        sub_workflow = node_config.get('sub_workflow')
+                        if isinstance(sub_workflow, dict):
+                            _normalize_node_config(sub_workflow)
 
     return segment_config
 
@@ -401,6 +419,68 @@ class SegmentRunnerService:
                 raise ValueError(f"State merge conflict on keys: {conflicts}")
         
         return result
+
+    def _cleanup_branch_intermediate_s3(
+        self,
+        parallel_results: List[Dict[str, Any]],
+        workflow_id: str,
+        segment_id: int
+    ) -> None:
+        """
+        [Critical] S3 중간 브랜치 결과 파일 정리 (Garbage Collection)
+        
+        Aggregation 완료 후 각 브랜치가 생성한 임시 S3 파일들을 삭제하여
+        S3 비용 절감 및 관리 부하 감소
+        
+        Args:
+            parallel_results: 브랜치 실행 결과 목록
+            workflow_id: 워크플로우 ID
+            segment_id: 현재 세그먼트 ID
+        """
+        if not parallel_results:
+            return
+        
+        s3_paths_to_delete = []
+        
+        # 브랜치 결과에서 S3 path 수집
+        for result in parallel_results:
+            if not result or not isinstance(result, dict):
+                continue
+            
+            s3_path = result.get('final_state_s3_path') or result.get('state_s3_path')
+            if s3_path:
+                s3_paths_to_delete.append(s3_path)
+        
+        if not s3_paths_to_delete:
+            logger.debug(f"[Aggregator] No S3 intermediate files to cleanup")
+            return
+        
+        logger.info(f"[Aggregator] 🧹 Cleaning up {len(s3_paths_to_delete)} S3 intermediate files")
+        
+        # 병렬 삭제
+        def delete_s3_object(s3_path: str) -> bool:
+            try:
+                bucket = s3_path.replace("s3://", "").split("/")[0]
+                key = "/".join(s3_path.replace("s3://", "").split("/")[1:])
+                self.state_manager.s3_client.delete_object(Bucket=bucket, Key=key)
+                return True
+            except Exception as e:
+                logger.warning(f"[Aggregator] Failed to delete {s3_path}: {e}")
+                return False
+        
+        # ThreadPoolExecutor로 병렬 삭제 (빠르게 처리)
+        deleted_count = 0
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(delete_s3_object, path): path for path in s3_paths_to_delete}
+            
+            for future in as_completed(futures, timeout=30):
+                try:
+                    if future.result(timeout=5):
+                        deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"[Aggregator] Cleanup future failed: {e}")
+        
+        logger.info(f"[Aggregator] ✅ Cleanup complete: {deleted_count}/{len(s3_paths_to_delete)} files deleted")
 
     # ========================================================================
     # [Pattern 1] Segment-Level Self-Healing: Segment Auto-Splitting
@@ -856,11 +936,12 @@ class SegmentRunnerService:
                     if isinstance(items, list):
                         memory_mb += len(items) * 5
                         # for_each 내부에 LLM이 있으면 토큰 폭증
-                        # [Fix] None defense: config['sub_node_config']가 None일 수 있음
-                        sub_nodes = (config.get('sub_node_config') or {}).get('nodes', [])
+                        # [Fix] None defense: config['sub_node_config'] 또는 config['sub_workflow']가 None일 수 있음
+                        sub_config = config.get('sub_node_config') or config.get('sub_workflow') or {}
+                        sub_nodes = sub_config.get('nodes', []) if isinstance(sub_config, dict) else []
                         for sub_node in sub_nodes:
                             # [Fix] sub_node가 None일 수 있음
-                            if sub_node and sub_node.get('type') in ('llm_chat', 'aiModel'):
+                            if sub_node and isinstance(sub_node, dict) and sub_node.get('type') in ('llm_chat', 'aiModel'):
                                 tokens += len(items) * 5000  # 아이템당 5000 토큰 예상 (Aggressive buffer for tests)
                                 llm_calls += len(items)
             
@@ -1144,6 +1225,53 @@ class SegmentRunnerService:
         logger.info(f"[Aggregator] [Parallel] Aggregating {len(parallel_results)} branch results"
                    + (f" (map_error present)" if map_error else ""))
         
+        # [Optimization] S3 Hydration 병렬화 (N+1 Query 문제 해결)
+        # 브랜치가 많을 경우 (50개+) 순차 다운로드는 timeout 위험
+        # ThreadPoolExecutor로 병렬 fetch
+        branches_needing_s3 = []
+        for i, result in enumerate(parallel_results):
+            if not result or not isinstance(result, dict):
+                continue
+            branch_s3_path = result.get('final_state_s3_path') or result.get('state_s3_path')
+            branch_state = result.get('final_state') or result.get('state') or {}
+            is_empty = isinstance(branch_state, dict) and len(branch_state) <= 1  # {} or {"__state_truncated": true}
+            
+            if is_empty and branch_s3_path:
+                branches_needing_s3.append((i, branch_s3_path, result))
+        
+        # 병렬 S3 fetch 실행
+        if branches_needing_s3:
+            logger.info(f"[Aggregator] 🚀 Parallel S3 fetch for {len(branches_needing_s3)} branches")
+            
+            def fetch_branch_s3(item: Tuple[int, str, Dict]) -> Tuple[int, Optional[Dict[str, Any]]]:
+                idx, s3_path, result = item
+                try:
+                    bucket = s3_path.replace("s3://", "").split("/")[0]
+                    key = "/".join(s3_path.replace("s3://", "").split("/")[1:])
+                    obj = self.state_manager.s3_client.get_object(Bucket=bucket, Key=key)
+                    state = json.loads(obj['Body'].read().decode('utf-8'))
+                    return (idx, state)
+                except Exception as e:
+                    logger.error(f"[Aggregator] Failed to fetch branch {idx} from S3: {e}")
+                    return (idx, None)
+            
+            # 병렬 실행 (최대 10개 동시)
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(fetch_branch_s3, item): item for item in branches_needing_s3}
+                
+                for future in as_completed(futures, timeout=60):  # 60초 전체 timeout
+                    try:
+                        idx, state = future.result(timeout=5)  # 개별 5초 timeout
+                        if state:
+                            # 원본 결과에 hydrated state 주입
+                            parallel_results[idx]['final_state'] = state
+                            parallel_results[idx]['__hydrated_from_s3'] = True
+                    except Exception as e:
+                        item = futures[future]
+                        logger.warning(f"[Aggregator] Future failed for branch {item[0]}: {e}")
+            
+            logger.info(f"[Aggregator] ✅ Parallel S3 fetch completed")
+        
         # 1. 모든 브랜치 결과 병합
         aggregated_state = base_state.copy()
         all_history_logs = []
@@ -1169,50 +1297,34 @@ class SegmentRunnerService:
             branch_id = branch_result.get('branch_id', f'branch_{i}')
             branch_status = branch_result.get('branch_status', 'UNKNOWN')
             
-            # 🛡️ [Fix] branch_state를 루프 내부에서 안전하게 획득 (Chained Get)
+            # 🛡️ [Fix] branch_state를 루프 내부에서 안전하게 획득
+            # [Note] 병렬 S3 fetch가 이미 완료되어 hydrated state가 주입됨
             branch_state = branch_result.get('final_state') or branch_result.get('state') or {}
             
             branch_logs = branch_result.get('new_history_logs', [])
             error_info = branch_result.get('error_info')
             
-            # 3. S3 하이드레이션 및 병합 로직 (모두 루프 내부로 이동)
-            branch_s3_path = branch_result.get('final_state_s3_path') or branch_result.get('state_s3_path')
-            
-            if isinstance(branch_state, dict):
-                # S3 데이터 복원 로직 실행
-                is_truncated = branch_state.get('__state_truncated') is True
-                if (not branch_state or is_truncated) and branch_s3_path:
+            # [Removed] 순차 S3 hydration 로직 제거 (이미 병렬로 처리됨)
+            # 병렬 fetch에서 실패한 경우에만 여기서 fallback 시도
+            if isinstance(branch_state, dict) and len(branch_state) == 0:
+                branch_s3_path = branch_result.get('final_state_s3_path') or branch_result.get('state_s3_path')
+                if branch_s3_path and not branch_result.get('__hydrated_from_s3'):
+                    # 병렬 fetch 실패 시 fallback (순차 재시도)
+                    logger.warning(f"[Aggregator] Fallback: Sequential fetch for branch {branch_id}")
                     try:
-                        logger.info(f"[Aggregator] ⬇️ Hydrating branch {branch_id} result from S3: {branch_s3_path}")
-                        
-                        def _download_branch_state():
-                            bucket_name = branch_s3_path.replace("s3://", "").split("/")[0]
-                            key_name = "/".join(branch_s3_path.replace("s3://", "").split("/")[1:])
-                            s3_client = self.state_manager.s3_client
-                            obj = s3_client.get_object(Bucket=bucket_name, Key=key_name)
-                            return json.loads(obj['Body'].read().decode('utf-8'))
-
-                        if RETRY_UTILS_AVAILABLE:
-                            branch_state = retry_call(
-                                _download_branch_state,
-                                max_retries=3,
-                                base_delay=0.5,
-                                max_delay=3.0,
-                                exceptions=(Exception,)
-                            )
-                        else:
-                            branch_state = _download_branch_state()
-                            
-                        logger.info(f"[Aggregator] ✅ Hydrated branch {branch_id} ({len(json.dumps(branch_state))} bytes)")
-                        
+                        bucket = branch_s3_path.replace("s3://", "").split("/")[0]
+                        key = "/".join(branch_s3_path.replace("s3://", "").split("/")[1:])
+                        obj = self.state_manager.s3_client.get_object(Bucket=bucket, Key=key)
+                        branch_state = json.loads(obj['Body'].read().decode('utf-8'))
                     except Exception as e:
-                        logger.error(f"[Aggregator] ❌ Failed to hydrate branch {branch_id} from S3: {e}")
+                        logger.error(f"[Aggregator] Fallback failed for branch {branch_id}: {e}")
                         branch_errors.append({
                             'branch_id': branch_id,
-                            'error': f"Aggregation Hydration Failed: {str(e)}"
+                            'error': f"S3 Hydration Failed: {str(e)}"
                         })
-
-                # 4. 실제 상태 병합 실행 (이게 루프 안에 있어야 모든 브랜치가 합쳐집니다!)
+            
+            # 실제 상태 병합 실행
+            if isinstance(branch_state, dict):
                 aggregated_state = self._merge_states(
                     aggregated_state,
                     branch_state,
@@ -1262,14 +1374,36 @@ class SegmentRunnerService:
         if not s3_bucket:
             logger.error("[Alert] [CRITICAL] S3_BUCKET/SKELETON_S3_BUCKET not set for aggregation!")
         
+        # [Fix] Aggregator는 데이터 유실 방지를 위해 더 보수적인 임계값 적용
+        # [Update] 각 브랜치가 50KB로 제한되므로 aggregator는 120KB threshold 적용
+        # 예: 3개 브랜치 x 50KB = 150KB → S3 오프로드 발생
+        # 참고: 브랜치가 S3 레퍼런스만 반환하면 aggregator 입력은 작지만,
+        #       hydration 후 병합된 결과는 클 수 있음
+        AGGREGATOR_SAFE_THRESHOLD = 120000  # 120KB (256KB 리밋의 47%)
+        
+        # [Critical] 병합된 상태 크기 측정 (S3 오프로드 결정 전)
+        aggregated_size = len(json.dumps(aggregated_state, ensure_ascii=False).encode('utf-8'))
+        logger.info(f"[Aggregator] Merged state size: {aggregated_size/1024:.1f}KB, "
+                   f"threshold: {AGGREGATOR_SAFE_THRESHOLD/1024:.0f}KB")
+        
         final_state, output_s3_path = self.state_manager.handle_state_storage(
             state=aggregated_state,
             auth_user_id=auth_user_id,
             workflow_id=workflow_id,
             segment_id=segment_to_run,
             bucket=s3_bucket,
-            threshold=self.threshold
+            threshold=AGGREGATOR_SAFE_THRESHOLD  # 강화된 임계값
         )
+        
+        # [Critical] 응답 페이로드 크기 검증 (Step Functions 256KB 제한)
+        response_size = len(json.dumps(final_state, ensure_ascii=False).encode('utf-8')) if final_state else 0
+        logger.info(f"[Aggregator] Response payload size: {response_size/1024:.1f}KB "
+                   f"(S3: {'YES - ' + output_s3_path if output_s3_path else 'NO'})")
+        
+        if response_size > 250000:  # 250KB warning
+            logger.warning(f"[Aggregator] [Alert] Response payload exceeds 250KB! "
+                          f"This may fail Step Functions state transition. Size: {response_size/1024:.1f}KB")
+        
         
         # 4. 다음 세그먼트 결정
         # aggregator 다음은 일반적으로 워크플로우 완료이지만,
@@ -1284,6 +1418,11 @@ class SegmentRunnerService:
         logger.info(f"[Aggregator] [Success] Aggregation complete: "
                    f"{successful_branches}/{len(parallel_results)} branches succeeded, "
                    f"next_segment={next_segment if not is_complete else 'COMPLETE'}")
+        
+        # [Critical] S3 중간 파일 정리 (Garbage Collection)
+        # 각 브랜치가 S3에 저장한 임시 결과 파일들을 삭제
+        # 병합 완료 후에는 더 이상 필요 없음 (비용 & 관리 부하 감소)
+        self._cleanup_branch_intermediate_s3(parallel_results, workflow_id, segment_to_run)
         
         # [Guard] [v3.9] Core aggregator response
         # ASL passthrough 필드는 _finalize_response에서 자동 주입됨
@@ -1647,10 +1786,7 @@ class SegmentRunnerService:
             3. Inject into top-level response (ResultSelector access).
             4. [v3.9] ASL passthrough fields - 입력 이벤트의 메타데이터를 그대로 전달
             """
-            res.setdefault('total_segments', _total_segments)
-            res.setdefault('segment_id', _segment_id)
-            
-            # [Guard] [v3.5] Hardened Response Wrapper
+            # [Guard] [v3.5] Hardened Response Wrapper - Check BEFORE access
             if res is None:
                 logger.error("[Alert] [Kernel] _finalize_response received None! Creating emergency error response.")
                 res = {
@@ -1752,7 +1888,8 @@ class SegmentRunnerService:
         # ====================================================================
         if CONCURRENCY_CONTROLLER_AVAILABLE and self.concurrency_controller:
             pre_check = self.concurrency_controller.pre_execution_check()
-            if not pre_check.get('can_proceed', True):
+            # 🛡️ [P0 Fix] Null Guard for pre_check return value
+            if pre_check and not pre_check.get('can_proceed', True):
                 logger.error(f"[Kernel] ❌ Pre-execution check failed: {pre_check.get('reason')}")
                 return _finalize_response({
                     "status": "HALTED",
@@ -1796,7 +1933,10 @@ class SegmentRunnerService:
         if branch_config:
             force_child = os.environ.get('FORCE_CHILD_WORKFLOW', 'false').lower() == 'true'
             node_count = len(branch_config.get('nodes', [])) if isinstance(branch_config.get('nodes'), list) else 0
-            has_hitp = branch_config.get('hitp', False) or any(n.get('hitp') for n in branch_config.get('nodes', []))
+            # 🛡️ [P0 Fix] n이 None일 수 있으므로 방어 코드 추가
+            has_hitp = branch_config.get('hitp', False) or any(
+                n.get('hitp') for n in branch_config.get('nodes', []) if n and isinstance(n, dict)
+            )
             
             should_offload = force_child or node_count > 20 or has_hitp
             
@@ -2392,11 +2532,24 @@ class SegmentRunnerService:
         # 배열로 수집하면 256KB 제한을 초과할 수 있음
         # [Fix] distributed_mode가 null(JSON)/None(Python)일 수 있으므로 명시적 True 체크
         is_distributed_mode = event.get('distributed_mode') is True
+        
+        # [Critical Fix] Map State 브랜치 실행도 강제 오프로딩 필요
+        # Map State가 모든 브랜치 결과를 수집할 때 256KB 제한 초과 방지
+        # branch_item 존재 = Map Iterator에서 실행 중 (각 브랜치는 작은 레퍼런스만 반환해야 함)
+        is_map_branch = event.get('branch_item') is not None
 
         if is_distributed_mode:
             # Distributed Map: threshold=0으로 강제 오프로딩
             effective_threshold = 0
             logger.info(f"[Distributed Map] Forcing S3 offload for iteration result (distributed_mode=True)")
+        elif is_map_branch:
+            # [Critical] Map State 브랜치: 무조건 S3 오프로딩 (threshold=0)
+            # 이유: 브랜치 개수가 가변적 (N개 × 50KB = N×50KB)
+            # 예시: 10개 브랜치 × 50KB = 500KB → 256KB 초과!
+            # 해결: 브랜치 크기와 무관하게 모든 결과를 S3로 오프로드
+            # Map은 작은 S3 레퍼런스만 수집 (N개 × 2KB = 2N KB << 256KB)
+            effective_threshold = 0  # 강제 오프로드
+            logger.info(f"[Map Branch] Forcing S3 offload for ALL branch results (variable fan-out protection)")
         else:
             effective_threshold = self.threshold
 
@@ -2529,6 +2682,8 @@ class SegmentRunnerService:
             
         # Simplified fallback - workflow_config 또는 에러 상태
         if workflow_config:
+            logger.warning(f"[_resolve_segment_config] [Warning] partition_map unavailable, falling back to workflow_config. "
+                          f"This may cause issues for large/complex workflows. segment_id={segment_id}")
             return workflow_config
         
         # [Critical Fix] 모든 fallback 실패 시 에러 상태 반환 (None 반환 방지)

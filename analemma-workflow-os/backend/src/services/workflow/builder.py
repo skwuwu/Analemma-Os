@@ -214,6 +214,12 @@ class DynamicWorkflowBuilder:
         Raises:
             ValueError: 서브그래프 깊이가 MAX_SUBGRAPH_DEPTH 초과 시
         """
+        # [Critical Fix] Config Null Guard - Graceful Fallback
+        # Raise ValueError explicitly or force empty dict to avoid NoneType error downstream
+        if config is None:
+            logger.error("[Builder] Initialized with None config. Forcing empty dict to prevent crash.")
+            config = {"nodes": [], "edges": [], "type": "error_fallback"}
+            
         self.config = config
         self.parent_path = parent_path or ["root"]
         self.use_lightweight_state = use_lightweight_state
@@ -930,4 +936,28 @@ class DynamicWorkflowBuilder:
                 f"🚨 Failed to build workflow at depth {depth}: {e} "
                 f"(path: {' > '.join(self.parent_path)})"
             )
-            raise
+            # [Immortality] Return a Safe Fallback Graph on failure
+            # This prevents system crash and allows Partial Failure reporting downstream
+            logger.warning(f"🛡️ [Builder] Returning Fallback Error Graph due to build failure.")
+            return self._create_fallback_app(str(e))
+
+    def _create_fallback_app(self, error_message: str) -> Any:
+        """Create a minimal fallback graph that reports initialization error."""
+        from langgraph.graph import StateGraph, END
+        
+        # Define error node
+        def error_node(state: Dict[str, Any], config=None) -> Dict[str, Any]:
+            logger.error(f"⚠️ Executing Fallback Error Node: {error_message}")
+            return {
+                "error": error_message,
+                "status": "FAILED", 
+                "segment_status": "FAILED" 
+            }
+            
+        # Build simple graph: START -> error_node -> END
+        fallback_graph = StateGraph(DynamicWorkflowState)
+        fallback_graph.add_node("init_error", error_node)
+        fallback_graph.set_entry_point("init_error")
+        fallback_graph.add_edge("init_error", END)
+        
+        return fallback_graph.compile()
