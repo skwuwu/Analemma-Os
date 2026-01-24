@@ -306,9 +306,6 @@
         }
     ],
     "start_node": "tm_init",
-    "initial_state": {
-        "distributed_mode": true
-    },
     "metadata": {
         "test_features": [
             "checkpoint_storm",

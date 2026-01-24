@@ -1330,6 +1330,16 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 sub_node_config = workflow_nodes[0]
                 logger.info(f"[ForEach] Extracted sub_node_config from sub_workflow.nodes[0]")
     
+    # [Critical Fix] Support subgraph_inline structure (builder transformation)
+    # Builder may convert sub_workflow to subgraph_inline
+    if not sub_node_config:
+        subgraph_inline = config.get("subgraph_inline")
+        if subgraph_inline and isinstance(subgraph_inline, dict):
+            subgraph_nodes = subgraph_inline.get("nodes", [])
+            if subgraph_nodes and len(subgraph_nodes) > 0:
+                sub_node_config = subgraph_nodes[0]
+                logger.info(f"[ForEach] Extracted sub_node_config from subgraph_inline.nodes[0]")
+    
     # [Fix v2] If body_nodes is specified but no sub_node_config, create a passthrough operator
     if body_nodes and not sub_node_config:
         # Create a simple operator that just logs the item

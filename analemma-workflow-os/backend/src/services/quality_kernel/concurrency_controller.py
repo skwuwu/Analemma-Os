@@ -71,6 +71,7 @@ class DistributedStateManager:
         self._table = None
         self._initialized = False
         self._lock = threading.Lock()
+        self._table_key_schema = None  # Cache actual table key schema
         
     def _ensure_initialized(self) -> bool:
         """DynamoDB 연결 초기화 (Lazy Loading)"""
@@ -88,10 +89,31 @@ class DistributedStateManager:
             self._dynamodb = boto3.resource('dynamodb')
             self._table = self._dynamodb.Table(self.config.table_name)
             
-            # 테이블 존재 확인
-            self._table.load()
+            # [Critical] Query actual table schema to determine key structure
+            try:
+                table_description = self._dynamodb.meta.client.describe_table(
+                    TableName=self.config.table_name
+                )
+                key_schema = table_description['Table']['KeySchema']
+                
+                # Parse schema: check if RANGE key exists
+                self._table_key_schema = {}
+                for key in key_schema:
+                    if key['KeyType'] == 'HASH':
+                        self._table_key_schema['hash_key'] = key['AttributeName']
+                    elif key['KeyType'] == 'RANGE':
+                        self._table_key_schema['range_key'] = key['AttributeName']
+                
+                has_range = 'range_key' in self._table_key_schema
+                logger.info(f"[DistributedState] Connected to {self.config.table_name}. "
+                          f"Schema: HASH={self._table_key_schema.get('hash_key')}, "
+                          f"RANGE={self._table_key_schema.get('range_key', 'None')}")
+                
+            except Exception as schema_error:
+                logger.error(f"[DistributedState] Failed to query table schema: {schema_error}")
+                return False
+            
             self._initialized = True
-            logger.info(f"[DistributedState] Connected to {self.config.table_name}")
             return True
             
         except Exception as e:
@@ -118,10 +140,10 @@ class DistributedStateManager:
                 return self._local_cache['active_executions']
             
             try:
-                # [Critical] Composite key support
-                key = {'pk': self.config.state_key}
-                if hasattr(self.config, 'sort_key') and self.config.sort_key:
-                    key['sk'] = self.config.sort_key
+                # [Critical] Build key using actual table schema
+                key = {self._table_key_schema['hash_key']: self.config.state_key}
+                if 'range_key' in self._table_key_schema:
+                    key[self._table_key_schema['range_key']] = self.config.sort_key
                 
                 response = self._table.update_item(
                     Key=key,
@@ -162,10 +184,10 @@ class DistributedStateManager:
                 return self._local_cache['accumulated_cost']
             
             try:
-                # [Critical] Composite key support
-                key = {'pk': self.config.state_key}
-                if hasattr(self.config, 'sort_key') and self.config.sort_key:
-                    key['sk'] = self.config.sort_key
+                # [Critical] Build key using actual table schema
+                key = {self._table_key_schema['hash_key']: self.config.state_key}
+                if 'range_key' in self._table_key_schema:
+                    key[self._table_key_schema['range_key']] = self.config.sort_key
                 
                 response = self._table.update_item(
                     Key=key,
@@ -209,11 +231,10 @@ class DistributedStateManager:
             }
         
         try:
-            # [Critical] Composite key support (pk + sk)
-            # Try with sort key first, fallback to pk-only
-            key = {'pk': self.config.state_key}
-            if hasattr(self.config, 'sort_key') and self.config.sort_key:
-                key['sk'] = self.config.sort_key
+            # [Critical] Build key using actual table schema
+            key = {self._table_key_schema['hash_key']: self.config.state_key}
+            if 'range_key' in self._table_key_schema:
+                key[self._table_key_schema['range_key']] = self.config.sort_key
             
             response = self._table.get_item(Key=key)
             item = response.get('Item', {})
@@ -233,14 +254,7 @@ class DistributedStateManager:
             return global_state
             
         except Exception as e:
-            # [Debug] Log actual error for schema mismatch diagnosis
-            error_type = type(e).__name__
-            if 'ValidationException' in str(e):
-                logger.error(f"[DistributedState] DynamoDB key schema mismatch: {e}. "
-                           f"Table may use composite key (pk+sk). Key used: {key}")
-            else:
-                logger.warning(f"[DistributedState] Get state failed ({error_type}): {e}")
-            
+            logger.warning(f"[DistributedState] Get state failed: {e}")
             return {
                 'active_executions': self._local_cache['active_executions'],
                 'accumulated_cost': self._local_cache['accumulated_cost'],
@@ -263,16 +277,16 @@ class DistributedStateManager:
                 return True
             
             try:
-                # [Critical] Composite key support
+                # [Critical] Build item using actual table schema
                 item = {
-                    'pk': self.config.state_key,
+                    self._table_key_schema['hash_key']: self.config.state_key,
                     'active_executions': 0,
                     'accumulated_cost': Decimal('0'),
                     'last_updated': Decimal(str(time.time())),
                     'reset_at': Decimal(str(time.time()))
                 }
-                if hasattr(self.config, 'sort_key') and self.config.sort_key:
-                    item['sk'] = self.config.sort_key
+                if 'range_key' in self._table_key_schema:
+                    item[self._table_key_schema['range_key']] = self.config.sort_key
                 
                 self._table.put_item(Item=item)
                 return True

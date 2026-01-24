@@ -2657,13 +2657,19 @@ class SegmentRunnerService:
             # Map은 작은 S3 레퍼런스만 수집 (N개 × 2KB = 2N KB << 256KB)
             effective_threshold = 0  # 강제 오프로드
             logger.info(f"[Map Branch] Forcing S3 offload for ALL branch results (variable fan-out protection)")
-        elif has_loop_structure or (has_next_segment and result_state_size > 20000):
-            # [Critical Fix] ForEach/반복 구조가 있거나, 다음 세그먼트가 있고 20KB 이상이면 강제 offload
-            # 이유: 반복 중 상태 누적으로 256KB 초과 방지
-            # 예: 40번 반복 × 52KB/iteration = 2080KB >> 256KB
-            effective_threshold = 20000  # 20KB - 매우 낮은 threshold
-            logger.info(f"[State Accumulation Prevention] Forcing S3 offload: "
-                       f"has_loop={has_loop_structure}, has_next={has_next_segment}, size={result_state_size/1024:.1f}KB")
+        elif has_loop_structure:
+            # [Critical Fix] ForEach/반복 구조가 있으면 무조건 강제 offload (threshold=0)
+            # 이유: 반복 횟수 × 결과 크기 = 예측 불가능한 누적
+            # 예: 40회 × 15KB = 600KB >> 256KB (20KB threshold로는 방어 불가)
+            # 해결: iteration 크기와 무관하게 모든 결과를 S3로 오프로드
+            effective_threshold = 0  # 강제 오프로드
+            logger.info(f"[Loop Structure] Forcing S3 offload for ALL iteration results (accumulation prevention)")
+        elif has_next_segment and result_state_size > 20000:
+            # [Segment Chain] 다음 세그먼트가 있고 20KB 이상이면 offload
+            # 이유: 세그먼트 체인에서 상태 누적 방지
+            effective_threshold = 20000  # 20KB threshold
+            logger.info(f"[Segment Chain] S3 offload for large state: "
+                       f"has_next={has_next_segment}, size={result_state_size/1024:.1f}KB")
         else:
             effective_threshold = self.threshold
 

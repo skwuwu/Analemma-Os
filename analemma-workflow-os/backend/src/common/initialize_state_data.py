@@ -486,7 +486,15 @@ def lambda_handler(event, context):
     logger.info(f"[Distributed Strategy] {distributed_strategy['strategy']}: {distributed_strategy['reason']}")
     
     # 🚨 [Critical Fix] Detect distributed mode and offload large data to S3
-    is_distributed_mode = total_segments > 300  # Distributed mode threshold
+    # Check if workflow explicitly sets distributed_mode in initial_state
+    explicit_distributed_mode = workflow_config.get('initial_state', {}).get('distributed_mode')
+    if explicit_distributed_mode is not None:
+        is_distributed_mode = bool(explicit_distributed_mode)
+        logger.info(f"[Distributed Mode] Using explicit value from initial_state: {is_distributed_mode}")
+    else:
+        is_distributed_mode = total_segments > 300  # Distributed mode threshold
+        logger.info(f"[Distributed Mode] Auto-detected based on segment count: {is_distributed_mode} (total_segments={total_segments})")
+    
     partition_map_for_return = partition_map  # Default: return all
     
     # 🚀 [Hybrid Mode Compatibility] MAP_REDUCE/BATCHED 모드에서는 segment_manifest 인라인 유지

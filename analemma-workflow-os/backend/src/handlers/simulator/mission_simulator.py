@@ -702,17 +702,39 @@ def trigger_step_functions(scenario_key: str, scenario_config: dict, orchestrato
     # Build execution input
     execution_id = f"e2e-{scenario_key.lower()}-{uuid.uuid4().hex[:8]}"
     
+    # [Critical] Auto-inject distributed_mode flag when using DISTRIBUTED state machine
+    # This ensures proper S3 offload threshold enforcement (threshold=0) in segment_runner
+    # 
+    # Control hierarchy (highest to lowest priority):
+    # 1. Scenario config 'force_distributed_mode' (explicit override)
+    # 2. DISTRIBUTED orchestrator (auto-inject true)
+    # 3. STANDARD orchestrator (no injection, relies on CheckDistributedMapRequired)
+    initial_state = {
+        'test_keyword': test_keyword,
+        'e2e_test_scenario': scenario_key,
+        'e2e_execution_id': execution_id,
+        **input_data
+    }
+    
+    # Check for explicit override in scenario config
+    force_distributed_mode = scenario_config.get('force_distributed_mode')
+    
+    if force_distributed_mode is not None:
+        # Explicit control: scenario specifies exact value
+        initial_state['distributed_mode'] = bool(force_distributed_mode)
+        logger.info(f"[Distributed Mode] Explicitly set to {force_distributed_mode} via scenario config")
+    elif orchestrator_type == 'DISTRIBUTED':
+        # Auto-inject for DISTRIBUTED orchestrator
+        initial_state['distributed_mode'] = True
+        logger.info(f"[Distributed Mode] Auto-injected distributed_mode=true for {orchestrator_type} orchestrator")
+    # else: STANDARD orchestrator - no injection, CheckDistributedMapRequired decides
+    
     payload = {
         'workflowId': f'e2e-test-{scenario_key.lower()}',
         'ownerId': 'system',
         'user_id': 'system',
         'MOCK_MODE': MOCK_MODE,
-        'initial_state': {
-            'test_keyword': test_keyword,
-            'e2e_test_scenario': scenario_key,
-            'e2e_execution_id': execution_id,
-            **input_data
-        },
+        'initial_state': initial_state,
         'idempotency_key': f"e2e#{scenario_key}#{execution_id}",
         'ALLOW_UNSAFE_EXECUTION': True  # Bypass idempotency for tests
     }
