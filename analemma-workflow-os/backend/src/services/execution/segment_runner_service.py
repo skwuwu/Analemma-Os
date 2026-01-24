@@ -1502,12 +1502,12 @@ class SegmentRunnerService:
             "status": "COMPLETE" if is_complete else "CONTINUE",
             "final_state": response_final_state,
             "final_state_s3_path": output_s3_path,
-            "current_state": final_state,  # ASL 호환용 별칭
+            "current_state": response_final_state,  # 🛡️ [P0 Fix] current_state도 S3 포인터로 변경 (중복 데이터 제거)
             "state_s3_path": output_s3_path,  # ASL 호환용 별칭
             "next_segment_to_run": None if is_complete else next_segment,
             "new_history_logs": all_history_logs,
             "error_info": branch_errors if branch_errors else None,
-            "branches": None,
+            "branches": [],  # 🛡️ [P0 Fix] None 대신 빈 배열로 변경 (ASL Map 호환성)
             "segment_type": "aggregator",
             "segment_id": segment_to_run,
             "total_segments": total_segments,
@@ -1944,62 +1944,80 @@ class SegmentRunnerService:
                 if response_size > SFN_SIZE_LIMIT:
                     logger.warning(
                         f"[Kernel] ⚠️ Response size {response_size/1024:.1f}KB exceeds Step Functions limit. "
-                        f"Force offloading final_state to S3..."
+                        f"Force offloading large fields to S3..."
                     )
                     
-                    # Force S3 offload for final_state
-                    final_state = res.get('final_state', {})
-                    if final_state and not final_state.get('__s3_offloaded'):
-                        # Generate S3 path for offloaded state
-                        owner_id = event.get('ownerId') or event.get('owner_id', 'unknown')
-                        workflow_id = event.get('workflowId') or event.get('workflow_id', 'unknown')
-                        segment_id = res.get('segment_id', 0)
-                        timestamp = int(time.time())
-                        
-                        s3_key = f"workflow-states/{owner_id}/{workflow_id}/segments/{segment_id}/{timestamp}/output.json"
-                        
-                        try:
-                            # Upload full state to S3
-                            s3_client = boto3.client('s3')
-                            s3_client.put_object(
-                                Bucket=self.state_bucket,
-                                Key=s3_key,
-                                Body=json.dumps(final_state, default=str),
-                                ContentType='application/json'
-                            )
+                    # 🛡️ [P0 Fix] Force S3 offload for ALL large state fields
+                    # Not just final_state, but also current_state and other large objects
+                    large_fields = ['final_state', 'current_state', 'workflow_config']
+                    
+                    for field_name in large_fields:
+                        field_value = res.get(field_name, {})
+                        if field_value and isinstance(field_value, dict) and not field_value.get('__s3_offloaded'):
+                            field_size = len(json.dumps(field_value, default=str))
+                            # 50KB threshold for individual fields
+                            if field_size > 50 * 1024:
+                                # Generate S3 path for offloaded field
+                                owner_id = event.get('ownerId') or event.get('owner_id', 'unknown')
+                                workflow_id = event.get('workflowId') or event.get('workflow_id', 'unknown')
+                                segment_id = res.get('segment_id', 0)
+                                timestamp = int(time.time())
+                                
+                                s3_key = f"workflow-states/{owner_id}/{workflow_id}/segments/{segment_id}/{timestamp}/{field_name}.json"
+                                
+                                try:
+                                    # Upload field to S3
+                                    s3_client = boto3.client('s3')
+                                    s3_client.put_object(
+                                        Bucket=self.state_bucket,
+                                        Key=s3_key,
+                                        Body=json.dumps(field_value, default=str),
+                                        ContentType='application/json'
+                                    )
+                                    
+                                    s3_path = f"s3://{self.state_bucket}/{s3_key}"
+                                    logger.info(f"[Kernel] [S3 Offload] Uploaded {field_name} ({field_size/1024:.1f}KB) to {s3_path}")
+                                    
+                                    # Replace field with S3 reference
+                                    res[field_name] = {
+                                        "__s3_offloaded": True,
+                                        "__s3_path": s3_path,
+                                        "__original_size_kb": field_size / 1024,
+                                        # Preserve critical metadata for Step Functions JSONPath
+                                        "guardrail_verified": field_value.get('guardrail_verified', False),
+                                        "batch_count_actual": field_value.get('batch_count_actual', 1),
+                                        "scheduling_metadata": field_value.get('scheduling_metadata', {}),
+                                        "state_size_threshold": self.threshold,
+                                        # Preserve passthrough fields with double underscore (legacy compatibility)
+                                        "__scheduling_metadata": field_value.get('scheduling_metadata', {}),
+                                        "__guardrail_verified": field_value.get('guardrail_verified', False),
+                                        "__batch_count_actual": field_value.get('batch_count_actual', 1),
+                                    }
+                                    
+                                    # Update S3 path fields if this is final_state
+                                    if field_name == 'final_state':
+                                        res['final_state_s3_path'] = s3_path
+                                        res['state_s3_path'] = s3_path  # ASL passthrough field
+                                    
+                                except Exception as s3_err:
+                                    logger.error(f"[Kernel] [S3 Offload] Failed to upload {field_name} to S3: {s3_err}")
+                                    # Continue without offloading - better to fail than crash
                             
-                            s3_path = f"s3://{self.state_bucket}/{s3_key}"
-                            logger.info(f"[Kernel] [S3 Offload] Uploaded {len(json.dumps(final_state))/1024:.1f}KB to {s3_path}")
-                            
-                            # Replace final_state with S3 reference
-                            res['final_state'] = {
-                                "__s3_offloaded": True,
-                                "__s3_path": s3_path,
-                                "__original_size_kb": len(json.dumps(final_state)) / 1024,
-                                # Preserve critical metadata for Step Functions JSONPath
-                                "guardrail_verified": final_state.get('guardrail_verified', False),
-                                "batch_count_actual": final_state.get('batch_count_actual', 1),
-                                "scheduling_metadata": final_state.get('scheduling_metadata', {}),
-                                "state_size_threshold": self.threshold,
-                                # Preserve passthrough fields with double underscore (legacy compatibility)
-                                "__scheduling_metadata": final_state.get('scheduling_metadata', {}),
-                                "__guardrail_verified": final_state.get('guardrail_verified', False),
-                                "__batch_count_actual": final_state.get('batch_count_actual', 1),
-                            }
-                            res['final_state_s3_path'] = s3_path
-                            res['state_s3_path'] = s3_path  # ASL passthrough field
-                            
-                            # Verify new size
+                            # Verify new size after all offloads
                             new_size = len(json.dumps(res, default=str))
-                            logger.info(
-                                f"[Kernel] [S3 Offload] Response size reduced: "
-                                f"{response_size/1024:.1f}KB → {new_size/1024:.1f}KB "
-                                f"(saved {(response_size-new_size)/1024:.1f}KB)"
-                            )
+                            if new_size < response_size:
+                                logger.info(
+                                    f"[Kernel] [S3 Offload] Response size reduced: "
+                                    f"{response_size/1024:.1f}KB → {new_size/1024:.1f}KB "
+                                    f"(saved {(response_size-new_size)/1024:.1f}KB)"
+                                )
                             
-                        except Exception as s3_err:
-                            logger.error(f"[Kernel] ❌ S3 offload failed: {s3_err}. Keeping original response (may fail in SFN)")
-                            # Keep original response but log the issue
+                            # If still too large, log warning but continue (Step Functions will reject)
+                            if new_size > SFN_SIZE_LIMIT:
+                                logger.error(
+                                    f"[Kernel] 🚨 CRITICAL: Response still {new_size/1024:.1f}KB after offload. "
+                                    f"Step Functions will reject this payload!"
+                                )
                             
             except Exception as size_check_err:
                 logger.error(f"[Kernel] ⚠️ Failed to check response size: {size_check_err}. Proceeding without offload.")
