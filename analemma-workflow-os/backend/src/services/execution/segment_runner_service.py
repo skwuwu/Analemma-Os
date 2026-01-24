@@ -1355,7 +1355,7 @@ class SegmentRunnerService:
 
             # 2. 컨텍스트 추출 (루프 내부)
             branch_id = branch_result.get('branch_id', f'branch_{i}')
-            branch_status = branch_result.get('branch_status', 'UNKNOWN')
+            branch_status = branch_result.get('branch_status') or branch_result.get('status', 'UNKNOWN')
             
             # 🛡️ [Fix] branch_state를 루프 내부에서 안전하게 획득
             # [Note] 병렬 S3 fetch가 이미 완료되어 hydrated state가 주입됨

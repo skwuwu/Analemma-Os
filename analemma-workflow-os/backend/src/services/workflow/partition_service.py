@@ -695,28 +695,65 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
             # Aggregator의 경우 convergence_node를 사용해 다음 세그먼트 연결
             if seg.get("type") == "aggregator":
                 convergence_node = seg.get("convergence_node")
+                source_p_seg_id = seg.get("source_parallel_group")
+                
+                # Case 1: Branch Convergence (Explicit Logic)
                 if convergence_node and convergence_node in node_to_seg_map:
                     next_seg_id = node_to_seg_map[convergence_node]
                     seg["next_mode"] = "default"
                     seg["default_next"] = next_seg_id
-                else:
-                    # [Critical Fix #2] 합류점이 맵에 없으면 강제로 찾기 시도
-                    if convergence_node:
-                        # 합류점이 forced_segment_starts에 있는지 확인
-                        if convergence_node in forced_segment_starts:
-                            logger.error(
-                                f"Aggregator {seg['id']} has convergence node '{convergence_node}' "
-                                f"which is a forced segment start but not mapped. "
-                                f"This indicates a partitioning logic error."
-                            )
-                        else:
-                            logger.warning(
-                                f"Aggregator {seg['id']} has convergence node '{convergence_node}' "
-                                f"but it is not mapped to any segment. Treating as workflow end."
-                            )
+                    continue
+                
+                # Case 2: Inline Parallel Group (Source Node Logic)
+                # Aggregator created from inline parallel group should follow the parallel group node's edges
+                elif source_p_seg_id is not None:
+                    # Find source parallel segment
+                    # Note: seg_list might be partial (recursive), but source_p_seg should be in the same list or parent?
+                    # Actually for inline parallel, they are siblings in the same list.
+                    source_seg = next((s for s in seg_list if s["id"] == source_p_seg_id), None)
                     
-                    seg["next_mode"] = "end"
-                    seg["default_next"] = None
+                    if source_seg and source_seg.get("node_ids"):
+                        p_node_id = source_seg["node_ids"][0] # Parallel group node ID
+                        
+                        # Find target segment from outgoing edges of the parallel group node
+                        # Similar to normal node exit logic
+                        p_exit_edges = []
+                        for out_edge in outgoing_edges.get(p_node_id, []):
+                            tgt = out_edge.get("target")
+                            if tgt and tgt in node_to_seg_map:
+                                tgt_seg = node_to_seg_map[tgt]
+                                if tgt_seg != source_p_seg_id and tgt_seg != seg["id"]:
+                                     p_exit_edges.append({"edge": out_edge, "target_segment": tgt_seg})
+                        
+                        if p_exit_edges:
+                            if len(p_exit_edges) == 1:
+                                seg["next_mode"] = "default"
+                                seg["default_next"] = p_exit_edges[0]["target_segment"]
+                            else:
+                                seg["next_mode"] = "conditional"
+                                seg["branches"] = [
+                                    {"condition": e["edge"].get("condition", "default"), "next": e["target_segment"]}
+                                    for e in p_exit_edges
+                                ]
+                            continue
+
+                # Fallback / Error Handling
+                if convergence_node:
+                    # [Critical Fix #2] 합류점이 맵에 없으면 강제로 찾기 시도
+                    if convergence_node in forced_segment_starts:
+                        logger.error(
+                            f"Aggregator {seg['id']} has convergence node '{convergence_node}' "
+                            f"which is a forced segment start but not mapped. "
+                            f"This indicates a partitioning logic error."
+                        )
+                    else:
+                        logger.warning(
+                            f"Aggregator {seg['id']} has convergence node '{convergence_node}' "
+                            f"but it is not mapped to any segment. Treating as workflow end."
+                        )
+                
+                seg["next_mode"] = "end"
+                seg["default_next"] = None
                 continue
             
             exit_edges = []
