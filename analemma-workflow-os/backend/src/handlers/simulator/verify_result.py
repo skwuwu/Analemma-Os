@@ -364,6 +364,14 @@ def _verify_scenario(scenario: str, status: str, output: Dict[str, Any], executi
             checks.append(_check("No Infinite Loop", False, 
                                 details="Workflow should complete without hitting loop limit",
                                 expected="< 100 iterations", actual=error_type))
+            return {"passed": False, "checks": checks}
+
+        # [Fix] LOOP_LIMIT 및 COST_GUARDRAIL 시나리오는 가드레일 작동이 성공 조건임
+        if 'LOOP_LIMIT' in scenario or 'COST_GUARDRAIL' in scenario:
+            checks.append(_check("Expected Guardrail Triggered", True, 
+                                details=f"Guardrail {error_type} correctly stopped the execution"))
+            return {"passed": True, "checks": checks}
+            
         return {"passed": False, "checks": checks}
     
     # A. Happy Path
