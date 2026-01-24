@@ -279,8 +279,19 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
     s3_offloaded = False
     
     # If payload is too large, apply optimizations
+    # [Fix] ALWAYS optimize current state to catch large individual fields early
+    # regardless of total size. This keeps state lean.
+    if updated_state_data.get('current_state'):
+        optimized_state, state_s3_offloaded = optimize_current_state(
+            updated_state_data['current_state'], 
+            idempotency_key
+        )
+        updated_state_data['current_state'] = optimized_state
+        if state_s3_offloaded:
+            s3_offloaded = True
+
     if initial_size_kb > max_payload_size_kb:
-        logger.info(f"Payload size ({initial_size_kb}KB) exceeds limit ({max_payload_size_kb}KB), applying optimizations")
+        logger.info(f"Payload size ({initial_size_kb}KB) exceeds limit ({max_payload_size_kb}KB), applying further optimizations")
         
         # 1. Optimize state history
         if updated_state_data.get('state_history'):
@@ -293,15 +304,8 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
             if history_s3_path:
                 compression_applied = True
         
-        # 2. Optimize current state
-        if updated_state_data.get('current_state'):
-            optimized_state, state_s3_offloaded = optimize_current_state(
-                updated_state_data['current_state'], 
-                idempotency_key
-            )
-            updated_state_data['current_state'] = optimized_state
-            if state_s3_offloaded:
-                s3_offloaded = True
+        # 2. [Already done above] Optimize current state
+        # (Moved outside this block to run unconditionally)
         
         # 3. If still too large, compress workflow_config
         final_size_kb = calculate_payload_size(updated_state_data)
