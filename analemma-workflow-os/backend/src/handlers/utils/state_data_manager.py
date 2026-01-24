@@ -180,7 +180,6 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
                 logger.info(f"Moved {field} ({field_size}KB) to S3: {s3_path}")
                 
             except Exception as e:
-            except Exception as e:
                 logger.error(f"[CRITICAL] Failed to move {field} to S3: {e}. Truncating field to prevent catastrophic failure.")
                 # 🛡️ [Fail-Safe] If offload fails, WE MUST NOT return the huge field.
                 # Returning it guarantees a crash (States.DataLimitExceeded).
