@@ -58,6 +58,41 @@ try:
 except ImportError:
     logger.warning("LangGraph not available, using fallback message reducer. This may cause issues with complex workflows.")
 
+# ============================================================================
+# [Configuration] Model Mapping and Timeouts
+# ============================================================================
+
+# Gemini to Bedrock model fallback mapping
+# Can be overridden via environment variable BEDROCK_MODEL_MAP (JSON format)
+DEFAULT_BEDROCK_MODEL_MAP = {
+    "gemini-2.0-flash": "anthropic.claude-3-haiku-20240307-v1:0",
+    "gemini-1.5-pro": "anthropic.claude-3-sonnet-20240229-v1:0",
+    "gemini-1.5-flash": "anthropic.claude-3-haiku-20240307-v1:0",
+    "gemini-1.5-flash-8b": "anthropic.claude-3-haiku-20240307-v1:0",
+}
+
+def get_bedrock_model_map() -> Dict[str, str]:
+    """
+    Get Bedrock model mapping with environment variable override support.
+    
+    Returns:
+        Dictionary mapping Gemini model names to Bedrock model IDs
+    """
+    try:
+        env_map = os.environ.get('BEDROCK_MODEL_MAP')
+        if env_map:
+            custom_map = json.loads(env_map)
+            logger.info(f"Using custom Bedrock model map from environment: {custom_map}")
+            return custom_map
+    except Exception as e:
+        logger.warning(f"Failed to parse BEDROCK_MODEL_MAP from environment: {e}")
+    
+    return DEFAULT_BEDROCK_MODEL_MAP.copy()
+
+# Lambda early exit threshold (milliseconds)
+# If remaining Lambda execution time < this value, trigger AsyncLLMRequiredException
+LAMBDA_EARLY_EXIT_THRESHOLD_MS = int(os.environ.get('LAMBDA_EARLY_EXIT_MS', '10000'))  # 10 seconds default
+
 # -----------------------------------------------------------------------------
 
 
@@ -414,6 +449,97 @@ def extract_text_from_bedrock_response(resp: Any) -> str:
     except Exception:
         return str(resp)
 
+
+def clean_llm_json_response(text: str) -> str:
+    """
+    Clean LLM response to extract valid JSON.
+    
+    LLMs often wrap JSON in markdown code blocks or add explanatory text.
+    This function strips common artifacts:
+    - Markdown code fences: ```json ... ```
+    - Leading/trailing whitespace
+    - Text before first { or [
+    - Text after last } or ]
+    
+    Returns:
+        Cleaned JSON string ready for parsing
+    """
+    if not isinstance(text, str):
+        return str(text)
+    
+    # Remove markdown code fences
+    text = text.strip()
+    
+    # Pattern 1: ```json\n{...}\n```
+    if text.startswith("```json"):
+        text = text[7:]  # Remove ```json
+        if text.endswith("```"):
+            text = text[:-3]  # Remove closing ```
+    elif text.startswith("```"):
+        text = text[3:]  # Remove generic ```
+        if text.endswith("```"):
+            text = text[:-3]
+    
+    text = text.strip()
+    
+    # Pattern 2: Text before/after JSON object or array
+    # Find first { or [ and last } or ]
+    start_obj = text.find('{')
+    start_arr = text.find('[')
+    
+    # Determine actual start (whichever comes first, or -1 if neither found)
+    if start_obj == -1 and start_arr == -1:
+        return text  # No JSON structure found, return as-is
+    elif start_obj == -1:
+        start = start_arr
+    elif start_arr == -1:
+        start = start_obj
+    else:
+        start = min(start_obj, start_arr)
+    
+    # Find corresponding end
+    if text[start] == '{':
+        end = text.rfind('}')
+    else:
+        end = text.rfind(']')
+    
+    if end != -1 and end > start:
+        text = text[start:end+1]
+    
+    return text.strip()
+
+
+def parse_llm_json_response(text: str, fallback_value: Any = None) -> Any:
+    """
+    Attempt to parse LLM response as JSON with robust error handling.
+    
+    Args:
+        text: Raw LLM response text
+        fallback_value: Value to return if parsing fails (default: original text)
+    
+    Returns:
+        Parsed JSON object, or fallback_value if parsing fails
+    """
+    if not isinstance(text, str):
+        return fallback_value if fallback_value is not None else text
+    
+    try:
+        # First attempt: direct parsing
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    try:
+        # Second attempt: clean markdown artifacts
+        cleaned = clean_llm_json_response(text)
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse LLM response as JSON: {e}. Returning raw text.")
+        return fallback_value if fallback_value is not None else text
+    except Exception as e:
+        logger.error(f"Unexpected error parsing LLM JSON: {e}")
+        return fallback_value if fallback_value is not None else text
+
 def normalize_llm_usage(usage: Dict[str, Any], provider: str) -> Dict[str, Any]:
     """
     Normalize token usage statistics from different LLM providers.
@@ -670,17 +796,33 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     attempt = 0
     last_error = None
     
+    # [Critical] Get Lambda context for timeout management
+    # Lambda context is available via global _lambda_context if set by handler
+    lambda_context = globals().get('_lambda_context')
+    
     while attempt <= max_retries:
         try:
-            # Update attempt_count in state for template rendering
-            exec_state["attempt_count"] = attempt + 1
+            # [Critical] Lambda Early Exit: Check remaining execution time
+            if lambda_context and hasattr(lambda_context, 'get_remaining_time_in_millis'):
+                remaining_ms = lambda_context.get_remaining_time_in_millis()
+                if remaining_ms < LAMBDA_EARLY_EXIT_THRESHOLD_MS:
+                    logger.warning(f"🚨 Lambda timeout imminent ({remaining_ms}ms remaining). "
+                                 f"Triggering async mode to prevent forceful termination.")
+                    raise AsyncLLMRequiredException(
+                        f"Insufficient Lambda time ({remaining_ms}ms < {LAMBDA_EARLY_EXIT_THRESHOLD_MS}ms)"
+                    )
+            
+            # [Critical] State Isolation: Deep copy to prevent attempt_count pollution
+            # Each retry attempt should have clean state to avoid template rendering contamination
+            current_attempt_state = exec_state.copy()
+            current_attempt_state["attempt_count"] = attempt + 1
             
             # Render prompts with current attempt count
             prompt_template = config.get("prompt_content") or config.get("user_prompt_template", "")
-            prompt = _render_template(prompt_template, exec_state)
+            prompt = _render_template(prompt_template, current_attempt_state)
             
             system_prompt_tmpl = config.get("system_prompt", "")
-            system_prompt = _render_template(system_prompt_tmpl, exec_state)
+            system_prompt = _render_template(system_prompt_tmpl, current_attempt_state)
             
             node_id = config.get("id", "llm")
 
@@ -824,19 +966,22 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 # Bedrock fallback (existing logic)
                 meta["provider"] = "bedrock"
                 
-                # [Fix] Map Gemini model names to Bedrock equivalents
-                # When falling back from Gemini, the model variable may contain Gemini model names
-                bedrock_model_map = {
-                    "gemini-2.0-flash": "anthropic.claude-3-haiku-20240307-v1:0",
-                    "gemini-1.5-pro": "anthropic.claude-3-sonnet-20240229-v1:0",
-                    "gemini-1.5-flash": "anthropic.claude-3-haiku-20240307-v1:0",
-                    "gemini-1.5-flash-8b": "anthropic.claude-3-haiku-20240307-v1:0",
-                }
+                # [Critical] Use configurable model mapping instead of hardcoded map
+                bedrock_model_map = get_bedrock_model_map()
                 bedrock_model_id = bedrock_model_map.get(model, model)  # Use original if not in map
                 
                 # Log model mapping if applied
                 if bedrock_model_id != model:
                     logger.info(f"Model mapped for Bedrock: {model} -> {bedrock_model_id}")
+                
+                # [Critical] Calculate safe timeout: remaining Lambda time - safety buffer
+                read_timeout = 90  # Default Bedrock timeout
+                if lambda_context and hasattr(lambda_context, 'get_remaining_time_in_millis'):
+                    remaining_ms = lambda_context.get_remaining_time_in_millis()
+                    # Set timeout to remaining time minus 5 second buffer (in seconds)
+                    max_safe_timeout = max(10, (remaining_ms - 5000) / 1000)
+                    read_timeout = min(read_timeout, max_safe_timeout)
+                    logger.info(f"Adjusted Bedrock timeout: {read_timeout}s (Lambda remaining: {remaining_ms}ms)")
                 
                 resp = invoke_bedrock_model(
                     model_id=bedrock_model_id,
@@ -844,7 +989,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     user_prompt=prompt,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    read_timeout_seconds=90 # Adaptive timeout
+                    read_timeout_seconds=read_timeout
                 )
                 text = extract_text_from_bedrock_response(resp)
                 
@@ -868,8 +1013,23 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             current_history = state.get("step_history", [])
             new_history = current_history + [f"{node_id}:llm_call"]
             
+            # [Critical] Parse JSON response if parse_json flag is set
+            # Enables structured output validation and schema enforcement
+            parse_json = config.get("parse_json", False)
+            output_value = text
+            
+            if parse_json:
+                logger.info(f"[LLM Response] Parsing JSON for node {node_id}")
+                output_value = parse_llm_json_response(text, fallback_value=text)
+                
+                # Log parsing result
+                if isinstance(output_value, (dict, list)):
+                    logger.info(f"[LLM Response] Successfully parsed JSON ({type(output_value).__name__})")
+                else:
+                    logger.warning(f"[LLM Response] JSON parsing failed, using raw text")
+            
             out_key = config.get("writes_state_key") or config.get("output_key") or f"{node_id}_output"
-            return {out_key: text, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
+            return {out_key: output_value, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
             
         except Exception as e:
             last_error = e
