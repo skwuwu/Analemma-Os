@@ -1392,7 +1392,7 @@ class SegmentRunnerService:
                     merge_policy=MERGE_POLICY_APPEND_LIST
                 )
                 
-                if branch_status in ('COMPLETE', 'SUCCEEDED'):
+                if branch_status in ('COMPLETE', 'SUCCEEDED', 'COMPLETED', 'CONTINUE'):
                     successful_branches += 1
             
             # 에러 수집
@@ -2268,6 +2268,18 @@ class SegmentRunnerService:
         
         if state_s3_path:
             initial_state = self.state_manager.download_state_from_s3(state_s3_path)
+            # [Critical Fix] Double-check for S3 offload in downloaded state
+            initial_state = ensure_state_bag(initial_state)
+            if isinstance(initial_state, dict) and initial_state.get('__s3_offloaded') is True:
+                offloaded_path = initial_state.get('__s3_path')
+                if offloaded_path:
+                    logger.info(f"[S3 Offload Recovery] Recursive hydration from: {offloaded_path}")
+                    try:
+                        initial_state = self.state_manager.download_state_from_s3(offloaded_path)
+                        initial_state = ensure_state_bag(initial_state)
+                    except Exception as e:
+                        logger.error(f"[S3 Offload Recovery] Recursive hydration failed: {e}")
+                        # Continue with wrapper (will likely fail downstream but better than crash)
         
         # [Guard] [v3.6 P0] Data Ownership Defense: enforce StateBag
         # StateBag guarantees Safe Access (get(key) != None)
