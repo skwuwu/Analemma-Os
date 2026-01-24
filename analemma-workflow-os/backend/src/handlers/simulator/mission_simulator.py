@@ -727,9 +727,13 @@ def trigger_step_functions(scenario_key: str, scenario_config: dict, orchestrato
         
         # Trigger Offloading:
         # 1. TIME_MACHINE_HYPER_STRESS scenario (always offload)
-        # 2. Config size > 30KB (prevent overhead)
+        # 2. PARALLEL_SCHEDULER_TEST (Large initial state)
+        # 3. Config size > 30KB (prevent overhead)
         should_offload = (
-            scenario_key == 'TIME_MACHINE_HYPER_STRESS' or 
+            scenario_key == 'TIME_MACHINE_HYPER_STRESS' or
+            scenario_key == 'PARALLEL_SCHEDULER_TEST' or
+            scenario_key == 'HYPER_REPORT' or
+            scenario_key == 'MULTIMODAL_COMPLEX' or
             config_size > 30 * 1024  # 30KB
         )
         
@@ -810,6 +814,8 @@ def poll_execution_status(execution_arn: str, max_seconds: int = MAX_POLL_SECOND
             
             if status == 'SUCCEEDED':
                 result['output'] = json.loads(response.get('output', '{}'))
+                # [Fix] Hydrate state from S3 for verification
+                result['output']['final_state'] = _hydrate_verification_state(result.get('output', {}))
             elif status == 'FAILED':
                 # Capture detailed error information
                 error_info = response.get('error', 'Unknown error')
@@ -882,6 +888,43 @@ def put_mission_metric(scenario_key: str, success: bool, duration: float = 0):
 # ============================================================================
 # Verification Functions
 # ============================================================================
+# ============================================================================
+# Verification Helpers
+# ============================================================================
+def _hydrate_verification_state(output: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    [Guard] Verification Hydrator
+    If the final state is truncated or offloaded to S3, download it for verification.
+    """
+    final_state = output.get('final_state', {})
+    s3_path = output.get('final_state_s3_path') or output.get('state_s3_path')
+    
+    # Check if hydration is needed
+    needs_hydration = (
+        s3_path and (
+            final_state is None or 
+            final_state.get('__state_truncated') is True or
+            len(final_state) == 0
+        )
+    )
+    
+    if needs_hydration:
+        try:
+            logger.info(f"🔄 Hydrating result for verification from: {s3_path}")
+            s3 = get_s3_client()
+            bucket = s3_path.split('/')[2]
+            key = '/'.join(s3_path.split('/')[3:])
+            
+            response = s3.get_object(Bucket=bucket, Key=key)
+            db_state = json.loads(response["Body"].read().decode("utf-8"))
+            return db_state
+        except Exception as e:
+            logger.error(f"❌ Failed to hydrate state from {s3_path}: {e}")
+            return final_state
+            
+    return final_state
+
+
 def _check_false_positive(scenario_key: str, output: Dict[str, Any]) -> Tuple[bool, str]:
     """
     🛡️ Anti-False Positive Check

@@ -1605,6 +1605,12 @@ class SegmentRunnerService:
             # This ensures the next step in SFN receives these values in its input state
             if isinstance(res.get('final_state'), dict):
                 res['final_state'].update(standard_metadata)
+                
+                # [Compat] [v3.10 Fix] Alias metadata with double underscore for Legacy/Test operator compatibility
+                # Specifically for SPEED_GUARDRAIL_TEST which expects __scheduling_metadata
+                res['final_state']['__scheduling_metadata'] = sm
+                res['final_state']['__guardrail_verified'] = gv
+                res['final_state']['__batch_count_actual'] = bca
             
             # [Guard] 2. Inject into Top-level (SFN ResultSelector Access)
             for key, value in standard_metadata.items():
@@ -2009,7 +2015,7 @@ class SegmentRunnerService:
                     "next_segment_to_run": segment_id + 1,
                     "new_history_logs": [],
                     "error_info": None,
-                    "branches": valid_branches,  # 유효한 브랜치만
+                    "branches": None,  # [Optim] Remove redundant branches (use execution_batches)
                     "execution_batches": execution_batches,
                     "segment_type": "scheduled_parallel",
                     "scheduling_metadata": meta

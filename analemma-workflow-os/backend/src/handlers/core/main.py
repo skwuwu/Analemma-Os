@@ -254,20 +254,86 @@ def _get_nested_value(state: Dict[str, Any], path: str, default: Any = "") -> An
 
 
 def _render_template(template: Any, state: Dict[str, Any]) -> Any:
-    """Render {{variable}} templates against the provided state."""
+    """Render {{variable}} templates against the provided state. Support basic Jinja2 conditionals."""
     if template is None: return None
     if isinstance(template, str):
+        # 1. Handle Basic Jinja2 Conditionals {% if ... %} ... {% else %} ... {% endif %} (Lightweight)
+        # Note: This is not a full Jinja2 parser, but supports common patterns used in test definitions.
+        while "{% if" in template and "{% endif %}" in template:
+            match = re.search(r"\{%\s*if\s+(.+?)\s*%\}(.+?)(?:\{%\s*else\s*%\}(.+?))?\{%\s*endif\s*%\}", template, re.DOTALL)
+            if not match: break
+            
+            full_block = match.group(0)
+            condition = match.group(1).strip()
+            true_block = match.group(2)
+            false_block = match.group(3) or ""
+            
+            # Evaluate condition
+            result = False
+            try:
+                # Check for 'is undefined' / 'is defined'
+                if " is undefined" in condition:
+                    var_name = condition.split(" is undefined")[0].strip()
+                    val = _get_nested_value(state, var_name, None)
+                    result = (val is None)
+                elif " is defined" in condition:
+                    var_name = condition.split(" is defined")[0].strip()
+                    val = _get_nested_value(state, var_name, None)
+                    result = (val is not None)
+                else:
+                    # Comparison logic (e.g., attempt_count < 2)
+                    # Safe eval: Only allow simple comparison
+                    # Replace variable names with values
+                    eval_cond = condition
+                    # Match variable names (simple alphanumeric & dots)
+                    for var_match in re.finditer(r"\b([a-zA-Z_][a-zA-Z0-9_.]*)\b", condition):
+                        var_name = var_match.group(1)
+                        if var_name in ("and", "or", "not", "True", "False", "None"): continue
+                        val = _get_nested_value(state, var_name, None)
+                        if val is None: val = 0 # Default for numeric comparison
+                        if isinstance(val, str): val = f"'{val}'"
+                        eval_cond = eval_cond.replace(var_name, str(val), 1)
+                    
+                    # Very restricted eval
+                    allowed_chars = set("0123456789.+-*/()<>=! '\"andornotTrueFalse")
+                    if set(eval_cond).issubset(allowed_chars):
+                        result = eval(eval_cond)
+            except Exception as e:
+                logger.warning(f"Template condition eval failed: {condition} -> {e}")
+                result = False
+            
+            replacement = true_block if result else false_block
+            template = template.replace(full_block, replacement, 1)
+
+        # 2. Variable Substitution {{ var }}
         def _repl(m):
             key = m.group(1).strip()
+            # Support basic filters (ignore them for now except | tojson)
+            if "|" in key:
+                parts = key.split("|")
+                key = parts[0].strip()
+                filter_name = parts[1].strip()
+            else:
+                filter_name = None
+
             if key == "__state_json":
                 try: return json.dumps(state, ensure_ascii=False)
                 except: return str(state)
+            
             val = _get_nested_value(state, key, "")
+            
+            # Simple handling for | tojson
+            if filter_name == "tojson":
+                if isinstance(val, (dict, list)):
+                    return json.dumps(val, ensure_ascii=False)
+            
             if isinstance(val, (dict, list)):
-                try: return json.dumps(val)
+                try: return json.dumps(val, ensure_ascii=False)
                 except: return str(val)
             return str(val)
-        return re.sub(r"\{\{\s*([\w\.]+)\s*\}\}", _repl, template)
+            
+        return re.sub(r"\{\{\s*(.+?)\s*\}\}", _repl, template)
+        
     if isinstance(template, dict):
         return {k: _render_template(v, state) for k, v in template.items()}
     if isinstance(template, list):
