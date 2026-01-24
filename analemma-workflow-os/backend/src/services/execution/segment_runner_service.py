@@ -1933,6 +1933,43 @@ class SegmentRunnerService:
             res.setdefault('next_segment_to_run', None)  # [Critical Fix] ASL requires this field
             res.setdefault('new_history_logs', [])  # 🛡️ [P0 Critical Fix] ASL JSONPath requires this field
             
+     
+            # [Guard] [v3.9] ASL Passthrough Fields - 입력 이벤트의 메타데이터를 응답에 주입
+            # [Fix] Moved BEFORE S3 Offloading Check to ensure these large fields are also offloaded if needed
+            # ASL JSONPath는 Lambda 응답을 직접 파싱하므로 필드가 없으면 오류 발생
+            # StateBag은 Python 레벨에서만 동작하고 ASL에는 영향 없음
+            asl_passthrough_fields = [
+                'workflow_config', 'current_state', 'state_s3_path',
+                'ownerId', 'workflowId', 'idempotency_key', 'quota_reservation_id',
+                'partition_map', 'partition_map_s3_path',
+                'segment_manifest', 'segment_manifest_s3_path',
+                'distributed_mode', 'max_concurrency',
+                'max_loop_iterations', 'max_branch_iterations',
+                'loop_counter', 'llm_segments', 'hitp_segments', 'state_durations',
+                # [New] Pass through S3 config paths
+                'test_workflow_config_s3_path', 'config_s3_ref'
+            ]
+            for field in asl_passthrough_fields:
+                if field not in res:
+                    # 이벤트에서 값 가져오기 (test_workflow_config -> workflow_config 별칭 처리)
+                    if field == 'workflow_config':
+                        # [Optimization] If config is offloaded, do NOT pass huge inline config back
+                        # unless it's small or we absolutely have to.
+                        s3_path = event.get('test_workflow_config_s3_path') or event.get('config_s3_ref')
+                        should_skip_inline = s3_path is not None
+                        
+                        if should_skip_inline:
+                             # Skip re-injecting huge config (it's available via S3 path)
+                             pass
+                        else:
+                             res[field] = event.get('test_workflow_config') or event.get('workflow_config')
+                    elif field == 'ownerId':
+                        res[field] = event.get('ownerId') or event.get('owner_id')
+                    elif field == 'workflowId':
+                        res[field] = event.get('workflowId') or event.get('workflow_id')
+                    else:
+                        res[field] = event.get(field)
+
             # 🛡️ [P0 Critical] Step Functions 256KB Payload Limit Guard
             # AWS Step Functions rejects state transitions > 256KB
             # Check BEFORE returning to ensure response fits within limits
@@ -2076,40 +2113,7 @@ class SegmentRunnerService:
             except Exception as size_check_err:
                 logger.error(f"[Kernel] ⚠️ Failed to check response size: {size_check_err}. Proceeding without offload.")
             
-            # [Guard] [v3.9] ASL Passthrough Fields - 입력 이벤트의 메타데이터를 응답에 주입
-            # ASL JSONPath는 Lambda 응답을 직접 파싱하므로 필드가 없으면 오류 발생
-            # StateBag은 Python 레벨에서만 동작하고 ASL에는 영향 없음
-            asl_passthrough_fields = [
-                'workflow_config', 'current_state', 'state_s3_path',
-                'ownerId', 'workflowId', 'idempotency_key', 'quota_reservation_id',
-                'partition_map', 'partition_map_s3_path',
-                'segment_manifest', 'segment_manifest_s3_path',
-                'distributed_mode', 'max_concurrency',
-                'max_loop_iterations', 'max_branch_iterations',
-                'loop_counter', 'llm_segments', 'hitp_segments', 'state_durations',
-                # [New] Pass through S3 config paths
-                'test_workflow_config_s3_path', 'config_s3_ref'
-            ]
-            for field in asl_passthrough_fields:
-                if field not in res:
-                    # 이벤트에서 값 가져오기 (test_workflow_config -> workflow_config 별칭 처리)
-                    if field == 'workflow_config':
-                        # [Optimization] If config is offloaded, do NOT pass huge inline config back
-                        # unless it's small or we absolutely have to.
-                        s3_path = event.get('test_workflow_config_s3_path') or event.get('config_s3_ref')
-                        should_skip_inline = s3_path is not None
-                        
-                        if should_skip_inline:
-                             # Skip re-injecting huge config (it's available via S3 path)
-                             pass
-                        else:
-                             res[field] = event.get('test_workflow_config') or event.get('workflow_config')
-                    elif field == 'ownerId':
-                        res[field] = event.get('ownerId') or event.get('owner_id')
-                    elif field == 'workflowId':
-                        res[field] = event.get('workflowId') or event.get('workflow_id')
-                    else:
-                        res[field] = event.get(field)
+
                 
             return res
         
@@ -2176,7 +2180,8 @@ class SegmentRunnerService:
                 
                 child_result = self._trigger_child_workflow(event, branch_config, auth_user_id, quota_id)
                 if child_result:
-                    return child_result
+                    # [Fix] Ensure child workflow result is also wrapped (though small) for consistency
+                    return _finalize_response(child_result, force_offload=False)
 
         # 1. State Bag Normalization
         # [Moved] executed AFTER loading state to prevent data loss
