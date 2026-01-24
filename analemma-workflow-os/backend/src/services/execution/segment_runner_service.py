@@ -1891,6 +1891,8 @@ class SegmentRunnerService:
             res.setdefault('inner_partition_map', None)
             res.setdefault('branches', None)
             res.setdefault('branch_id', None)
+            res.setdefault('final_state_s3_path', None)  # [Critical Fix] ASL requires this field
+            res.setdefault('next_segment_to_run', None)  # [Critical Fix] ASL requires this field
             
             # [Guard] [v3.9] ASL Passthrough Fields - 입력 이벤트의 메타데이터를 응답에 주입
             # ASL JSONPath는 Lambda 응답을 직접 파싱하므로 필드가 없으면 오류 발생

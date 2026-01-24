@@ -74,11 +74,13 @@ class StateManager:
         """
         Download state JSON from S3.
         """
+        import json as json_module  # [Critical Fix] Explicit local import to avoid UnboundLocalError
         try:
             logger.info("⬇️ Downloading state from: %s", s3_path)
             bucket, key = s3_path.replace("s3://", "").split("/", 1)
             response = self.s3_client.get_object(Bucket=bucket, Key=key)
-            state_data = json.loads(response["Body"].read().decode("utf-8"))
+            body_bytes = response["Body"].read()
+            state_data = json_module.loads(body_bytes.decode("utf-8"))
             logger.info("✅ State downloaded successfully (%d keys)", len(state_data.keys()))
             return state_data
         except Exception as e:
