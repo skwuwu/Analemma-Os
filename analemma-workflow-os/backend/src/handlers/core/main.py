@@ -2294,7 +2294,30 @@ def run_workflow_from_dynamodb(table_name: str, key_name: str, key_value: str, i
         raise ValueError(f"Workflow config not found in DynamoDB table {table_name} with key {key_name}={key_value}")
     
     item = response['Item']
-    config_json = item.get('config_json')
+    
+    # [Hybrid Storage] S3 Hydration Check
+    config_s3_ref = item.get('config_s3_ref')
+    if config_s3_ref:
+        logger.info(f"🔄 Hybrid Storage: Hydrating config from {config_s3_ref}")
+        try:
+            # Parse s3://bucket/key
+            if config_s3_ref.startswith("s3://"):
+                parts = config_s3_ref[5:].split("/", 1)
+                bucket = parts[0]
+                key = parts[1]
+                
+                s3_client = boto3.client('s3', region_name=region)
+                obj = s3_client.get_object(Bucket=bucket, Key=key)
+                config_json = obj['Body'].read().decode('utf-8')
+            else:
+                logger.warning(f"Invalid S3 ref format: {config_s3_ref}, falling back to item config")
+                config_json = item.get('config_json') or item.get('config')
+        except Exception as e:
+            logger.error(f"❌ Failed to hydrate config from S3: {e}")
+            raise ValueError(f"Failed to load offloaded config: {e}")
+    else:
+        # Standard load
+        config_json = item.get('config_json') or item.get('config')
     
     if not config_json:
         raise ValueError(f"No config_json found in DynamoDB item")

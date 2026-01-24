@@ -658,6 +658,47 @@ def lambda_handler(event, context):
             # [Fix] Convert floats to Decimals for DynamoDB
             body = _convert_floats_to_decimals(body)
 
+            # [Hybrid Storage] Check for Payload Limit (DynamoDB 400KB)
+            # If config > 350KB, offload to S3
+            try:
+                config_str = body.get('config', '')
+                # Check utf-8 byte size
+                config_size = len(config_str.encode('utf-8')) if isinstance(config_str, str) else 0
+                
+                # Threshold: 350KB (Buffer 50KB for other fields)
+                if config_size > 350 * 1024 and SKELETON_S3_BUCKET:
+                    workflow_id = body['workflowId']
+                    # Use SKELETON_S3_PREFIX if available, else default to 'workflows/'
+                    prefix = SKELETON_S3_PREFIX or 'workflows/'
+                    s3_key = f"{prefix.rstrip('/')}/{workflow_id}/config.json"
+                    if s3_key.startswith('/'): s3_key = s3_key[1:] # Safety
+                    
+                    logger.info(f"⬆️ Config size {config_size/1024:.1f}KB exceeds limit. Offloading to S3: s3://{SKELETON_S3_BUCKET}/{s3_key}")
+                    
+                    s3 = boto3.client('s3')
+                    s3.put_object(
+                        Bucket=SKELETON_S3_BUCKET,
+                        Key=s3_key,
+                        Body=config_str,
+                        ContentType='application/json'
+                    )
+                    
+                    # Set pointer and clear heavy fields
+                    body['config_s3_ref'] = f"s3://{SKELETON_S3_BUCKET}/{s3_key}"
+                    body['config_s3_size'] = config_size
+                    
+                    # Keep minimal metadata if possible, but clear the bulk
+                    # We keep 'config' as a small placeholder or empty to avoid schema issues if any
+                    # But ideally we remove it or set to empty JSON '{}'
+                    body['config'] = '{}' 
+                    if 'config_map' in body:
+                        del body['config_map'] # Remove the map version too
+                    
+                    logger.info("✅ Hybrid Storage: S3 Offloading successful")
+            except Exception as e:
+                logger.error(f"Failed to offload config to S3: {e}")
+                # Fallback: Try to save to DynamoDB (might fail if > 400KB)
+
             # [개선] 경쟁 상태 방지 + IDOR 방지: ConditionExpression으로 원자성/소유권 확보
             put_kwargs = {'Item': body}
             if not is_update:  # POST 요청 (새 워크플로우 생성)
