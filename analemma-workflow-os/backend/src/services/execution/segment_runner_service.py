@@ -1812,6 +1812,9 @@ class SegmentRunnerService:
         last_error = None
         retry_history = []
         
+        # Check if this is a parallel branch execution (for token aggregation)
+        is_parallel_branch = event.get('branch_config') is not None
+        
         for attempt in range(KERNEL_MAX_RETRIES + 1):
             try:
                 # 커널 동적 분할 활성화 여부 확인
@@ -2126,7 +2129,6 @@ class SegmentRunnerService:
                 # 🛡️ [P0 Critical] Force offload for Aggregator/Parallel contexts
                 # These cases accumulate data from multiple branches, so always offload regardless of size
                 # [Fix] Also force offload if running as a Parallel Branch (to keep Map output small)
-                is_parallel_branch = event.get('branch_config') is not None
                 
                 if force_offload or is_parallel_branch:
                     if is_parallel_branch:
