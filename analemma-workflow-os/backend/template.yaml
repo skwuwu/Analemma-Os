@@ -45,6 +45,19 @@ Parameters:
     Type: String
     Description: API key for Google Gemini access.
     NoEcho: true
+  GcpProjectId:
+    Type: String
+    Default: ""
+    Description: GCP Project ID for Vertex AI Gemini integration.
+  GcpLocation:
+    Type: String
+    Default: "us-central1"
+    Description: GCP Location for Vertex AI (e.g., us-central1, asia-northeast3).
+  GcpServiceAccountKey:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: GCP Service Account Key JSON for Vertex AI authentication.
   WorkflowStateBucket:
     Type: String
     Default: ""
@@ -130,6 +143,11 @@ Globals:
           - "arn:aws:states:${AWS::Region}:${AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
           - AccountId: !Ref "AWS::AccountId"
         MOCK_MODE: !Ref MockMode
+        GCP_PROJECT_ID: !Ref GcpProjectId
+        GCP_LOCATION: !Ref GcpLocation
+        # GCP_SERVICE_ACCOUNT_KEY is stored in Secrets Manager (separate secret), not as env var
+        VERTEX_SECRET_NAME: !Sub "backend-workflow-${StageName}-vertex_ai_config"
+        GCP_SA_SECRET_NAME: !Sub "backend-workflow-${StageName}-gcp_service_account"
         SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
         # OWNER_INDEX removed from Globals - each function must specify correct index for its table
         # WorkflowsTableV3 uses: OwnerIdNameIndex
@@ -149,6 +167,10 @@ Conditions:
   HasTestUserCredentials: !And
     - !Not [ !Equals [ !Ref TestUserEmail, "" ] ]
     - !Not [ !Equals [ !Ref TestUserPassword, "" ] ]
+  # [Addition] Create GCP secret only when GCP credentials are provided
+  HasGcpCredentials: !Not [ !Equals [ !Ref GcpProjectId, "" ] ]
+  # [Addition] Create GCP SA Key secret only when service account key is provided
+  HasGcpServiceAccountKey: !Not [ !Equals [ !Ref GcpServiceAccountKey, "" ] ]
 
 Resources:
   # [Secondary optimization] CheckIdempotencyFunction removed
@@ -204,6 +226,27 @@ Resources:
       Name: !Sub "analemma/${StageName}/test-user-credentials"
       SecretString: !Sub '{"email":"${TestUserEmail}","password":"${TestUserPassword}"}'
       Description: "Test user credentials for simulator auth tests"
+
+  # 🔐 GCP Vertex AI credentials for Gemini integration
+  # GitHub Secrets → Save to AWS Secrets Manager during deployment → Runtime lookup from Lambda
+  # Note: GcpServiceAccountKey should be a JSON string (escaped) or empty string
+  GcpVertexAiSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasGcpCredentials
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-vertex_ai_config"
+      SecretString: !Sub '{"project_id":"${GcpProjectId}","location":"${GcpLocation}"}'
+      Description: "GCP Vertex AI configuration for Gemini integration"
+
+  # 🔐 GCP Service Account Key (separate secret for JSON credential)
+  # This avoids JSON-in-JSON escaping issues in CloudFormation
+  GcpServiceAccountKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: HasGcpServiceAccountKey
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-gcp_service_account"
+      SecretString: !Ref GcpServiceAccountKey
+      Description: "GCP Service Account JSON key for Vertex AI authentication"
 
   # 🔐 SSM Parameter for Cognito User Pool ID
   # Extract and store User Pool ID from CognitoIssuerUrl (used by LocalRunnerFunction, etc.)
@@ -598,6 +641,8 @@ Resources:
               - !Ref OpenAISecret
               - !Ref GeminiSecret
               - !Ref AnthropicSecret
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:backend-workflow-${StageName}-vertex_ai_config-*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:backend-workflow-${StageName}-gcp_service_account-*"
           - Effect: Allow
             Action: bedrock:InvokeModel*
             Resource: "*"

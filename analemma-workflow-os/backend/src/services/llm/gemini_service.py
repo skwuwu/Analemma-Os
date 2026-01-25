@@ -247,14 +247,41 @@ _vertexai_initialized = False
 _vertexai_init_error: Optional[str] = None  # Store initialization failure reason
 
 
+def _get_service_account_from_secrets() -> Optional[str]:
+    """
+    Retrieve GCP Service Account JSON from AWS Secrets Manager.
+    
+    Returns:
+        Service Account JSON string or None if not available
+    """
+    try:
+        import boto3
+        secret_name = os.getenv("GCP_SA_SECRET_NAME", "backend-workflow-dev-gcp_service_account")
+        client = boto3.client("secretsmanager", region_name=os.getenv("AWS_REGION", "us-east-1"))
+        response = client.get_secret_value(SecretId=secret_name)
+        sa_key = response.get("SecretString", "")
+        if sa_key and sa_key.strip():
+            logger.debug(f"Service Account key retrieved from Secrets Manager: {secret_name}")
+            return sa_key
+    except Exception as e:
+        logger.debug(f"GCP SA secret not available (this is OK if not configured): {e}")
+    return None
+
+
 def _init_vertexai() -> bool:
     """
     Vertex AI SDK initialization
     
-    Environment variables injected via GitHub Secrets:
+    Authentication flow:
+    1. GCP_SERVICE_ACCOUNT_KEY env var (if set directly)
+    2. AWS Secrets Manager: GCP_SA_SECRET_NAME (separate secret for SA key)
+    3. Application Default Credentials (ADC) fallback
+    
+    Environment variables:
     - GCP_PROJECT_ID: GCP project ID
     - GCP_LOCATION: Vertex AI region (default: us-central1)
-    - GCP_SERVICE_ACCOUNT_KEY: Service Account JSON (optional, uses ADC if not provided)
+    - VERTEX_SECRET_NAME: Secret name for project config
+    - GCP_SA_SECRET_NAME: Secret name for Service Account JSON
     """
     global _vertexai_initialized, _vertexai_init_error
     if _vertexai_initialized:
@@ -262,18 +289,33 @@ def _init_vertexai() -> bool:
     
     try:
         import vertexai
+        import tempfile
         
-        # If Service Account JSON is provided as environment variable, save as temporary file
+        # Step 1: Try to get Service Account credentials
+        sa_key = None
+        
+        # 1a. Check environment variable first
         if GCP_SERVICE_ACCOUNT_KEY:
-            import tempfile
+            sa_key = GCP_SERVICE_ACCOUNT_KEY
+            logger.debug("Using GCP_SERVICE_ACCOUNT_KEY from environment variable")
+        
+        # 1b. Fallback to AWS Secrets Manager (separate secret)
+        if not sa_key:
+            sa_key = _get_service_account_from_secrets()
+        
+        # 1c. Write SA key to temp file for GOOGLE_APPLICATION_CREDENTIALS
+        if sa_key:
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                f.write(GCP_SERVICE_ACCOUNT_KEY)
+                f.write(sa_key)
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
                 logger.debug(f"Service Account credentials written to {f.name}")
         
+        # Step 2: Get project ID
         project_id = GCP_PROJECT_ID
+        location = GCP_LOCATION
+        
         if not project_id:
-            # Fallback: Retrieve from AWS Secrets Manager (Lambda environment)
+            # Fallback: Retrieve from AWS Secrets Manager (vertex_ai_config)
             try:
                 import boto3
                 secret_name = os.getenv("VERTEX_SECRET_NAME", "backend-workflow-dev-vertex_ai_config")
@@ -281,13 +323,8 @@ def _init_vertexai() -> bool:
                 response = client.get_secret_value(SecretId=secret_name)
                 secret = json.loads(response["SecretString"])
                 project_id = secret.get("project_id", "")
-                
-                # Service Account JSON can also be retrieved from Secrets
-                if secret.get("service_account_key"):
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
-                        f.write(json.dumps(secret["service_account_key"]))
-                        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
+                location = secret.get("location", location)
+                logger.debug(f"Project config retrieved from Secrets Manager: {secret_name}")
             except Exception as e:
                 logger.warning(f"Failed to get Vertex AI config from Secrets Manager: {e}")
                 _vertexai_init_error = f"Secrets Manager fallback failed: {e}"
@@ -297,10 +334,11 @@ def _init_vertexai() -> bool:
             logger.error(_vertexai_init_error)
             return False
         
-        vertexai.init(project=project_id, location=GCP_LOCATION)
+        # Step 3: Initialize Vertex AI
+        vertexai.init(project=project_id, location=location)
         _vertexai_initialized = True
         _vertexai_init_error = None  # Clear any previous error
-        logger.info(f"Vertex AI initialized: project={project_id}, location={GCP_LOCATION}")
+        logger.info(f"Vertex AI initialized: project={project_id}, location={location}, credentials={'configured' if sa_key else 'ADC'}")
         return True
         
     except ImportError as e:
