@@ -3088,6 +3088,11 @@ class SegmentRunnerService:
                     '__scheduling_metadata': final_state.get('__scheduling_metadata', {}),
                     '__guardrail_verified': final_state.get('__guardrail_verified'),
                     '__batch_count_actual': final_state.get('__batch_count_actual'),
+                    # 🚀 토큰 관련 필드 추가 (CRITICAL for aggregation)
+                    'total_tokens': final_state.get('total_tokens', 0),
+                    'total_input_tokens': final_state.get('total_input_tokens', 0),
+                    'total_output_tokens': final_state.get('total_output_tokens', 0),
+                    'usage': final_state.get('usage', {}),
                 }
                 # None 값 제거 (응답 크기 추가 절감)
                 pruned_state = {k: v for k, v in pruned_state.items() if v is not None}

@@ -113,7 +113,7 @@
                         },
                         "ResultSelector": {
                             "status.$": "$.Status",
-                            "output.$": "States.StringToJson($.Output)"
+                            "output.$": "$.Output"
                         },
                         "ResultPath": "$.test_result",
                         "Catch": [
