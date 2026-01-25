@@ -1435,6 +1435,47 @@ class SegmentRunnerService:
         if branch_errors:
             aggregated_state['__branch_errors'] = branch_errors
         
+        # [Token Aggregation] 병렬 브랜치들의 토큰 사용량 합산
+        from src.handlers.core.token_utils import extract_token_usage
+        
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_tokens = 0
+        branch_token_details = []
+        
+        for branch_result in parallel_results:
+            if not isinstance(branch_result, dict):
+                continue
+                
+            branch_id = branch_result.get('branch_id', 'unknown')
+            branch_state = branch_result.get('final_state') or branch_result.get('state') or {}
+            
+            # 브랜치의 토큰 사용량 추출
+            usage = extract_token_usage(branch_state)
+            input_tokens = usage['input_tokens']
+            output_tokens = usage['output_tokens']
+            branch_total = usage['total_tokens']
+            
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            total_tokens += branch_total
+            
+            branch_token_details.append({
+                'branch_id': branch_id,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'total_tokens': branch_total
+            })
+        
+        # 합산된 토큰 정보를 aggregated_state에 기록
+        aggregated_state['total_input_tokens'] = total_input_tokens
+        aggregated_state['total_output_tokens'] = total_output_tokens
+        aggregated_state['total_tokens'] = total_tokens
+        aggregated_state['branch_token_details'] = branch_token_details
+        
+        logger.info(f"[Aggregator] [Token Aggregation] {len(branch_token_details)} branches, "
+                   f"total tokens: {total_tokens} ({total_input_tokens} input + {total_output_tokens} output)")
+        
         # 3. 상태 저장 (S3 오프로딩 포함)
         s3_bucket_raw = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET") or ""
         s3_bucket = s3_bucket_raw.strip() if s3_bucket_raw else None
