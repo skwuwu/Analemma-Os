@@ -232,10 +232,27 @@ jobs:
           if [ -n "${GCP_PROJECT_ID}" ]; then
             PARAM_OVERRIDES="${PARAM_OVERRIDES} GcpProjectId=${GCP_PROJECT_ID} GcpLocation=${GCP_LOCATION}"
           fi
+          
+          # GCP Service Account Key is stored directly in AWS Secrets Manager (not via SAM parameter)
+          # This avoids JSON escaping issues with SAM parameter-overrides
           if [ -n "${GCP_SERVICE_ACCOUNT_KEY}" ]; then
-            # Escape special characters in JSON for SAM parameter
-            ESCAPED_KEY=$(echo "${GCP_SERVICE_ACCOUNT_KEY}" | sed 's/"/\\"/g' | tr -d '\n')
-            PARAM_OVERRIDES="${PARAM_OVERRIDES} GcpServiceAccountKey='${ESCAPED_KEY}'"
+            # Use same naming convention as GCP_SA_SECRET_NAME in template.yaml
+            SECRET_NAME="backend-workflow-${STAGE_NAME}-gcp_service_account"
+            echo "Storing GCP Service Account Key in AWS Secrets Manager: ${SECRET_NAME}"
+            # Create or update the secret
+            if aws secretsmanager describe-secret --secret-id "${SECRET_NAME}" --region "${AWS_REGION}" 2>/dev/null; then
+              aws secretsmanager put-secret-value \
+                --secret-id "${SECRET_NAME}" \
+                --secret-string "${GCP_SERVICE_ACCOUNT_KEY}" \
+                --region "${AWS_REGION}"
+              echo "✅ Updated existing secret: ${SECRET_NAME}"
+            else
+              aws secretsmanager create-secret \
+                --name "${SECRET_NAME}" \
+                --secret-string "${GCP_SERVICE_ACCOUNT_KEY}" \
+                --region "${AWS_REGION}"
+              echo "✅ Created new secret: ${SECRET_NAME}"
+            fi
           fi
 
           # Inject test user secrets (CI/CD → AWS Secrets Manager)

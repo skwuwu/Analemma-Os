@@ -53,11 +53,8 @@ Parameters:
     Type: String
     Default: "us-central1"
     Description: GCP Location for Vertex AI (e.g., us-central1, asia-northeast3).
-  GcpServiceAccountKey:
-    Type: String
-    Default: ""
-    NoEcho: true
-    Description: GCP Service Account Key JSON for Vertex AI authentication.
+  # GcpServiceAccountKey is stored directly by GitHub Actions in AWS Secrets Manager
+  # (avoids JSON escaping issues with SAM parameter-overrides)
   WorkflowStateBucket:
     Type: String
     Default: ""
@@ -169,8 +166,7 @@ Conditions:
     - !Not [ !Equals [ !Ref TestUserPassword, "" ] ]
   # [Addition] Create GCP secret only when GCP credentials are provided
   HasGcpCredentials: !Not [ !Equals [ !Ref GcpProjectId, "" ] ]
-  # [Addition] Create GCP SA Key secret only when service account key is provided
-  HasGcpServiceAccountKey: !Not [ !Equals [ !Ref GcpServiceAccountKey, "" ] ]
+  # Note: GcpServiceAccountKey secret is created by GitHub Actions directly in Secrets Manager
 
 Resources:
   # [Secondary optimization] CheckIdempotencyFunction removed
@@ -238,15 +234,8 @@ Resources:
       SecretString: !Sub '{"project_id":"${GcpProjectId}","location":"${GcpLocation}"}'
       Description: "GCP Vertex AI configuration for Gemini integration"
 
-  # 🔐 GCP Service Account Key (separate secret for JSON credential)
-  # This avoids JSON-in-JSON escaping issues in CloudFormation
-  GcpServiceAccountKeySecret:
-    Type: AWS::SecretsManager::Secret
-    Condition: HasGcpServiceAccountKey
-    Properties:
-      Name: !Sub "backend-workflow-${StageName}-gcp_service_account"
-      SecretString: !Ref GcpServiceAccountKey
-      Description: "GCP Service Account JSON key for Vertex AI authentication"
+  # Note: GCP Service Account Key secret (backend-workflow-${StageName}-gcp_service_account) is created
+  # directly by GitHub Actions in AWS Secrets Manager to avoid JSON escaping issues
 
   # 🔐 SSM Parameter for Cognito User Pool ID
   # Extract and store User Pool ID from CognitoIssuerUrl (used by LocalRunnerFunction, etc.)
