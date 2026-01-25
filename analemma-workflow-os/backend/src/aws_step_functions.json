@@ -1010,10 +1010,13 @@
     },
     "CleanupMergedState": {
       "Type": "Pass",
-      "Comment": "🛡️ [Payload Safety] Remove parallel_results and debris, keeping only state_data and execution_result",
+      "Comment": "🛡️ [Payload Safety] Remove parallel_results and debris, keeping only state_data and execution_result. Flatten critical metadata to root.",
       "Parameters": {
         "state_data.$": "$.state_data",
-        "execution_result.$": "$.execution_result_wrapper.execution_result"
+        "execution_result.$": "$.execution_result_wrapper.execution_result",
+        "ownerId.$": "$.state_data.ownerId",
+        "workflowId.$": "$.state_data.workflowId",
+        "idempotency_key.$": "$.state_data.idempotency_key"
       },
       "Next": "UpdateStateData"
     },

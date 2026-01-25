@@ -89,6 +89,39 @@ def get_bedrock_model_map() -> Dict[str, str]:
     
     return DEFAULT_BEDROCK_MODEL_MAP.copy()
 
+# ============================================================================
+# [Cancellation] Execution Cancellation Support
+# ============================================================================
+
+def check_execution_cancelled(execution_arn: str) -> bool:
+    """
+    Check if the Step Functions execution has been cancelled/stopped.
+    
+    Args:
+        execution_arn: The ARN of the Step Functions execution
+        
+    Returns:
+        True if execution is cancelled/stopped, False otherwise
+    """
+    try:
+        # Get Step Functions client
+        sfn_client = boto3.client('stepfunctions', region_name=os.environ.get('AWS_REGION', 'us-east-1'))
+        
+        # Describe execution to get current status
+        response = sfn_client.describe_execution(executionArn=execution_arn)
+        status = response.get('status', 'RUNNING')
+        
+        # Check if execution is in a terminal state (not running)
+        if status in ['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'ABORTED']:
+            logger.warning(f"Execution {execution_arn} is in terminal state: {status}")
+            return True
+            
+        return False
+    except Exception as e:
+        logger.warning(f"Failed to check execution status for {execution_arn}: {e}")
+        # If we can't check, assume not cancelled to avoid false positives
+        return False
+
 # Lambda early exit threshold (milliseconds)
 # If remaining Lambda execution time < this value, trigger AsyncLLMRequiredException
 LAMBDA_EARLY_EXIT_THRESHOLD_MS = int(os.environ.get('LAMBDA_EARLY_EXIT_MS', '10000'))  # 10 seconds default
@@ -1083,6 +1116,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # Ensure S3 pointers defined in input_variables are downloaded
     exec_state = _hydrate_state_for_config(state, config)
     
+    # [Cancellation] Check if execution has been cancelled before starting LLM call
+    execution_arn = exec_state.get("execution_arn") or exec_state.get("ExecutionArn")
+    if execution_arn and check_execution_cancelled(execution_arn):
+        logger.warning(f"🚨 Execution cancelled, aborting LLM call for node {config.get('id', 'llm')}")
+        raise Exception("Execution cancelled by user")
+    
     # 1. Get Retry Config
     # [Fix] None defense: config['retry_config']가 None일 수 있음
     retry_config = config.get("retry_config") or {}
@@ -1098,6 +1137,11 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     lambda_context = globals().get('_lambda_context')
     
     while attempt <= max_retries:
+        # [Cancellation] Check if execution has been cancelled before each attempt
+        if execution_arn and check_execution_cancelled(execution_arn):
+            logger.warning(f"🚨 Execution cancelled during retry attempt {attempt+1}, aborting LLM call for node {config.get('id', 'llm')}")
+            raise Exception("Execution cancelled by user")
+        
         try:
             # [Critical] Lambda Early Exit: Check remaining execution time
             if lambda_context and hasattr(lambda_context, 'get_remaining_time_in_millis'):
@@ -1209,6 +1253,11 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             logger.debug(f"  Part {i+1}: {part['mime_type']} ({source_type})")
                         
                         # Call invoke_with_images for multimodal processing
+                        # [Cancellation] Check before expensive multimodal call
+                        if execution_arn and check_execution_cancelled(execution_arn):
+                            logger.warning(f"🚨 Execution cancelled before multimodal LLM call for node {node_id}")
+                            raise Exception("Execution cancelled by user")
+                        
                         resp = service.invoke_with_images(
                             user_prompt=cleaned_prompt,
                             image_sources=image_sources,
@@ -1219,6 +1268,11 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         )
                     else:
                         # Standard text-only invocation
+                        # [Cancellation] Check before LLM call
+                        if execution_arn and check_execution_cancelled(execution_arn):
+                            logger.warning(f"🚨 Execution cancelled before LLM call for node {node_id}")
+                            raise Exception("Execution cancelled by user")
+                        
                         resp = service.invoke_model(
                             user_prompt=prompt,
                             system_instruction=system_prompt,
@@ -1312,6 +1366,11 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     max_safe_timeout = max(10, (remaining_ms - LAMBDA_TIMEOUT_BUFFER_MS) / 1000)
                     read_timeout = min(read_timeout, max_safe_timeout)
                     logger.info(f"Adjusted Bedrock timeout: {read_timeout}s (Lambda remaining: {remaining_ms}ms)")
+                
+                # [Cancellation] Check before Bedrock call
+                if execution_arn and check_execution_cancelled(execution_arn):
+                    logger.warning(f"🚨 Execution cancelled before Bedrock LLM call for node {node_id}")
+                    raise Exception("Execution cancelled by user")
                 
                 resp = invoke_bedrock_model(
                     model_id=bedrock_model_id,
@@ -1809,6 +1868,13 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
 
 def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Executes sub-node for each item in list concurrently."""
+    
+    # [Cancellation] Check if execution has been cancelled before starting parallel processing
+    execution_arn = state.get("execution_arn") or state.get("ExecutionArn")
+    if execution_arn and check_execution_cancelled(execution_arn):
+        logger.warning(f"🚨 Execution cancelled, aborting for_each processing for node {config.get('id', 'for_each')}")
+        return {config.get("output_key", "for_each_results"): []}
+    
     # [Fix] Support both flat config and nested config (node_def structure)
     # When called from builder, config is the full node_def: {id, type, config: {...}}
     # Extract the inner config if present
@@ -1923,6 +1989,11 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             raise ValueError(f"Unknown sub-node: {sub_node_type}")
 
     def worker(item):
+        # [Cancellation] Check if execution has been cancelled before processing each item
+        if execution_arn and check_execution_cancelled(execution_arn):
+            logger.warning(f"🚨 Execution cancelled during parallel processing, skipping item {item}")
+            return {"error": "Execution cancelled", "item": item}
+        
         # [Optimization] Use ChainMap for zero-copy state view
         item_state = ChainMap({"item": item}, state)
         # Deep copy only the messages list if it exists (to avoid reducer conflicts)
