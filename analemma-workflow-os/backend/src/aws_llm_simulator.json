@@ -7,8 +7,8 @@
             "Parameters": {
                 "execution_id.$": "$$.Execution.Id",
                 "start_time.$": "$$.Execution.StartTime",
-                "test_config.$": "$.test_config",
-                "scenario_key.$": "$.scenario_key",
+                "test_workflow_config.$": "$.test_workflow_config",
+                "scenario_key.$": "$.initial_state.e2e_test_scenario",
                 "MOCK_MODE": "false"
             },
             "ResultPath": "$.test_metadata",
@@ -119,7 +119,7 @@
             "Parameters": {
                 "scenario_key.$": "$.test_metadata.scenario_key",
                 "final_state.$": "$.final_state",
-                "test_config.$": "$.test_metadata.test_config",
+                "test_workflow_config.$": "$.test_metadata.test_workflow_config",
                 "execution_id.$": "$.test_metadata.execution_id"
             },
             "ResultPath": "$.verification_result",
