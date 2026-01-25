@@ -2356,6 +2356,43 @@ Resources:
             Resource:
               - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*"
 
+  # LLM Simulator Support Functions
+  PrepareLLMTestFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "PrepareLLMTest-${StageName}"
+      CodeUri: src/
+      Handler: handlers.simulator.prepare_llm_test.lambda_handler
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !GetAtt WorkflowDistributedOrchestratorStateMachine.Arn
+          WORKFLOW_ORCHESTRATOR_ARN: !GetAtt WorkflowOrchestratorStateMachine.Arn
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - CloudWatchLogsFullAccess
+
+  AggregateLLMResultsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "AggregateLLMResults-${StageName}"
+      CodeUri: src/
+      Handler: handlers.simulator.aggregate_llm_results.lambda_handler
+      Runtime: python3.12
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          METRIC_NAMESPACE: Analemma/LLMSimulator
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - CloudWatchPutMetricPolicy: {}
+        - CloudWatchLogsFullAccess
+
   # LLM Simulator Step Functions State Machine
   LLMSimulatorStateMachine:
     Type: AWS::Serverless::StateMachine
@@ -2363,22 +2400,38 @@ Resources:
       Name: !Sub "LLMSimulator-${StageName}"
       DefinitionUri: src/aws_llm_simulator.json
       DefinitionSubstitutions:
-        InitializeStateDataArn: !GetAtt InitializeStateDataFunction.Arn
-        SegmentRunnerArn: !GetAtt SegmentRunnerFunction.Arn
-        AggregateDistributedResultsArn: !GetAtt AggregateDistributedResultsFunction.Arn
-        VerifyLLMTestArn: !GetAtt VerifyLLMTestFunction.Arn
+        PrepareLLMTestFunction: !GetAtt PrepareLLMTestFunction.Arn
+        VerifyLLMTestFunction: !GetAtt VerifyLLMTestFunction.Arn
+        AggregateLLMResultsFunction: !GetAtt AggregateLLMResultsFunction.Arn
       Policies:
         - LambdaInvokePolicy:
-            FunctionName: !Ref InitializeStateDataFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref SegmentRunnerFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref AggregateDistributedResultsFunction
+            FunctionName: !Ref PrepareLLMTestFunction
         - LambdaInvokePolicy:
             FunctionName: !Ref VerifyLLMTestFunction
-        - S3CrudPolicy:
-            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
-        - CloudWatchPutMetricPolicy: {}
+        - LambdaInvokePolicy:
+            FunctionName: !Ref AggregateLLMResultsFunction
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:StartExecution
+            Resource:
+              - !GetAtt WorkflowDistributedOrchestratorStateMachine.Arn
+              - !GetAtt WorkflowOrchestratorStateMachine.Arn
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:DescribeExecution
+              - states:StopExecution
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*"
+        - Statement:
+          - Effect: Allow
+            Action:
+              - events:PutTargets
+              - events:PutRule
+              - events:DescribeRule
+            Resource:
+              - !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForStepFunctionsExecutionRule"
 
   WorkflowsTableV3:
     Type: AWS::DynamoDB::Table

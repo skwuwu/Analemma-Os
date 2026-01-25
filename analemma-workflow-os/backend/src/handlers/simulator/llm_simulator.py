@@ -60,6 +60,9 @@ def get_cloudwatch_client():
 # Configuration
 # ============================================================================
 METRIC_NAMESPACE = os.environ.get('METRIC_NAMESPACE', 'Analemma/LLMSimulator')
+# LLM Simulator uses its own dedicated State Machine
+LLM_SIMULATOR_STATE_MACHINE_ARN = os.environ.get('LLM_SIMULATOR_STATE_MACHINE_ARN')
+# Fallback to distributed orchestrator if LLM Simulator SM not configured
 DISTRIBUTED_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN')
 STANDARD_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
 STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
@@ -325,7 +328,11 @@ def trigger_llm_test(scenario_key: str, scenario_config: dict, orchestrator_type
     
     IMPORTANT: MOCK_MODE=false로 실행됨 (실제 LLM 호출)
     """
-    if orchestrator_type == 'STANDARD':
+    # [Fix] Use dedicated LLM Simulator State Machine if available
+    if LLM_SIMULATOR_STATE_MACHINE_ARN:
+        state_machine_arn = LLM_SIMULATOR_STATE_MACHINE_ARN
+        logger.info(f"Using dedicated LLM Simulator State Machine")
+    elif orchestrator_type == 'STANDARD':
         state_machine_arn = STANDARD_STATE_MACHINE_ARN
     else:
         state_machine_arn = DISTRIBUTED_STATE_MACHINE_ARN

@@ -2421,8 +2421,8 @@ def route_draft_quality(state: Dict[str, Any]) -> str:
 def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Executes branches in parallel and merges results."""
     node_id = config.get("id", "parallel_group")
-    # [Fix] None defense: config['config']가 None일 수 있음
-    branches = (config.get("config") or {}).get("branches", [])
+    # [Fix] Support both nested config and direct config
+    branches = config.get("branches", (config.get("config") or {}).get("branches", []))
     
     if not branches:
         return {}
@@ -2528,6 +2528,9 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
                 f"total tokens: {combined_updates['total_tokens']} "
                 f"({total_input_tokens} input + {total_output_tokens} output), "
                 f"cost: ${estimated_cost:.6f}")
+    
+    # [Debug] Log the keys being returned
+    logger.info(f"Parallel group {node_id} returning keys: {list(combined_updates.keys())}")
                 
     return combined_updates
 

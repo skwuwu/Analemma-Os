@@ -1847,6 +1847,70 @@ class SegmentRunnerService:
                      result_state['__execution_null_recovered'] = True
                      # Note: We prefer keep-alive over crash here.
                 
+                # [Token Aggregation] ASL Parallel Branch Support
+                # For parallel branches, extract and accumulate token usage from the branch execution result
+                # This ensures _handle_aggregator can extract tokens from branch final_states
+                if is_parallel_branch:
+                    try:
+                        # Extract accumulated token usage by directly searching result_state for token data
+                        total_input_tokens = 0
+                        total_output_tokens = 0
+                        total_tokens = 0
+                        
+                        def extract_tokens_from_dict(data, prefix=""):
+                            """Recursively extract token values from nested dictionaries"""
+                            nonlocal total_input_tokens, total_output_tokens, total_tokens
+                            
+                            if isinstance(data, dict):
+                                for key, value in data.items():
+                                    full_key = f"{prefix}.{key}" if prefix else key
+                                    
+                                    if key in ['input_tokens', 'total_input_tokens'] or 'input_tokens' in key:
+                                        if isinstance(value, (int, float)):
+                                            total_input_tokens += int(value)
+                                    elif key in ['output_tokens', 'total_output_tokens'] or 'output_tokens' in key:
+                                        if isinstance(value, (int, float)):
+                                            total_output_tokens += int(value)
+                                    elif key in ['total_tokens'] or 'total_tokens' in key:
+                                        if isinstance(value, (int, float)):
+                                            total_tokens += int(value)
+                                    elif isinstance(value, dict):
+                                        # Recursively search nested dictionaries
+                                        extract_tokens_from_dict(value, full_key)
+                            
+                            elif isinstance(data, (int, float)) and 'token' in prefix.lower():
+                                # Handle direct token values in keys containing 'token'
+                                if 'input' in prefix.lower():
+                                    total_input_tokens += int(data)
+                                elif 'output' in prefix.lower():
+                                    total_output_tokens += int(data)
+                                else:
+                                    total_tokens += int(data)
+                        
+                        # Search through all keys in result_state
+                        for key, value in result_state.items():
+                            extract_tokens_from_dict({key: value})
+                        
+                        if total_tokens > 0 or total_input_tokens > 0 or total_output_tokens > 0:
+                            # Ensure total_tokens is calculated if not directly found
+                            if total_tokens == 0 and (total_input_tokens > 0 or total_output_tokens > 0):
+                                total_tokens = total_input_tokens + total_output_tokens
+                            
+                            # Store accumulated usage in final_state for aggregator to extract
+                            result_state['usage'] = {
+                                'input_tokens': total_input_tokens,
+                                'output_tokens': total_output_tokens,
+                                'total_tokens': total_tokens
+                            }
+                            result_state['total_input_tokens'] = total_input_tokens
+                            result_state['total_output_tokens'] = total_output_tokens
+                            result_state['total_tokens'] = total_tokens
+                            logger.info(f"[Parallel Branch] Accumulated token usage in final_state: {total_tokens} tokens ({total_input_tokens} input + {total_output_tokens} output)")
+                        else:
+                            logger.debug(f"[Parallel Branch] No token usage found in branch result")
+                    except Exception as e:
+                        logger.warning(f"[Parallel Branch] Failed to extract token usage: {e}")
+                
                 # 성공
                 if attempt > 0:
                     logger.info(f"[Kernel Retry] [Success] Succeeded after {attempt} retries")
