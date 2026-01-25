@@ -1292,6 +1292,13 @@ class SegmentRunnerService:
         for i, result in enumerate(parallel_results):
             if not result or not isinstance(result, dict):
                 continue
+            
+            # [Critical Fix] Unwrap Lambda invoke wrapper if present
+            # Distributed Map State returns: {"Payload": {...}}
+            if 'Payload' in result and isinstance(result['Payload'], dict):
+                result = result['Payload']
+                parallel_results[i] = result  # Update in-place for later processing
+            
             branch_s3_path = result.get('final_state_s3_path') or result.get('state_s3_path')
             branch_state = result.get('final_state') or result.get('state') or {}
             

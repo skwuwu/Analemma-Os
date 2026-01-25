@@ -746,11 +746,7 @@
               }
             },
             "ResultSelector": {
-              "status.$": "$.Payload.status",
-              "final_state.$": "$.Payload.final_state",
-              "final_state_s3_path.$": "$.Payload.final_state_s3_path",
-              "state_s3_path.$": "$.Payload.state_s3_path",
-              "execution_metadata.$": "$.Payload.execution_metadata"
+              "Payload.$": "$.Payload"
             },
             "End": true
           }
