@@ -18,7 +18,10 @@ def extract_token_usage(data: Dict[str, Any]) -> TokenUsage:
     """
     Extract token usage from various data structures with fallback support.
 
-    Supports both 'usage' (from llm_chat_runner) and 'token_usage' (legacy) keys.
+    Supports multiple token usage patterns:
+    - 'usage' or 'token_usage' keys (from llm_chat_runner)
+    - Direct 'total_input_tokens', 'total_output_tokens', 'total_tokens' keys (from aggregators)
+    - Aggregated token data from for_each, parallel_group, etc.
 
     Args:
         data: Dictionary that may contain token usage information
@@ -32,13 +35,16 @@ def extract_token_usage(data: Dict[str, Any]) -> TokenUsage:
     # Try both possible keys for backward compatibility
     token_data = data.get('usage') or data.get('token_usage') or {}
 
-    if not isinstance(token_data, dict):
-        return {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
-
-    # Extract and normalize token values
-    input_tokens = int(token_data.get('input_tokens', 0))
-    output_tokens = int(token_data.get('output_tokens', 0))
-    total_tokens = int(token_data.get('total_tokens', input_tokens + output_tokens))
+    if isinstance(token_data, dict) and token_data:
+        # Extract and normalize token values from usage/token_usage
+        input_tokens = int(token_data.get('input_tokens', 0))
+        output_tokens = int(token_data.get('output_tokens', 0))
+        total_tokens = int(token_data.get('total_tokens', input_tokens + output_tokens))
+    else:
+        # Check for direct aggregated token keys (from for_each, parallel_group, etc.)
+        input_tokens = int(data.get('total_input_tokens', 0))
+        output_tokens = int(data.get('total_output_tokens', 0))
+        total_tokens = int(data.get('total_tokens', input_tokens + output_tokens))
 
     return {
         'input_tokens': input_tokens,
