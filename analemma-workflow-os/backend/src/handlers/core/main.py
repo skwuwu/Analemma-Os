@@ -2573,7 +2573,9 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     
     # [Debug] Log the keys being returned
     logger.info(f"Parallel group {node_id} returning keys: {list(combined_updates.keys())}")
-                
+    
+    # [Payload Optimization] Keep flattened structure to avoid 256KB Step Functions limit
+    # Aggregators must query individual branch IDs directly from state
     return combined_updates
 
 

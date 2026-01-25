@@ -975,7 +975,8 @@ class SegmentRunnerService:
                 if items_key and items_key in state:
                     items = state.get(items_key, [])
                     if isinstance(items, list):
-                        memory_mb += len(items) * 5
+                        iteration_count = len(items)
+                        memory_mb += iteration_count * 5
                         # for_each 내부에 LLM이 있으면 토큰 폭증
                         # [Fix] None defense: config['sub_node_config'] 또는 config['sub_workflow']가 None일 수 있음
                         sub_config = config.get('sub_node_config') or config.get('sub_workflow') or {}
@@ -983,8 +984,10 @@ class SegmentRunnerService:
                         for sub_node in sub_nodes:
                             # [Fix] sub_node가 None일 수 있음
                             if sub_node and isinstance(sub_node, dict) and sub_node.get('type') in ('llm_chat', 'aiModel'):
-                                tokens += len(items) * 5000  # 아이템당 5000 토큰 예상 (Aggressive buffer for tests)
-                                llm_calls += len(items)
+                                # [Critical Fix] Multiply by iteration count for accurate token estimation
+                                tokens += iteration_count * 5000  # 아이템당 5000 토큰 예상
+                                llm_calls += iteration_count
+                                logger.debug(f"[Scheduler] for_each with LLM: {iteration_count} iterations × 5000 tokens = {iteration_count * 5000} tokens")
             
             # 공유 자원 접근 감지
             if node_type in ('db_write', 's3_write', 'api_call'):
@@ -2476,6 +2479,12 @@ class SegmentRunnerService:
         # StateBag guarantees Safe Access (get(key) != None)
         from src.common.statebag import ensure_state_bag
         initial_state = ensure_state_bag(initial_state)
+        
+        # [FIX] Propagate MOCK_MODE from payload to state
+        # LLM Simulator passes MOCK_MODE in payload root, but llm_chat_runner reads from state
+        if 'MOCK_MODE' in event and 'MOCK_MODE' not in initial_state:
+            initial_state['MOCK_MODE'] = event['MOCK_MODE']
+            logger.info(f"🔄 Propagated MOCK_MODE from payload to state: {event['MOCK_MODE']}")
 
         # [Fix] [v3.10] Normalize Event AFTER loading state
         # Remove potentially huge state_data from event to save memory for child processes
