@@ -2368,8 +2368,8 @@ Resources:
       MemorySize: 256
       Environment:
         Variables:
-          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !GetAtt WorkflowDistributedOrchestratorStateMachine.Arn
-          WORKFLOW_ORCHESTRATOR_ARN: !GetAtt WorkflowOrchestratorStateMachine.Arn
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !GetAtt StepFunctionDistributedOrchestrator.Arn
+          WORKFLOW_ORCHESTRATOR_ARN: !GetAtt StepFunctionOrchestrator.Arn
       Policies:
         - S3ReadPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
@@ -2415,8 +2415,8 @@ Resources:
             Action:
               - states:StartExecution
             Resource:
-              - !GetAtt WorkflowDistributedOrchestratorStateMachine.Arn
-              - !GetAtt WorkflowOrchestratorStateMachine.Arn
+              - !GetAtt StepFunctionDistributedOrchestrator.Arn
+              - !GetAtt StepFunctionOrchestrator.Arn
         - Statement:
           - Effect: Allow
             Action:
