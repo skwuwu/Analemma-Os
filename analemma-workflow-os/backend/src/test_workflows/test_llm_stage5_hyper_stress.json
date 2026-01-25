@@ -252,9 +252,11 @@
         },
         {
             "id": "depth_3_hitl_approval",
-            "type": "hitl",
+            "type": "operator",
+            "hitp": true,
             "label": "[Depth 3] 인간 최종 결재 (재귀 3단계 + HITL)",
             "config": {
+                "code": "state['hitl_decision'] = 'pending'",
                 "prompt": "심층 분석 완료. 다음 항목들에 대해 최종 승인이 필요합니다.",
                 "data_key": "needs_hitl",
                 "timeout_seconds": 180,

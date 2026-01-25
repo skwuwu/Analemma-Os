@@ -151,7 +151,7 @@
                     "then": "proceed_to_hitl",
                     "else": "retry_processing"
                 },
-                "output_key": "loop_decision"
+                "output_key": "_routing_decision"
             }
         },
         {
@@ -184,9 +184,11 @@
         },
         {
             "id": "hitl_approval",
-            "type": "hitl",
+            "type": "operator",
+            "hitp": true,
             "label": "최종 승인 대기 (Human-in-the-Loop)",
             "config": {
+                "code": "state['hitl_decision'] = 'pending'",
                 "prompt": "3개 아이템 처리 완료. 최종 승인하시겠습니까?",
                 "timeout_seconds": 120,
                 "options": [
@@ -264,14 +266,13 @@
             "target": "loop_decision"
         },
         {
+            "type": "conditional_edge",
             "source": "loop_decision",
-            "target": "record_state_for_hitl",
-            "condition": "proceed_to_hitl"
-        },
-        {
-            "source": "loop_decision",
-            "target": "increment_counter",
-            "condition": "retry_processing"
+            "router_func": "route_by_state_key",
+            "mapping": {
+                "proceed_to_hitl": "record_state_for_hitl",
+                "retry_processing": "increment_counter"
+            }
         },
         {
             "source": "increment_counter",

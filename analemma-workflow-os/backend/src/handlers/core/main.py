@@ -1133,6 +1133,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # Ensure S3 pointers defined in input_variables are downloaded
     exec_state = _hydrate_state_for_config(state, config)
     
+    # [FIX] Override MOCK_MODE from state if present (payload takes precedence over Lambda env var)
+    # This allows LLM Simulator to force MOCK_MODE=false even when Lambda default is true
+    if "MOCK_MODE" in exec_state:
+        os.environ["MOCK_MODE"] = str(exec_state["MOCK_MODE"])
+        logger.info(f"🔄 MOCK_MODE overridden from state: {exec_state['MOCK_MODE']}")
+    
     # [Cancellation] Check if execution has been cancelled before starting LLM call
     execution_arn = exec_state.get("execution_arn") or exec_state.get("ExecutionArn")
     if execution_arn and check_execution_cancelled(execution_arn):
@@ -1503,25 +1509,48 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
     aggregation_sources = []
     
     # 1. 병렬 그룹 결과 합산
-    parallel_result = state.get('parallel_group_result') or state.get('parallel_result')
-    if parallel_result and isinstance(parallel_result, dict):
-        branches = parallel_result.get('branches', {})
-        for branch_id, branch_data in branches.items():
-            if isinstance(branch_data, dict):
-                usage = extract_token_usage(branch_data)
+    # [FIX] Support flattened structure from parallel_group_runner (payload size optimization)
+    # Strategy 1: Use pre-computed branch_token_details if available
+    if 'branch_token_details' in state:
+        branch_token_details = state['branch_token_details']
+        logger.info(f"Aggregator using pre-computed branch_token_details: {len(branch_token_details)} branches")
+        for detail in branch_token_details:
+            total_input_tokens += detail.get('input_tokens', 0)
+            total_output_tokens += detail.get('output_tokens', 0)
+            aggregation_sources.append({
+                'source': 'parallel_branch',
+                'branch_id': detail.get('branch_id', 'unknown'),
+                'input_tokens': detail['input_tokens'],
+                'output_tokens': detail['output_tokens'],
+                'total_tokens': detail['total_tokens']
+            })
+    else:
+        # Strategy 2: Scan for flattened branch results (branch_* keys)
+        logger.info(f"Aggregator scanning for flattened branch results (branch_* keys)")
+        for key, value in state.items():
+            if key.startswith('branch_') and isinstance(value, dict):
+                # Extract branch_id from key (e.g., 'branch_doc_summarize' -> 'branch_doc_summarize')
+                branch_id = key
+                usage = extract_token_usage(value)
                 input_tokens = usage['input_tokens']
                 output_tokens = usage['output_tokens']
                 
-                total_input_tokens += input_tokens
-                total_output_tokens += output_tokens
-                
-                aggregation_sources.append({
-                    'source': 'parallel_branch',
-                    'branch_id': branch_id,
-                    'input_tokens': input_tokens,
-                    'output_tokens': output_tokens,
-                    'total_tokens': input_tokens + output_tokens
-                })
+                if input_tokens > 0 or output_tokens > 0:  # Only count branches with actual token usage
+                    total_input_tokens += input_tokens
+                    total_output_tokens += output_tokens
+                    
+                    aggregation_sources.append({
+                        'source': 'parallel_branch',
+                        'branch_id': branch_id,
+                        'input_tokens': input_tokens,
+                        'output_tokens': output_tokens,
+                        'total_tokens': input_tokens + output_tokens
+                    })
+        
+        if aggregation_sources:
+            logger.info(f"Aggregator found {len(aggregation_sources)} branches in flattened structure")
+        else:
+            logger.warning(f"Aggregator {node_id}: No parallel branch results found in state")
     
     # 2. ForEach/Map 결과 합산
     foreach_result = state.get('for_each_result') or state.get('map_result')
