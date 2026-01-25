@@ -2480,11 +2480,13 @@ class SegmentRunnerService:
         from src.common.statebag import ensure_state_bag
         initial_state = ensure_state_bag(initial_state)
         
-        # [FIX] Propagate MOCK_MODE from payload to state
+        # [FIX] Propagate MOCK_MODE from payload to state (payload always wins)
         # LLM Simulator passes MOCK_MODE in payload root, but llm_chat_runner reads from state
-        if 'MOCK_MODE' in event and 'MOCK_MODE' not in initial_state:
+        # CRITICAL: Payload takes precedence over state to allow runtime override
+        if 'MOCK_MODE' in event:
+            old_value = initial_state.get('MOCK_MODE', 'not set')
             initial_state['MOCK_MODE'] = event['MOCK_MODE']
-            logger.info(f"🔄 Propagated MOCK_MODE from payload to state: {event['MOCK_MODE']}")
+            logger.info(f"🔄 MOCK_MODE override: {old_value} → {event['MOCK_MODE']} (from payload)")
 
         # [Fix] [v3.10] Normalize Event AFTER loading state
         # Remove potentially huge state_data from event to save memory for child processes
