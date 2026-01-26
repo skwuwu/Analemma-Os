@@ -252,22 +252,19 @@
         },
         {
             "id": "depth_3_hitl_approval",
-            "type": "operator",
-            "hitp": true,
-            "label": "[Depth 3] 인간 최종 결재 (재귀 3단계 + HITL)",
+            "type": "operator_official",
+            "label": "[Depth 3] HITL 상태 설정 (세그먼트 분할점)",
             "config": {
-                "code": "state['hitl_decision'] = 'pending'",
-                "prompt": "심층 분석 완료. 다음 항목들에 대해 최종 승인이 필요합니다.",
-                "data_key": "needs_hitl",
-                "timeout_seconds": 180,
-                "options": [
-                    "approve_all",
-                    "approve_partial",
-                    "reject",
-                    "request_revision"
-                ],
-                "output_key": "hitl_decision",
-                "recursion_depth": 3
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {"hitl_decision": "pending"},
+                        {"hitl_prompt": "심층 분석 완료. 다음 항목들에 대해 최종 승인이 필요합니다."},
+                        {"hitl_options": ["approve_all", "approve_partial", "reject", "request_revision"]},
+                        {"recursion_depth": 3}
+                    ]
+                },
+                "output_key": "hitl_state"
             }
         },
         {
@@ -398,7 +395,13 @@
         },
         {
             "source": "filter_needs_hitl",
-            "target": "depth_3_hitl_approval"
+            "target": "depth_3_hitl_approval",
+            "type": "hitp",
+            "metadata": {
+                "prompt": "심층 분석 완료. 다음 항목들에 대해 최종 승인이 필요합니다.",
+                "timeout_seconds": 180,
+                "options": ["approve_all", "approve_partial", "reject", "request_revision"]
+            }
         },
         {
             "source": "depth_3_hitl_approval",

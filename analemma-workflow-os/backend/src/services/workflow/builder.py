@@ -494,8 +494,18 @@ class DynamicWorkflowBuilder:
                 node_id = node_def.get('id', f'unknown_{node_type}')
                 logger.info(f"🔧 Executing {node_type} node: {node_id}")
                 try:
-                    # Standard interface: pass state and node_def as config
-                    result = registry_func(state, node_def)
+                    # [Fix] Flatten node_def to consistent config format
+                    # node_def structure: {id, type, config: {...}}
+                    # Runners expect: {id, ...config_fields}
+                    node_config = node_def.get('config', {}).copy() if isinstance(node_def.get('config'), dict) else {}
+                    node_config['id'] = node_id
+                    node_config['type'] = node_type
+                    # Preserve top-level fields that may exist
+                    for key in ['subgraph_inline', 'subgraph_ref', 'skill_ref', 'input_mapping', 'output_mapping']:
+                        if key in node_def and key not in node_config:
+                            node_config[key] = node_def[key]
+                    
+                    result = registry_func(state, node_config)
                     logger.info(f"✅ {node_type} node {node_id} completed")
                     
                     # 🛡️ [v3.6 Data Ownership Defense]

@@ -184,19 +184,18 @@
         },
         {
             "id": "hitl_approval",
-            "type": "operator",
-            "hitp": true,
-            "label": "최종 승인 대기 (Human-in-the-Loop)",
+            "type": "operator_official",
+            "label": "HITL 상태 설정 (세그먼트 분할점)",
             "config": {
-                "code": "state['hitl_decision'] = 'pending'",
-                "prompt": "3개 아이템 처리 완료. 최종 승인하시겠습니까?",
-                "timeout_seconds": 120,
-                "options": [
-                    "approve",
-                    "reject",
-                    "rollback"
-                ],
-                "output_key": "hitl_decision"
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {"hitl_decision": "pending"},
+                        {"hitl_prompt": "3개 아이템 처리 완료. 최종 승인하시겠습니까?"},
+                        {"hitl_options": ["approve", "reject", "rollback"]}
+                    ]
+                },
+                "output_key": "hitl_state"
             }
         },
         {
@@ -280,7 +279,13 @@
         },
         {
             "source": "record_state_for_hitl",
-            "target": "hitl_approval"
+            "target": "hitl_approval",
+            "type": "hitp",
+            "metadata": {
+                "prompt": "3개 아이템 처리 완료. 최종 승인하시겠습니까?",
+                "timeout_seconds": 120,
+                "options": ["approve", "reject", "rollback"]
+            }
         },
         {
             "source": "hitl_approval",
