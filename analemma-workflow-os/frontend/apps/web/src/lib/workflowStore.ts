@@ -29,11 +29,11 @@ interface WorkflowState {
   currentWorkflowId?: string;
   currentWorkflowName?: string;
   currentWorkflowInputs?: Record<string, any>;
-  
+
   // 서브그래프 관련 상태
   subgraphs: Record<string, SubgraphDefinition>;
   navigationPath: string[]; // 현재 탐색 경로 (서브그래프 ID 스택)
-  
+
   selectedNodeId: string | null;
   setSelectedNodeId: (id: string | null) => void;
 
@@ -51,7 +51,7 @@ interface WorkflowState {
   onNodesChange: (changes: NodeChange[]) => void;
   onEdgesChange: (changes: EdgeChange[]) => void;
   onConnect: (connection: Connection) => void;
-  
+
   // 서브그래프 관련 액션
   groupNodes: (nodeIds: string[], groupName: string) => void;
   ungroupNode: (groupNodeId: string) => void;
@@ -84,14 +84,14 @@ export const useWorkflowStore = create<WorkflowState>()(
           edges: workflow.edges || [],
         }),
 
-      clearWorkflow: () => set({ 
-        nodes: [], 
-        edges: [], 
+      clearWorkflow: () => set({
+        nodes: [],
+        edges: [],
         subgraphs: {},
         navigationPath: [],
-        currentWorkflowId: undefined, 
-        currentWorkflowName: undefined, 
-        currentWorkflowInputs: undefined 
+        currentWorkflowId: undefined,
+        currentWorkflowName: undefined,
+        currentWorkflowInputs: undefined
       }),
 
       addNode: (node) => set((state) => ({ nodes: [...state.nodes, node] })),
@@ -164,27 +164,27 @@ export const useWorkflowStore = create<WorkflowState>()(
       groupNodes: (nodeIds: string[], groupName: string) => {
         const state = get();
         const nodesToGroup = state.nodes.filter((n) => nodeIds.includes(n.id));
-        
+
         if (nodesToGroup.length < 2) return;
-        
+
         // 그룹화할 노드들 간의 내부 엣지 찾기
         const internalEdges = state.edges.filter(
           (e) => nodeIds.includes(e.source) && nodeIds.includes(e.target)
         );
-        
+
         // 외부에서 들어오는/나가는 엣지 찾기
         const externalEdges = state.edges.filter(
           (e) => (nodeIds.includes(e.source) && !nodeIds.includes(e.target)) ||
-                 (!nodeIds.includes(e.source) && nodeIds.includes(e.target))
+            (!nodeIds.includes(e.source) && nodeIds.includes(e.target))
         );
-        
+
         // 그룹 노드의 위치 계산 (묶인 노드들의 중심점)
         const avgX = nodesToGroup.reduce((sum, n) => sum + n.position.x, 0) / nodesToGroup.length;
         const avgY = nodesToGroup.reduce((sum, n) => sum + n.position.y, 0) / nodesToGroup.length;
-        
+
         // 서브그래프 ID 생성
         const subgraphId = `subgraph-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-        
+
         // 서브그래프 정의 생성
         const subgraph: SubgraphDefinition = {
           id: subgraphId,
@@ -202,7 +202,7 @@ export const useWorkflowStore = create<WorkflowState>()(
             createdAt: new Date().toISOString(),
           },
         };
-        
+
         // 그룹 노드 생성
         const groupNode: Node = {
           id: subgraphId,
@@ -214,20 +214,20 @@ export const useWorkflowStore = create<WorkflowState>()(
             nodeCount: nodesToGroup.length,
           },
         };
-        
+
         // 외부 엣지를 그룹 노드에 연결하도록 업데이트
         const updatedExternalEdges = externalEdges.map((edge) => ({
           ...edge,
           source: nodeIds.includes(edge.source) ? subgraphId : edge.source,
           target: nodeIds.includes(edge.target) ? subgraphId : edge.target,
         }));
-        
+
         // 기존 노드/엣지 제거 및 그룹 노드 추가
         const remainingNodes = state.nodes.filter((n) => !nodeIds.includes(n.id));
         const remainingEdges = state.edges.filter(
           (e) => !nodeIds.includes(e.source) && !nodeIds.includes(e.target)
         );
-        
+
         set({
           nodes: [...remainingNodes, groupNode],
           edges: [...remainingEdges, ...updatedExternalEdges],
@@ -243,9 +243,9 @@ export const useWorkflowStore = create<WorkflowState>()(
         const state = get();
         const groupNode = state.nodes.find((n) => n.id === groupNodeId);
         const subgraph = state.subgraphs[groupNodeId];
-        
+
         if (!groupNode || !subgraph) return;
-        
+
         // 그룹 노드의 위치를 기준으로 내부 노드 위치 복원
         const restoredNodes = subgraph.nodes.map((n) => ({
           ...n,
@@ -254,28 +254,28 @@ export const useWorkflowStore = create<WorkflowState>()(
             y: n.position.y + groupNode.position.y - 200,
           },
         }));
-        
+
         // 그룹 노드에 연결된 외부 엣지 찾기
         const edgesToGroup = state.edges.filter((e) => e.target === groupNodeId);
         const edgesFromGroup = state.edges.filter((e) => e.source === groupNodeId);
-        
+
         // 첫 번째/마지막 노드로 연결 (간단한 휴리스틱)
         const firstNodeId = subgraph.nodes[0]?.id;
         const lastNodeId = subgraph.nodes[subgraph.nodes.length - 1]?.id;
-        
+
         const reconnectedEdges = [
           ...edgesToGroup.map((e) => ({ ...e, target: firstNodeId })),
           ...edgesFromGroup.map((e) => ({ ...e, source: lastNodeId })),
         ];
-        
+
         // 그룹 노드 제거, 내부 노드/엣지 복원
         const remainingNodes = state.nodes.filter((n) => n.id !== groupNodeId);
         const remainingEdges = state.edges.filter(
           (e) => e.source !== groupNodeId && e.target !== groupNodeId
         );
-        
+
         const { [groupNodeId]: removed, ...remainingSubgraphs } = state.subgraphs;
-        
+
         set({
           nodes: [...remainingNodes, ...restoredNodes],
           edges: [...remainingEdges, ...subgraph.edges, ...reconnectedEdges],
@@ -287,13 +287,13 @@ export const useWorkflowStore = create<WorkflowState>()(
       navigateToSubgraph: (subgraphId: string) => {
         const state = get();
         const subgraph = state.subgraphs[subgraphId];
-        
+
         if (!subgraph) return;
-        
+
         // 현재 상태를 임시 저장 (루트 또는 현재 서브그래프)
         const currentPath = state.navigationPath;
         const currentSubgraphId = currentPath[currentPath.length - 1];
-        
+
         if (currentSubgraphId) {
           // 현재 서브그래프 내용 업데이트
           set((s) => ({
@@ -320,7 +320,7 @@ export const useWorkflowStore = create<WorkflowState>()(
             },
           }));
         }
-        
+
         // 서브그래프 내용으로 전환
         set({
           nodes: subgraph.nodes,
@@ -333,9 +333,9 @@ export const useWorkflowStore = create<WorkflowState>()(
       navigateUp: (levels = 1) => {
         const state = get();
         const currentPath = state.navigationPath;
-        
+
         if (currentPath.length === 0) return;
-        
+
         // 현재 서브그래프 내용 저장
         const currentSubgraphId = currentPath[currentPath.length - 1];
         if (currentSubgraphId && state.subgraphs[currentSubgraphId]) {
@@ -350,11 +350,11 @@ export const useWorkflowStore = create<WorkflowState>()(
             },
           }));
         }
-        
+
         // 새 경로 계산
         const newPath = currentPath.slice(0, Math.max(0, currentPath.length - levels));
         const targetSubgraphId = newPath[newPath.length - 1];
-        
+
         if (targetSubgraphId) {
           // 다른 서브그래프로 이동
           const targetSubgraph = state.subgraphs[targetSubgraphId];
@@ -377,9 +377,9 @@ export const useWorkflowStore = create<WorkflowState>()(
       // 루트로 바로 이동
       navigateToRoot: () => {
         const state = get();
-        
+
         if (state.navigationPath.length === 0) return;
-        
+
         // 현재 서브그래프 내용 저장
         const currentSubgraphId = state.navigationPath[state.navigationPath.length - 1];
         if (currentSubgraphId && state.subgraphs[currentSubgraphId]) {
@@ -394,7 +394,7 @@ export const useWorkflowStore = create<WorkflowState>()(
             },
           }));
         }
-        
+
         // 루트 상태 복원
         const rootSubgraph = state.subgraphs._root;
         set({

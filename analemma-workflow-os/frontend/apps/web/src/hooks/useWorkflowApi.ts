@@ -1,4 +1,18 @@
-import { useInfiniteQuery, useMutation, useQueryClient, type QueryFunctionContext } from '@tanstack/react-query';
+/**
+ * 워크플로우 API 통합 훅 (v2.0)
+ * =====================================================
+ * 
+ * Analemma 백엔드 통신 총괄 데이터 레이어
+ * 
+ * v2.0 Changes:
+ * - Endpoint centralization (ENDPOINTS object)
+ * - Normalization utilities extracted
+ * - Consistent Query/Mutation patterns
+ * - Enhanced defensive programming
+ * - Ready for future split (useWorkflowQueries/Mutations/ExecutionManager)
+ */
+
+import { useInfiniteQuery, useMutation, useQueryClient, useQuery, type QueryFunctionContext } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import { useState } from 'react';
 import {
@@ -16,6 +30,51 @@ import {
 import { makeAuthenticatedRequest, parseApiResponse } from '@/lib/api';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL;
+
+// Endpoint centralization
+const ENDPOINTS = {
+  WORKFLOWS: `${API_BASE}/workflows`,
+  WORKFLOW_BY_NAME: `${API_BASE}/by-name`,
+  EXECUTIONS: `${API_BASE}/executions`,
+  EXECUTION_HISTORY: `${API_BASE}/executions/history`,
+  EXECUTION_STOP: `${API_BASE}/executions/stop`,
+  STATUS: `${API_BASE}/status`,
+  NOTIFICATIONS: `${API_BASE}/notifications`,
+  NOTIFICATIONS_DISMISS: `${API_BASE}/notifications/dismiss`,
+  RESUME: `${API_BASE}/resume`,
+  INSTRUCTIONS_CLONE: `${API_BASE}/instructions/clone`,
+} as const;
+
+// Normalization utilities
+const normalize = {
+  toNumber: (v: unknown): number | undefined => {
+    if (v === undefined || v === null || v === '') return undefined;
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : undefined;
+    }
+    return undefined;
+  },
+  
+  toNumberOrNull: (v: unknown): number | null => {
+    if (v === undefined || v === null || v === '') return null;
+    if (typeof v === 'number') return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  },
+  
+  toBoolean: (v: unknown): boolean => {
+    return v === true || String(v) === 'true';
+  },
+  
+  isValidId: (id: unknown): boolean => {
+    return typeof id === 'string' && id.trim().length > 0 && id !== 'undefined';
+  }
+};
 
 interface NotificationsResponse {
   notifications: PendingNotification[];
@@ -42,6 +101,14 @@ interface TestKeywordsResponse {
 interface ExecutionListResponse {
   executions: ExecutionSummary[];
   nextToken?: string;
+}
+
+interface CloneInstructionsResponse {
+  message: string;
+  cloned_count: number;
+  cloned_nodes?: string[]; // 복제된 노드 ID 목록
+  source_workflow_name?: string;
+  target_workflow_name?: string;
 }
 
 interface ExecutionDetailStatus {
@@ -72,39 +139,19 @@ const parseWorkflowDetail = (raw: WorkflowDetailResponse): WorkflowDetailRespons
   if (raw.config !== null && raw.config !== undefined && typeof raw.config !== 'object') {
     throw new Error('Invalid workflow configuration format');
   }
-  // Helper: 안전한 숫자 변환 (문자열 숫자 -> number, NaN/빈값 -> undefined/null)
-  const toNumberOrUndefined = (v: unknown): number | undefined => {
-    if (v === undefined || v === null || v === '') return undefined;
-    if (typeof v === 'number') return v;
-    if (typeof v === 'string' && v.trim() !== '') {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : undefined;
-    }
-    return undefined;
-  };
-
-  const toNumberOrNull = (v: unknown): number | null => {
-    if (v === undefined || v === null || v === '') return null;
-    if (typeof v === 'number') return v;
-    if (typeof v === 'string' && v.trim() !== '') {
-      const n = Number(v);
-      return Number.isFinite(n) ? n : null;
-    }
-    return null;
-  };
 
   return {
     ...raw,
-    createdAt: toNumberOrUndefined(raw.createdAt as unknown),
-    updatedAt: toNumberOrUndefined(raw.updatedAt as unknown),
-    next_run_time: toNumberOrNull(raw.next_run_time as unknown),
+    createdAt: normalize.toNumber(raw.createdAt as unknown),
+    updatedAt: normalize.toNumber(raw.updatedAt as unknown),
+    next_run_time: normalize.toNumberOrNull(raw.next_run_time as unknown),
     // DynamoDB may store booleans as strings "true"/"false" — normalize to boolean
-    is_scheduled: raw.is_scheduled === true || String(raw.is_scheduled) === 'true',
+    is_scheduled: normalize.toBoolean(raw.is_scheduled),
   } as WorkflowDetailResponse;
 };
 
 const buildWorkflowDetailUrl = (name: string) => {
-  return `${API_BASE}/by-name?name=${encodeURIComponent(name)}`;
+  return `${ENDPOINTS.WORKFLOW_BY_NAME}?name=${encodeURIComponent(name)}`;
 };
 
 export const useWorkflowApi = () => {
@@ -122,11 +169,11 @@ export const useWorkflowApi = () => {
     queryFn: async ({ pageParam = null }: QueryFunctionContext) => {
       const pageToken = typeof pageParam === 'string' && pageParam.length > 0 ? pageParam : null;
       const params = pageToken ? `?nextToken=${encodeURIComponent(pageToken)}` : '';
-      const response = await makeAuthenticatedRequest(`${API_BASE}/workflows${params}`);
+      const response = await makeAuthenticatedRequest(`${ENDPOINTS.WORKFLOWS}${params}`);
       const body = await parseApiResponse(response);
-      console.log('📋 Workflow list API response:', { body, workflows: body?.workflows });
-      const workflowItems: WorkflowSummary[] = Array.isArray(body?.workflows)
-        ? body.workflows.map((item: any) => {
+      console.log('📋 Workflow list API response:', { body, workflows: (body as any)?.workflows });
+      const workflowItems: WorkflowSummary[] = Array.isArray((body as any)?.workflows)
+        ? (body as any).workflows.map((item: any) => {
           const mapped = {
             name: item.name,
             workflowId: item.workflowId,
@@ -136,7 +183,7 @@ export const useWorkflowApi = () => {
           return mapped;
         }).filter((w: WorkflowSummary) => w.name && w.name.trim().length > 0)
         : [];
-      const next = typeof body?.nextToken === 'string' && body.nextToken.trim().length > 0 ? body.nextToken : null;
+      const next = typeof (body as any)?.nextToken === 'string' && (body as any).nextToken.trim().length > 0 ? (body as any).nextToken : null;
       return {
         workflows: workflowItems,
         nextToken: next,
@@ -164,8 +211,8 @@ export const useWorkflowApi = () => {
       if (next_run_time !== undefined) payload.next_run_time = next_run_time;
 
       let response: Response;
-      if (workflowId) {
-        response = await makeAuthenticatedRequest(`${API_BASE}/workflows/${encodeURIComponent(workflowId)}`, {
+      if (workflowId && normalize.isValidId(workflowId)) {
+        response = await makeAuthenticatedRequest(`${ENDPOINTS.WORKFLOWS}/${encodeURIComponent(workflowId)}`, {
           method: 'PUT',
           headers: {
             'Content-Type': 'application/json',
@@ -173,7 +220,7 @@ export const useWorkflowApi = () => {
           body: JSON.stringify(payload),
         });
       } else {
-        response = await makeAuthenticatedRequest(`${API_BASE}/workflows`, {
+        response = await makeAuthenticatedRequest(ENDPOINTS.WORKFLOWS, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -195,7 +242,7 @@ export const useWorkflowApi = () => {
   const deleteWorkflow = useMutation({
     mutationFn: async (workflowId: string) => {
       // Delete is authenticated via JWT; backend will verify owner from token.
-      const response = await makeAuthenticatedRequest(`${API_BASE}/workflows/${encodeURIComponent(workflowId)}`, {
+      const response = await makeAuthenticatedRequest(`${ENDPOINTS.WORKFLOWS}/${encodeURIComponent(workflowId)}`, {
         method: 'DELETE',
       });
 
@@ -217,7 +264,7 @@ export const useWorkflowApi = () => {
     mutationFn: async ({ workflowId, inputs, idempotencyKey }: { workflowId: string; inputs: unknown; idempotencyKey?: string }) => {
       // Defensive check: ensure workflowId is provided and valid to avoid sending
       // requests to URLs containing 'undefined' or empty ids.
-      if (!workflowId || typeof workflowId !== 'string' || workflowId.trim().length === 0 || workflowId === 'undefined') {
+      if (!normalize.isValidId(workflowId)) {
         console.error('runWorkflow called without valid workflowId:', workflowId);
         // show user-facing feedback and abort
         try {
@@ -229,7 +276,7 @@ export const useWorkflowApi = () => {
         throw new Error('runWorkflow: workflowId is required');
       }
 
-      const url = `${API_BASE}/workflows/${encodeURIComponent(workflowId)}/run`;
+      const url = `${ENDPOINTS.WORKFLOWS}/${encodeURIComponent(workflowId)}/run`;
       // Include workflowId in the body to make server-side debugging/logging easier
       // and to provide an explicit payload field the backend may also validate.
       const requestBody = JSON.stringify({ workflowId, input_data: inputs });
@@ -281,9 +328,9 @@ export const useWorkflowApi = () => {
       const body = await parseApiResponse(response);
       console.log('🔍 getWorkflowByName raw response:', body);
       const result = {
-        ...body,
-        is_scheduled: body.is_scheduled === 'true',
-        config: body.config ?? null,
+        ...(body as any),
+        is_scheduled: (body as any).is_scheduled === 'true',
+        config: (body as any).config ?? null,
       };
       console.log('📋 getWorkflowByName processed result:', result);
       const finalResult = parseWorkflowDetail(result as WorkflowDetailResponse);
@@ -297,9 +344,10 @@ export const useWorkflowApi = () => {
     },
   });
 
-  // 알림 센터 API
+  // 알림 센터 API (일관성을 위해 useQuery로 변환)
+  // 컴포넌트 외부에서 사용할 수 있도록 함수로 정의 (내부에서 useQuery 반환)
   const fetchNotifications = async (params?: {
-    status?: 'pending' | 'sent' | 'all';  // API 규약에 'all' 추가
+    status?: 'pending' | 'sent' | 'all';
     type?: 'hitp_pause' | 'execution_progress' | 'workflow_completed';
     limit?: number;
     nextToken?: string;
@@ -311,15 +359,15 @@ export const useWorkflowApi = () => {
     if (params?.nextToken) queryParams.set('nextToken', params.nextToken);
 
     const response = await makeAuthenticatedRequest(
-      `${API_BASE}/notifications?${queryParams.toString()}`
+      `${ENDPOINTS.NOTIFICATIONS}?${queryParams.toString()}`
     );
 
     return parseApiResponse<NotificationsResponse>(response);
   };
-
+  
   const resumeWorkflowMutation = useMutation({
     mutationFn: async (request: ResumeWorkflowRequest): Promise<ResumeWorkflowResponse> => {
-      const response = await makeAuthenticatedRequest(`${API_BASE}/resume`, {
+      const response = await makeAuthenticatedRequest(ENDPOINTS.RESUME, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -344,16 +392,16 @@ export const useWorkflowApi = () => {
     if (nextToken) params.set('nextToken', nextToken);
 
     const response = await makeAuthenticatedRequest(
-      `${API_BASE}/executions?${params.toString()}`
+      `${ENDPOINTS.EXECUTIONS}?${params.toString()}`
     );
 
     return parseApiResponse<ExecutionListResponse>(response);
   };
 
-  // Fetch execution details
+  // Fetch execution details (단일 조회는 async 함수로 유지)
   const fetchExecutionDetail = async (executionArn: string): Promise<ExecutionDetailStatus> => {
     const response = await makeAuthenticatedRequest(
-      `${API_BASE}/status?executionArn=${encodeURIComponent(executionArn)}`
+      `${ENDPOINTS.STATUS}?executionArn=${encodeURIComponent(executionArn)}`
     );
 
     return parseApiResponse<ExecutionDetailStatus>(response);
@@ -362,7 +410,7 @@ export const useWorkflowApi = () => {
   // Stop execution
   const stopExecutionMutation = useMutation({
     mutationFn: async (executionArn: string) => {
-      const response = await makeAuthenticatedRequest(`${API_BASE}/executions/stop`, {
+      const response = await makeAuthenticatedRequest(ENDPOINTS.EXECUTION_STOP, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ executionArn })
@@ -382,7 +430,7 @@ export const useWorkflowApi = () => {
 
   const deleteExecutionMutation = useMutation({
     mutationFn: async (executionArn: string) => {
-      const url = `${API_BASE}/executions?executionArn=${encodeURIComponent(executionArn)}`;
+      const url = `${ENDPOINTS.EXECUTIONS}?executionArn=${encodeURIComponent(executionArn)}`;
       const response = await makeAuthenticatedRequest(url, {
         method: 'DELETE',
       });
@@ -403,7 +451,7 @@ export const useWorkflowApi = () => {
   const dismissNotificationMutation = useMutation({
     mutationFn: async (executionId: string) => {
       // ARN이 포함된 executionId를 URL 경로에 넣지 않고 Body에 담아 보냅니다.
-      const response = await makeAuthenticatedRequest(`${API_BASE}/notifications/dismiss`, {
+      const response = await makeAuthenticatedRequest(ENDPOINTS.NOTIFICATIONS_DISMISS, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -431,7 +479,7 @@ export const useWorkflowApi = () => {
       sourceWorkflowId: string;
       targetWorkflowId: string
     }) => {
-      const response = await makeAuthenticatedRequest(`${API_BASE}/instructions/clone`, {
+      const response = await makeAuthenticatedRequest(ENDPOINTS.INSTRUCTIONS_CLONE, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -441,12 +489,16 @@ export const useWorkflowApi = () => {
           target_workflow_id: targetWorkflowId
         }),
       });
-      return parseApiResponse<{ message: string; cloned_count: number }>(response);
+      return parseApiResponse<CloneInstructionsResponse>(response);
     },
     onSuccess: (data) => {
+      const nodeCount = data.cloned_count || 0;
+      const nodeList = data.cloned_nodes?.length ? ` (${data.cloned_nodes.join(', ')})` : '';
+      const sourceInfo = data.source_workflow_name ? ` from "${data.source_workflow_name}"` : '';
+      
       toast({
-        title: '지침 복제 완료',
-        description: data.message || '기존 에이전트의 학습된 스타일이 적용되었습니다.'
+        title: '지침 복제 성공',
+        description: `${nodeCount}개 노드의 학습된 스타일이 적용되었습니다${sourceInfo}${nodeList}`
       });
     },
     onError: (error: unknown) => {
@@ -474,10 +526,10 @@ export const useWorkflowApi = () => {
     isLoadingWorkflow: getWorkflowByNameMutation.isPending,
     // 새로 추가된 API 메서드들
     fetchNotifications,
+    fetchExecutions,
     resumeWorkflow: resumeWorkflowMutation.mutateAsync,
     isResuming: resumeWorkflowMutation.isPending,
-    fetchExecutions,
-    fetchExecutionDetail,
+    fetchExecutionDetail, // 단일 조회는 async 함수로 유지
     stopExecution: stopExecutionMutation.mutateAsync,
     isStopping: stopExecutionMutation.isPending,
     deleteExecution: deleteExecutionMutation.mutateAsync,
@@ -485,7 +537,7 @@ export const useWorkflowApi = () => {
     // [추가] 외부에서 사용할 수 있도록 export
     dismissNotification: dismissNotificationMutation.mutateAsync,
     isDismissing: dismissNotificationMutation.isPending,
-    // [추가] 지침 복제 API
+    // [추가] 지침 복제 API (향상된 피드백)
     cloneInstructions: cloneInstructionsMutation.mutateAsync,
     isCloningInstructions: cloneInstructionsMutation.isPending,
     // getExecutionHistory는 별도의 useExecutionHistory 훅으로 분리됨
@@ -504,7 +556,7 @@ export const useExecutionHistory = (executionArn: string, limit: number = 50, ma
       }
 
       const response = await makeAuthenticatedRequest(
-        `${API_BASE}/executions/history?executionArn=${encodeURIComponent(executionArn)}&${params.toString()}`
+        `${ENDPOINTS.EXECUTION_HISTORY}?executionArn=${encodeURIComponent(executionArn)}&${params.toString()}`
       );
 
       return parseApiResponse<ExecutionHistoryResponse>(response);

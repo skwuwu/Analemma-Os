@@ -1,10 +1,17 @@
 /**
- * Task Manager Hooks
+ * Task Manager Hooks (v2.0)
+ * ===========================
  * 
  * Task Manager UI를 위한 React Query 훅입니다.
+ * 
+ * v2.0 Changes:
+ * - Ref-based Map 관리로 고주파 WebSocket 성능 개선
+ * - React Query 캐시 업데이트 최적화 (개별 Task 타게팅)
+ * - optionsRef 패턴으로 콜백 안정성 개선
+ * - 부분 실패 시 사용자 피드백 추가
  */
 
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useReducer } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import {
   listTasks,
@@ -60,24 +67,32 @@ interface UseTaskDetailOptions {
 export function useTaskDetail(options: UseTaskDetailOptions = {}) {
   const { taskId, includeTechnicalLogs, enabled = true, refetchInterval = false } = options;
   const queryClient = useQueryClient();
+  const [partialFailures, setPartialFailures] = useState<string[]>([]);
 
   const detailQuery = useQuery({
     queryKey: ['task', taskId, { includeTechnicalLogs }],
     queryFn: async () => {
       if (!taskId) throw new Error('Task ID is required');
 
+      const failures: string[] = [];
+
       // 상세 정보, 결과물, 지표를 병렬로 조회
       const [detail, outcomesResponse, metricsResponse] = await Promise.all([
         getTaskDetail(taskId, { includeTechnicalLogs }),
         getTaskOutcomes(taskId).catch(err => {
           console.error('Failed to fetch outcomes:', err);
+          failures.push('outcomes');
           return { outcomes: [] };
         }),
         getTaskMetrics(taskId).catch(err => {
           console.error('Failed to fetch metrics:', err);
+          failures.push('metrics');
           return null;
         }),
       ]);
+
+      // Track partial failures for UI feedback
+      setPartialFailures(failures);
 
       return {
         ...detail,
@@ -86,6 +101,7 @@ export function useTaskDetail(options: UseTaskDetailOptions = {}) {
         // 비즈니스 지표 데이터 추가
         business_metrics: metricsResponse,
         collapsed_history: outcomesResponse.collapsed_history,
+        _partialFailures: failures, // Expose to UI
       };
     },
     enabled: enabled && !!taskId,
@@ -94,8 +110,11 @@ export function useTaskDetail(options: UseTaskDetailOptions = {}) {
 
   // 캐시 무효화
   const invalidate = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['task', taskId] });
+    if (taskId) {
+      queryClient.invalidateQueries({ queryKey: ['task', taskId] });
+    }
     queryClient.invalidateQueries({ queryKey: ['tasks'] });
+    setPartialFailures([]); // Clear failure state on manual invalidate
   }, [queryClient, taskId]);
 
   return {
@@ -103,6 +122,7 @@ export function useTaskDetail(options: UseTaskDetailOptions = {}) {
     isLoading: detailQuery.isLoading,
     isError: detailQuery.isError,
     error: detailQuery.error,
+    partialFailures, // Expose partial failures to UI
     refetch: detailQuery.refetch,
     invalidate,
   };
@@ -127,12 +147,22 @@ const MAX_ACTIVE_TASKS = 50;
 const MAX_TECHNICAL_LOGS_ENTRIES = 20;
 
 export function useTaskStream(options: UseTaskStreamOptions = {}) {
-  const { onTaskUpdate, onTechnicalLog } = options;
-  const [activeTasks, setActiveTasks] = useState<Map<string, TaskStreamPayload>>(new Map());
-  const [technicalLogs, setTechnicalLogs] = useState<Map<string, any[]>>(new Map());
+  const optionsRef = useRef(options);
   const queryClient = useQueryClient();
+  
+  // Keep callbacks stable
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
-  // WebSocket 메시지 처리
+  // Use ref for high-frequency updates (avoid state updates on every WebSocket message)
+  const activeTasksRef = useRef<Map<string, TaskStreamPayload>>(new Map());
+  const technicalLogsRef = useRef<Map<string, any[]>>(new Map());
+  
+  // Force re-render when needed (for UI subscription)
+  const [, forceUpdate] = useReducer((x) => x + 1, 0);
+
+  // WebSocket 메시지 처리 (optimized for high-frequency updates)
   const processMessage = useCallback((message: any) => {
     // Task 업데이트 메시지 처리
     if (message.type === 'task_update' && message.task_id) {
@@ -149,89 +179,82 @@ export function useTaskStream(options: UseTaskStreamOptions = {}) {
         agent_name: message.agent_name,
       };
 
-      setActiveTasks(prev => {
-        const next = new Map(prev);
-        next.set(payload.task_id, payload);
-        // Map 크기 제한: 가장 오래된 항목 제거
-        if (next.size > MAX_ACTIVE_TASKS) {
-          const oldestKey = next.keys().next().value;
-          if (oldestKey) next.delete(oldestKey);
-        }
-        return next;
-      });
+      // Update ref directly (no React state update = no re-render)
+      activeTasksRef.current.set(payload.task_id, payload);
+      
+      // Map 크기 제한: 가장 오래된 항목 제거
+      if (activeTasksRef.current.size > MAX_ACTIVE_TASKS) {
+        const oldestKey = activeTasksRef.current.keys().next().value;
+        if (oldestKey) activeTasksRef.current.delete(oldestKey);
+      }
 
-      onTaskUpdate?.(payload);
+      // Trigger re-render only if subscribed components need it
+      forceUpdate();
 
-      // React Query 캐시 업데이트
-      queryClient.setQueryData<TaskSummary[]>(['tasks'], (old) => {
+      optionsRef.current.onTaskUpdate?.(payload);
+
+      // Optimize: Update individual Task detail cache instead of full list
+      // This prevents unnecessary re-renders of the entire task list
+      queryClient.setQueryData(['task', payload.task_id], (old: any) => {
         if (!old) return old;
-        return old.map(task =>
-          task.task_id === payload.task_id
-            ? {
-              ...task,
-              current_thought: payload.thought,
-              progress_percentage: payload.progress ?? task.progress_percentage,
-              current_step_name: payload.current_step || task.current_step_name,
-              is_interruption: payload.is_interruption ?? task.is_interruption,
-            }
-            : task
-        );
+        return {
+          ...old,
+          current_thought: payload.thought,
+          progress_percentage: payload.progress ?? old.progress_percentage,
+          current_step_name: payload.current_step || old.current_step_name,
+          is_interruption: payload.is_interruption ?? old.is_interruption,
+        };
       });
+      
+      // Optionally update list cache (less frequent, throttled approach)
+      // For now, let refetchInterval handle list updates
     }
 
     // 기술 로그 메시지 처리 (디버그 탭용)
     if (message.type === 'node_start' || message.type === 'node_end' || message.type === 'node_error') {
       const executionId = message.execution_id || message.task_id;
       if (executionId) {
-        setTechnicalLogs(prev => {
-          const next = new Map(prev);
-          const logs = (next.get(executionId) || []) as any[];
-          logs.push({
-            type: message.type,
-            timestamp: message.timestamp || new Date().toISOString(),
-            node_id: message.node_id,
-            data: message.data || message,
-          });
-          next.set(executionId, logs.slice(-100)); // 각 실행당 최대 100개 유지
-          // Map 크기 제한: 가장 오래된 실행 로그 제거
-          if (next.size > MAX_TECHNICAL_LOGS_ENTRIES) {
-            const oldestKey = next.keys().next().value;
-            if (oldestKey) next.delete(oldestKey);
-          }
-          return next;
+        const logs = technicalLogsRef.current.get(executionId) || [];
+        logs.push({
+          type: message.type,
+          timestamp: message.timestamp || new Date().toISOString(),
+          node_id: message.node_id,
+          data: message.data || message,
         });
+        
+        technicalLogsRef.current.set(executionId, logs.slice(-100)); // 각 실행당 최대 100개 유지
+        
+        // Map 크기 제한: 가장 오래된 실행 로그 제거
+        if (technicalLogsRef.current.size > MAX_TECHNICAL_LOGS_ENTRIES) {
+          const oldestKey = technicalLogsRef.current.keys().next().value;
+          if (oldestKey) technicalLogsRef.current.delete(oldestKey);
+        }
 
-        onTechnicalLog?.(message);
+        forceUpdate(); // Re-render for debug tab
+        optionsRef.current.onTechnicalLog?.(message);
       }
     }
-  }, [onTaskUpdate, onTechnicalLog, queryClient]);
+  }, [queryClient]);
 
   // 특정 Task의 실시간 상태 가져오기
   const getTaskState = useCallback((taskId: string): TaskStreamPayload | undefined => {
-    return activeTasks.get(taskId);
-  }, [activeTasks]);
+    return activeTasksRef.current.get(taskId);
+  }, []);
 
   // 특정 Task의 기술 로그 가져오기
   const getTechnicalLogs = useCallback((taskId: string): any[] => {
-    return technicalLogs.get(taskId) || [];
-  }, [technicalLogs]);
+    return technicalLogsRef.current.get(taskId) || [];
+  }, []);
 
   // 상태 초기화
   const clearTask = useCallback((taskId: string) => {
-    setActiveTasks(prev => {
-      const next = new Map(prev);
-      next.delete(taskId);
-      return next;
-    });
-    setTechnicalLogs(prev => {
-      const next = new Map(prev);
-      next.delete(taskId);
-      return next;
-    });
+    activeTasksRef.current.delete(taskId);
+    technicalLogsRef.current.delete(taskId);
+    forceUpdate();
   }, []);
 
   return {
-    activeTasks: Array.from(activeTasks.values()),
+    activeTasks: Array.from(activeTasksRef.current.values()),
     processMessage,
     getTaskState,
     getTechnicalLogs,
@@ -254,33 +277,32 @@ interface UseTaskManagerOptions {
  * 리스트, 상세, 스트림을 통합하여 관리합니다.
  */
 export function useTaskManager(options: UseTaskManagerOptions = {}) {
-  const {
-    selectedTaskId,
-    statusFilter,
-    autoRefresh = true,
-    showTechnicalLogs = false
-  } = options;
+  const optionsRef = useRef(options);
+  const [selectedId, setSelectedId] = useState<string | null>(options.selectedTaskId || null);
 
-  const [selectedId, setSelectedId] = useState<string | null>(selectedTaskId || null);
+  // Keep options ref up to date
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
   // prop 변경 시 내부 상태 동기화
   useEffect(() => {
-    if (selectedTaskId !== undefined && selectedTaskId !== selectedId) {
-      setSelectedId(selectedTaskId);
+    if (options.selectedTaskId !== undefined && options.selectedTaskId !== selectedId) {
+      setSelectedId(options.selectedTaskId);
     }
-  }, [selectedTaskId, selectedId]);
+  }, [options.selectedTaskId, selectedId]);
 
   // 리스트 조회
   const taskList = useTaskList({
-    status: statusFilter,
-    refetchInterval: autoRefresh ? 10000 : false,
+    status: optionsRef.current.statusFilter,
+    refetchInterval: optionsRef.current.autoRefresh ? 10000 : false,
   });
 
   // 선택된 Task 상세 조회
   const taskDetail = useTaskDetail({
     taskId: selectedId || undefined,
-    includeTechnicalLogs: showTechnicalLogs,
-    refetchInterval: autoRefresh && selectedId ? 5000 : false,
+    includeTechnicalLogs: optionsRef.current.showTechnicalLogs,
+    refetchInterval: optionsRef.current.autoRefresh && selectedId ? 5000 : false,
   });
 
   // 실시간 스트림

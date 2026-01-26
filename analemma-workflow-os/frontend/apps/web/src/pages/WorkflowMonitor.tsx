@@ -298,26 +298,38 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
     return fetchExecutionTimeline(id, force);
   }, [fetchExecutionTimeline]);
 
-  // URL 파라미터에서 execution_id 가져오기
-  const executionIdFromUrl = searchParams.get('execution_id');
+  // URL 파라미터에서 execution_id 또는 executionId 가져오기
+  const executionIdFromUrl = searchParams.get('executionId') || searchParams.get('execution_id');
 
   useEffect(() => {
     if (!executionIdFromUrl) return;
 
-    const runningWorkflows = (Array.isArray(notifications) ? notifications : [])
-      .filter(n => n.action === 'execution_progress' || n.action === 'hitp_pause')
-      .sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
-
-    const targetWorkflow = runningWorkflows.find(
+    // 1. 활성 워크플로우에서 찾기
+    const targetWorkflow = groupedActiveWorkflows.find(
       w => (w.payload?.execution_id || w.execution_id)?.includes(executionIdFromUrl) ||
         w.conversation_id?.includes(executionIdFromUrl)
     );
 
-    if (targetWorkflow && !selectedExecutionId) {
+    if (targetWorkflow) {
       const execId = targetWorkflow.payload?.execution_id || targetWorkflow.execution_id;
-      if (execId) setSelectedExecutionId(execId);
+      if (execId) {
+        setSelectedExecutionId(execId);
+        setSelectedTab('active');
+        setShowGraphView(false); // 상세 뷰를 우선 보여줌
+      }
+    } else {
+      // 2. 히스토리에서 찾기 (이미 로드된 데이터가 있다면)
+      const targetHistory = executions.find(
+        e => (e.executionArn || e.execution_id)?.includes(executionIdFromUrl)
+      );
+      if (targetHistory) {
+        const execId = targetHistory.executionArn || targetHistory.execution_id!;
+        setSelectedExecutionId(execId);
+        setSelectedTab('history');
+        setExecutionSummary(targetHistory);
+      }
     }
-  }, [notifications, executionIdFromUrl, selectedExecutionId]);
+  }, [groupedActiveWorkflows, executions, executionIdFromUrl]);
 
   // Helper for safe date conversion
   const safeToISOString = (val: any): string | null => {
@@ -602,7 +614,7 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
                   <WorkflowGraphViewer
                     nodes={workflowGraphData.nodes}
                     edges={workflowGraphData.edges}
-                    activeNodeId={nodeStatus.activeNodeId || undefined}
+                    activeNodeId={nodeStatus.activeNodeIds[0] || undefined}
                     completedNodeIds={nodeStatus.completedNodeIds}
                     failedNodeIds={nodeStatus.failedNodeIds}
                     onNodeClick={setSelectedNodeId}

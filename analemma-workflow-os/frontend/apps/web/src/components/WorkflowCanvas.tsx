@@ -12,6 +12,8 @@ import {
   useOnSelectionChange,
   SelectionMode,
   OnSelectionChangeParams,
+  NodeChange,
+  EdgeChange,
 } from '@xyflow/react';
 import { useShallow } from 'zustand/react/shallow';
 import '@xyflow/react/dist/style.css';
@@ -31,7 +33,19 @@ import { SuggestionList } from './SuggestionList';
 import { AuditPanel } from './AuditPanel';
 import { EmptyCanvasGuide } from './EmptyCanvasGuide';
 import { Button } from './ui/button';
-import { Trash2, Keyboard, Layers, ChevronRight, Play, History, PanelRightOpen, PanelRightClose } from 'lucide-react';
+import {
+  Trash2,
+  Keyboard,
+  Layers,
+  ChevronRight,
+  Play,
+  History,
+  PanelRightOpen,
+  PanelRightClose,
+  Zap,
+  ShieldAlert,
+  Menu
+} from 'lucide-react';
 import { TooltipProvider } from './ui/tooltip';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
@@ -40,6 +54,10 @@ import { useCanvasMode } from '@/hooks/useCanvasMode';
 import { usePlanBriefing, useCheckpoints, useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { toast } from 'sonner';
 import type { TimelineItem, RollbackRequest } from '@/lib/types';
+import { createWorkflowNode, generateNodeId } from '@/lib/nodeFactory';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
+import { motion, AnimatePresence } from 'framer-motion';
 
 const nodeTypes: NodeTypes = {
   aiModel: AIModelNode,
@@ -56,8 +74,8 @@ const edgeTypes = {
 const WorkflowCanvasInner = () => {
   // 1. Store 최적화: nodes/edges만 shallow 비교로 구독
   const { nodes, edges, subgraphs, navigationPath } = useWorkflowStore(
-    useShallow((state) => ({ 
-      nodes: state.nodes, 
+    useShallow((state) => ({
+      nodes: state.nodes,
       edges: state.edges,
       subgraphs: state.subgraphs || {},
       navigationPath: state.navigationPath || ['root'],
@@ -95,14 +113,12 @@ const WorkflowCanvasInner = () => {
   // Co-design store
   const {
     recordChange,
-    clearChanges,
     pendingSuggestions,
     activeSuggestionId,
     setActiveSuggestion,
     acceptSuggestion,
     rejectSuggestion,
     auditIssues,
-    setSyncStatus,
     requestSuggestions,
     requestAudit,
     recentChanges,
@@ -144,32 +160,27 @@ const WorkflowCanvasInner = () => {
     });
   }, [addEdge, recordChange]);
 
-  const removeEdgeWithTracking = useCallback((id: string) => {
-    removeEdge(id);
-    recordChange('delete_edge', { id });
-  }, [removeEdge, recordChange]);
-
   // Wrap change handlers to record position/drag changes
   const onNodesChangeWithTracking = useCallback((changes: NodeChange[]) => {
     onNodesChange(changes);
-    
+
     // Record position changes (when dragging stops)
     const positionChanges = changes.filter(c => c.type === 'position' && c.dragging === false);
     positionChanges.forEach(change => {
       recordChange('move_node', {
-        id: change.id,
-        position: change.position,
+        id: (change as any).id,
+        position: (change as any).position,
       });
     });
   }, [onNodesChange, recordChange]);
 
   const onEdgesChangeWithTracking = useCallback((changes: EdgeChange[]) => {
     onEdgesChange(changes);
-    
+
     // Record edge removals
     const removeChanges = changes.filter(c => c.type === 'remove');
     removeChanges.forEach(change => {
-      recordChange('delete_edge', { id: change.id });
+      recordChange('delete_edge', { id: (change as any).id });
     });
   }, [onEdgesChange, recordChange]);
 
@@ -178,14 +189,17 @@ const WorkflowCanvasInner = () => {
   const [editorOpen, setEditorOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<any, any> | null>(null);
-  
+
+  // Right Panel System
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [activePanelTab, setActivePanelTab] = useState<string>('timeline');
+
   // Plan Briefing & Time Machine state
   const [briefingOpen, setBriefingOpen] = useState(false);
-  const [timelinePanelOpen, setTimelinePanelOpen] = useState(false);
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
   const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
-  
+
   // Hooks for briefing and checkpoints
   const planBriefing = usePlanBriefing({
     onSuccess: () => {
@@ -195,13 +209,13 @@ const WorkflowCanvasInner = () => {
       toast.error(`미리보기 생성 실패: ${error.message}`);
     },
   });
-  
+
   const checkpoints = useCheckpoints({
     executionId: currentExecutionId || undefined,
-    enabled: !!currentExecutionId,
-    refetchInterval: timelinePanelOpen ? 5000 : false,
+    enabled: !!currentExecutionId && rightPanelOpen && activePanelTab === 'timeline',
+    refetchInterval: 5000,
   });
-  
+
   const timeMachine = useTimeMachine({
     executionId: currentExecutionId || '',
     onRollbackSuccess: (result) => {
@@ -214,27 +228,10 @@ const WorkflowCanvasInner = () => {
     },
   });
 
-  // ID generation with fallback for environments without crypto.randomUUID
-  const generateId = useCallback(() => {
-    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
-      return crypto.randomUUID();
-    }
-    return 'node-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-  }, []);
-
   // Handle multi-selection changes
   const onSelectionChange = useCallback((params: OnSelectionChangeParams) => {
     setSelectedNodes(params.nodes);
   }, []);
-
-  // Handle grouping selected nodes
-  const handleGroupSelection = useCallback(() => {
-    if (selectedNodes.length < 2) {
-      toast.error('그룹화하려면 2개 이상의 노드를 선택하세요');
-      return;
-    }
-    setGroupDialogOpen(true);
-  }, [selectedNodes]);
 
   const handleGroupConfirm = useCallback((groupName: string) => {
     const nodeIds = selectedNodes.map(n => n.id);
@@ -255,31 +252,29 @@ const WorkflowCanvasInner = () => {
 
       if (!type || !reactFlowInstance) return;
 
-      // Parse initial data safely
-      let initialData = { label };
-      try {
-        if (dataString) {
-          initialData = { ...JSON.parse(dataString), label };
-        }
-      } catch (e) {
-        console.error('Failed to parse drop data', e);
-      }
-
       const position = reactFlowInstance.screenToFlowPosition({
         x: event.clientX,
         y: event.clientY,
       });
 
-      const newNode: Node = {
-        id: generateId(),
+      // 💡 Node Factory 활용
+      let data = { label };
+      try {
+        if (dataString) {
+          data = { ...JSON.parse(dataString), label };
+        }
+      } catch (e) { }
+
+      const newNode = createWorkflowNode({
         type,
         position,
-        data: { ...initialData, blockId },
-      };
+        data,
+        blockId
+      });
 
       addNodeWithTracking(newNode);
     },
-    [addNode, reactFlowInstance]
+    [addNodeWithTracking, reactFlowInstance]
   );
 
   const onDragOver = useCallback((event: React.DragEvent) => {
@@ -290,7 +285,7 @@ const WorkflowCanvasInner = () => {
   const onNodeDoubleClick = useCallback((_event: React.MouseEvent, node: Node) => {
     // 그룹 노드(서브그래프)인 경우 내부로 진입
     if (node.type === 'group' && node.data?.subgraphId) {
-      navigateToSubgraph(node.data.subgraphId);
+      navigateToSubgraph(node.data.subgraphId as string);
       return;
     }
     setSelectedNode(node);
@@ -302,14 +297,12 @@ const WorkflowCanvasInner = () => {
   }, [updateNodeWithTracking]);
 
   const handleNodeDelete = useCallback((nodeId: string) => {
-    removeNode(nodeId);
-  }, [removeNode]);
+    removeNodeWithTracking(nodeId);
+  }, [removeNodeWithTracking]);
 
   const clearCanvas = useCallback(() => {
     clearWorkflow();
   }, [clearWorkflow]);
-
-  // Note: low-level add/update/remove wrappers removed — use store actions directly
 
   // Memoize nodes with onDelete handler to prevent unnecessary re-renders
   const nodesWithHandlers = useMemo(
@@ -328,7 +321,6 @@ const WorkflowCanvasInner = () => {
   const dialogConnectionData = useMemo(() => {
     if (!selectedNode || !editorOpen) return null;
 
-    // 들어오는 연결
     const incoming = edges
       .filter(e => e.target === selectedNode.id)
       .map(edge => ({
@@ -336,7 +328,6 @@ const WorkflowCanvasInner = () => {
         sourceLabel: (nodes.find(n => n.id === edge.source)?.data?.label as string) || edge.source
       }));
 
-    // 나가는 연결
     const outgoing = edges
       .filter(e => e.source === selectedNode.id)
       .map(edge => ({
@@ -345,7 +336,6 @@ const WorkflowCanvasInner = () => {
         targetLabel: (nodes.find(n => n.id === edge.target)?.data?.label as string) || edge.target
       }));
 
-    // 연결 가능한 대상
     const outgoingTargetNodeIds = new Set(outgoing.map(e => e.target));
     const available = nodes
       .filter(n =>
@@ -364,26 +354,25 @@ const WorkflowCanvasInner = () => {
 
   const handleEdgeCreateInDialog = useCallback((source: string, target: string) => {
     const newEdge = {
-      id: generateId(),
+      id: generateNodeId(),
       source,
       target,
       animated: true,
       style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 },
     };
     addEdge(newEdge);
-  }, [addEdge, generateId]);
+  }, [addEdge]);
 
   // Co-design: 변경사항이 있을 때 AI 제안 요청
   useEffect(() => {
     if (recentChanges.length > 0) {
       const timeoutId = setTimeout(() => {
-        // Capture current nodes/edges at callback execution time
         const currentNodes = useWorkflowStore.getState().nodes;
         const currentEdges = useWorkflowStore.getState().edges;
         requestSuggestions({ nodes: currentNodes, edges: currentEdges });
         requestAudit({ nodes: currentNodes, edges: currentEdges });
       }, 2000); // 2초 디바운스
-      
+
       return () => clearTimeout(timeoutId);
     }
   }, [recentChanges.length, requestSuggestions, requestAudit]);
@@ -391,28 +380,21 @@ const WorkflowCanvasInner = () => {
   // 키보드 단축키 핸들러
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      // 입력 필드에서는 단축키 무시
       const target = event.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
-        return;
-      }
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
-      // Delete/Backspace: 선택된 노드 삭제
       if ((event.key === 'Delete' || event.key === 'Backspace') && selectedNode) {
         event.preventDefault();
         handleNodeDelete(selectedNode.id);
         setSelectedNode(null);
         setEditorOpen(false);
-        toast.success('노드가 삭제되었습니다');
       }
 
-      // Escape: 선택 해제 및 다이얼로그 닫기
       if (event.key === 'Escape') {
         setSelectedNode(null);
         setEditorOpen(false);
       }
 
-      // Enter: 선택된 노드 편집
       if (event.key === 'Enter' && selectedNode && !editorOpen) {
         event.preventDefault();
         setEditorOpen(true);
@@ -427,8 +409,6 @@ const WorkflowCanvasInner = () => {
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
   }, []);
-
-  // Note: imperative handle removed — store exposes actions directly.
 
   // 미리보기 실행 핸들러
   const handlePreviewExecution = useCallback(async () => {
@@ -447,198 +427,213 @@ const WorkflowCanvasInner = () => {
       console.error('Failed to generate preview:', error);
     }
   }, [planBriefing, nodes, edges]);
-  
+
   // 실행 확인 핸들러
   const handleConfirmExecution = useCallback(async () => {
-    // TODO: 실제 실행 로직 연결
     toast.success('워크플로우 실행이 시작됩니다');
     setBriefingOpen(false);
-    
-    // 실행 시작 시 타임라인 패널 열기 및 executionId 설정
-    // setCurrentExecutionId('new-execution-id');
-    // setTimelinePanelOpen(true);
+    // TODO: Connect real execution engine
   }, []);
-  
+
   // 롤백 핸들러
   const handleRollbackClick = useCallback((item: TimelineItem) => {
     setRollbackTarget(item);
     setRollbackDialogOpen(true);
   }, []);
-  
+
   const handleRollbackPreview = useCallback(async (checkpointId: string) => {
     await timeMachine.loadPreview(checkpointId);
   }, [timeMachine]);
-  
+
   const handleRollbackExecute = useCallback(async (request: Omit<RollbackRequest, 'preview_only'>) => {
     return await timeMachine.executeRollback(request);
   }, [timeMachine]);
 
-  // 빈 Canvas에서 AI Designer 시작 핸들러
   const handleQuickStart = useCallback(async (prompt: string, persona?: string, systemPrompt?: string) => {
-    try {
-      addMessage('user', prompt);
-      
-      if (persona && systemPrompt) {
-        addMessage('system', `도메인 전문가 모드 활성화: ${persona.replace('_', ' ')}`);
-        addMessage('assistant', `${persona.replace('_', ' ')} 전문가로서 워크플로우를 설계하겠습니다.`);
-      }
-      
-      addMessage('assistant', 'AI Designer가 워크플로우 초안을 생성하고 있습니다...');
-      
-      // 여기서 실제 API 호출을 하거나 WorkflowChat 컴포넌트의 로직을 재사용할 수 있습니다.
-      // 현재는 사용자가 채팅에서 직접 입력하도록 안내합니다.
-      toast.success('채팅창에서 AI Designer와 대화를 시작하세요!');
-    } catch (error) {
-      console.error('Quick start failed:', error);
-      toast.error('빠른 시작에 실패했습니다.');
+    addMessage('user', prompt);
+    if (persona && systemPrompt) {
+      addMessage('system', `도메인 전문가 모드 활성화: ${persona.replace('_', ' ')}`);
     }
+    toast.success('AI Designer Activated');
   }, [addMessage]);
 
   return (
     <>
-      <div className="h-full w-full relative" onDrop={onDrop} onDragOver={onDragOver}>
-        {/* Empty Canvas Guide - 빈 Canvas일 때만 표시 */}
-        {canvasMode.isEmpty && (
-          <EmptyCanvasGuide 
-            onQuickStart={handleQuickStart}
-            className="absolute inset-0 z-10 bg-background/95 backdrop-blur-sm"
-          />
-        )}
-        {/* 상단 툴바 */}
-        <div className="absolute top-4 right-4 z-10 flex gap-2">
-          {/* 미리보기 실행 버튼 */}
-          <Button
-            variant="default"
-            size="sm"
-            onClick={handlePreviewExecution}
-            disabled={planBriefing.isLoading || nodes.length === 0}
-            className="gap-2"
-          >
-            <Play className="w-4 h-4" />
-            {planBriefing.isLoading ? '생성 중...' : '미리보기 실행'}
-          </Button>
-          
-          {/* 타임라인 패널 토글 */}
-          {currentExecutionId && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setTimelinePanelOpen(!timelinePanelOpen)}
-              className="gap-2"
-            >
-              {timelinePanelOpen ? (
-                <PanelRightClose className="w-4 h-4" />
-              ) : (
-                <PanelRightOpen className="w-4 h-4" />
+      <div className="h-full w-full relative flex overflow-hidden bg-[#121212]">
+        {/* Main Canvas Area */}
+        <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
+          {canvasMode.isEmpty && (
+            <EmptyCanvasGuide
+              onQuickStart={handleQuickStart}
+              className="absolute inset-0 z-10 bg-background/95 backdrop-blur-sm"
+            />
+          )}
+
+          {/* Contextual Toolbar */}
+          <div className="absolute top-4 right-4 z-10 flex gap-2">
+            <AnimatePresence>
+              {selectedNodes.length >= 2 && (
+                <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }}>
+                  <Button variant="secondary" size="sm" onClick={() => setGroupDialogOpen(true)} className="gap-2 bg-slate-800 border-slate-700">
+                    <Layers className="w-4 h-4 text-blue-400" />
+                    Group Selection ({selectedNodes.length})
+                  </Button>
+                </motion.div>
               )}
-              <History className="w-4 h-4" />
-            </Button>
-          )}
-          
-          {/* 그룹 버튼 - 2개 이상 선택시 활성화 */}
-          {selectedNodes.length >= 2 && (
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setGroupDialogOpen(true)}
-              className="gap-2"
-            >
-              <Layers className="w-4 h-4" />
-              그룹화 ({selectedNodes.length})
-            </Button>
-          )}
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={clearCanvas}
-            className="gap-2"
-          >
-            <Trash2 className="w-4 h-4" />
-            Clear Canvas
-          </Button>
-        </div>
+            </AnimatePresence>
 
-        {/* 네비게이션 브레드크럼 - 서브그래프 내부에 있을 때 표시 */}
-        {navigationPath.length > 0 && (
-          <div className="absolute top-4 left-4 z-10 flex items-center gap-1 bg-background/90 backdrop-blur-sm px-3 py-2 rounded-lg border shadow-sm">
-            <button
-              onClick={() => navigateUp(navigationPath.length)}
-              className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-            >
-              루트
-            </button>
-            {navigationPath.map((subgraphId, index) => {
-              const subgraph = subgraphs[subgraphId];
-              const isLast = index === navigationPath.length - 1;
-              return (
-                <Fragment key={subgraphId}>
-                  <ChevronRight className="w-4 h-4 text-muted-foreground" />
-                  {isLast ? (
-                    <span className="text-sm font-medium">
-                      {subgraph?.metadata?.name || subgraphId}
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => navigateUp(navigationPath.length - index - 1)}
-                      className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-                    >
-                      {subgraph?.metadata?.name || subgraphId}
-                    </button>
-                  )}
-                </Fragment>
-              );
-            })}
+            <Button variant="default" size="sm" onClick={handlePreviewExecution} disabled={planBriefing.isLoading || nodes.length === 0} className="gap-2 bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-600/20">
+              <Play className="w-4 h-4 fill-white" />
+              {planBriefing.isLoading ? 'Processing...' : 'Simulate Run'}
+            </Button>
+
+            <Button variant="outline" size="sm" onClick={() => setRightPanelOpen(!rightPanelOpen)} className={cn("gap-2 border-slate-700 bg-slate-900/50", rightPanelOpen && "bg-slate-800")}>
+              {rightPanelOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
+              Insight Centre
+            </Button>
           </div>
-        )}
 
-        <ReactFlow
-          nodes={nodesWithHandlers}
-          edges={edges}
-          onNodesChange={onNodesChangeWithTracking}
-          onEdgesChange={onEdgesChangeWithTracking}
-          onConnect={onConnect}
-          onNodeClick={onNodeClick}
-          onNodeDoubleClick={onNodeDoubleClick}
-          onInit={setReactFlowInstance}
-          onSelectionChange={onSelectionChange}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          fitView
-          className="bg-[#1a1a1a]"
-          deleteKeyCode={null} // 커스텀 키보드 핸들러 사용
-          selectionOnDrag={true}
-          panOnDrag={[1, 2]} // 중간/오른쪽 버튼으로 패닝
-          selectionMode={SelectionMode.Partial}
-        >
-          <Background color="#333" gap={20} size={1} variant={BackgroundVariant.Lines} />
-        </ReactFlow>
+          {/* Breadcrumbs for Subgraphs */}
+          {navigationPath.length > 0 && (
+            <div className="absolute top-4 left-4 z-10 flex items-center gap-1.5 bg-slate-900/60 backdrop-blur-md px-4 py-2 rounded-2xl border border-slate-800 shadow-xl">
+              <button onClick={() => navigateUp(navigationPath.length)} className="text-xs font-black uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors">ROOT</button>
+              {navigationPath.map((subgraphId, index) => {
+                const subgraph = subgraphs[subgraphId];
+                const isLast = index === navigationPath.length - 1;
+                return (
+                  <Fragment key={subgraphId}>
+                    <ChevronRight className="w-3.5 h-3.5 text-slate-700" />
+                    {isLast ? (
+                      <span className="text-xs font-black uppercase tracking-widest text-white">{subgraph?.metadata?.name || subgraphId}</span>
+                    ) : (
+                      <button onClick={() => navigateUp(navigationPath.length - index - 1)} className="text-xs font-black uppercase tracking-widest text-slate-500 hover:text-blue-400 transition-colors">{subgraph?.metadata?.name || subgraphId}</button>
+                    )}
+                  </Fragment>
+                );
+              })}
+            </div>
+          )}
 
-        {/* 키보드 단축키 힌트 */}
-        <div className="absolute bottom-4 left-4 z-10">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <div className="flex items-center gap-1 text-xs text-muted-foreground bg-background/80 backdrop-blur-sm px-2 py-1 rounded border">
-                <Keyboard className="w-3 h-3" />
-                <span>단축키</span>
-              </div>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">
-              <div className="space-y-1">
-                <div><kbd className="px-1 bg-muted rounded">Delete</kbd> 노드 삭제</div>
-                <div><kbd className="px-1 bg-muted rounded">Enter</kbd> 노드 편집</div>
-                <div><kbd className="px-1 bg-muted rounded">Esc</kbd> 선택 해제</div>
-                <div><kbd className="px-1 bg-muted rounded">더블클릭</kbd> 노드 편집</div>
-                <div><kbd className="px-1 bg-muted rounded">드래그</kbd> 다중 선택</div>
-                <div><kbd className="px-1 bg-muted rounded">그룹화</kbd> 서브그래프 생성</div>
-              </div>
-            </TooltipContent>
-          </Tooltip>
+          <ReactFlow
+            nodes={nodesWithHandlers}
+            edges={edges}
+            onNodesChange={onNodesChangeWithTracking}
+            onEdgesChange={onEdgesChangeWithTracking}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick}
+            onNodeDoubleClick={onNodeDoubleClick}
+            onInit={setReactFlowInstance}
+            onSelectionChange={onSelectionChange}
+            nodeTypes={nodeTypes}
+            edgeTypes={edgeTypes}
+            fitView
+            fitViewOptions={{ padding: 0.2 }}
+            minZoom={0.1}
+            maxZoom={2}
+            snapToGrid={true}
+            snapGrid={[20, 20]}
+            className="bg-[#121212]"
+            deleteKeyCode={null}
+            selectionOnDrag={true}
+            panOnDrag={[1, 2]}
+            selectionMode={SelectionMode.Partial}
+          >
+            <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={{ opacity: 0.4 }} />
+          </ReactFlow>
+
+          {/* Shortcuts Info */}
+          <div className="absolute bottom-4 left-4 z-10">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-900/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-slate-800 cursor-help hover:text-slate-300 transition-colors">
+                  <Keyboard className="w-3.5 h-3.5" />
+                  COMMAND_GUIDE
+                </div>
+              </TooltipTrigger>
+              <TooltipContent side="top" className="bg-slate-900 border-slate-800 p-3 rounded-xl shadow-2xl">
+                <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DEL</kbd> Delete Node</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ENT</kbd> Edit Params</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ESC</kbd> Clear Selection</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DRG</kbd> Multi-Select</div>
+                </div>
+              </TooltipContent>
+            </Tooltip>
+          </div>
         </div>
+
+        {/* Unified Sidebar Panel */}
+        <AnimatePresence>
+          {rightPanelOpen && (
+            <motion.div
+              initial={{ x: 400 }}
+              animate={{ x: 0 }}
+              exit={{ x: 400 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="w-96 border-l border-slate-800 bg-slate-950/50 backdrop-blur-xl z-20 flex flex-col"
+            >
+              <div className="p-6 pb-2">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-100 flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-blue-500" />
+                    Insight_Matrix
+                  </h3>
+                  <Button variant="ghost" size="icon" onClick={() => setRightPanelOpen(false)} className="h-8 w-8 text-slate-500 hover:text-white">
+                    <PanelRightClose className="w-4 h-4" />
+                  </Button>
+                </div>
+
+                <Tabs value={activePanelTab} onValueChange={setActivePanelTab} className="w-full">
+                  <TabsList className="w-full grid grid-cols-3 bg-slate-900/50 border border-slate-800 rounded-xl p-1 h-10">
+                    <TabsTrigger value="timeline" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-blue-400 transition-all">Timeline</TabsTrigger>
+                    <TabsTrigger value="audit" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-amber-400 transition-all">Audit</TabsTrigger>
+                    <TabsTrigger value="ai" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-400 transition-all">Agents</TabsTrigger>
+                  </TabsList>
+
+                  <div className="mt-6 flex-1 overflow-hidden">
+                    <TabsContent value="timeline" className="m-0 h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
+                      {currentExecutionId ? (
+                        <CheckpointTimeline
+                          items={checkpoints.timeline}
+                          loading={checkpoints.isLoading}
+                          selectedId={timeMachine.selectedCheckpointId}
+                          compareId={timeMachine.compareCheckpointId}
+                          onRollback={handleRollbackClick}
+                          onCompare={(item) => {
+                            if (timeMachine.selectedCheckpointId && timeMachine.selectedCheckpointId !== item.checkpoint_id) {
+                              timeMachine.compare(timeMachine.selectedCheckpointId, item.checkpoint_id);
+                            }
+                          }}
+                          onPreview={(item) => checkpoints.getDetail(item.checkpoint_id)}
+                          compact
+                        />
+                      ) : (
+                        <div className="flex flex-col items-center justify-center py-20 opacity-20 text-center">
+                          <History className="w-12 h-12 mb-4" />
+                          <p className="text-[10px] font-black uppercase">No active operations</p>
+                        </div>
+                      )}
+                    </TabsContent>
+
+                    <TabsContent value="audit" className="m-0 h-[calc(100vh-200px)] overflow-y-auto">
+                      <AuditPanel standalone />
+                    </TabsContent>
+
+                    <TabsContent value="ai" className="m-0 h-[calc(100vh-200px)] overflow-y-auto">
+                      <SuggestionList />
+                    </TabsContent>
+                  </div>
+                </Tabs>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        <SuggestionOverlay />
       </div>
 
       <NodeEditorDialog
-        key={selectedNode?.id}
-        node={selectedNode}
+        node={selectedNode as any}
         open={editorOpen}
         onClose={() => setEditorOpen(false)}
         onSave={handleNodeUpdate}
@@ -656,8 +651,7 @@ const WorkflowCanvasInner = () => {
         onConfirm={handleGroupConfirm}
         nodeCount={selectedNodes.length}
       />
-      
-      {/* Plan Briefing Modal */}
+
       <PlanBriefingModal
         open={briefingOpen}
         onOpenChange={setBriefingOpen}
@@ -666,8 +660,7 @@ const WorkflowCanvasInner = () => {
         onConfirm={handleConfirmExecution}
         onCancel={() => setBriefingOpen(false)}
       />
-      
-      {/* Rollback Dialog */}
+
       <RollbackDialog
         open={rollbackDialogOpen}
         onOpenChange={setRollbackDialogOpen}
@@ -676,41 +669,8 @@ const WorkflowCanvasInner = () => {
         loading={timeMachine.isPreviewLoading}
         onPreview={handleRollbackPreview}
         onExecute={handleRollbackExecute}
-        onSuccess={() => {
-          checkpoints.refetch();
-        }}
+        onSuccess={() => checkpoints.refetch()}
       />
-      
-      {/* Timeline Side Panel */}
-      {timelinePanelOpen && currentExecutionId && (
-        <div className="absolute top-0 right-0 h-full w-80 bg-background border-l z-20 overflow-hidden">
-          <div className="p-4 h-full overflow-auto">
-            <CheckpointTimeline
-              items={checkpoints.timeline}
-              loading={checkpoints.isLoading}
-              selectedId={timeMachine.selectedCheckpointId}
-              compareId={timeMachine.compareCheckpointId}
-              onSelect={(item) => {
-                // 선택 시 해당 노드 하이라이트 등 추가 가능
-              }}
-              onRollback={handleRollbackClick}
-              onCompare={(item) => {
-                if (timeMachine.selectedCheckpointId && timeMachine.selectedCheckpointId !== item.checkpoint_id) {
-                  timeMachine.compare(timeMachine.selectedCheckpointId, item.checkpoint_id);
-                }
-              }}
-              onPreview={(item) => {
-                checkpoints.getDetail(item.checkpoint_id);
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Co-design Assistant Components */}
-      <SuggestionOverlay />
-      <SuggestionList />
-      <AuditPanel />
     </>
   );
 }

@@ -1,17 +1,114 @@
+/**
+ * 실시간 타임라인 오케스트레이션 훅 (v2.0)
+ * =====================================================
+ * 
+ * 실시간 스트리밍 데이터와 서버 과거 이력을 통합하는 데이터 엔진
+ * 
+ * v2.0 Changes:
+ * - Deterministic ID generation (hash-based)
+ * - Pure function extraction for data merging
+ * - Enhanced type safety (TimelineEntry with __source)
+ * - Improved normalizeEventTs (ISO string support)
+ * - Error state management (loading/error tracking)
+ * - Optimized pruning (single-pass seqCounter cleanup)
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { NotificationItem } from '@/lib/types';
 import { makeAuthenticatedRequest } from '@/lib/api';
+import { normalizeEventTs } from '@/lib/utils';
+
+// 타임라인 전용 확장 타입
+interface TimelineEntry extends NotificationItem {
+    __seq: number;
+    __source: 'stream' | 'fetch';
+}
+
+interface TimelineState {
+    data: TimelineEntry[];
+    loading: boolean;
+    error: Error | null;
+}
 
 export interface ExecutionTimelineHook {
-    executionTimelines: Record<string, NotificationItem[]>;
+    executionTimelines: Record<string, TimelineEntry[]>;
+    timelineStates: Record<string, TimelineState>;
     fetchExecutionTimeline: (executionId: string, force?: boolean) => Promise<NotificationItem[]>;
+}
+
+/**
+ * Deterministic ID 생성 (멱등성 보장)
+ */
+function generateDeterministicId(event: NotificationItem): string {
+    const execId = event.payload?.execution_id || event.execution_id || '';
+    const ts = event.payload?.timestamp || event.timestamp || event.receivedAt || 0;
+    const msg = event.message || event.payload?.message || '';
+    const type = event.type || '';
+
+    const combined = `${execId}-${ts}-${type}-${msg.substring(0, 50)}`;
+
+    // Simple hash function
+    let hash = 0;
+    for (let i = 0; i < combined.length; i++) {
+        const char = combined.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash = hash & hash; // Convert to 32bit integer
+    }
+
+    return `event:${Math.abs(hash).toString(36)}`;
+}
+
+
+/**
+ * 타임라인 병합 로직 (순수 함수)
+ */
+function mergeTimelines(
+    existing: TimelineEntry[],
+    fetched: NotificationItem[],
+    source: 'stream' | 'fetch',
+    seqCounter: number
+): { merged: TimelineEntry[], nextSeq: number } {
+    const byId = new Map<string, TimelineEntry>();
+    let currentSeq = seqCounter;
+
+    // Add fetched events first
+    for (const e of fetched) {
+        const id = e.id || generateDeterministicId(e);
+        const entry: TimelineEntry = {
+            ...e,
+            __seq: ++currentSeq,
+            __source: source
+        };
+        byId.set(id, entry);
+    }
+
+    // Merge with existing, preserving local __seq if present
+    for (const e of existing) {
+        const id = e.id || generateDeterministicId(e);
+        if (byId.has(id)) {
+            const server = byId.get(id)!;
+            const merged: TimelineEntry = {
+                ...e,
+                ...server,
+                __seq: e.__seq, // Preserve original sequence
+                __source: e.__source // Preserve original source
+            };
+            byId.set(id, merged);
+        } else {
+            byId.set(id, e);
+        }
+    }
+
+    const merged = Array.from(byId.values()).sort((a, b) => normalizeEventTs(a) - normalizeEventTs(b));
+    return { merged, nextSeq: currentSeq };
 }
 
 export const useExecutionTimeline = (
     notifications: NotificationItem[],
     API_BASE: string
 ): ExecutionTimelineHook => {
-    const [executionTimelines, setExecutionTimelines] = useState<Record<string, NotificationItem[]>>({});
+    const [executionTimelines, setExecutionTimelines] = useState<Record<string, TimelineEntry[]>>({});
+    const [timelineStates, setTimelineStates] = useState<Record<string, TimelineState>>({});
     const seqCountersRef = useRef<Record<string, number>>({});
 
     // Configuration
@@ -19,15 +116,7 @@ export const useExecutionTimeline = (
     const MAX_TIMELINES = 500;
     const PRUNE_INTERVAL_MS = 1000 * 60 * 5; // 5 minutes
 
-    // Helper: Normalize event timestamps
-    const normalizeEventTs = (e: NotificationItem): number => {
-        const candidate = e?.payload?.timestamp ?? e?.timestamp ?? e?.receivedAt ?? e?.start_time;
-        if (!candidate && candidate !== 0) return 0;
-        const num = Number(candidate) || 0;
-        return num < 10000000000 ? num * 1000 : num;
-    };
-
-    // 1. Pruning Effect
+    // 1. Pruning Effect (최적화: single-pass seqCounter cleanup)
     useEffect(() => {
         const id = setInterval(() => {
             setExecutionTimelines(prev => {
@@ -47,20 +136,34 @@ export const useExecutionTimeline = (
                         .slice(0, MAX_TIMELINES);
                 }
 
+                // Single-pass: Build next state and clean seqCounters simultaneously
                 const next = Object.fromEntries(kept);
+                const keptKeys = new Set(kept.map(([k]) => k));
                 const seq = seqCountersRef.current;
+
                 for (const k of Object.keys(seq)) {
-                    if (!next[k]) delete seq[k];
+                    if (!keptKeys.has(k)) delete seq[k];
                 }
 
+                return next;
+            });
+
+            // Prune timeline states as well
+            setTimelineStates(prev => {
+                const next: Record<string, TimelineState> = {};
+                for (const [key, state] of Object.entries(prev)) {
+                    if (executionTimelines[key]) {
+                        next[key] = state;
+                    }
+                }
                 return next;
             });
         }, PRUNE_INTERVAL_MS);
 
         return () => clearInterval(id);
-    }, []);
+    }, [executionTimelines]);
 
-    // 2. Append new notifications
+    // 2. Append new notifications (with deterministic IDs)
     useEffect(() => {
         if (!notifications || notifications.length === 0) return;
 
@@ -69,24 +172,22 @@ export const useExecutionTimeline = (
             const seq = seqCountersRef.current;
 
             for (const n of notifications) {
-                if (!n || !n.id) continue;
+                if (!n) continue;
 
                 const execId = n.payload?.execution_id || n.execution_id;
-                const key = execId || `notification:${n.id}`;
+                const key = execId || `notification:${n.id || generateDeterministicId(n)}`;
 
                 const arr = next[key] ? [...next[key]] : [];
-                const exists = arr.some(e => e.id === n.id);
+                const eventId = n.id || generateDeterministicId(n);
+                const exists = arr.some(e => (e.id || generateDeterministicId(e)) === eventId);
 
                 if (!exists) {
                     seq[key] = (seq[key] || 0) + 1;
-                    // Fix for 'any' type: explicit casting or extending type if needed.
-                    // Here we attach __seq for internal ordering if needed, but NotificationItem doesn't have it.
-                    // We can cast to a local intersection type if we really need it, or just use the object.
-                    // For now, let's assume we can attach it safely or ignore it if not strictly typed in the interface.
-                    // To be type-safe, we should probably extend the type, but for now we'll cast to 'any' locally to avoid TS error,
-                    // OR better, update NotificationItem type. Since we can't easily change the imported type right now without checking,
-                    // we will use a type assertion that is safer than 'any'.
-                    const enhanced = { ...n, __seq: seq[key] } as NotificationItem & { __seq?: number };
+                    const enhanced: TimelineEntry = {
+                        ...n,
+                        __seq: seq[key],
+                        __source: 'stream'
+                    };
                     arr.push(enhanced);
                 }
                 next[key] = arr;
@@ -95,7 +196,7 @@ export const useExecutionTimeline = (
         });
     }, [notifications]);
 
-    // 3. Fetch Timeline Function
+    // 3. Fetch Timeline Function (with error state management)
     const fetchExecutionTimeline = useCallback(async (executionId: string, force = false) => {
         if (!executionId) return [];
 
@@ -103,6 +204,16 @@ export const useExecutionTimeline = (
         if (!force && local && local.length > 0) {
             return local;
         }
+
+        // Set loading state
+        setTimelineStates(prev => ({
+            ...prev,
+            [executionId]: {
+                data: local || [],
+                loading: true,
+                error: null
+            }
+        }));
 
         try {
             const url = `${API_BASE}/executions/${encodeURIComponent(executionId)}/history`;
@@ -138,50 +249,47 @@ export const useExecutionTimeline = (
             }
             else if (b && typeof b === 'object' && ('payload' in b || 'message' in b || 'id' in b)) events = [b];
 
+            // Use pure merge function
             setExecutionTimelines(prev => {
                 const existing = prev[executionId] || [];
-                const byId = new Map<string, NotificationItem>();
+                const seq = seqCountersRef.current;
+                const currentSeq = seq[executionId] || 0;
 
-                for (const e of events) {
-                    if (e.id) byId.set(e.id, e);
-                    else {
-                        const key = `fetched:${Math.random().toString(36).slice(2, 9)}`;
-                        byId.set(key, e);
-                    }
-                }
+                const { merged, nextSeq } = mergeTimelines(existing, events, 'fetch', currentSeq);
+                seq[executionId] = nextSeq;
 
-                for (const e of existing) {
-                    if (e.id) {
-                        if (byId.has(e.id)) {
-                            const server = byId.get(e.id)!;
-                            const merged = { ...e, ...server };
-                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                            if ((e as any).__seq && !(merged as any).__seq) (merged as any).__seq = (e as any).__seq;
-                            byId.set(e.id, merged);
-                        } else {
-                            byId.set(e.id, e);
-                        }
-                    } else {
-                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                        const key = `local:seq:${(e as any).__seq || Math.random().toString(36).slice(2, 9)}`;
-                        if (!Array.from(byId.values()).some(v => v === e)) {
-                            byId.set(key, e);
-                        }
-                    }
-                }
-
-                const merged = Array.from(byId.values()).sort((a, b) => normalizeEventTs(a) - normalizeEventTs(b));
                 return { ...prev, [executionId]: merged };
             });
 
+            // Update state: success
+            setTimelineStates(prev => ({
+                ...prev,
+                [executionId]: {
+                    data: events as TimelineEntry[],
+                    loading: false,
+                    error: null
+                }
+            }));
+
             return events;
         } catch (e) {
-            console.error('fetchExecutionTimeline failed', e);
+            const error = e instanceof Error ? e : new Error('Unknown error');
+            console.error('fetchExecutionTimeline failed', error);
+
+            // Update state: error
+            setTimelineStates(prev => ({
+                ...prev,
+                [executionId]: {
+                    data: prev[executionId]?.data || [],
+                    loading: false,
+                    error
+                }
+            }));
         }
 
         setExecutionTimelines(prev => ({ ...prev, [executionId]: prev[executionId] || [] }));
         return [];
     }, [API_BASE, executionTimelines]);
 
-    return { executionTimelines, fetchExecutionTimeline };
+    return { executionTimelines, timelineStates, fetchExecutionTimeline };
 };

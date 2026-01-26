@@ -1,28 +1,43 @@
 /**
- * SelfHealingPanel Component (v3.9)
+ * SelfHealingPanel Component (v4.0)
  * ==================================
  * 
- * Self-Healing 상태를 표시하고 수동 승인 버튼을 제공합니다.
- * 
- * 표시 상태:
- * - AUTO_HEALING_IN_PROGRESS: "자동 복구 중..." 토스트
- * - AWAITING_MANUAL_HEALING: Gemini 제안 + [승인] 버튼
- * - HEALING_SUCCESS: 복구 완료 메시지
- * - HEALING_FAILED: 에스컬레이션 안내
+ * 에이전트의 자가 치유(Self-Healing) 프로세스를 가시화하고 제어권을 부여하는 패널입니다.
+ * 'Glassbox UX' 원칙에 따라 에러의 원인과 해결책을 투명하게 공개합니다.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
-import { Loader2, Wand2, AlertTriangle, CheckCircle, XCircle, RefreshCw, Shield } from 'lucide-react';
+import {
+    Loader2,
+    Wand2,
+    AlertTriangle,
+    CheckCircle,
+    XCircle,
+    RefreshCw,
+    Shield,
+    Copy,
+    LifeBuoy,
+    Terminal,
+    ChevronDown,
+    ChevronUp,
+    Zap,
+    History
+} from 'lucide-react';
 import { toast } from 'sonner';
+import { cn } from '@/lib/utils';
+import { motion, AnimatePresence } from 'framer-motion';
+import JsonViewer from './JsonViewer';
+
+type HealingStatus = 'AUTO_HEALING_IN_PROGRESS' | 'AWAITING_MANUAL_HEALING' | 'HEALING_SUCCESS' | 'HEALING_FAILED' | null;
 
 interface SelfHealingPanelProps {
     executionArn: string;
     ownerId: string;
-    healingStatus: 'AUTO_HEALING_IN_PROGRESS' | 'AWAITING_MANUAL_HEALING' | 'HEALING_SUCCESS' | 'HEALING_FAILED' | null;
+    healingStatus: HealingStatus;
     errorType?: string;
     errorMessage?: string;
     suggestedFix?: string;
@@ -33,6 +48,48 @@ interface SelfHealingPanelProps {
     onRejectHealing?: () => void;
     onClose?: () => void;
 }
+
+// --- CONFIGURATION ---
+
+const HEALING_UI_CONFIG: Record<string, {
+    color: string;
+    icon: any;
+    title: string;
+    description: string;
+    animate?: string;
+    bg: string;
+    border: string;
+    text: string;
+}> = {
+    AUTO_HEALING_IN_PROGRESS: {
+        color: 'blue',
+        icon: Loader2,
+        title: 'Agent Self-Correction Active',
+        description: '오류가 감지되었습니다. Gemini가 코드를 분석하고 수정을 제안 중입니다.',
+        animate: 'animate-spin',
+        bg: 'bg-blue-500/10',
+        border: 'border-blue-500/30',
+        text: 'text-blue-500'
+    },
+    HEALING_SUCCESS: {
+        color: 'emerald',
+        icon: CheckCircle,
+        title: 'Automatic Healing Synchronized',
+        description: '시스템 무결성이 복구되었습니다. 워크플로우를 즉시 재개합니다.',
+        bg: 'bg-emerald-500/10',
+        border: 'border-emerald-500/30',
+        text: 'text-emerald-500'
+    },
+    HEALING_FAILED: {
+        color: 'rose',
+        icon: XCircle,
+        title: 'Self-Correction Ceiling Reached',
+        description: '지정된 복구 시도 횟수 내에 안전한 정합성을 확보하지 못했습니다.',
+        bg: 'bg-rose-500/10',
+        border: 'border-rose-500/30',
+        text: 'text-rose-500'
+    }
+};
 
 export const SelfHealingPanel: React.FC<SelfHealingPanelProps> = ({
     executionArn,
@@ -49,215 +106,219 @@ export const SelfHealingPanel: React.FC<SelfHealingPanelProps> = ({
     onClose,
 }) => {
     const [isApproving, setIsApproving] = useState(false);
+    const [showFullError, setShowFullError] = useState(false);
 
     const handleApprove = async () => {
         if (!onApproveHealing) return;
-
         setIsApproving(true);
         try {
             await onApproveHealing();
-            toast.success('Self-Healing이 승인되었습니다. 복구가 시작됩니다.');
         } catch (error) {
-            toast.error('승인 처리 중 오류가 발생했습니다.');
             console.error('Approve healing error:', error);
         } finally {
             setIsApproving(false);
         }
     };
 
-    const handleReject = () => {
-        if (onRejectHealing) {
-            onRejectHealing();
-        }
-        toast.info('Self-Healing이 취소되었습니다. 수동으로 문제를 해결해주세요.');
+    const handleCopyLog = () => {
+        const log = `[Error] ${errorType}\n[Message] ${errorMessage}\n[Suggested Fix] ${suggestedFix}`;
+        navigator.clipboard.writeText(log);
+        toast.info('상세 로그가 클립보드에 복사되었습니다.');
     };
+
+    const isJsonFix = useMemo(() => {
+        if (!suggestedFix) return false;
+        const trimmed = suggestedFix.trim();
+        return (trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'));
+    }, [suggestedFix]);
 
     if (!healingStatus) return null;
 
-    // 🔄 자동 복구 진행 중
-    if (healingStatus === 'AUTO_HEALING_IN_PROGRESS') {
+    // --- RENDER HEALING ALERT (AUTO, SUCCESS, FAILED) ---
+    if (healingStatus !== 'AWAITING_MANUAL_HEALING') {
+        const config = HEALING_UI_CONFIG[healingStatus as keyof typeof HEALING_UI_CONFIG];
+        if (!config) return null;
+
         return (
-            <Alert className="border-blue-500/50 bg-blue-500/10">
-                <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
-                <AlertTitle className="text-blue-400">자동 복구 진행 중...</AlertTitle>
-                <AlertDescription className="text-blue-300/80">
-                    오류가 감지되었습니다. Gemini가 코드를 분석하고 자동으로 수정 중입니다.
-                    <br />
-                    <span className="text-xs text-blue-400/60 mt-1 block">
-                        복구 시도: {healingCount + 1} / {maxHealingAttempts}
-                    </span>
-                </AlertDescription>
-            </Alert>
+            <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="w-full"
+            >
+                <Alert className={cn("border-2 rounded-2xl py-5 px-6", config.border, config.bg)}>
+                    <div className="flex items-start gap-4">
+                        <div className={cn("p-2 rounded-xl bg-white dark:bg-black/20 shadow-sm", config.text)}>
+                            <config.icon className={cn("h-5 w-5", config.animate)} />
+                        </div>
+                        <div className="flex-1 space-y-1">
+                            <AlertTitle className={cn("text-base font-black tracking-tight uppercase", config.text)}>
+                                {config.title}
+                            </AlertTitle>
+                            <AlertDescription className="text-sm font-medium opacity-80 leading-relaxed">
+                                {config.description}
+                                {healingStatus === 'AUTO_HEALING_IN_PROGRESS' && (
+                                    <span className="flex items-center gap-1.5 mt-2 text-[10px] font-black uppercase tracking-widest opacity-60">
+                                        <History className="h-3 w-3" /> Attempt {healingCount + 1} / {maxHealingAttempts}
+                                    </span>
+                                )}
+                            </AlertDescription>
+
+                            {healingStatus === 'HEALING_FAILED' && (
+                                <div className="flex gap-2 mt-4">
+                                    <Button size="sm" variant="outline" onClick={handleCopyLog} className="h-8 border-rose-500/20 bg-white/50 text-rose-600 font-bold hover:bg-rose-500/10">
+                                        <Copy className="mr-2 h-3.5 w-3.5" /> Copy Log
+                                    </Button>
+                                    <Button size="sm" variant="ghost" className="h-8 text-rose-500/60 font-bold hover:bg-rose-500/5">
+                                        <LifeBuoy className="mr-2 h-3.5 w-3.5" /> Request Escalation
+                                    </Button>
+                                </div>
+                            )}
+
+                            {onClose && healingStatus === 'HEALING_SUCCESS' && (
+                                <Button size="sm" variant="ghost" onClick={onClose} className="h-8 mt-4 text-emerald-600 font-black uppercase tracking-widest hover:bg-emerald-500/10">
+                                    Dismiss Report
+                                </Button>
+                            )}
+                        </div>
+                    </div>
+                </Alert>
+            </motion.div>
         );
     }
 
-    // ⏳ 수동 승인 대기 중
-    if (healingStatus === 'AWAITING_MANUAL_HEALING') {
-        return (
-            <Card className="border-amber-500/50 bg-amber-500/5">
-                <CardHeader className="pb-3">
-                    <div className="flex items-center gap-2">
-                        <AlertTriangle className="h-5 w-5 text-amber-500" />
-                        <CardTitle className="text-amber-400">수동 승인 필요</CardTitle>
-                        <Badge variant="outline" className="ml-auto border-amber-500/50 text-amber-400">
-                            Semantic Error
+    // --- RENDER MANUAL APPROVAL PANEL ---
+    return (
+        <motion.div
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            className={cn("transition-all duration-300", isApproving && "opacity-60 pointer-events-none scale-[0.99]")}
+        >
+            <Card className="border-2 border-amber-500/30 bg-amber-500/5 rounded-3xl overflow-hidden shadow-2xl">
+                <CardHeader className="px-8 py-6 border-b border-amber-500/10 bg-amber-500/5">
+                    <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-amber-500 text-white rounded-xl shadow-lg shadow-amber-500/20">
+                                <AlertTriangle className="h-5 w-5" />
+                            </div>
+                            <div className="space-y-0.5">
+                                <CardTitle className="text-amber-600 dark:text-amber-500 font-black tracking-tight">Manual Reasoning Required</CardTitle>
+                                <CardDescription className="text-xs font-bold text-amber-500/60 uppercase tracking-widest">Semantic Breach Detected</CardDescription>
+                            </div>
+                        </div>
+                        <Badge className="bg-amber-100 text-amber-700 border-none font-black text-[10px] tracking-tighter uppercase px-2.5">
+                            High Fidelity Check
                         </Badge>
                     </div>
-                    <CardDescription className="text-amber-300/70">
-                        자동 복구가 불가능한 오류입니다. 아래 제안을 검토하고 승인해주세요.
-                    </CardDescription>
                 </CardHeader>
 
-                <CardContent className="space-y-4">
-                    {/* 에러 정보 */}
-                    <div className="space-y-2">
-                        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                            <XCircle className="h-4 w-4 text-red-500" />
-                            <span className="font-medium text-red-400">{errorType || 'Unknown Error'}</span>
+                <CardContent className="p-8 space-y-6">
+                    {/* Error Analysis Section */}
+                    <div className="space-y-3">
+                        <div className="flex items-center gap-2">
+                            <Terminal className="h-4 w-4 text-slate-400" />
+                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Error Payload Signature</span>
                         </div>
-                        {errorMessage && (
-                            <div className="bg-red-500/10 border border-red-500/20 rounded-md p-3 max-h-24 overflow-y-auto">
-                                <code className="text-xs text-red-300 whitespace-pre-wrap break-all">
-                                    {errorMessage}
-                                </code>
+                        <div className="rounded-2xl border border-rose-500/20 bg-rose-500/5 p-5 space-y-3 relative overflow-hidden">
+                            <div className="absolute top-0 right-0 p-2 bg-rose-500/20 rounded-bl-xl text-rose-600 font-mono text-[9px] font-bold">
+                                {errorType || 'RUNTIME_EXCEPTION'}
                             </div>
-                        )}
+                            <p className={cn("text-xs font-bold text-rose-700 dark:text-rose-400 leading-relaxed", !showFullError && "line-clamp-2")}>
+                                {errorMessage}
+                            </p>
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setShowFullError(!showFullError)}
+                                className="h-6 px-2 text-[9px] font-black uppercase text-rose-500/60 hover:bg-rose-500/10"
+                            >
+                                {showFullError ? <ChevronUp className="h-3 w-3 mr-1" /> : <ChevronDown className="h-3 w-3 mr-1" />}
+                                {showFullError ? 'Collapse Trace' : 'Expand Trace'}
+                            </Button>
+                        </div>
                     </div>
 
-                    {/* 차단 사유 */}
-                    {blockedReason && (
-                        <div className="flex items-start gap-2 text-sm">
-                            <Shield className="h-4 w-4 text-amber-500 mt-0.5" />
-                            <div>
-                                <span className="font-medium text-amber-400">차단 사유: </span>
-                                <span className="text-amber-300/80">{blockedReason}</span>
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Gemini 제안 */}
+                    {/* Proposed Reconstruction Section */}
                     {suggestedFix && (
-                        <div className="space-y-2">
-                            <div className="flex items-center gap-2 text-sm">
-                                <Wand2 className="h-4 w-4 text-purple-500" />
-                                <span className="font-medium text-purple-400">Gemini 수정 제안</span>
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <Zap className="h-4 w-4 text-purple-500 fill-purple-500" />
+                                    <span className="text-[10px] font-black uppercase tracking-widest text-purple-600">Gemini Neural Repair Proposal</span>
+                                </div>
+                                <Badge variant="outline" className="border-purple-200 text-purple-500 text-[9px] font-bold">RECON_MODE=AUTO</Badge>
                             </div>
-                            <div className="bg-purple-500/10 border border-purple-500/20 rounded-md p-3">
-                                <p className="text-sm text-purple-300/90 whitespace-pre-wrap">
-                                    {suggestedFix}
-                                </p>
+                            <div className="rounded-2xl border-2 border-purple-500/20 bg-white dark:bg-black/40 overflow-hidden">
+                                {isJsonFix ? (
+                                    <JsonViewer src={JSON.parse(suggestedFix)} collapsed={1} className="p-4 bg-transparent border-none" />
+                                ) : (
+                                    <div className="p-5">
+                                        <p className="text-sm font-medium text-slate-700 dark:text-purple-200 leading-relaxed italic">
+                                            "{suggestedFix}"
+                                        </p>
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )}
 
-                    {/* 복구 시도 횟수 */}
-                    <div className="flex items-center justify-between text-xs text-muted-foreground pt-2 border-t border-border/30">
-                        <span>복구 시도: {healingCount} / {maxHealingAttempts}</span>
-                        <span className="text-xs">
-                            {executionArn.split(':').pop()}
-                        </span>
+                    {/* Block Reasoning Policy */}
+                    {blockedReason && (
+                        <div className="flex items-start gap-3 p-4 rounded-xl bg-slate-900/5 border border-slate-200">
+                            <Shield className="h-5 w-5 text-slate-400 mt-0.5 shrink-0" />
+                            <div className="space-y-1">
+                                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Bypass Prevention Policy</span>
+                                <p className="text-xs font-bold text-slate-600 dark:text-slate-400">{blockedReason}</p>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Meta Info */}
+                    <div className="flex items-center justify-between pt-4 border-t border-amber-500/10">
+                        <div className="flex items-center gap-4">
+                            <div className="flex flex-col">
+                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Attempts Logged</span>
+                                <span className="text-xs font-black text-slate-700">{healingCount} / {maxHealingAttempts}</span>
+                            </div>
+                            <div className="w-px h-6 bg-slate-200" />
+                            <div className="flex flex-col">
+                                <span className="text-[9px] font-black text-slate-400 uppercase tracking-tighter">Correlation ID</span>
+                                <span className="text-xs font-mono font-bold text-slate-400">{executionArn.split(':').pop()?.substring(0, 12)}...</span>
+                            </div>
+                        </div>
+                        <Badge variant="outline" className="h-6 border-emerald-500/20 text-emerald-600 font-mono text-[10px]">VERIFIED_ORIGIN=LLM</Badge>
                     </div>
                 </CardContent>
 
-                <CardFooter className="flex gap-2 pt-0">
+                <CardFooter className="px-8 py-5 flex gap-3 bg-amber-500/5">
+                    <Button
+                        variant="ghost"
+                        onClick={onRejectHealing}
+                        disabled={isApproving}
+                        className="h-11 px-6 font-bold text-xs text-slate-400 hover:text-rose-500 hover:bg-rose-50 transition-all rounded-xl"
+                    >
+                        Discard Proposal
+                    </Button>
                     <Button
                         onClick={handleApprove}
                         disabled={isApproving}
-                        className="flex-1 bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
+                        className="flex-1 h-11 bg-gradient-to-r from-purple-600 to-amber-600 hover:from-purple-700 hover:to-amber-700 text-white font-black text-xs uppercase tracking-widest rounded-xl shadow-xl shadow-amber-600/20 transition-all active:scale-95"
                     >
                         {isApproving ? (
                             <>
                                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                                승인 중...
+                                Reconstructing State...
                             </>
                         ) : (
                             <>
                                 <Wand2 className="mr-2 h-4 w-4" />
-                                Self-Healing 승인
+                                Authorize Global Repair
                             </>
                         )}
                     </Button>
-                    <Button
-                        variant="outline"
-                        onClick={handleReject}
-                        disabled={isApproving}
-                    >
-                        취소
-                    </Button>
                 </CardFooter>
             </Card>
-        );
-    }
-
-    // ✅ 복구 성공
-    if (healingStatus === 'HEALING_SUCCESS') {
-        return (
-            <Alert className="border-green-500/50 bg-green-500/10">
-                <CheckCircle className="h-5 w-5 text-green-500" />
-                <AlertTitle className="text-green-400">자동 복구 완료</AlertTitle>
-                <AlertDescription className="text-green-300/80">
-                    오류가 자동으로 수정되었습니다. 워크플로우가 정상적으로 재실행됩니다.
-                    <br />
-                    <span className="text-xs text-green-400/60 mt-1 block">
-                        복구에 {healingCount}회 시도가 소요되었습니다.
-                    </span>
-                </AlertDescription>
-                {onClose && (
-                    <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={onClose}
-                        className="mt-2 text-green-400 hover:text-green-300"
-                    >
-                        닫기
-                    </Button>
-                )}
-            </Alert>
-        );
-    }
-
-    // ❌ 복구 실패
-    if (healingStatus === 'HEALING_FAILED') {
-        return (
-            <Alert variant="destructive" className="border-red-500/50 bg-red-500/10">
-                <XCircle className="h-5 w-5 text-red-500" />
-                <AlertTitle className="text-red-400">자동 복구 실패</AlertTitle>
-                <AlertDescription className="text-red-300/80">
-                    최대 복구 시도({maxHealingAttempts}회)를 초과했습니다.
-                    <br />
-                    수동으로 문제를 해결하거나 관리자에게 에스컬레이션하세요.
-                    <br />
-                    {errorType && (
-                        <span className="text-xs text-red-400/60 mt-1 block">
-                            에러 타입: {errorType}
-                        </span>
-                    )}
-                </AlertDescription>
-                <div className="flex gap-2 mt-3">
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        className="border-red-500/50 text-red-400 hover:bg-red-500/10"
-                    >
-                        <RefreshCw className="mr-2 h-4 w-4" />
-                        수동 재시도
-                    </Button>
-                    {onClose && (
-                        <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={onClose}
-                            className="text-red-400 hover:text-red-300"
-                        >
-                            닫기
-                        </Button>
-                    )}
-                </div>
-            </Alert>
-        );
-    }
-
-    return null;
+        </motion.div>
+    );
 };
 
 export default SelfHealingPanel;

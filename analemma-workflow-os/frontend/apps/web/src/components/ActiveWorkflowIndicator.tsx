@@ -1,50 +1,54 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Activity, ChevronDown } from 'lucide-react';
+import { Activity, ChevronDown, AlertCircle } from 'lucide-react';
 import { useNotifications } from '@/hooks/useNotifications';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import ActiveWorkflowList from '@/components/ActiveWorkflowList';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { cn } from '@/lib/utils';
 
 export const ActiveWorkflowIndicator: React.FC = () => {
     const navigate = useNavigate();
     const { notifications } = useNotifications();
     const [isOpen, setIsOpen] = useState(false);
 
-    // Filter running/started workflows
-    const activeWorkflows = (notifications || [])
-        .filter(e => ['RUNNING', 'STARTED', 'PAUSED_FOR_HITP'].includes(e.status))
-        .map(e => ({
-            ...e,
-            payload: {
-                execution_id: e.executionArn || e.execution_id,
-                status: e.status,
-                start_time: e.startDate ? new Date(e.startDate).getTime() : undefined,
-                workflowId: e.workflowId,
-                workflow_alias: e.workflow_alias,
-                workflow_name: e.workflow_name,
-                current_segment: (e.step_function_state as any)?.current_segment,
-                total_segments: (e.step_function_state as any)?.total_segments,
-                estimated_remaining_seconds: (e.step_function_state as any)?.estimated_remaining_seconds,
-                last_update_time: e.updated_at ? e.updated_at : undefined,
-            }
-        }));
+    // Filter running/started workflows and memoize for performance
+    const activeWorkflows = useMemo(() => {
+        return (notifications || [])
+            .filter(e => ['RUNNING', 'STARTED', 'PAUSED_FOR_HITP'].includes(e.status))
+            .map(e => {
+                const sfs = (e.step_function_state as any) || {};
+                return {
+                    ...e,
+                    payload: {
+                        execution_id: e.executionArn || e.execution_id,
+                        status: e.status,
+                        start_time: e.startDate ? new Date(e.startDate).getTime() : undefined,
+                        workflowId: e.workflowId,
+                        workflow_alias: e.workflow_alias,
+                        workflow_name: e.workflow_name,
+                        current_segment: sfs.current_segment,
+                        total_segments: sfs.total_segments,
+                        estimated_remaining_seconds: sfs.estimated_remaining_seconds,
+                        last_update_time: e.updated_at,
+                    }
+                };
+            });
+    }, [notifications]);
 
     const runningCount = activeWorkflows.length;
     const isRunning = runningCount > 0;
+    const hasPausedWorkflow = activeWorkflows.some(w => w.status === 'PAUSED_FOR_HITP');
 
-    const handleSelectWorkflow = (executionId: string | null) => {
+    const handleSelectWorkflow = useCallback((executionId: string | null) => {
         if (executionId) {
-            // Navigate to monitor page with this execution selected
-            // We can't directly select it via URL params yet (maybe?), but navigating to the page is a start.
-            // Ideally, the monitor page should accept a query param ?executionId=...
-            // For now, just go to /workflows
-            navigate('/workflows');
+            // Monitor 페이지에서 이 ID를 읽어 자동으로 상세창을 띄우도록 딥링크 활용
+            navigate(`/workflows?executionId=${encodeURIComponent(executionId)}`);
             setIsOpen(false);
         }
-    };
+    }, [navigate]);
 
     return (
         <Popover open={isOpen} onOpenChange={setIsOpen}>
@@ -52,14 +56,27 @@ export const ActiveWorkflowIndicator: React.FC = () => {
                 <Button
                     variant="ghost"
                     size="sm"
-                    className={`h-9 gap-2 ${isRunning ? 'text-primary' : 'text-muted-foreground'}`}
+                    className={`h-9 gap-2 ${hasPausedWorkflow
+                        ? 'text-orange-600 bg-orange-50 hover:bg-orange-100 hover:text-orange-700'
+                        : isRunning ? 'text-primary' : 'text-muted-foreground'
+                        }`}
                 >
-                    <Activity className={`w-4 h-4 ${isRunning ? 'animate-pulse' : ''}`} />
+                    {hasPausedWorkflow ? (
+                        <AlertCircle className="w-4 h-4 animate-pulse" />
+                    ) : (
+                        <Activity className={`w-4 h-4 ${isRunning ? 'animate-pulse' : ''}`} />
+                    )}
                     <span className="hidden sm:inline">
-                        {isRunning ? `${runningCount} Running` : 'No Active Workflows'}
+                        {hasPausedWorkflow ? 'Input Required' : isRunning ? `${runningCount} Running` : 'No Active Workflows'}
                     </span>
                     {isRunning && (
-                        <Badge variant="secondary" className="ml-1 px-1.5 h-5 min-w-5 flex justify-center items-center">
+                        <Badge
+                            variant="secondary"
+                            className={cn(
+                                "ml-1 px-1.5 h-5 min-w-5 flex justify-center items-center",
+                                hasPausedWorkflow ? "bg-orange-500 text-white" : ""
+                            )}
+                        >
                             {runningCount}
                         </Badge>
                     )}

@@ -8,10 +8,10 @@ import { useCodesignStore, AuditIssue, selectIssueSummary } from '@/lib/codesign
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { 
-  AlertTriangle, 
-  XCircle, 
-  Info, 
+import {
+  AlertTriangle,
+  XCircle,
+  Info,
   CheckCircle2,
   ChevronRight,
   RefreshCw,
@@ -25,6 +25,7 @@ interface AuditPanelProps {
   onRefresh?: () => void;
   isLoading?: boolean;
   className?: string;
+  standalone?: boolean;
 }
 
 const levelConfig = {
@@ -54,25 +55,26 @@ const levelConfig = {
   }
 };
 
-export function AuditPanel({ 
+export function AuditPanel({
   issues: externalIssues,
   onNodeClick,
   onRefresh,
   isLoading = false,
-  className 
+  className,
+  standalone = false
 }: AuditPanelProps) {
   const storeIssues = useCodesignStore(state => state.auditIssues);
   const issueSummary = useCodesignStore(selectIssueSummary);
-  
+
   // 외부에서 전달된 issues가 있으면 사용, 없으면 store 사용
   const issues = externalIssues ?? storeIssues;
-  
+
   // 레벨별 정렬 (error > warning > info)
   const sortedIssues = [...issues].sort((a, b) => {
     const order = { error: 0, warning: 1, info: 2 };
     return (order[a.level] ?? 3) - (order[b.level] ?? 3);
   });
-  
+
   // 이슈 없음 상태
   if (issues.length === 0) {
     return (
@@ -85,9 +87,9 @@ export function AuditPanel({
           워크플로우에 발견된 문제가 없습니다
         </p>
         {onRefresh && (
-          <Button 
-            variant="outline" 
-            size="sm" 
+          <Button
+            variant="outline"
+            size="sm"
             onClick={onRefresh}
             disabled={isLoading}
           >
@@ -98,7 +100,7 @@ export function AuditPanel({
       </div>
     );
   }
-  
+
   return (
     <div className={cn("flex flex-col", className)}>
       {/* 요약 헤더 */}
@@ -124,9 +126,9 @@ export function AuditPanel({
           </div>
         </div>
         {onRefresh && (
-          <Button 
-            variant="ghost" 
-            size="sm" 
+          <Button
+            variant="ghost"
+            size="sm"
             className="h-7 px-2"
             onClick={onRefresh}
             disabled={isLoading}
@@ -135,7 +137,7 @@ export function AuditPanel({
           </Button>
         )}
       </div>
-      
+
       {/* 이슈 목록 */}
       <ScrollArea className="flex-1">
         <div className="divide-y">
@@ -161,9 +163,9 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
   const [isExpanded, setIsExpanded] = React.useState(issue.level === 'error');
   const config = levelConfig[issue.level] || levelConfig.info;
   const Icon = config.icon;
-  
+
   return (
-    <div 
+    <div
       className={cn(
         "px-4 py-3 transition-colors cursor-pointer",
         config.bgColor,
@@ -176,7 +178,7 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
         <Icon className={cn("w-4 h-4 mt-0.5 flex-shrink-0", config.color)} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-1">
-            <Badge 
+            <Badge
               variant={config.badgeVariant}
               className="text-[10px] px-1.5 py-0 h-4"
             >
@@ -192,14 +194,14 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
             {issue.message}
           </p>
         </div>
-        <ChevronRight 
+        <ChevronRight
           className={cn(
             "w-4 h-4 text-muted-foreground transition-transform flex-shrink-0",
             isExpanded && "rotate-90"
-          )} 
+          )}
         />
       </div>
-      
+
       {/* 확장 내용 */}
       {isExpanded && (
         <div className="mt-3 pl-6 space-y-2">
@@ -210,7 +212,7 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
               <span>{issue.suggestion}</span>
             </div>
           )}
-          
+
           {/* 영향받는 노드 */}
           {issue.affectedNodes && issue.affectedNodes.length > 0 && (
             <div>
@@ -245,7 +247,7 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
 // 이슈 요약 컴포넌트 (외부에서 사용 가능)
 export function AuditSummary({ className }: { className?: string }) {
   const issueSummary = useCodesignStore(selectIssueSummary);
-  
+
   if (issueSummary.total === 0) {
     return (
       <div className={cn("flex items-center gap-1.5 text-green-600", className)}>
@@ -254,7 +256,7 @@ export function AuditSummary({ className }: { className?: string }) {
       </div>
     );
   }
-  
+
   return (
     <div className={cn("flex items-center gap-1", className)}>
       {issueSummary.errors > 0 && (

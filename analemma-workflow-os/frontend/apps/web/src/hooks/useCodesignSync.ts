@@ -1,17 +1,37 @@
 /**
- * useCodesignSync: Co-design 동기화 훅
+ * useCodesignSync: Co-design 동기화 훅 (v2.0)
+ * ====================================================
  * 
  * 워크플로우 변경 사항을 추적하고 AI와 동기화합니다.
+ * 
+ * v2.0 Changes:
+ * - API 엔드포인트 상수화 (URL 파싱 견고함)
+ * - sendToCodesign 의존성 최적화 (getState() 패턴)
+ * - 스트리밍 데이터 검증 및 에러 핸들링 강화
+ * - optionsRef 패턴으로 콜백 안정성 개선
  */
 import { useCallback, useRef, useEffect } from 'react';
 import { useCodesignStore, ChangeType, AuditIssue, SuggestionPreview } from '@/lib/codesignStore';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { streamDesignAssistant, resolveDesignAssistantEndpoint } from '@/lib/streamingFetch';
 
+// API 엔드포인트 상수 (URL 파싱 대신)
+const API_ENDPOINTS = {
+  DESIGN_ASSISTANT: '/design-assistant',
+  AUDIT: '/audit',
+  SIMULATE: '/simulate',
+  EXPLAIN: '/explain',
+} as const;
+
 interface UseCodesignSyncOptions {
   authToken?: string | null;
   autoAudit?: boolean;
   auditDebounceMs?: number;
+  onNodeReceived?: (node: any) => void;
+  onEdgeReceived?: (edge: any) => void;
+  onSuggestionReceived?: (suggestion: SuggestionPreview) => void;
+  onAuditReceived?: (issue: AuditIssue) => void;
+  onTextReceived?: (text: string) => void;
 }
 
 interface CodesignStreamMessage {
@@ -21,6 +41,12 @@ interface CodesignStreamMessage {
 
 export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
   const { authToken, autoAudit = true, auditDebounceMs = 2000 } = options;
+  const optionsRef = useRef(options);
+  
+  // Keep callbacks stable
+  useEffect(() => {
+    optionsRef.current = options;
+  });
   
   const {
     recentChanges,
@@ -33,23 +59,28 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
     clearChanges,
   } = useCodesignStore();
   
-  const { nodes, edges, addNode, addEdge: addWorkflowEdge } = useWorkflowStore();
+  // Store reference만 가져오기 (getState로 최신 상태 접근)
+  const workflowStore = useWorkflowStore;
   
   const abortControllerRef = useRef<AbortController | null>(null);
   const auditTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
   /**
-   * Co-design 요청 전송
+   * API URL 빌더 (견고한 엔드포인트 관리)
+   */
+  const getApiUrl = useCallback((endpoint: keyof typeof API_ENDPOINTS): string => {
+    const baseEndpoint = resolveDesignAssistantEndpoint();
+    const baseUrl = baseEndpoint.url.replace(API_ENDPOINTS.DESIGN_ASSISTANT, '');
+    return `${baseUrl}${API_ENDPOINTS[endpoint]}`;
+  }, []);
+  
+  /**
+   * Co-design 요청 전송 (최적화: getState()로 최신 상태 접근)
    */
   const sendToCodesign = useCallback(async (
     userMessage: string,
-    options: { 
+    requestOptions: { 
       mode?: 'codesign' | 'explain' | 'suggest';
-      onNodeReceived?: (node: any) => void;
-      onEdgeReceived?: (edge: any) => void;
-      onSuggestionReceived?: (suggestion: SuggestionPreview) => void;
-      onAuditReceived?: (issue: AuditIssue) => void;
-      onTextReceived?: (text: string) => void;
     } = {}
   ) => {
     // 이전 요청 취소
@@ -61,11 +92,14 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
     setSyncStatus('syncing');
     addMessage('user', userMessage);
     
+    // getState()로 최신 상태 가져오기 (함수 재생성 방지)
+    const { nodes, edges, addNode, addEdge: addWorkflowEdge } = workflowStore.getState();
+    
     const payload = {
       request: userMessage,
       current_workflow: { nodes, edges },
       recent_changes: recentChanges,
-      mode: options.mode || 'codesign'
+      mode: requestOptions.mode || 'codesign'
     };
     
     let textBuffer = '';
@@ -80,75 +114,109 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
           switch (obj.type) {
             case 'node':
               if (obj.data) {
-                // 노드 데이터를 워크플로우에 추가
-                const nodeData = obj.data;
-                const newNode = {
-                  id: nodeData.id,
-                  type: nodeData.type,
-                  position: nodeData.position || { x: 150, y: 50 },
-                  data: {
-                    label: nodeData.label || nodeData.id,
-                    ...nodeData.config,
-                    ...nodeData.data
+                try {
+                  const { id, type, position, label, config, data: extraData } = obj.data;
+                  
+                  // 필수 필드 검증
+                  if (!id || !type) {
+                    console.warn('Invalid node data: missing id or type', obj.data);
+                    return;
                   }
-                };
-                addNode(newNode);
-                options.onNodeReceived?.(newNode);
+
+                  const newNode = {
+                    id,
+                    type,
+                    position: position || { 
+                      x: Math.random() * 200 + 50, 
+                      y: Math.random() * 200 + 50 
+                    },
+                    data: {
+                      label: label || config?.label || id,
+                      ...config,
+                      ...extraData
+                    }
+                  };
+                  
+                  addNode(newNode);
+                  optionsRef.current.onNodeReceived?.(newNode);
+                } catch (e) {
+                  console.error('Failed to process streamed node:', e, obj.data);
+                }
               }
               break;
               
             case 'edge':
               if (obj.data) {
-                const edgeData = obj.data;
-                const newEdge = {
-                  id: edgeData.id,
-                  source: edgeData.source,
-                  target: edgeData.target,
-                  sourceHandle: edgeData.source_handle,
-                  targetHandle: edgeData.target_handle,
-                  animated: true,
-                  style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 }
-                };
-                addWorkflowEdge(newEdge);
-                options.onEdgeReceived?.(newEdge);
+                try {
+                  const { id, source, target, source_handle, target_handle, sourceHandle, targetHandle } = obj.data;
+                  
+                  // 필수 필드 검증
+                  if (!id || !source || !target) {
+                    console.warn('Invalid edge data: missing required fields', obj.data);
+                    return;
+                  }
+
+                  const newEdge = {
+                    id,
+                    source,
+                    target,
+                    sourceHandle: source_handle || sourceHandle,
+                    targetHandle: target_handle || targetHandle,
+                    animated: true,
+                    style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 }
+                  };
+                  
+                  addWorkflowEdge(newEdge);
+                  optionsRef.current.onEdgeReceived?.(newEdge);
+                } catch (e) {
+                  console.error('Failed to process streamed edge:', e, obj.data);
+                }
               }
               break;
               
             case 'suggestion':
               if (obj.data) {
-                const suggestion: SuggestionPreview = {
-                  id: obj.data.id || `sug_${Date.now()}`,
-                  action: obj.data.action,
-                  reason: obj.data.reason,
-                  affectedNodes: obj.data.affected_nodes || [],
-                  proposedChange: obj.data.proposed_change || {},
-                  confidence: obj.data.confidence || 0.5,
-                  status: 'pending'
-                };
-                addSuggestion(suggestion);
-                receivedSuggestions.push(suggestion);
-                options.onSuggestionReceived?.(suggestion);
+                try {
+                  const suggestion: SuggestionPreview = {
+                    id: obj.data.id || `sug_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    action: obj.data.action || 'unknown',
+                    reason: obj.data.reason || '',
+                    affectedNodes: obj.data.affected_nodes || obj.data.affectedNodes || [],
+                    proposedChange: obj.data.proposed_change || obj.data.proposedChange || {},
+                    confidence: obj.data.confidence || 0.5,
+                    status: 'pending'
+                  };
+                  addSuggestion(suggestion);
+                  receivedSuggestions.push(suggestion);
+                  optionsRef.current.onSuggestionReceived?.(suggestion);
+                } catch (e) {
+                  console.error('Failed to process suggestion:', e, obj.data);
+                }
               }
               break;
               
             case 'audit':
               if (obj.data) {
-                const issue: AuditIssue = {
-                  level: obj.data.level || 'info',
-                  type: obj.data.type || 'unknown',
-                  message: obj.data.message,
-                  affectedNodes: obj.data.affected_nodes || [],
-                  suggestion: obj.data.suggestion
-                };
-                receivedAuditIssues.push(issue);
-                options.onAuditReceived?.(issue);
+                try {
+                  const issue: AuditIssue = {
+                    level: obj.data.level || 'info',
+                    type: obj.data.type || 'unknown',
+                    message: obj.data.message || 'No message provided',
+                    affectedNodes: obj.data.affected_nodes || obj.data.affectedNodes || [],
+                    suggestion: obj.data.suggestion
+                  };
+                  receivedAuditIssues.push(issue);
+                  optionsRef.current.onAuditReceived?.(issue);
+                } catch (e) {
+                  console.error('Failed to process audit issue:', e, obj.data);
+                }
               }
               break;
               
             case 'text':
               if (obj.data) {
                 textBuffer += obj.data;
-                options.onTextReceived?.(obj.data);
+                optionsRef.current.onTextReceived?.(obj.data);
               }
               break;
               
@@ -189,26 +257,23 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
       }
     }
   }, [
-    nodes, 
-    edges, 
-    recentChanges, 
-    authToken, 
-    addNode, 
-    addWorkflowEdge,
-    addSuggestion, 
-    setAuditIssues, 
-    addMessage, 
-    setSyncStatus, 
-    setLastSyncTime, 
+    recentChanges,
+    authToken,
+    workflowStore,
+    addSuggestion,
+    setAuditIssues,
+    addMessage,
+    setSyncStatus,
+    setLastSyncTime,
     clearChanges
   ]);
   
   /**
-   * 워크플로우 검증 요청
+   * 워크플로우 검증 요청 (견고한 URL 관리)
    */
   const auditWorkflow = useCallback(async () => {
-    const endpoint = resolveDesignAssistantEndpoint();
-    const auditUrl = endpoint.url.replace('/design-assistant', '/audit');
+    const auditUrl = getApiUrl('AUDIT');
+    const { nodes, edges } = workflowStore.getState();
     
     try {
       const response = await fetch(auditUrl, {
@@ -230,14 +295,14 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
     }
     
     return null;
-  }, [nodes, edges, authToken, setAuditIssues]);
+  }, [authToken, workflowStore, setAuditIssues, getApiUrl]);
   
   /**
    * 워크플로우 시뮬레이션 요청
    */
   const simulateWorkflow = useCallback(async (mockInputs: Record<string, any> = {}) => {
-    const endpoint = resolveDesignAssistantEndpoint();
-    const simulateUrl = endpoint.url.replace('/design-assistant', '/simulate');
+    const simulateUrl = getApiUrl('SIMULATE');
+    const { nodes, edges } = workflowStore.getState();
     
     try {
       const response = await fetch(simulateUrl, {
@@ -260,14 +325,14 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
     }
     
     return null;
-  }, [nodes, edges, authToken]);
+  }, [authToken, workflowStore, getApiUrl]);
   
   /**
    * 워크플로우 설명 요청
    */
   const explainWorkflow = useCallback(async () => {
-    const endpoint = resolveDesignAssistantEndpoint();
-    const explainUrl = endpoint.url.replace('/design-assistant', '/explain');
+    const explainUrl = getApiUrl('EXPLAIN');
+    const { nodes, edges } = workflowStore.getState();
     
     try {
       const response = await fetch(explainUrl, {
@@ -287,7 +352,7 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
     }
     
     return null;
-  }, [nodes, edges, authToken]);
+  }, [authToken, workflowStore, getApiUrl]);
   
   /**
    * 요청 취소

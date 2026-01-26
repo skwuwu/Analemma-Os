@@ -1,10 +1,17 @@
 /**
- * Plan Briefing & Checkpoint Hooks
+ * Plan Briefing & Checkpoint Hooks (v2.0)
+ * ==========================================
  * 
  * Plan Briefing과 Checkpoint 기능을 위한 React Query 훅입니다.
+ * 
+ * v2.0 Changes:
+ * - PlanBriefing을 React Query 캐시로 관리 (useState → setQueryData)
+ * - executionId 유효성 검사 강화
+ * - optionsRef 패턴으로 콜백 안정성 개선
+ * - useMemo로 체크포인트/브랜치 트리 구조 가공
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { 
   generateWorkflowPreview,
@@ -40,19 +47,39 @@ interface UsePlanBriefingOptions {
 }
 
 export function usePlanBriefing(options: UsePlanBriefingOptions = {}) {
-  const [briefing, setBriefing] = useState<PlanBriefing | null>(null);
+  const optionsRef = useRef(options);
   const queryClient = useQueryClient();
+  const [briefingId, setBriefingId] = useState<string | null>(null);
+  
+  // Keep callbacks stable
+  useEffect(() => {
+    optionsRef.current = options;
+  });
+  
+  // Query briefing from cache (React Query pattern)
+  const briefingQuery = useQuery({
+    queryKey: ['briefing', briefingId],
+    queryFn: async () => {
+      // Data is already in cache from mutation
+      return queryClient.getQueryData<PlanBriefing>(['briefing', briefingId]) || null;
+    },
+    enabled: !!briefingId,
+    staleTime: Infinity, // Briefing은 변경되지 않으므로 무한 캐시
+  });
   
   const generateMutation = useMutation({
     mutationFn: async (request: PreviewWorkflowRequest) => {
       return await generateWorkflowPreview(request);
     },
     onSuccess: (data) => {
-      setBriefing(data);
-      options.onSuccess?.(data);
+      // React Query 캐시에 저장 (다른 컴포넌트에서도 사용 가능)
+      const id = data.briefing_id || `briefing-${Date.now()}`;
+      queryClient.setQueryData(['briefing', id], data);
+      setBriefingId(id);
+      optionsRef.current.onSuccess?.(data);
     },
     onError: (error: Error) => {
-      options.onError?.(error);
+      optionsRef.current.onError?.(error);
     },
   });
   
@@ -77,11 +104,15 @@ export function usePlanBriefing(options: UsePlanBriefingOptions = {}) {
   );
   
   const clear = useCallback(() => {
-    setBriefing(null);
-  }, []);
+    if (briefingId) {
+      queryClient.removeQueries({ queryKey: ['briefing', briefingId] });
+    }
+    setBriefingId(null);
+  }, [briefingId, queryClient]);
   
   return {
-    briefing,
+    briefing: briefingQuery.data || null,
+    briefingId,
     isLoading: generateMutation.isPending,
     isError: generateMutation.isError,
     error: generateMutation.error,
@@ -113,7 +144,8 @@ export function useCheckpoints({
   const checkpointsQuery = useQuery({
     queryKey: ['checkpoints', executionId],
     queryFn: async () => {
-      const result = await listCheckpoints(executionId!);
+      if (!executionId) throw new Error('executionId is required');
+      const result = await listCheckpoints(executionId);
       return result.checkpoints;
     },
     enabled: enabled && !!executionId,
@@ -124,19 +156,51 @@ export function useCheckpoints({
   const timelineQuery = useQuery({
     queryKey: ['timeline', executionId],
     queryFn: async () => {
-      const result = await getExecutionTimeline(executionId!);
+      if (!executionId) throw new Error('executionId is required');
+      const result = await getExecutionTimeline(executionId);
       return result.timeline;
     },
     enabled: enabled && !!executionId,
     refetchInterval,
   });
   
+  // 체크포인트 트리 구조 생성 (UI 렌더링용)
+  const checkpointTree = useMemo(() => {
+    const checkpoints = checkpointsQuery.data || [];
+    const timeline = timelineQuery.data || [];
+    
+    // 트리 노드 생성
+    const nodes = checkpoints.map(cp => ({
+      id: cp.checkpoint_id,
+      label: cp.checkpoint_id,
+      timestamp: cp.created_at,
+      data: cp,
+      type: 'checkpoint' as const,
+    }));
+    
+    // 엣지 생성 (타임라인 기반)
+    const edges = timeline
+      .map((item: any, index, arr) => {
+        if (index === 0) return null;
+        const prev = arr[index - 1] as any;
+        return {
+          source: prev.checkpoint_id || prev.id || '',
+          target: item.checkpoint_id || item.id || '',
+          label: `${Math.floor((new Date(item.timestamp).getTime() - new Date(prev.timestamp).getTime()) / 1000)}s`,
+        };
+      })
+      .filter(Boolean);
+    
+    return { nodes, edges };
+  }, [checkpointsQuery.data, timelineQuery.data]);
+  
   // 특정 체크포인트 상세 조회
   const getDetail = useCallback(
     async (checkpointId: string) => {
+      if (!executionId) throw new Error('executionId is required');
       return await queryClient.fetchQuery({
         queryKey: ['checkpoint', executionId, checkpointId],
-        queryFn: () => getCheckpointDetail(executionId!, checkpointId),
+        queryFn: () => getCheckpointDetail(executionId, checkpointId),
         staleTime: 5 * 60 * 1000, // 5분간 캐시
       });
     },
@@ -145,13 +209,16 @@ export function useCheckpoints({
   
   // 캐시 무효화
   const invalidate = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['checkpoints', executionId] });
-    queryClient.invalidateQueries({ queryKey: ['timeline', executionId] });
+    if (executionId) {
+      queryClient.invalidateQueries({ queryKey: ['checkpoints', executionId] });
+      queryClient.invalidateQueries({ queryKey: ['timeline', executionId] });
+    }
   }, [queryClient, executionId]);
   
   return {
     checkpoints: checkpointsQuery.data || [],
     timeline: timelineQuery.data || [],
+    checkpointTree, // 트리 구조 (시각화용)
     isLoading: checkpointsQuery.isLoading || timelineQuery.isLoading,
     isError: checkpointsQuery.isError || timelineQuery.isError,
     error: checkpointsQuery.error || timelineQuery.error,
@@ -177,24 +244,32 @@ export function useTimeMachine({
   onRollbackSuccess, 
   onRollbackError 
 }: UseTimeMachineOptions) {
+  const optionsRef = useRef({ onRollbackSuccess, onRollbackError });
   const [preview, setPreview] = useState<RollbackPreview | null>(null);
   const [selectedCheckpointId, setSelectedCheckpointId] = useState<string | null>(null);
   const [compareCheckpointId, setCompareCheckpointId] = useState<string | null>(null);
   const queryClient = useQueryClient();
-  const executionIdRef = useRef(executionId);
   
-  // executionId 업데이트
-  executionIdRef.current = executionId;
+  // Keep callbacks stable
+  useEffect(() => {
+    optionsRef.current = { onRollbackSuccess, onRollbackError };
+  });
   
-  // 롤백 미리보기
+  // executionId 유효성 검사
+  const validateExecutionId = useCallback((id?: string) => {
+    const effectiveId = id || executionId;
+    if (!effectiveId || effectiveId.trim() === '') {
+      throw new Error('executionId is required for time machine operations');
+    }
+    return effectiveId;
+  }, [executionId]);
+  
+  // 롤백 미리보기 (executionId를 인자로 받아 클로저 문제 방지)
   const previewMutation = useMutation({
-    mutationFn: async (checkpointId: string) => {
-      const currentExecutionId = executionIdRef.current;
-      if (!currentExecutionId || currentExecutionId.trim() === '') {
-        throw new Error('executionId is required for rollback preview');
-      }
+    mutationFn: async ({ checkpointId, execId }: { checkpointId: string; execId?: string }) => {
+      const validExecId = validateExecutionId(execId);
       const request: Omit<RollbackRequest, 'preview_only'> = {
-        thread_id: currentExecutionId,
+        thread_id: validExecId,
         target_checkpoint_id: checkpointId,
         state_modifications: {},
       };
@@ -207,42 +282,75 @@ export function useTimeMachine({
   
   // 롤백 실행
   const rollbackMutation = useMutation({
-    mutationFn: async (request: Omit<RollbackRequest, 'preview_only'>) => {
-      return await executeRollback(request);
+    mutationFn: async ({ request, execId }: { request: Omit<RollbackRequest, 'preview_only'>; execId?: string }) => {
+      const validExecId = validateExecutionId(execId);
+      // 요청에 올바른 executionId 덮어쓰기
+      return await executeRollback({ ...request, thread_id: validExecId });
     },
     onSuccess: (data) => {
-      // 캐시 무효화
-      queryClient.invalidateQueries({ queryKey: ['checkpoints', executionId] });
-      queryClient.invalidateQueries({ queryKey: ['timeline', executionId] });
-      queryClient.invalidateQueries({ queryKey: ['branches', executionId] });
+      const validExecId = executionId; // 성공 후 캐시 무효화용
+      if (validExecId) {
+        queryClient.invalidateQueries({ queryKey: ['checkpoints', validExecId] });
+        queryClient.invalidateQueries({ queryKey: ['timeline', validExecId] });
+        queryClient.invalidateQueries({ queryKey: ['branches', validExecId] });
+      }
       
-      onRollbackSuccess?.(data);
+      optionsRef.current.onRollbackSuccess?.(data);
       setPreview(null);
     },
     onError: (error: Error) => {
-      onRollbackError?.(error);
+      optionsRef.current.onRollbackError?.(error);
     },
   });
   
   // 체크포인트 비교
   const compareMutation = useMutation({
-    mutationFn: async ({ sourceId, targetId }: { sourceId: string; targetId: string }) => {
-      return await compareCheckpoints(executionId, sourceId, targetId);
+    mutationFn: async ({ sourceId, targetId, execId }: { sourceId: string; targetId: string; execId?: string }) => {
+      const validExecId = validateExecutionId(execId);
+      return await compareCheckpoints(validExecId, sourceId, targetId);
     },
   });
   
   // 브랜치 히스토리
   const branchesQuery = useQuery({
     queryKey: ['branches', executionId],
-    queryFn: () => getBranchHistory(executionId),
+    queryFn: () => {
+      const validExecId = validateExecutionId();
+      return getBranchHistory(validExecId);
+    },
     enabled: !!executionId,
   });
+  
+  // 브랜치 트리 구조 (DAG 시각화용)
+  const branchTree = useMemo(() => {
+    const branches = branchesQuery.data?.branches || [];
+    
+    // 브랜치를 노드와 엣지로 변환
+    const nodes = branches.map((branch: any) => ({
+      id: branch.branch_id || branch.id || '',
+      label: branch.name || branch.branch_id || branch.id || 'Unknown',
+      checkpointId: branch.checkpoint_id,
+      createdAt: branch.created_at,
+      type: 'branch' as const,
+    }));
+    
+    const edges = branches
+      .filter((branch: any) => branch.parent_branch_id)
+      .map((branch: any) => ({
+        source: branch.parent_branch_id,
+        target: branch.branch_id || branch.id || '',
+        label: 'branch',
+      }));
+    
+    return { nodes, edges };
+  }, [branchesQuery.data]);
   
   // 롤백 제안
   const suggestionsQuery = useQuery({
     queryKey: ['rollback-suggestions', executionId],
     queryFn: async () => {
-      const result = await getRollbackSuggestions(executionId);
+      const validExecId = validateExecutionId();
+      const result = await getRollbackSuggestions(validExecId);
       return result.suggestions;
     },
     enabled: !!executionId,
@@ -250,26 +358,26 @@ export function useTimeMachine({
   });
   
   const loadPreview = useCallback(
-    (checkpointId: string) => {
+    (checkpointId: string, execId?: string) => {
       setSelectedCheckpointId(checkpointId);
-      return previewMutation.mutateAsync(checkpointId);
+      return previewMutation.mutateAsync({ checkpointId, execId });
     },
-    [previewMutation]
+    [previewMutation, validateExecutionId]
   );
   
   const executeRollbackAction = useCallback(
-    (request: Omit<RollbackRequest, 'preview_only'>) => {
-      return rollbackMutation.mutateAsync(request);
+    (request: Omit<RollbackRequest, 'preview_only'>, execId?: string) => {
+      return rollbackMutation.mutateAsync({ request, execId });
     },
-    [rollbackMutation]
+    [rollbackMutation, validateExecutionId]
   );
   
   const compare = useCallback(
-    (sourceId: string, targetId: string) => {
+    (sourceId: string, targetId: string, execId?: string) => {
       setCompareCheckpointId(targetId);
-      return compareMutation.mutateAsync({ sourceId, targetId });
+      return compareMutation.mutateAsync({ sourceId, targetId, execId });
     },
-    [compareMutation]
+    [compareMutation, validateExecutionId]
   );
   
   const clearPreview = useCallback(() => {
@@ -317,6 +425,7 @@ export function useTimeMachine({
     
     // 브랜치
     branches: branchesQuery.data?.branches || [],
+    branchTree, // DAG 구조 (시각화용)
     isBranchesLoading: branchesQuery.isLoading,
     
     // 제안

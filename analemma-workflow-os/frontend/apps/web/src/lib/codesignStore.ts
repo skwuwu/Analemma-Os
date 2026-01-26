@@ -11,23 +11,23 @@ import { streamCoDesignAssistant, callCoDesignAssistantSync } from './streamingF
 // 타입 정의
 // ──────────────────────────────────────────────────────────────
 
-export type ChangeType = 
-  | 'add_node' 
-  | 'move_node' 
-  | 'delete_node' 
-  | 'update_node' 
-  | 'add_edge' 
-  | 'delete_edge' 
-  | 'group_nodes' 
+export type ChangeType =
+  | 'add_node'
+  | 'move_node'
+  | 'delete_node'
+  | 'update_node'
+  | 'add_edge'
+  | 'delete_edge'
+  | 'group_nodes'
   | 'ungroup_nodes';
 
-export type SuggestionAction = 
-  | 'group' 
-  | 'add_node' 
-  | 'modify' 
-  | 'delete' 
-  | 'reorder' 
-  | 'connect' 
+export type SuggestionAction =
+  | 'group'
+  | 'add_node'
+  | 'modify'
+  | 'delete'
+  | 'reorder'
+  | 'connect'
   | 'optimize';
 
 export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';
@@ -63,13 +63,10 @@ export interface AuditIssue {
 
 export interface CodesignMessage {
   id: string;
-  type: 'user' | 'assistant' | 'system';
+  type: 'user' | 'assistant' | 'system' | 'thought';
   content: string;
   timestamp: number;
-  metadata?: {
-    suggestionsCount?: number;
-    issuesCount?: number;
-  };
+  metadata?: Record<string, any>;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -79,51 +76,56 @@ export interface CodesignMessage {
 interface CodesignState {
   // 변경 추적
   recentChanges: CodesignChange[];
-  
+
   // AI 제안
   pendingSuggestions: SuggestionPreview[];
   activeSuggestionId: string | null;
-  
+
   // 검증 이슈
   auditIssues: AuditIssue[];
-  
+
   // 채팅 기록
   messages: CodesignMessage[];
-  
+
   // 동기화 상태
   syncStatus: SyncStatus;
   lastSyncTime: number | null;
-  
+
   // 패널 상태
   isPanelOpen: boolean;
   activeTab: 'chat' | 'suggestions' | 'audit';
-  
+
   // Actions - 변경 추적
   recordChange: (type: ChangeType, data: Record<string, unknown>) => void;
   clearChanges: () => void;
-  
+
   // Actions - 제안 관리
   addSuggestion: (suggestion: Omit<SuggestionPreview, 'status'>) => void;
   acceptSuggestion: (id: string) => void;
   rejectSuggestion: (id: string) => void;
   setActiveSuggestion: (id: string | null) => void;
   clearSuggestions: () => void;
-  
+
   // Actions - 검증 이슈
   setAuditIssues: (issues: AuditIssue[]) => void;
   clearAuditIssues: () => void;
-  
+
   // Actions - 채팅
   addMessage: (type: CodesignMessage['type'], content: string, metadata?: CodesignMessage['metadata']) => void;
   clearMessages: () => void;
-  
+
   // Actions - 동기화
   setSyncStatus: (status: SyncStatus) => void;
   setLastSyncTime: (time: number) => void;
-  
+
   // Actions - 패널
   togglePanel: () => void;
   setActiveTab: (tab: CodesignState['activeTab']) => void;
+
+  // Actions - AI Assistant (API calls)
+  requestSuggestions: (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => Promise<void>;
+  requestAudit: (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => Promise<void>;
+  requestSimulation: (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => Promise<void>;
 }
 
 // ──────────────────────────────────────────────────────────────
@@ -141,41 +143,41 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   lastSyncTime: null,
   isPanelOpen: false,
   activeTab: 'chat',
-  
+
   // ─────────────────────────────────────────────
   // 변경 추적 Actions
   // ─────────────────────────────────────────────
-  
+
   recordChange: (type, data) => {
     set((state) => ({
       recentChanges: [
         ...state.recentChanges.slice(-19),  // 최근 20개 유지
-        { 
-          timestamp: Date.now(), 
-          type, 
-          data 
+        {
+          timestamp: Date.now(),
+          type,
+          data
         }
       ]
     }));
   },
-  
+
   clearChanges: () => set({ recentChanges: [] }),
-  
+
   // ─────────────────────────────────────────────
   // 제안 관리 Actions
   // ─────────────────────────────────────────────
-  
+
   addSuggestion: (suggestion) => {
     set((state) => {
       // 중복 제안 방지
       const exists = state.pendingSuggestions.some(s => s.id === suggestion.id);
       if (exists) return state;
-      
+
       return {
         pendingSuggestions: [
           ...state.pendingSuggestions,
-          { 
-            ...suggestion, 
+          {
+            ...suggestion,
             status: 'pending' as SuggestionStatus,
             createdAt: Date.now()
           }
@@ -183,7 +185,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       };
     });
   },
-  
+
   acceptSuggestion: (id) => {
     set((state) => ({
       pendingSuggestions: state.pendingSuggestions.map(s =>
@@ -191,14 +193,14 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       ),
       activeSuggestionId: state.activeSuggestionId === id ? null : state.activeSuggestionId
     }));
-    
+
     // 시스템 메시지 추가
     const suggestion = get().pendingSuggestions.find(s => s.id === id);
     if (suggestion) {
       get().addMessage('system', `제안 "${suggestion.action}"이(가) 적용되었습니다.`);
     }
   },
-  
+
   rejectSuggestion: (id) => {
     set((state) => ({
       pendingSuggestions: state.pendingSuggestions.map(s =>
@@ -207,26 +209,26 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       activeSuggestionId: state.activeSuggestionId === id ? null : state.activeSuggestionId
     }));
   },
-  
+
   setActiveSuggestion: (id) => set({ activeSuggestionId: id }),
-  
-  clearSuggestions: () => set({ 
-    pendingSuggestions: [], 
-    activeSuggestionId: null 
+
+  clearSuggestions: () => set({
+    pendingSuggestions: [],
+    activeSuggestionId: null
   }),
-  
+
   // ─────────────────────────────────────────────
   // 검증 이슈 Actions
   // ─────────────────────────────────────────────
-  
+
   setAuditIssues: (issues) => set({ auditIssues: issues }),
-  
+
   clearAuditIssues: () => set({ auditIssues: [] }),
-  
+
   // ─────────────────────────────────────────────
   // 채팅 Actions
   // ─────────────────────────────────────────────
-  
+
   addMessage: (type, content, metadata) => {
     set((state) => ({
       messages: [
@@ -241,29 +243,29 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       ]
     }));
   },
-  
+
   clearMessages: () => set({ messages: [] }),
-  
+
   // ─────────────────────────────────────────────
   // 동기화 Actions
   // ─────────────────────────────────────────────
-  
+
   setSyncStatus: (status) => set({ syncStatus: status }),
-  
+
   setLastSyncTime: (time) => set({ lastSyncTime: time }),
-  
+
   // ─────────────────────────────────────────────
   // 패널 Actions
   // ─────────────────────────────────────────────
-  
+
   togglePanel: () => set((state) => ({ isPanelOpen: !state.isPanelOpen })),
-  
+
   setActiveTab: (tab) => set({ activeTab: tab }),
-  
+
   // ─────────────────────────────────────────────
   // API Actions - Co-design Assistant
   // ─────────────────────────────────────────────
-  
+
   requestSuggestions: async (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => {
     set({ syncStatus: 'syncing' });
     try {
@@ -273,7 +275,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         recent_changes: get().recentChanges,
         mode: 'suggest'
       };
-      
+
       await streamCoDesignAssistant('codesign', body, {
         authToken,
         onMessage: (data: any) => {
@@ -301,7 +303,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       set({ syncStatus: 'error' });
     }
   },
-  
+
   requestAudit: async (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => {
     set({ syncStatus: 'syncing' });
     try {
@@ -311,7 +313,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
           edges: workflowData.edges
         }
       };
-      
+
       const result = await callCoDesignAssistantSync('audit', body, authToken);
       if (result.issues) {
         get().setAuditIssues(result.issues);
@@ -322,7 +324,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
       set({ syncStatus: 'error' });
     }
   },
-  
+
   requestSimulation: async (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => {
     set({ syncStatus: 'syncing' });
     try {
@@ -333,7 +335,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         },
         mock_inputs: {}
       };
-      
+
       const result = await callCoDesignAssistantSync('simulate', body, authToken);
       // 시뮬레이션 결과를 메시지로 추가
       if (result.simulation_result) {
@@ -354,10 +356,10 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
 // 선택자 (Selectors)
 // ──────────────────────────────────────────────────────────────
 
-export const selectPendingSuggestions = (state: CodesignState) => 
+export const selectPendingSuggestions = (state: CodesignState) =>
   state.pendingSuggestions.filter(s => s.status === 'pending');
 
-export const selectActiveSuggestion = (state: CodesignState) => 
+export const selectActiveSuggestion = (state: CodesignState) =>
   state.pendingSuggestions.find(s => s.id === state.activeSuggestionId);
 
 export const selectErrorIssues = (state: CodesignState) =>

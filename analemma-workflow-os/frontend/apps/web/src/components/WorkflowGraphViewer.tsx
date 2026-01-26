@@ -1,4 +1,4 @@
-import { useMemo, useCallback, useState, useEffect } from 'react';
+import { useMemo, useCallback, useState, useEffect, memo } from 'react';
 import {
     ReactFlow,
     Background,
@@ -8,6 +8,9 @@ import {
     ReactFlowProvider,
     BackgroundVariant,
     useReactFlow,
+    Panel,
+    MiniMap,
+    Controls,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { AIModelNode } from './nodes/AIModelNode';
@@ -16,8 +19,10 @@ import { TriggerNode } from './nodes/TriggerNode';
 import { ControlNode } from './nodes/ControlNode';
 import { SmartEdge } from './edges/SmartEdge';
 import { cn } from '@/lib/utils';
+import { AlertCircle } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
-// Node status types for visual feedback
+// --- Types ---
 export type NodeStatus = 'idle' | 'running' | 'completed' | 'failed';
 
 export interface WorkflowGraphViewerProps {
@@ -30,7 +35,7 @@ export interface WorkflowGraphViewerProps {
     className?: string;
 }
 
-// Custom nodeTypes with status-aware styling
+// --- Constants & Config ---
 const nodeTypes: NodeTypes = {
     aiModel: AIModelNode,
     operator: OperatorNode,
@@ -42,28 +47,70 @@ const edgeTypes = {
     smart: SmartEdge,
 };
 
-// Status-based styles
-const getNodeStatusStyle = (status: NodeStatus) => {
-    switch (status) {
-        case 'running':
-            return {
-                boxShadow: '0 0 0 3px #fbbf24, 0 0 20px rgba(251, 191, 36, 0.5)',
-                animation: 'pulse 1.5s ease-in-out infinite',
-            };
-        case 'completed':
-            return {
-                boxShadow: '0 0 0 3px #22c55e',
-            };
-        case 'failed':
-            return {
-                boxShadow: '0 0 0 3px #ef4444',
-            };
-        default:
-            return {};
-    }
+// --- Helpers ---
+
+const resolveNodeStatus = (
+    nodeId: string,
+    activeId?: string,
+    doneIds: string[] = [],
+    failIds: string[] = []
+): NodeStatus => {
+    if (nodeId === activeId) return 'running';
+    if (failIds.includes(nodeId)) return 'failed';
+    if (doneIds.includes(nodeId)) return 'completed';
+    return 'idle';
 };
 
-// Inner component to use ReactFlow hooks
+const getEdgeStyle = (
+    edge: Edge,
+    activeId?: string,
+    doneIds: string[] = []
+) => {
+    const sourceDone = doneIds.includes(edge.source);
+    const targetDone = doneIds.includes(edge.target) || edge.target === activeId;
+    const isCompletedPath = sourceDone && targetDone;
+
+    return {
+        animated: edge.source === activeId,
+        style: {
+            ...edge.style,
+            stroke: isCompletedPath ? '#22c55e' : (edge.source === activeId ? '#3b82f6' : 'rgba(255,255,255,0.1)'),
+            strokeWidth: isCompletedPath ? 3 : 2,
+            opacity: isCompletedPath || edge.source === activeId ? 1 : 0.4,
+            transition: 'stroke 0.4s ease, stroke-width 0.4s ease, opacity 0.4s ease',
+        },
+    };
+};
+
+const STATUS_STYLES: Record<NodeStatus, string> = {
+    running: "ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.4)] animate-pulse",
+    completed: "ring-2 ring-green-500 shadow-[0_0_15px_rgba(34,197,94,0.2)]",
+    failed: "ring-2 ring-red-500 shadow-[0_0_15px_rgba(239,68,68,0.2)]",
+    idle: "opacity-60 grayscale-[0.3]"
+};
+
+// --- Sub-components ---
+
+const StatusLegend = () => (
+    <Panel position="top-left" className="m-4">
+        <div className="flex gap-4 p-3 bg-black/60 backdrop-blur-xl border border-white/5 rounded-2xl shadow-2xl overflow-hidden">
+            {[
+                { label: 'Running', color: 'bg-yellow-400' },
+                { label: 'Completed', color: 'bg-green-500' },
+                { label: 'Failed', color: 'bg-red-500' },
+                { label: 'Waiting', color: 'bg-white/20' }
+            ].map((s) => (
+                <div key={s.label} className="flex items-center gap-2">
+                    <div className={cn("w-2 h-2 rounded-full", s.color)} />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-white/40">
+                        {s.label}
+                    </span>
+                </div>
+            ))}
+        </div>
+    </Panel>
+);
+
 const WorkflowGraphViewerInner = ({
     nodes,
     edges,
@@ -76,145 +123,119 @@ const WorkflowGraphViewerInner = ({
     const { fitView } = useReactFlow();
     const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
 
-    // Determine node status
-    const getNodeStatus = useCallback(
-        (nodeId: string): NodeStatus => {
-            if (nodeId === activeNodeId) return 'running';
-            if (failedNodeIds.includes(nodeId)) return 'failed';
-            if (completedNodeIds.includes(nodeId)) return 'completed';
-            return 'idle';
-        },
-        [activeNodeId, completedNodeIds, failedNodeIds]
-    );
-
-    // Apply status styles to nodes
     const styledNodes = useMemo(() => {
         return nodes.map((node) => {
-            const status = getNodeStatus(node.id);
+            const status = resolveNodeStatus(node.id, activeNodeId, completedNodeIds, failedNodeIds);
             return {
                 ...node,
-                style: {
-                    ...node.style,
-                    ...getNodeStatusStyle(status),
-                },
+                className: cn(node.className, STATUS_STYLES[status]),
                 data: {
                     ...node.data,
-                    _status: status, // Pass status to custom node components
+                    status,
                     _isSelected: node.id === selectedNodeId,
                 },
             };
         });
-    }, [nodes, getNodeStatus, selectedNodeId]);
+    }, [nodes, activeNodeId, completedNodeIds, failedNodeIds, selectedNodeId]);
 
-    // Apply status styles to edges (completed path turns green)
     const styledEdges = useMemo(() => {
-        return edges.map((edge) => {
-            const sourceCompleted = completedNodeIds.includes(edge.source);
-            const targetCompleted = completedNodeIds.includes(edge.target) || edge.target === activeNodeId;
-            const isActivePath = sourceCompleted && targetCompleted;
-
-            return {
-                ...edge,
-                animated: edge.source === activeNodeId,
-                style: {
-                    ...edge.style,
-                    stroke: isActivePath ? '#22c55e' : (edge.style?.stroke || 'hsl(263 70% 60%)'),
-                    strokeWidth: isActivePath ? 3 : 2,
-                    opacity: isActivePath || edge.source === activeNodeId ? 1 : 0.6,
-                },
-            };
-        });
+        return edges.map((edge) => ({
+            ...edge,
+            ...getEdgeStyle(edge, activeNodeId, completedNodeIds),
+        }));
     }, [edges, completedNodeIds, activeNodeId]);
 
-    // Handle node click
-    const handleNodeClick = useCallback(
-        (_event: React.MouseEvent, node: Node) => {
+    useEffect(() => {
+        if (activeNodeId) {
+            fitView({
+                nodes: [{ id: activeNodeId }],
+                duration: 600,
+                padding: 0.8,
+            });
+        }
+    }, [activeNodeId, fitView]);
+
+    const handleNodesInitialized = useCallback(() => {
+        fitView({ padding: 0.2, duration: 400 });
+    }, [fitView]);
+
+    const onNodeClickInternal = useCallback(
+        (_: any, node: Node) => {
             setSelectedNodeId(node.id);
             onNodeClick?.(node.id);
         },
         [onNodeClick]
     );
 
-    // Auto-focus on active node
-    useEffect(() => {
-        if (activeNodeId) {
-            // Small delay to allow ReactFlow to render
-            setTimeout(() => {
-                fitView({
-                    nodes: [{ id: activeNodeId }],
-                    duration: 500,
-                    padding: 0.5,
-                });
-            }, 100);
-        }
-    }, [activeNodeId, fitView]);
-
-    // Fit view on initial load
-    useEffect(() => {
-        if (nodes.length > 0) {
-            setTimeout(() => fitView({ padding: 0.2, duration: 300 }), 100);
-        }
-    }, [nodes.length, fitView]);
-
     return (
-        <div className={cn('h-full w-full relative', className)}>
-            {/* Status Legend */}
-            <div className="absolute top-4 left-4 z-10 flex gap-3 text-xs bg-background/80 backdrop-blur-sm px-3 py-2 rounded-lg border">
-                <div className="flex items-center gap-1.5">
-                    <div className="w-3 h-3 rounded-full bg-yellow-400 animate-pulse" />
-                    <span>실행 중</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                    <div className="w-3 h-3 rounded-full bg-green-500" />
-                    <span>완료</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                    <div className="w-3 h-3 rounded-full bg-red-500" />
-                    <span>실패</span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                    <div className="w-3 h-3 rounded-full bg-gray-500" />
-                    <span>대기</span>
-                </div>
-            </div>
-
+        <div className={cn('h-full w-full relative bg-[#0a0a0a] overflow-hidden', className)}>
             <ReactFlow
                 nodes={styledNodes}
                 edges={styledEdges}
-                onNodeClick={handleNodeClick}
+                onNodeClick={onNodeClickInternal}
                 nodeTypes={nodeTypes}
                 edgeTypes={edgeTypes}
+                onInit={handleNodesInitialized}
                 nodesDraggable={false}
                 nodesConnectable={false}
                 elementsSelectable={true}
                 panOnDrag={true}
                 zoomOnScroll={true}
-                fitView
-                className="bg-[#1a1a1a]"
+                className="bg-transparent"
+                minZoom={0.2}
+                maxZoom={1.5}
             >
-                <Background color="#333" gap={20} size={1} variant={BackgroundVariant.Lines} />
+                <Background
+                    color="#ffffff"
+                    gap={25}
+                    size={0.5}
+                    variant={BackgroundVariant.Dots}
+                    className="opacity-[0.03]"
+                />
+
+                <StatusLegend />
+
+                <MiniMap
+                    style={{ background: '#111', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}
+                    maskColor="rgba(0,0,0,0.6)"
+                    nodeColor={(n) => {
+                        const s = resolveNodeStatus(n.id, activeNodeId, completedNodeIds, failedNodeIds);
+                        if (s === 'running') return '#fbbf24';
+                        if (s === 'completed') return '#22c55e';
+                        if (s === 'failed') return '#ef4444';
+                        return '#333';
+                    }}
+                />
+                <Controls showInteractive={false} className="bg-black/40 border border-white/5 rounded-xl overflow-hidden" />
             </ReactFlow>
 
-            {/* CSS for pulse animation */}
-            <style>{`
-        @keyframes pulse {
-          0%, 100% {
-            box-shadow: 0 0 0 3px #fbbf24, 0 0 20px rgba(251, 191, 36, 0.5);
-          }
-          50% {
-            box-shadow: 0 0 0 5px #fbbf24, 0 0 30px rgba(251, 191, 36, 0.8);
-          }
-        }
-      `}</style>
+            <AnimatePresence>
+                {failedNodeIds.length > 0 && (
+                    <motion.div
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 20 }}
+                        className="absolute bottom-6 right-6 z-20 pointer-events-none"
+                    >
+                        <div className="flex items-center gap-3 bg-red-500/10 backdrop-blur-md border border-red-500/20 px-4 py-2 rounded-2xl">
+                            <AlertCircle className="w-4 h-4 text-red-400" />
+                            <span className="text-[11px] font-bold text-red-400 uppercase tracking-wider">
+                                {failedNodeIds.length} Failure Detected
+                            </span>
+                        </div>
+                    </motion.div>
+                )}
+            </AnimatePresence>
         </div>
     );
 };
 
-// Exported component with ReactFlowProvider wrapper
-export const WorkflowGraphViewer = (props: WorkflowGraphViewerProps) => (
+export const WorkflowGraphViewer = memo((props: WorkflowGraphViewerProps) => (
     <ReactFlowProvider>
         <WorkflowGraphViewerInner {...props} />
     </ReactFlowProvider>
-);
+));
+
+WorkflowGraphViewer.displayName = 'WorkflowGraphViewer';
 
 export default WorkflowGraphViewer;

@@ -1,88 +1,112 @@
+/**
+ * useSmoothTaskUpdates Hook (v2.0)
+ * ===================================
+ * 
+ * 수치 데이터에 대한 부드러운 보간 애니메이션을 제공합니다.
+ * 
+ * v2.0 Changes:
+ * - setState 업데이터 함수에서 부수 효과 제거 (Pure function)
+ * - 애니메이션 로직을 useEffect로 분리
+ * - ref 기반 타겟 관리로 안정성 개선
+ * - 메모리 누수 방지를 위한 cleanup 강화
+ */
+
 import { useState, useRef, useEffect } from 'react';
+
+const LERP_FACTOR = 0.15; // 감속 계수 (낮을수록 부드러움)
+const CONVERGENCE_THRESHOLD = 0.5; // 수렴 임계값 (Jitter 방지)
+const NUMERIC_KEYS = ['progress_percentage', 'autonomy_rate', 'confidence_score'] as const;
 
 export function useSmoothTaskUpdates(initialData: any) {
     const [displayData, setDisplayData] = useState(initialData);
-    const lastTargetData = useRef(initialData);
-    const animationFrame = useRef<number>();
+    const targetDataRef = useRef(initialData);
+    const animationFrameRef = useRef<number>();
+    const isAnimatingRef = useRef(false);
 
-    // 타겟 데이터가 변경되면 보간 애니메이션 시작
+    // Update target when initialData changes
     useEffect(() => {
         if (!initialData) return;
-        smoothUpdate(initialData);
+        targetDataRef.current = initialData;
+        
+        // Start animation if not already running
+        if (!isAnimatingRef.current) {
+            isAnimatingRef.current = true;
+            animationFrameRef.current = requestAnimationFrame(animate);
+        }
     }, [initialData]);
 
-    const smoothUpdate = (newData: any) => {
-        if (!newData) return;
+    // Animation loop (separate from React rendering)
+    const animate = () => {
+        const targetData = targetDataRef.current;
+        if (!targetData) return;
 
-        lastTargetData.current = newData;
+        setDisplayData((prevData: any) => {
+            if (!prevData) return targetData;
 
-        const step = () => {
-            setDisplayData((prev: any) => {
-                if (!prev) return newData;
+            const nextData = { ...prevData };
+            let hasActiveAnimation = false;
 
-                const next = { ...prev };
-                let isAnimating = false;
-
-                // 1. 수치 데이터 보간 (Lerp)
-                // - progress_percentage: 진행률
-                // - autonomy_rate: 자율도
-                // - confidence_score: 신뢰도 (중첩 객체 내부 값은 별도 처리 필요할 수 있음)
-
-                const numericKeys = ['progress_percentage', 'autonomy_rate'];
-
-                numericKeys.forEach(key => {
-                    if (prev[key] !== undefined && newData[key] !== undefined) {
-                        const target = Number(newData[key]);
-                        const current = Number(prev[key]);
-                        const diff = target - current;
-
-                        // 차이가 작으면 바로 완료 (Jitter 방지)
-                        if (Math.abs(diff) > 0.5) {
-                            // Lerp: 감속 계수 0.15 (낮을수록 부드러움)
-                            next[key] = current + diff * 0.15;
-                            isAnimating = true;
-                        } else {
-                            next[key] = target;
-                        }
-                    } else if (newData[key] !== undefined) {
-                        next[key] = newData[key];
-                    }
-                });
-
-                // confidence_score 처리 (중첩되거나 최상위일 수 있음)
-                // business_metrics_calculator.py의 결과에 따라 구조가 다를 수 있으므로 체크
-                if (newData.confidence_score !== undefined) {
-                    const target = Number(newData.confidence_score);
-                    const current = Number(prev.confidence_score || 0);
+            // 1. Interpolate numeric fields (Lerp)
+            NUMERIC_KEYS.forEach(key => {
+                if (targetData[key] !== undefined) {
+                    const target = Number(targetData[key]);
+                    const current = Number(prevData[key] ?? 0);
                     const diff = target - current;
-                    if (Math.abs(diff) > 0.5) {
-                        next.confidence_score = current + diff * 0.15;
-                        isAnimating = true;
+
+                    if (Math.abs(diff) > CONVERGENCE_THRESHOLD) {
+                        nextData[key] = current + diff * LERP_FACTOR;
+                        hasActiveAnimation = true;
                     } else {
-                        next.confidence_score = target;
+                        nextData[key] = target; // Snap to target
                     }
+                } else if (prevData[key] !== undefined) {
+                    nextData[key] = prevData[key]; // Keep existing value
                 }
-
-                // 2. 텍스트/상태값/나머지는 즉시 업데이트 (반응성)
-                // 객체의 다른 모든 키 복사 (deep merge가 아니므로 주의, 얕은 복사 후 덮어쓰기)
-                Object.keys(newData).forEach(key => {
-                    if (!numericKeys.includes(key) && key !== 'confidence_score') {
-                        // 깊은 비교가 아니므로, 객체나 배열은 참조가 바뀌면 업데이트
-                        // 여기서는 단순성을 위해 덮어씁니다.
-                        next[key] = newData[key];
-                    }
-                });
-
-                if (isAnimating) {
-                    animationFrame.current = requestAnimationFrame(step);
-                }
-                return next;
             });
-        };
 
-        if (animationFrame.current) cancelAnimationFrame(animationFrame.current);
-        animationFrame.current = requestAnimationFrame(step);
+            // 2. Immediately update non-numeric fields (reactivity)
+            Object.keys(targetData).forEach(key => {
+                if (!NUMERIC_KEYS.includes(key as any)) {
+                    nextData[key] = targetData[key];
+                }
+            });
+
+            return nextData;
+        });
+
+        // Continue animation if needed
+        const targetData2 = targetDataRef.current;
+        if (targetData2) {
+            let stillAnimating = false;
+            NUMERIC_KEYS.forEach(key => {
+                if (targetData2[key] !== undefined) {
+                    const current = displayData?.[key] ?? 0;
+                    const target = Number(targetData2[key]);
+                    if (Math.abs(target - current) > CONVERGENCE_THRESHOLD) {
+                        stillAnimating = true;
+                    }
+                }
+            });
+
+            if (stillAnimating) {
+                animationFrameRef.current = requestAnimationFrame(animate);
+            } else {
+                isAnimatingRef.current = false;
+            }
+        } else {
+            isAnimatingRef.current = false;
+        }
     };
+
+    // Cleanup on unmount
+    useEffect(() => {
+        return () => {
+            if (animationFrameRef.current !== undefined) {
+                cancelAnimationFrame(animationFrameRef.current);
+            }
+            isAnimatingRef.current = false;
+        };
+    }, []);
 
     return displayData;
 }

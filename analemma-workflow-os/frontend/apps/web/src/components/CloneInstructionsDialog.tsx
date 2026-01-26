@@ -1,11 +1,3 @@
-/**
- * CloneInstructionsDialog
- * 
- * 워크플로우 저장 시 기존 에이전트의 학습된 지침을 복제할 수 있는 옵션을 제공합니다.
- * 사용자가 체크박스를 선택하면 기존 워크플로우 목록이 표시되고,
- * 선택한 워크플로우의 지침이 새 워크플로우에 복제됩니다.
- */
-
 import { useState } from 'react';
 import {
     Dialog,
@@ -19,13 +11,20 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
 import {
-    Select,
-    SelectContent,
-    SelectItem,
-    SelectTrigger,
-    SelectValue,
-} from '@/components/ui/select';
-import { Loader2, Sparkles, Copy } from 'lucide-react';
+    Command,
+    CommandEmpty,
+    CommandGroup,
+    CommandInput,
+    CommandItem,
+    CommandList,
+} from '@/components/ui/command';
+import {
+    Popover,
+    PopoverContent,
+    PopoverTrigger,
+} from '@/components/ui/popover';
+import { Loader2, Sparkles, Copy, Check, ChevronsUpDown } from 'lucide-react';
+import { cn } from '@/lib/utils';
 import type { WorkflowSummary } from '@/lib/types';
 
 interface CloneInstructionsDialogProps {
@@ -41,6 +40,8 @@ interface CloneInstructionsDialogProps {
     isCloning?: boolean;
     /** 새로 생성된 워크플로우 이름 (UI 표시용) */
     targetWorkflowName?: string;
+    /** 현재 저장 중인 워크플로우 ID (목록에서 제외용) */
+    targetWorkflowId?: string | null;
 }
 
 export function CloneInstructionsDialog({
@@ -50,9 +51,11 @@ export function CloneInstructionsDialog({
     onConfirm,
     isCloning = false,
     targetWorkflowName = '새 워크플로우',
+    targetWorkflowId = null,
 }: CloneInstructionsDialogProps) {
     const [enableClone, setEnableClone] = useState(false);
     const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
+    const [comboOpen, setComboOpen] = useState(false);
 
     const handleConfirm = () => {
         if (enableClone && selectedSourceId) {
@@ -69,10 +72,12 @@ export function CloneInstructionsDialog({
         onOpenChange(false);
     };
 
-    // 복제 가능한 워크플로우만 필터링 (현재 저장 중인 워크플로우 제외)
+    // 복제 가능한 워크플로우만 필터링 (현재 워크플로우 및 ID 없는 항목 제외)
     const availableWorkflows = workflows.filter(
-        (w) => w.name && w.workflowId
+        (w) => w.name && w.workflowId && w.workflowId !== targetWorkflowId
     );
+
+    const selectedWorkflow = availableWorkflows.find(w => w.workflowId === selectedSourceId);
 
     return (
         <Dialog open={open} onOpenChange={handleClose}>
@@ -113,36 +118,65 @@ export function CloneInstructionsDialog({
                         </div>
                     </div>
 
-                    {/* 소스 워크플로우 선택 드롭다운 */}
+                    {/* 소스 워크플로우 선택 (Combobox Searchable) */}
                     {enableClone && (
                         <div className="pl-6 space-y-2">
-                            <Label htmlFor="source-workflow" className="text-sm font-medium">
+                            <Label className="text-sm font-medium">
                                 스타일을 복제할 에이전트 선택
                             </Label>
-                            <Select
-                                value={selectedSourceId || undefined}
-                                onValueChange={setSelectedSourceId}
-                            >
-                                <SelectTrigger id="source-workflow" className="w-full">
-                                    <SelectValue placeholder="에이전트를 선택하세요" />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    {availableWorkflows.map((workflow) => (
-                                        <SelectItem
-                                            key={workflow.workflowId}
-                                            value={workflow.workflowId!}
-                                        >
-                                            <div className="flex items-center gap-2">
-                                                <Copy className="h-3.5 w-3.5 text-muted-foreground" />
-                                                {workflow.name}
+
+                            <Popover open={comboOpen} onOpenChange={setComboOpen}>
+                                <PopoverTrigger asChild>
+                                    <Button
+                                        variant="outline"
+                                        role="combobox"
+                                        aria-expanded={comboOpen}
+                                        className="w-full justify-between font-normal"
+                                    >
+                                        {selectedSourceId ? (
+                                            <div className="flex items-center gap-2 truncate">
+                                                <Copy className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                                                <span className="truncate">{selectedWorkflow?.name}</span>
                                             </div>
-                                        </SelectItem>
-                                    ))}
-                                </SelectContent>
-                            </Select>
+                                        ) : (
+                                            <span className="text-muted-foreground">에이전트를 선택하세요</span>
+                                        )}
+                                        <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                                    </Button>
+                                </PopoverTrigger>
+                                <PopoverContent className="w-[var(--radix-popover-trigger-width)] p-0" align="start">
+                                    <Command>
+                                        <CommandInput placeholder="에이전트 검색..." />
+                                        <CommandList>
+                                            <CommandEmpty>검색 결과가 없습니다.</CommandEmpty>
+                                            <CommandGroup>
+                                                {availableWorkflows.map((workflow) => (
+                                                    <CommandItem
+                                                        key={workflow.workflowId}
+                                                        value={workflow.name}
+                                                        onSelect={() => {
+                                                            setSelectedSourceId(workflow.workflowId!);
+                                                            setComboOpen(false);
+                                                        }}
+                                                    >
+                                                        <Check
+                                                            className={cn(
+                                                                "mr-2 h-4 w-4",
+                                                                selectedSourceId === workflow.workflowId ? "opacity-100" : "opacity-0"
+                                                            )}
+                                                        />
+                                                        {workflow.name}
+                                                    </CommandItem>
+                                                ))}
+                                            </CommandGroup>
+                                        </CommandList>
+                                    </Command>
+                                </PopoverContent>
+                            </Popover>
+
                             {availableWorkflows.length === 0 && (
-                                <p className="text-xs text-muted-foreground">
-                                    복제 가능한 워크플로우가 없습니다.
+                                <p className="text-xs text-muted-foreground italic">
+                                    복제 가능한 기존 워크플로우가 없습니다.
                                 </p>
                             )}
                         </div>
@@ -156,6 +190,7 @@ export function CloneInstructionsDialog({
                     <Button
                         onClick={handleConfirm}
                         disabled={isCloning || (enableClone && !selectedSourceId)}
+                        className={cn(enableClone && selectedSourceId && "bg-amber-600 hover:bg-amber-700")}
                     >
                         {isCloning ? (
                             <>

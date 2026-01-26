@@ -85,7 +85,7 @@ export const reducer = (state: State, action: Action): State => {
     case "DISMISS_TOAST": {
       const { toastId } = action;
       
-      // 순수 함수로 만들기 - 사이드 이팩트 제거
+      // 순수 함수 - 상태만 변경, 사이드 이펙트 없음
       return {
         ...state,
         toasts: state.toasts.map((t) =>
@@ -165,23 +165,23 @@ function useToast() {
         listeners.splice(index, 1);
       }
     };
-  }, []); // 종속성 배열을 비워서 마운트/언마운트 시에만 실행
+  }, []);
+
+  // 자동 큐 처리: open: false인 toast를 감지하여 자동으로 제거 큐에 추가
+  React.useEffect(() => {
+    state.toasts.forEach((toast) => {
+      if (toast.open === false && !toastTimeouts.has(toast.id)) {
+        addToRemoveQueue(toast.id);
+      }
+    });
+  }, [state.toasts]);
 
   return {
     ...state,
     toast,
     dismiss: (toastId?: string) => {
-      // 순수한 상태 변경을 dispatch
+      // 순수하게 dispatch만 호출 - 큐 처리는 useEffect가 자동으로 처리
       dispatch({ type: "DISMISS_TOAST", toastId });
-      
-      // 훅에서 사이드 이팩트를 실행
-      if (toastId) {
-        addToRemoveQueue(toastId);
-      } else {
-        memoryState.toasts.forEach((toast) => {
-          addToRemoveQueue(toast.id);
-        });
-      }
     },
   };
 }

@@ -1,13 +1,20 @@
 /**
- * useSelfHealing Hook (v3.9)
+ * useSelfHealing Hook (v4.0)
  * ===========================
  * 
  * Self-Healing API 호출 및 상태 관리 훅.
  * WebSocket을 통해 실시간 Self-Healing 상태 업데이트를 수신합니다.
+ * 
+ * v4.0 Changes:
+ * - optionsRef로 콜백 안정성 개선
+ * - fetchAuthSession 통합 (Amplify)
+ * - WebSocketManager 연동 구조 개선
  */
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { toast } from 'sonner';
+import { fetchAuthSession } from '@aws-amplify/auth';
+import { makeAuthenticatedRequest } from '@/lib/api';
 
 // API Base URL
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
@@ -38,7 +45,13 @@ export interface UseSelfHealingOptions {
 }
 
 export function useSelfHealing(options: UseSelfHealingOptions) {
-    const { executionArn, ownerId, onHealingComplete, onHealingFailed } = options;
+    const { executionArn, ownerId } = options;
+    
+    // Keep callbacks stable with ref
+    const optionsRef = useRef(options);
+    useEffect(() => {
+        optionsRef.current = options;
+    });
 
     const [healingState, setHealingState] = useState<HealingState>({
         status: null,
@@ -48,26 +61,13 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<Error | null>(null);
 
-    // 인증 토큰 가져오기
-    const getAuthToken = useCallback(async (): Promise<string> => {
-        // Cognito 또는 다른 인증 방식에서 토큰 가져오기
-        const token = localStorage.getItem('authToken') || '';
-        return token;
-    }, []);
-
     // Self-Healing 상태 조회
     const fetchHealingStatus = useCallback(async () => {
         try {
-            const token = await getAuthToken();
-
-            const response = await fetch(
+            const response = await makeAuthenticatedRequest(
                 `${API_BASE_URL}/executions/${encodeURIComponent(executionArn)}/healing-status`,
                 {
                     method: 'GET',
-                    headers: {
-                        'Authorization': `Bearer ${token}`,
-                        'Content-Type': 'application/json',
-                    },
                 }
             );
 
@@ -92,7 +92,7 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
             console.error('Failed to fetch healing status:', err);
             setError(err instanceof Error ? err : new Error('Unknown error'));
         }
-    }, [executionArn, getAuthToken]);
+    }, [executionArn]);
 
     // Self-Healing 승인 (수동 트리거)
     const approveHealing = useCallback(async (): Promise<void> => {
@@ -100,12 +100,9 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
         setError(null);
 
         try {
-            const token = await getAuthToken();
-
-            const response = await fetch(`${API_BASE_URL}/tasks/quick-fix`, {
+            const response = await makeAuthenticatedRequest(`${API_BASE_URL}/tasks/quick-fix`, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
@@ -134,9 +131,9 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
 
             toast.success('Self-Healing이 시작되었습니다.');
 
-            if (onHealingComplete) {
+            if (optionsRef.current.onHealingComplete) {
                 // 일정 시간 후 완료 콜백 (실제로는 WebSocket으로 상태 업데이트 수신)
-                setTimeout(onHealingComplete, 5000);
+                setTimeout(optionsRef.current.onHealingComplete, 5000);
             }
 
             return result;
@@ -145,8 +142,8 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
             const error = err instanceof Error ? err : new Error('Unknown error');
             setError(error);
 
-            if (onHealingFailed) {
-                onHealingFailed(error);
+            if (optionsRef.current.onHealingFailed) {
+                optionsRef.current.onHealingFailed(error);
             }
 
             toast.error(`Self-Healing 실패: ${error.message}`);
@@ -155,19 +152,16 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
         } finally {
             setIsLoading(false);
         }
-    }, [executionArn, ownerId, healingState.suggestedFix, getAuthToken, onHealingComplete, onHealingFailed]);
+    }, [executionArn, ownerId, healingState.suggestedFix]);
 
     // Self-Healing 거부 (수동)
     const rejectHealing = useCallback(async (): Promise<void> => {
         try {
-            const token = await getAuthToken();
-
-            await fetch(
+            await makeAuthenticatedRequest(
                 `${API_BASE_URL}/executions/${encodeURIComponent(executionArn)}/healing-status`,
                 {
                     method: 'PATCH',
                     headers: {
-                        'Authorization': `Bearer ${token}`,
                         'Content-Type': 'application/json',
                     },
                     body: JSON.stringify({
@@ -185,19 +179,16 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
         } catch (err) {
             console.error('Failed to reject healing:', err);
         }
-    }, [executionArn, ownerId, getAuthToken]);
+    }, [executionArn, ownerId]);
 
     // 재시도 트리거
     const triggerRetry = useCallback(async (): Promise<void> => {
         setIsLoading(true);
 
         try {
-            const token = await getAuthToken();
-
-            const response = await fetch(`${API_BASE_URL}/tasks/quick-fix`, {
+            const response = await makeAuthenticatedRequest(`${API_BASE_URL}/tasks/quick-fix`, {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${token}`,
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
@@ -220,9 +211,9 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
         } finally {
             setIsLoading(false);
         }
-    }, [executionArn, ownerId, getAuthToken]);
+    }, [executionArn, ownerId]);
 
-    // WebSocket 메시지 핸들러 (외부에서 주입)
+    // WebSocket 메시지 핸들러 (stable callback with optionsRef)
     const handleWebSocketMessage = useCallback((message: any) => {
         if (message.type === 'SelfHealingStatusUpdate' && message.executionArn === executionArn) {
             setHealingState(prev => ({
@@ -240,16 +231,20 @@ export function useSelfHealing(options: UseSelfHealingOptions) {
                     toast.info(message.message);
                 } else if (message.healing_status === 'HEALING_SUCCESS') {
                     toast.success(message.message);
-                    if (onHealingComplete) onHealingComplete();
+                    if (optionsRef.current.onHealingComplete) {
+                        optionsRef.current.onHealingComplete();
+                    }
                 } else if (message.healing_status === 'HEALING_FAILED') {
                     toast.error(message.message);
-                    if (onHealingFailed) onHealingFailed(new Error(message.message));
+                    if (optionsRef.current.onHealingFailed) {
+                        optionsRef.current.onHealingFailed(new Error(message.message));
+                    }
                 } else if (message.healing_status === 'AWAITING_MANUAL_HEALING') {
                     toast.warning(message.message);
                 }
             }
         }
-    }, [executionArn, onHealingComplete, onHealingFailed]);
+    }, [executionArn]);
 
     // 초기 상태 조회
     useEffect(() => {

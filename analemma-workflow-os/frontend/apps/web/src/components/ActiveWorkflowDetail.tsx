@@ -14,6 +14,7 @@ import { StateDiffViewer } from '@/components/StateDiffViewer';
 import { useCheckpoints, useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { NotificationItem, TimelineItem as CheckpointTimelineItem, RollbackRequest } from '@/lib/types';
 import { toast } from 'sonner';
+import { normalizeEventTs } from '@/lib/utils';
 import { ConfidenceGauge } from '@/components/ui/confidence-gauge';
 import NumberTicker from '@/components/ui/number-ticker';
 
@@ -46,9 +47,9 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
     setResponseText,
     onClose,
 }) => {
-    const rawProgress = Math.round((latestStatus?.payload?.current_segment || 0) / (latestStatus?.payload?.total_segments || 1) * 100);
-    // Ensure progress is valid number
-    const progress = isNaN(rawProgress) ? 0 : rawProgress;
+    const rawProgress = Math.round(((latestStatus?.payload?.current_segment || 0) / (latestStatus?.payload?.total_segments || 1)) * 100);
+    // Ensure progress is valid number and between 0-100
+    const progress = Math.min(Math.max(isNaN(rawProgress) ? 0 : rawProgress, 0), 100);
 
     // Check for confidence score in payload (business metrics)
     // Assuming structure: payload.metrics.confidence_score or payload.confidence_score
@@ -83,18 +84,21 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
     });
 
     // 롤백 핸들러
+    // 롤백 핸들러 최적화
+    const { loadPreview, executeRollback } = timeMachine;
+
     const handleRollbackClick = useCallback((item: CheckpointTimelineItem) => {
         setRollbackTarget(item);
         setRollbackDialogOpen(true);
     }, []);
 
     const handleRollbackPreview = useCallback(async (checkpointId: string) => {
-        await timeMachine.loadPreview(checkpointId);
-    }, [timeMachine]);
+        await loadPreview(checkpointId);
+    }, [loadPreview]);
 
     const handleRollbackExecute = useCallback(async (request: Omit<RollbackRequest, 'preview_only'>) => {
-        return await timeMachine.executeRollback(request);
-    }, [timeMachine]);
+        return await executeRollback(request);
+    }, [executeRollback]);
 
     return (
         <>
@@ -114,7 +118,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                             {latestStatus?.payload?.start_time && (
                                 <div>
                                     <span className="font-medium">Started:</span>{' '}
-                                    {new Date(latestStatus.payload.start_time * 1000).toLocaleTimeString()}
+                                    {new Date(normalizeEventTs(latestStatus.payload.start_time)).toLocaleTimeString()}
                                 </div>
                             )}
                             {latestStatus?.payload?.estimated_remaining_seconds && (
@@ -197,7 +201,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                             <h3 className="font-semibold mb-6 flex items-center gap-2">
                                 <Activity className="w-4 h-4" /> Execution Timeline
                             </h3>
-                            <div className="ml-2">
+                            <ol className="ml-2">
                                 {selectedWorkflowTimeline.map((event, idx) => (
                                     <TimelineItem
                                         key={event.id || idx}
@@ -205,7 +209,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                         isLast={idx === selectedWorkflowTimeline.length - 1}
                                     />
                                 ))}
-                            </div>
+                            </ol>
 
                             {status === 'PAUSED_FOR_HITP' && (
                                 <div className="mt-6 p-4 border rounded-lg bg-orange-50/50 border-orange-100 animate-in fade-in slide-in-from-bottom-4">
@@ -219,8 +223,8 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                     <Button
                                         onClick={() => {
                                             try {
-                                                if (!latestStatus) return;
-                                                const payload = sanitizeResumePayload({ ...latestStatus, id: selectedExecutionId } as any, responseText);
+                                                if (!latestStatus || !selectedExecutionId) return;
+                                                const payload = sanitizeResumePayload({ ...latestStatus, execution_id: selectedExecutionId } as any, responseText);
                                                 resumeWorkflow(payload);
                                                 setResponseText('');
                                             } catch (e) {
@@ -308,6 +312,11 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                             </div>
                                         </CardHeader>
                                         <CardContent>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <Badge variant="secondary" className="text-[10px] h-5">
+                                                    현재로부터 {Math.max(0, (checkpoints.timeline.length > 0 ? checkpoints.timeline[checkpoints.timeline.length - 1].step : suggestion.step) - suggestion.step)}단계 전
+                                                </Badge>
+                                            </div>
                                             <p className="text-sm text-foreground mb-4 leading-relaxed">{suggestion.reason}</p>
                                             <div className="flex gap-2">
                                                 <Button

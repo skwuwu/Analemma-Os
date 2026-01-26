@@ -113,6 +113,36 @@ export const parseInitialState = (userInput: string, currentWorkflow?: { inputs?
   return inputs;
 };
 
+/**
+ * 타임스탬프 정규화 (ISO string 지원 및 초/밀리초 자동 판별)
+ */
+export function normalizeEventTs(candidate: any): number {
+  if (!candidate && candidate !== 0) return 0;
+
+  // Handle object with common timestamp fields
+  let val = candidate;
+  if (typeof candidate === 'object') {
+    val = candidate.payload?.timestamp ??
+      candidate.timestamp ??
+      candidate.receivedAt ??
+      candidate.start_time ??
+      candidate.created_at ??
+      candidate;
+  }
+
+  if (!val && val !== 0) return 0;
+
+  // Try parsing as Date for ISO strings
+  if (typeof val === 'string') {
+    const parsed = new Date(val).getTime();
+    if (!isNaN(parsed)) return parsed;
+  }
+
+  const num = Number(val) || 0;
+  // Timestamp is in seconds if less than 10 billion
+  return num < 10000000000 ? num * 1000 : num;
+}
+
 // Safe JSON parse helper used across UI: returns parsed object or { raw: original }
 export const safeParseJson = (data: unknown): any => {
   if (typeof data === 'string') {

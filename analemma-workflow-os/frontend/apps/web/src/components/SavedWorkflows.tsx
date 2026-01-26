@@ -70,7 +70,7 @@ export const SavedWorkflows = ({
   const [showInitialStateDialog, setShowInitialStateDialog] = useState(false);
   const [initialStateText, setInitialStateText] = useState('');
   const [workflowAlias, setWorkflowAlias] = useState('');
-  
+
   // 미디어 업로드 관련 상태
   const [uploadedMedia, setUploadedMedia] = useState<UploadedMedia[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -164,7 +164,7 @@ export const SavedWorkflows = ({
     if (!files || files.length === 0) return;
 
     const file = files[0];
-    
+
     // 파일 타입 검증
     if (!SUPPORTED_MEDIA_TYPES.includes(file.type as any)) {
       toast.error(`지원되지 않는 파일 형식입니다: ${file.type}`);
@@ -185,7 +185,7 @@ export const SavedWorkflows = ({
       const result = await uploadMedia(file, (percent) => {
         setUploadProgress(percent);
       });
-      
+
       setUploadedMedia((prev) => [...prev, result]);
       toast.success(`${file.name} 업로드 완료`);
     } catch (error) {
@@ -320,10 +320,10 @@ export const SavedWorkflows = ({
   const handleLoadCancel = () => { setShowLoadDialog(false); setSelectedWorkflow(null); };
   const handlePreviewClose = () => { setShowPreviewDialog(false); setPreviewData(null); setSelectedWorkflow(null); };
 
-  const handleInitialStateCancel = () => { 
-    setShowInitialStateDialog(false); 
-    setInitialStateText(''); 
-    setWorkflowAlias(''); 
+  const handleInitialStateCancel = () => {
+    setShowInitialStateDialog(false);
+    setInitialStateText('');
+    setWorkflowAlias('');
     setUploadedMedia([]); // 미디어 초기화
   };
   const handleInitialStateConfirm = async () => {
@@ -338,7 +338,7 @@ export const SavedWorkflows = ({
     if (finalAlias) {
       inputs.workflow_alias = finalAlias;
     }
-    
+
     // 업로드된 미디어 URL 추가
     if (uploadedMedia.length > 0) {
       const mediaUrls = uploadedMedia.map((m) => m.s3_url);
@@ -356,7 +356,7 @@ export const SavedWorkflows = ({
         size_bytes: m.size_bytes,
       }));
     }
-    
+
     setShowInitialStateDialog(false);
     setInitialStateText('');
     setWorkflowAlias('');
@@ -516,14 +516,14 @@ export const SavedWorkflows = ({
               <label className="text-sm font-semibold mb-2 block">Initial Prompt</label>
               <Textarea placeholder='e.g. "내 구글 드라이브 요약해줘"' value={initialStateText} onChange={(e) => setInitialStateText(e.target.value)} className="min-h-[120px] w-full text-sm" />
             </div>
-            
+
             {/* 📁 미디어 업로드 섹션 */}
             <div className="border-t pt-4">
               <label className="text-sm font-semibold mb-2 block">📁 Media Attachments (Optional)</label>
               <p className="text-xs text-muted-foreground mb-3">
                 이미지, 비디오, PDF 파일을 첨부하면 워크플로우에서 분석할 수 있습니다. (최대 {MAX_FILE_SIZE_MB}MB)
               </p>
-              
+
               {/* 업로드 버튼 */}
               <input
                 type="file"
@@ -552,12 +552,12 @@ export const SavedWorkflows = ({
                   </>
                 )}
               </Button>
-              
+
               {/* 업로드된 파일 목록 */}
               {uploadedMedia.length > 0 && (
                 <div className="space-y-2">
                   {uploadedMedia.map((media, index) => (
-                    <div 
+                    <div
                       key={`${media.filename}-${index}`}
                       className="flex items-center justify-between p-2 bg-secondary rounded-md text-sm"
                     >
@@ -584,7 +584,7 @@ export const SavedWorkflows = ({
                 </div>
               )}
             </div>
-            
+
             <div>
               <h4 className="text-sm font-semibold mb-2">Supported Test Keywords</h4>
               <div className="grid grid-cols-1 gap-2 max-h-40 overflow-y-auto">
@@ -614,6 +614,7 @@ export const SavedWorkflows = ({
         onConfirm={handleCloneConfirm}
         isCloning={isCloningInstructions}
         targetWorkflowName={savedWorkflowName}
+        targetWorkflowId={savedWorkflowId}
       />
     </div>
   );

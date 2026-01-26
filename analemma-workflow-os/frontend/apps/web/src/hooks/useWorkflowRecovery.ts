@@ -1,243 +1,239 @@
-/**
- * useWorkflowRecovery: 워크플로우 생성 중단 시 복구 기능
- * 
- * Agentic Designer가 생성 도중 멈췄을 때 부분 롤백 또는 재시작 기능을 제공합니다.
- */
 import { useCallback, useRef, useState } from 'react';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore } from '@/lib/codesignStore';
 import { toast } from 'sonner';
+import { makeAuthenticatedRequest, parseApiResponse } from '@/lib/api';
 
-export interface WorkflowSnapshot {
+const API_BASE = import.meta.env.VITE_API_BASE_URL;
+
+// 로컬 임시 스냅샷 (네트워크 끊김 시에만 사용)
+export interface LocalSnapshot {
   timestamp: number;
   nodes: any[];
   edges: any[];
-  reason: string;
-  sessionId?: string;
+  reason: 'local_edit' | 'network_offline';
+  isTemporary: true;
+}
+
+// 백엔드 체크포인트 정보
+export interface CheckpointInfo {
+  checkpoint_id: string;
+  thread_id: string;
+  execution_id: string;
+  created_at: string;
+  node_id: string;
+  event_type: string;
+  status: string;
+  message?: string;
+  is_important: boolean;
 }
 
 export interface RecoveryOptions {
-  rollbackToSnapshot?: WorkflowSnapshot;
-  resumeGeneration?: boolean;
+  restoreFromCheckpoint?: CheckpointInfo;
+  rollbackToLocal?: LocalSnapshot;
   clearAndRestart?: boolean;
 }
 
 export function useWorkflowRecovery() {
-  const [snapshots, setSnapshots] = useState<WorkflowSnapshot[]>([]);
+  const [localSnapshots, setLocalSnapshots] = useState<LocalSnapshot[]>([]);
   const [isRecovering, setIsRecovering] = useState(false);
-  const generationStartRef = useRef<WorkflowSnapshot | null>(null);
-  const lastValidStateRef = useRef<WorkflowSnapshot | null>(null);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<string[]>([]);
+  const lastLocalEditRef = useRef<LocalSnapshot | null>(null);
 
   const { nodes, edges, clearWorkflow, loadWorkflow } = useWorkflowStore();
   const { addMessage, setSyncStatus } = useCodesignStore();
 
-  /**
-   * 워크플로우 스냅샷 생성
-   */
-  const createSnapshot = useCallback((reason: string, sessionId?: string): WorkflowSnapshot => {
-    const snapshot: WorkflowSnapshot = {
+  const createLocalSnapshot = useCallback((reason: 'local_edit' | 'network_offline'): LocalSnapshot => {
+    const snapshot: LocalSnapshot = {
       timestamp: Date.now(),
-      nodes: JSON.parse(JSON.stringify(nodes)), // Deep copy
-      edges: JSON.parse(JSON.stringify(edges)), // Deep copy
+      nodes: typeof structuredClone !== 'undefined' ? structuredClone(nodes) : JSON.parse(JSON.stringify(nodes)),
+      edges: typeof structuredClone !== 'undefined' ? structuredClone(edges) : JSON.parse(JSON.stringify(edges)),
       reason,
-      sessionId
+      isTemporary: true
     };
-
-    setSnapshots(prev => [...prev.slice(-9), snapshot]); // 최근 10개 유지
+    setLocalSnapshots(prev => [...prev.slice(-4), snapshot]);
+    lastLocalEditRef.current = snapshot;
     return snapshot;
   }, [nodes, edges]);
 
-  /**
-   * 생성 시작 시 호출 - 시작점 스냅샷 생성
-   */
-  const markGenerationStart = useCallback((sessionId?: string) => {
-    const snapshot = createSnapshot('generation_start', sessionId);
-    generationStartRef.current = snapshot;
-    lastValidStateRef.current = snapshot;
-    
-    console.log('Workflow generation started, snapshot created:', snapshot.timestamp);
-  }, [createSnapshot]);
+  const markGenerationStart = useCallback((executionId: string) => {
+    setCurrentExecutionId(executionId);
+    setIsGenerating(true);
+    setGenerationProgress([]);
+  }, []);
 
-  /**
-   * 노드/엣지 추가 시 호출 - 중간 상태 저장
-   */
-  const markProgress = useCallback((reason: string = 'progress_update') => {
-    if (generationStartRef.current) {
-      const snapshot = createSnapshot(reason, generationStartRef.current.sessionId);
-      lastValidStateRef.current = snapshot;
-    }
-  }, [createSnapshot]);
-
-  /**
-   * 생성 완료 시 호출
-   */
   const markGenerationComplete = useCallback(() => {
-    if (generationStartRef.current) {
-      createSnapshot('generation_complete', generationStartRef.current.sessionId);
-      generationStartRef.current = null;
-    }
-  }, [createSnapshot]);
+    setIsGenerating(false);
+  }, []);
 
-  /**
-   * 생성 중단 감지 및 복구 옵션 제공
-   */
-  const handleGenerationInterruption = useCallback((error?: Error) => {
-    if (!generationStartRef.current) {
-      return; // 생성 중이 아니었음
-    }
+  const markProgress = useCallback((step: string) => {
+    setGenerationProgress(prev => [...prev, step]);
+    createLocalSnapshot('local_edit');
+  }, [createLocalSnapshot]);
 
-    const errorMessage = error?.message || 'Unknown error';
-    console.warn('Workflow generation interrupted:', errorMessage);
-
-    // 현재 상태 스냅샷 생성
-    const interruptedSnapshot = createSnapshot(`interrupted: ${errorMessage}`, generationStartRef.current.sessionId);
-
-    // 복구 옵션 제공
-    const recoveryOptions: RecoveryOptions = {
-      rollbackToSnapshot: lastValidStateRef.current || generationStartRef.current,
-      resumeGeneration: true,
-      clearAndRestart: true
-    };
-
-    addMessage('system', `워크플로우 생성이 중단되었습니다: ${errorMessage}`);
-    
-    return {
-      interruptedSnapshot,
-      recoveryOptions,
-      canRecover: true
-    };
-  }, [createSnapshot, addMessage]);
-
-  /**
-   * 부분 롤백 실행
-   */
-  const rollbackToSnapshot = useCallback(async (snapshot: WorkflowSnapshot) => {
-    setIsRecovering(true);
-    
+  const fetchCheckpoints = useCallback(async (executionId: string): Promise<CheckpointInfo[]> => {
     try {
-      // 워크플로우 상태 복원
-      clearWorkflow();
-      
-      // 약간의 지연 후 복원 (UI 업데이트를 위해)
-      setTimeout(() => {
-        loadWorkflow({
-          name: `Recovered Workflow (${new Date(snapshot.timestamp).toLocaleTimeString()})`,
-          nodes: snapshot.nodes,
-          edges: snapshot.edges
-        });
-        
-        addMessage('system', `워크플로우가 ${snapshot.reason} 시점으로 복원되었습니다.`);
-        toast.success('워크플로우가 복원되었습니다.');
-        
-        setIsRecovering(false);
-      }, 100);
-      
+      const response = await makeAuthenticatedRequest(
+        `${API_BASE}/executions/${encodeURIComponent(executionId)}/checkpoints?only_important=true`
+      );
+      const data = await parseApiResponse<{ checkpoints: CheckpointInfo[] }>(response);
+      return data.checkpoints || [];
     } catch (error) {
-      console.error('Rollback failed:', error);
-      addMessage('system', `복원 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('Failed to fetch checkpoints:', error);
+      toast.error('체크포인트 목록을 불러올 수 없습니다.');
+      return [];
+    }
+  }, []);
+
+  const markExecutionStart = useCallback((executionId: string) => {
+    setCurrentExecutionId(executionId);
+  }, []);
+
+  const handleGenerationInterruption = useCallback(async (error?: Error) => {
+    if (!currentExecutionId) {
+      toast.error('실행 ID를 찾을 수 없습니다.');
+      return null;
+    }
+    const checkpoints = await fetchCheckpoints(currentExecutionId);
+    if (checkpoints.length === 0) {
+      toast.warning('복구 가능한 체크포인트가 없습니다. 처음부터 다시 시작해주세요.');
+      return { canRecover: false, recoveryOptions: { clearAndRestart: true } };
+    }
+    const lastSuccessfulCheckpoint = checkpoints
+      .filter(cp => cp.status === 'completed')
+      .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())[0];
+    addMessage('system', `워크플로우 생성이 중단되었습니다. 복구 가능한 체크포인트: ${checkpoints.length}개`);
+    return {
+      canRecover: true,
+      checkpoints,
+      lastSuccessfulCheckpoint,
+      recoveryOptions: { restoreFromCheckpoint: lastSuccessfulCheckpoint, clearAndRestart: true }
+    };
+  }, [currentExecutionId, fetchCheckpoints, addMessage]);
+
+  const restoreFromCheckpoint = useCallback(async (checkpoint: CheckpointInfo) => {
+    setIsRecovering(true);
+    try {
+      const response = await makeAuthenticatedRequest(
+        `${API_BASE}/executions/${encodeURIComponent(checkpoint.execution_id)}/restore`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ checkpoint_id: checkpoint.checkpoint_id })
+        }
+      );
+      const result = await parseApiResponse<{ new_execution_id: string; restored_state: any; message: string; }>(response);
+      setCurrentExecutionId(result.new_execution_id);
+      if (result.restored_state?.workflow_config) {
+        const config = result.restored_state.workflow_config;
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        loadWorkflow({ nodes: config.nodes || [], edges: config.edges || [] });
+      }
+      addMessage('system', `체크포인트로부터 복원되었습니다.`);
+      toast.success('워크플로우가 복원되었습니다.');
+      return result.new_execution_id;
+    } catch (error) {
+      console.error('Checkpoint restore failed:', error);
       toast.error('워크플로우 복원에 실패했습니다.');
+      return null;
+    } finally {
+      setIsRecovering(false);
+    }
+  }, [loadWorkflow, addMessage]);
+
+  const rollbackToLocalSnapshot = useCallback(async (snapshot: LocalSnapshot) => {
+    setIsRecovering(true);
+    try {
+      clearWorkflow();
+      await new Promise(resolve => requestAnimationFrame(resolve));
+      loadWorkflow({ nodes: snapshot.nodes, edges: snapshot.edges });
+      addMessage('system', `로컬 백업으로부터 복원되었습니다.`);
+      toast.info('로컬 백업이 복원되었습니다.');
+    } catch (error) {
+      console.error('Local rollback failed:', error);
+      toast.error('로컬 복원에 실패했습니다.');
+    } finally {
       setIsRecovering(false);
     }
   }, [clearWorkflow, loadWorkflow, addMessage]);
 
-  /**
-   * 생성 재시작
-   */
   const restartGeneration = useCallback(async (originalPrompt?: string) => {
     setIsRecovering(true);
-    
     try {
-      // Canvas 초기화
       clearWorkflow();
-      
-      // 새로운 생성 시작
+      setCurrentExecutionId(null);
       if (originalPrompt) {
         addMessage('user', `[재시작] ${originalPrompt}`);
         addMessage('system', '워크플로우 생성을 다시 시작합니다...');
       }
-      
       toast.info('워크플로우 생성을 다시 시작합니다.');
-      setIsRecovering(false);
-      
     } catch (error) {
       console.error('Restart failed:', error);
-      addMessage('system', `재시작 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
       toast.error('워크플로우 재시작에 실패했습니다.');
+    } finally {
       setIsRecovering(false);
     }
   }, [clearWorkflow, addMessage]);
 
-  /**
-   * 생성 재개 (중단된 지점부터 계속)
-   */
-  const resumeGeneration = useCallback(async (originalPrompt?: string) => {
-    if (!lastValidStateRef.current) {
-      toast.error('재개할 수 있는 상태가 없습니다.');
-      return;
+  const resumeGeneration = useCallback(async (checkpoint?: CheckpointInfo, originalPrompt?: string) => {
+    if (!checkpoint && !currentExecutionId) {
+      toast.error('재개할 수 있는 체크포인트가 없습니다.');
+      return null;
     }
-
     setIsRecovering(true);
     setSyncStatus('syncing');
-    
     try {
-      const resumePrompt = originalPrompt 
-        ? `이전에 "${originalPrompt}" 요청으로 워크플로우를 생성하다가 중단되었습니다. 현재 상태에서 이어서 완성해주세요.`
-        : '중단된 워크플로우 생성을 이어서 완성해주세요.';
-      
-      addMessage('user', `[재개] ${resumePrompt}`);
-      addMessage('system', '중단된 지점부터 워크플로우 생성을 재개합니다...');
-      
-      toast.info('워크플로우 생성을 재개합니다.');
-      
-      // 실제 API 호출은 WorkflowChat에서 처리
-      return resumePrompt;
-      
+      let targetCheckpoint = checkpoint;
+      if (!targetCheckpoint && currentExecutionId) {
+        const checkpoints = await fetchCheckpoints(currentExecutionId);
+        targetCheckpoint = checkpoints[0];
+      }
+      if (!targetCheckpoint) throw new Error('No checkpoint found');
+      const newExecutionId = await restoreFromCheckpoint(targetCheckpoint);
+      if (newExecutionId) {
+        const resumePrompt = originalPrompt
+          ? `체크포인트 ${targetCheckpoint.node_id}에서 이어서 완성해주세요.`
+          : `체크포인트 ${targetCheckpoint.node_id}에서 워크플로우 생성을 재개합니다.`;
+        addMessage('user', `[재개] ${resumePrompt}`);
+        toast.info('워크플로우 생성을 재개합니다.');
+        return resumePrompt;
+      }
+      return null;
     } catch (error) {
       console.error('Resume failed:', error);
-      addMessage('system', `재개 실패: ${error instanceof Error ? error.message : 'Unknown error'}`);
       toast.error('워크플로우 재개에 실패했습니다.');
+      return null;
     } finally {
       setIsRecovering(false);
       setSyncStatus('idle');
     }
-  }, [addMessage, setSyncStatus]);
+  }, [currentExecutionId, fetchCheckpoints, restoreFromCheckpoint, addMessage, setSyncStatus]);
 
-  /**
-   * 스냅샷 목록 정리
-   */
-  const clearSnapshots = useCallback(() => {
-    setSnapshots([]);
-    generationStartRef.current = null;
-    lastValidStateRef.current = null;
-  }, []);
-
-  /**
-   * 현재 생성 중인지 확인
-   */
-  const isGenerating = useCallback(() => {
-    return generationStartRef.current !== null;
+  const clearLocalSnapshots = useCallback(() => {
+    setLocalSnapshots([]);
+    lastLocalEditRef.current = null;
   }, []);
 
   return {
-    // 상태
-    snapshots,
+    localSnapshots,
     isRecovering,
-    isGenerating: isGenerating(),
-    
-    // 스냅샷 관리
+    isGenerating,
+    currentExecutionId,
+    generationProgress,
     markGenerationStart,
-    markProgress,
     markGenerationComplete,
-    createSnapshot,
-    
-    // 복구 기능
+    markProgress,
+    fetchCheckpoints,
+    markExecutionStart,
+    createLocalSnapshot,
     handleGenerationInterruption,
-    rollbackToSnapshot,
+    restoreFromCheckpoint,
+    rollbackToLocalSnapshot,
     restartGeneration,
     resumeGeneration,
-    
-    // 유틸리티
-    clearSnapshots,
+    clearLocalSnapshots,
   };
 }
 

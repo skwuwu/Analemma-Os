@@ -2,6 +2,7 @@ import {
   Dialog,
   DialogContent,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
@@ -13,21 +14,36 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useState } from 'react';
-import { ArrowRight, ArrowLeft, Trash2, Plug } from 'lucide-react';
+import { useState, useMemo, useCallback } from 'react';
+import { ArrowRight, ArrowLeft, Trash2, Plug, Settings2, Info } from 'lucide-react';
 import { BLOCK_CATEGORIES } from './BlockLibrary';
+import { cn } from '@/lib/utils';
+import { motion, AnimatePresence } from 'framer-motion';
 
-// 설정 객체들 (BLOCK_CATEGORIES에서 추출)
-const AI_MODELS = BLOCK_CATEGORIES.find(cat => cat.type === 'aiModel')?.items || [];
-const OPERATORS = BLOCK_CATEGORIES.find(cat => cat.type === 'operator')?.items || [];
-const TRIGGERS = BLOCK_CATEGORIES.find(cat => cat.type === 'trigger')?.items || [];
-const CONTROLS = BLOCK_CATEGORIES.find(cat => cat.type === 'control')?.items || [];
+// --- TYPES & CONSTANTS ---
+
+interface NodeData {
+  label: string;
+  prompt_content?: string;
+  temperature?: number;
+  model?: string;
+  max_tokens?: number;
+  operatorType?: string;
+  operatorVariant?: string;
+  triggerType?: string;
+  triggerHour?: number;
+  triggerMinute?: number;
+  controlType?: string;
+  whileCondition?: string;
+  maxIterations?: number;
+  [key: string]: any;
+}
 
 interface NodeEditorDialogProps {
-  node: any | null;
+  node: { id: string; type?: string; data: NodeData } | null;
   open: boolean;
   onClose: () => void;
-  onSave: (nodeId: string, updates: any) => void;
+  onSave: (nodeId: string, updates: Partial<NodeData>) => void;
   onDelete?: (nodeId: string) => void;
   incomingConnections?: { id: string; sourceLabel: string }[];
   outgoingConnections?: { id: string; targetLabel: string }[];
@@ -36,79 +52,338 @@ interface NodeEditorDialogProps {
   onEdgeCreate?: (source: string, target: string) => void;
 }
 
-export const NodeEditorDialog = ({ 
-  node, 
-  open, 
-  onClose, 
+const AI_MODELS = BLOCK_CATEGORIES.find(cat => cat.type === 'aiModel')?.items || [];
+const OPERATORS = BLOCK_CATEGORIES.find(cat => cat.type === 'operator')?.items || [];
+const TRIGGERS = BLOCK_CATEGORIES.find(cat => cat.type === 'trigger')?.items || [];
+const CONTROLS = BLOCK_CATEGORIES.find(cat => cat.type === 'control')?.items || [];
+
+// --- SUB-COMPONENTS ---
+
+/**
+ * AI 모델 설정 컴포넌트
+ */
+const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: string, val: any) => void }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 10 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+  >
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Engine Identity</Label>
+      <Select value={data.model} onValueChange={(val) => onChange('model', val)}>
+        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {AI_MODELS.map(m => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Core Instruction (System Prompt)</Label>
+      <Textarea
+        value={data.prompt_content}
+        onChange={(e) => onChange('prompt_content', e.target.value)}
+        placeholder="에이전트의 성격과 임무를 정의하세요..."
+        className="min-h-[120px] font-mono text-xs bg-white border-slate-200 leading-relaxed shadow-inner"
+      />
+    </div>
+    <div className="space-y-3 pt-2">
+      <div className="flex justify-between items-center px-1">
+        <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Creativity (Temp)</Label>
+        <span className="text-xs font-mono font-bold text-primary bg-primary/10 px-2 py-0.5 rounded-full">{data.temperature?.toFixed(1)}</span>
+      </div>
+      <Slider
+        value={[data.temperature ?? 0.7]}
+        onValueChange={(val) => onChange('temperature', val[0])}
+        min={0} max={2} step={0.1}
+        className="py-2"
+      />
+    </div>
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Token Limit</Label>
+      <Input
+        type="number"
+        value={data.max_tokens}
+        onChange={(e) => onChange('max_tokens', parseInt(e.target.value))}
+        className="bg-white"
+      />
+    </div>
+  </motion.div>
+);
+
+/**
+ * 연산 및 액션 설정 컴포넌트
+ */
+const OperatorSettings = ({ data, onChange }: { data: NodeData, onChange: (key: string, val: any) => void }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 10 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+  >
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Action Registry</Label>
+      <Select value={data.operatorType} onValueChange={(val) => onChange('operatorType', val)}>
+        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {OPERATORS.map(op => <SelectItem key={op.id} value={op.id}>{op.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Execution Mode</Label>
+      <Select value={data.operatorVariant} onValueChange={(val) => onChange('operatorVariant', val)}>
+        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          <SelectItem value="official">Standard (Validated)</SelectItem>
+          <SelectItem value="custom">Edge (Experimental)</SelectItem>
+        </SelectContent>
+      </Select>
+      <div className="flex gap-2 p-3 bg-blue-50/50 border border-blue-100 rounded-xl mt-2">
+        <Info className="w-4 h-4 text-blue-400 shrink-0" />
+        <p className="text-[10px] text-blue-600/80 leading-snug">
+          Standard 모드는 Gmail/Notion 등 검증된 API 연동을 제공하며, Edge 모드는 커스텀 훅이나 스크립트 실행에 최적화되어 있습니다.
+        </p>
+      </div>
+    </div>
+  </motion.div>
+);
+
+/**
+ * 트리거 및 이벤트 설정 컴포넌트
+ */
+const TriggerSettings = ({ data, onChange }: { data: NodeData, onChange: (key: string, val: any) => void }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 10 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+  >
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Activation Source</Label>
+      <Select value={data.triggerType} onValueChange={(val) => onChange('triggerType', val)}>
+        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {TRIGGERS.map(t => <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+    <AnimatePresence>
+      {data.triggerType === 'time' && (
+        <motion.div
+          initial={{ opacity: 0, height: 0 }}
+          animate={{ opacity: 1, height: 'auto' }}
+          exit={{ opacity: 0, height: 0 }}
+          className="grid grid-cols-2 gap-4 pt-2"
+        >
+          <div className="space-y-2">
+            <Label className="text-[10px] text-slate-400 pl-1 font-bold">Hour (24h)</Label>
+            <Input type="number" min={0} max={23} value={data.triggerHour} onChange={(e) => onChange('triggerHour', parseInt(e.target.value))} className="bg-white" />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-[10px] text-slate-400 pl-1 font-bold">Minute (mm)</Label>
+            <Input type="number" min={0} max={59} value={data.triggerMinute} onChange={(e) => onChange('triggerMinute', parseInt(e.target.value))} className="bg-white" />
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  </motion.div>
+);
+
+/**
+ * 로직 및 흐름 제어 설정 컴포넌트
+ */
+const ControlSettings = ({ data, onChange }: { data: NodeData, onChange: (key: string, val: any) => void }) => (
+  <motion.div
+    initial={{ opacity: 0, y: 10 }}
+    animate={{ opacity: 1, y: 0 }}
+    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+  >
+    <div className="space-y-2">
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Flow Controller</Label>
+      <Select value={data.controlType} onValueChange={(val) => onChange('controlType', val)}>
+        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {CONTROLS.map(c => <SelectItem key={c.id} value={c.id}>{c.label}</SelectItem>)}
+        </SelectContent>
+      </Select>
+    </div>
+    {data.controlType === 'while' && (
+      <div className="space-y-4 pt-2 animate-in slide-in-from-top-2">
+        <div className="space-y-2">
+          <Label className="text-[10px] text-slate-400 pl-1 font-bold italic">Stop Condition Path</Label>
+          <Input value={data.whileCondition} onChange={(e) => onChange('whileCondition', e.target.value)} placeholder="e.g. data.status == 'ready'" className="bg-white" />
+        </div>
+        <div className="space-y-2">
+          <Label className="text-[10px] text-slate-400 pl-1 font-bold">Max Iteration Guard</Label>
+          <Input type="number" value={data.maxIterations} onChange={(e) => onChange('maxIterations', parseInt(e.target.value))} className="bg-white" />
+        </div>
+      </div>
+    )}
+  </motion.div>
+);
+
+/**
+ * 연결 관리 컴포넌트
+ */
+const ConnectionManager = ({
+  incoming,
+  outgoing,
+  available,
+  onDelete,
+  onCreate,
+  nodeId
+}: any) => {
+  const [selectedTarget, setSelectedTarget] = useState('');
+
+  return (
+    <div className="space-y-6 pt-4">
+      <div className="flex items-center gap-3 border-b pb-3">
+        <div className="p-1.5 bg-slate-100 rounded-lg">
+          <Plug className="w-4 h-4 text-slate-500" />
+        </div>
+        <h4 className="font-bold text-sm tracking-tight text-slate-700">Link Infrastructure</h4>
+      </div>
+
+      <div className="grid grid-cols-2 gap-6">
+        {/* Incoming Section */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-1.5">
+            <ArrowLeft className="w-3 h-3 text-slate-300" />
+            <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Incoming</Label>
+          </div>
+          {incoming.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {incoming.map((conn: any) => (
+                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-100 border-none group/badge">
+                  <span className="truncate max-w-[80px] text-[10px] font-medium">{conn.sourceLabel}</span>
+                  <Button
+                    variant="ghost"
+                    className="h-4 w-4 p-0 ml-1 hover:text-destructive transition-colors opacity-0 group-hover/badge:opacity-100"
+                    onClick={() => onDelete?.(conn.id)}
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </Button>
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[10px] text-slate-300 italic pl-1">No dependency</p>
+          )}
+        </div>
+
+        {/* Outgoing Section */}
+        <div className="space-y-3">
+          <div className="flex items-center gap-1.5">
+            <ArrowRight className="w-3 h-3 text-slate-300" />
+            <Label className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Outgoing</Label>
+          </div>
+          {outgoing.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {outgoing.map((conn: any) => (
+                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-100 border-none group/badge">
+                  <span className="truncate max-w-[80px] text-[10px] font-medium">{conn.targetLabel}</span>
+                  <Button
+                    variant="ghost"
+                    className="h-4 w-4 p-0 ml-1 hover:text-destructive transition-colors opacity-0 group-hover/badge:opacity-100"
+                    onClick={() => onDelete?.(conn.id)}
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </Button>
+                </Badge>
+              ))}
+            </div>
+          ) : (
+            <p className="text-[10px] text-slate-300 italic pl-1">Endpoint terminal</p>
+          )}
+        </div>
+      </div>
+
+      {/* Create New Link */}
+      {onCreate && available.length > 0 && (
+        <div className="flex gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-100">
+          <Select value={selectedTarget} onValueChange={setSelectedTarget}>
+            <SelectTrigger className="h-9 text-xs bg-white border-slate-200">
+              <SelectValue placeholder="Propagate to..." />
+            </SelectTrigger>
+            <SelectContent>
+              {available.map((t: any) => (
+                <SelectItem key={t.id} value={t.id} disabled={t.id === nodeId}>
+                  {t.label}
+                  {t.id === nodeId && <span className="text-[10px] ml-2 text-red-400 opacity-50">(Self)</span>}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button
+            size="sm"
+            className="h-9 px-4 font-bold active:scale-95 transition-transform"
+            disabled={!selectedTarget}
+            onClick={() => {
+              onCreate(nodeId, selectedTarget);
+              setSelectedTarget('');
+            }}
+          >
+            Connect
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// --- MAIN COMPONENT ---
+
+export const NodeEditorDialog = ({
+  node,
+  open,
+  onClose,
   onSave,
   onDelete,
   incomingConnections = [],
   outgoingConnections = [],
   availableTargets = [],
   onEdgeDelete,
-  onEdgeCreate 
+  onEdgeCreate
 }: NodeEditorDialogProps) => {
-  // node.type은 불변이므로 초기값으로 고정
   const nodeType = node?.type || '';
 
-  // 폼 상태 초기화 (부모의 key prop 변경 시 재마운트되어 초기화됨)
-  const [formData, setFormData] = useState(() => ({
+  // 폼 상태 데이터 (Any 제거 후 정규화된 키 사용)
+  const [formData, setFormData] = useState<NodeData>(() => ({
     label: node?.data.label || '',
-    // AI Model fields
     prompt_content: node?.data.prompt_content || node?.data.prompt || '',
     temperature: node?.data.temperature ?? 0.7,
-    model: node?.data.model || 'gpt-4',
+    model: node?.data.model || (nodeType === 'aiModel' ? 'gpt-4' : ''),
     max_tokens: node?.data.max_tokens || node?.data.maxTokens || 2000,
-    // Operator fields
-    operatorType: node?.data.operatorType || 'email',
+    operatorType: node?.data.operatorType || (nodeType === 'operator' ? 'email' : ''),
     operatorVariant: node?.data.operatorVariant || 'official',
-    // Trigger fields
-    triggerType: node?.data.triggerType || (node?.data.blockId as 'time' | 'request' | 'event') || 'request',
+    triggerType: node?.data.triggerType || (nodeType === 'trigger' ? (node?.data.blockId as string || 'request') : ''),
     triggerHour: node?.data.triggerHour ?? 9,
     triggerMinute: node?.data.triggerMinute ?? 0,
-    // Control fields
-    controlType: node?.data.controlType || 'while',
+    controlType: node?.data.controlType || (nodeType === 'control' ? 'while' : ''),
     whileCondition: node?.data.whileCondition || '',
     maxIterations: node?.data.max_iterations || node?.data.maxIterations || 10,
   }));
 
-  const [selectedTargetNode, setSelectedTargetNode] = useState<string>('');
-
-  const updateField = (key: string, value: any) => {
+  const updateField = useCallback((key: string, value: any) => {
     setFormData(prev => ({ ...prev, [key]: value }));
-  };
+  }, []);
 
   const handleSave = () => {
     if (!node) return;
 
-    const updates: any = { label: formData.label };
+    // Payload extraction logic based on type
+    const updates: Partial<NodeData> = { label: formData.label };
 
-    // 현재 nodeType에 필요한 데이터만 선별적으로 저장
-    switch (nodeType) {
-      case 'aiModel':
-        updates.prompt_content = formData.prompt_content;
-        updates.temperature = formData.temperature;
-        updates.model = formData.model;
-        updates.max_tokens = Number(formData.max_tokens);
-        break;
-      case 'operator':
-        updates.operatorType = formData.operatorType;
-        updates.operatorVariant = formData.operatorVariant;
-        break;
-      case 'trigger':
-        updates.triggerType = formData.triggerType;
-        if (formData.triggerType === 'time') {
-          updates.triggerHour = Number(formData.triggerHour);
-          updates.triggerMinute = Number(formData.triggerMinute);
-        }
-        break;
-      case 'control':
-        updates.controlType = formData.controlType;
-        if (formData.controlType === 'while') {
-          updates.whileCondition = formData.whileCondition;
-          updates.maxIterations = Number(formData.maxIterations);
-        }
-        break;
+    if (nodeType === 'aiModel') {
+      const { prompt_content, temperature, model, max_tokens } = formData;
+      Object.assign(updates, { prompt_content, temperature, model, max_tokens: Number(max_tokens) });
+    } else if (nodeType === 'operator') {
+      const { operatorType, operatorVariant } = formData;
+      Object.assign(updates, { operatorType, operatorVariant });
+    } else if (nodeType === 'trigger') {
+      const { triggerType, triggerHour, triggerMinute } = formData;
+      Object.assign(updates, { triggerType, triggerHour: Number(triggerHour || 0), triggerMinute: Number(triggerMinute || 0) });
+    } else if (nodeType === 'control') {
+      const { controlType, whileCondition, maxIterations } = formData;
+      Object.assign(updates, { controlType, whileCondition, maxIterations: Number(maxIterations || 0) });
     }
 
     onSave(node.id, updates);
@@ -119,254 +394,110 @@ export const NodeEditorDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[500px] max-h-[90vh] flex flex-col p-0 gap-0">
-        <DialogHeader className="p-6 pb-4 border-b">
-          <DialogTitle className="flex items-center gap-2">
-            Edit Block
-            <Badge variant="secondary" className="uppercase text-[10px] tracking-wider">{nodeType}</Badge>
-          </DialogTitle>
-          <DialogDescription>
-            Configure properties and connections for this block.
-          </DialogDescription>
+      <DialogContent className="sm:max-w-[520px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden border-none shadow-2xl rounded-3xl">
+        <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-primary/80 to-indigo-500/80" />
+
+        <DialogHeader className="p-7 pb-4">
+          <div className="flex items-center justify-between">
+            <div className="space-y-1">
+              <DialogTitle className="flex items-center gap-3 text-xl font-bold tracking-tight">
+                Block Configuration
+                <Badge variant="outline" className="h-5 text-[9px] font-bold uppercase tracking-widest border-slate-200 bg-slate-50 text-slate-500">
+                  {nodeType}
+                </Badge>
+              </DialogTitle>
+              <DialogDescription className="text-slate-400">
+                ID: <span className="font-mono text-[10px] font-bold">{node.id}</span> • Specify block behavior and connectivity.
+              </DialogDescription>
+            </div>
+          </div>
         </DialogHeader>
-        
-        <ScrollArea className="flex-1 max-h-[60vh]">
-          <div className="p-6 space-y-6">
+
+        <ScrollArea className="flex-1 max-h-[60vh] custom-scrollbar">
+          <div className="px-7 py-2 space-y-8">
             {/* Common Fields */}
-            <div className="space-y-2">
-              <Label htmlFor="label">Label</Label>
+            <div className="space-y-2.5">
+              <Label htmlFor="label" className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Block Alias (Display Name)</Label>
               <Input
                 id="label"
                 value={formData.label}
                 onChange={(e) => updateField('label', e.target.value)}
-                placeholder="Block Name"
+                placeholder="e.g. Master Intelligence Unit"
+                className="h-11 bg-white border-slate-200 font-medium placeholder:text-slate-300"
               />
             </div>
 
-            {/* AI Model Settings */}
-            {nodeType === 'aiModel' && (
-              <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-                <div className="space-y-2">
-                  <Label>Model</Label>
-                  <Select value={formData.model} onValueChange={(val) => updateField('model', val)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {AI_MODELS.map(m => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>System Prompt</Label>
-                  <Textarea
-                    value={formData.prompt_content}
-                    onChange={(e) => updateField('prompt_content', e.target.value)}
-                    placeholder="You are a helpful assistant..."
-                    className="min-h-[100px] font-mono text-xs"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between">
-                    <Label>Temperature</Label>
-                    <span className="text-xs text-muted-foreground">{formData.temperature.toFixed(1)}</span>
-                  </div>
-                  <Slider
-                    value={[formData.temperature]}
-                    onValueChange={(val) => updateField('temperature', val[0])}
-                    min={0} max={2} step={0.1}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label>Max Tokens</Label>
-                  <Input
-                    type="number"
-                    value={formData.max_tokens}
-                    onChange={(e) => updateField('max_tokens', e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
-
-            {/* Operator Settings */}
-            {nodeType === 'operator' && (
-              <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-                <div className="space-y-2">
-                  <Label>Action Type</Label>
-                  <Select value={formData.operatorType} onValueChange={(val) => updateField('operatorType', val)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {OPERATORS.map(op => <SelectItem key={op.id} value={op.id}>{op.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label>Operator Mode</Label>
-                  <Select value={formData.operatorVariant} onValueChange={(val) => updateField('operatorVariant', val)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="official">Official (템플릿/검증된 연동)</SelectItem>
-                      <SelectItem value="custom">Custom (사용자 정의)</SelectItem>
-                    </SelectContent>
-                  </Select>
-                  <p className="text-xs text-muted-foreground">
-                    공식 모드는 향후 Gmail/GDrive 등 검증된 연동에 사용되며, 커스텀은 사용자 정의 코드/설정에 사용됩니다.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* Trigger Settings */}
-            {nodeType === 'trigger' && (
-              <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-                <div className="space-y-2">
-                  <Label>Trigger Type</Label>
-                  <Select value={formData.triggerType} onValueChange={(val) => updateField('triggerType', val)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {TRIGGERS.map(t => <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {formData.triggerType === 'time' && (
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="space-y-2">
-                      <Label>Hour (0-23)</Label>
-                      <Input type="number" min={0} max={23} value={formData.triggerHour} onChange={(e) => updateField('triggerHour', e.target.value)} />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Minute (0-59)</Label>
-                      <Input type="number" min={0} max={59} value={formData.triggerMinute} onChange={(e) => updateField('triggerMinute', e.target.value)} />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Control Settings */}
-            {nodeType === 'control' && (
-              <div className="space-y-4 border rounded-lg p-4 bg-muted/20">
-                <div className="space-y-2">
-                  <Label>Logic Type</Label>
-                  <Select value={formData.controlType} onValueChange={(val) => updateField('controlType', val)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {CONTROLS.map(c => <SelectItem key={c.id} value={c.id}>{c.label}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {formData.controlType === 'while' && (
-                  <>
-                    <div className="space-y-2">
-                      <Label>Loop Condition</Label>
-                      <Input value={formData.whileCondition} onChange={(e) => updateField('whileCondition', e.target.value)} placeholder="e.g. data.status == 'pending'" />
-                    </div>
-                    <div className="space-y-2">
-                      <Label>Max Iterations</Label>
-                      <Input type="number" value={formData.maxIterations} onChange={(e) => updateField('maxIterations', e.target.value)} />
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* Connection Management */}
-            <div className="space-y-4 pt-2">
-              <div className="flex items-center gap-2 pb-2 border-b">
-                <Plug className="w-4 h-4" />
-                <h4 className="font-semibold text-sm">Connections</h4>
+            <div className="relative">
+              <div className="absolute -left-7 top-0 bottom-0 w-1 bg-primary/20 rounded-r-full" />
+              <div className="space-y-2 mb-4 flex items-center gap-2">
+                <Settings2 className="w-4 h-4 text-primary" />
+                <h3 className="text-xs font-bold text-slate-700">Internal Logic Settings</h3>
               </div>
 
-              {/* Incoming */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground flex items-center gap-1">
-                  <ArrowLeft className="w-3 h-3" /> Incoming
-                </Label>
-                {incomingConnections.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {incomingConnections.map((conn) => (
-                      <Badge key={conn.id} variant="secondary" className="flex gap-1 items-center pr-1">
-                        {conn.sourceLabel}
-                        {onEdgeDelete && (
-                          <Trash2 
-                            className="w-3 h-3 cursor-pointer hover:text-destructive ml-1" 
-                            onClick={() => onEdgeDelete(conn.id)}
-                          />
-                        )}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground italic">No incoming connections</p>
-                )}
-              </div>
-
-              {/* Outgoing */}
-              <div className="space-y-2">
-                <Label className="text-xs text-muted-foreground flex items-center gap-1">
-                  <ArrowRight className="w-3 h-3" /> Outgoing
-                </Label>
-                {outgoingConnections.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {outgoingConnections.map((conn) => (
-                      <Badge key={conn.id} variant="secondary" className="flex gap-1 items-center pr-1">
-                        {conn.targetLabel}
-                        {onEdgeDelete && (
-                          <Trash2 
-                            className="w-3 h-3 cursor-pointer hover:text-destructive ml-1" 
-                            onClick={() => onEdgeDelete(conn.id)}
-                          />
-                        )}
-                      </Badge>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted-foreground italic">No outgoing connections</p>
-                )}
-              </div>
-
-              {/* Add Connection */}
-              {onEdgeCreate && availableTargets.length > 0 && (
-                <div className="flex gap-2 pt-2">
-                  <Select value={selectedTargetNode} onValueChange={setSelectedTargetNode}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder="Link to..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {availableTargets.map((t) => (
-                        <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <Button 
-                    size="sm" 
-                    className="h-8"
-                    disabled={!selectedTargetNode}
-                    onClick={() => {
-                      if (selectedTargetNode && node) {
-                        onEdgeCreate(node.id, selectedTargetNode);
-                        setSelectedTargetNode('');
-                      }
-                    }}
-                  >
-                    Connect
-                  </Button>
-                </div>
-              )}
+              {/* Switch settings UI based on type */}
+              {nodeType === 'aiModel' && <AIModelSettings data={formData} onChange={updateField} />}
+              {nodeType === 'operator' && <OperatorSettings data={formData} onChange={updateField} />}
+              {nodeType === 'trigger' && <TriggerSettings data={formData} onChange={updateField} />}
+              {nodeType === 'control' && <ControlSettings data={formData} onChange={updateField} />}
             </div>
+
+            {/* Connection Infrastructure */}
+            <ConnectionManager
+              incoming={incomingConnections}
+              outgoing={outgoingConnections}
+              available={availableTargets}
+              onDelete={onEdgeDelete}
+              onCreate={onEdgeCreate}
+              nodeId={node.id}
+            />
           </div>
+          <div className="h-8" /> {/* Scroll margin */}
         </ScrollArea>
 
-        <div className="p-4 border-t bg-muted/10 flex justify-between items-center">
-          {onDelete && (
-            <Button variant="ghost" size="sm" onClick={() => { onDelete(node.id); onClose(); }} className="text-destructive hover:text-destructive hover:bg-destructive/10">
-              <Trash2 className="w-4 h-4 mr-2" /> Delete
-            </Button>
-          )}
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
-            <Button size="sm" onClick={handleSave}>Save Changes</Button>
+        <DialogFooter className="p-6 border-t bg-slate-50/80 flex-row justify-between items-center sm:justify-between">
+          <div className="flex items-center">
+            {onDelete && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { onDelete(node.id); onClose(); }}
+                className="text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-xl h-10 px-4 font-bold text-xs gap-2 transition-all"
+              >
+                <Trash2 className="w-4 h-4" /> Discard Block
+              </Button>
+            )}
           </div>
-        </div>
+          <div className="flex gap-2">
+            <Button variant="ghost" className="h-10 rounded-xl font-bold text-xs" onClick={onClose}>Dismiss</Button>
+            <Button
+              onClick={handleSave}
+              className="h-10 px-8 rounded-xl font-bold text-xs bg-primary shadow-lg shadow-primary/20 active:scale-95 transition-all"
+            >
+              Commit Changes
+            </Button>
+          </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 };
+
+export default NodeEditorDialog;
+
+const X = ({ className, onClick }: { className?: string, onClick?: () => void }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    width="24"
+    height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    onClick={onClick}
+  >
+    <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+  </svg>
+);

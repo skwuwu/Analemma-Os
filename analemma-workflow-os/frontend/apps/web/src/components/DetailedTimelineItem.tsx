@@ -1,5 +1,20 @@
-import React, { useState } from 'react';
-import { CheckCircle, Circle, Clock, Loader2, AlertCircle, ChevronDown, ChevronRight, Terminal, Cpu, AlertTriangle } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import {
+    CheckCircle,
+    Circle,
+    Clock,
+    Loader2,
+    AlertCircle,
+    ChevronDown,
+    ChevronRight,
+    Terminal,
+    Cpu,
+    AlertTriangle,
+    Copy,
+    Check,
+    Activity
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -8,6 +23,8 @@ import { NotificationItem } from '@/lib/types';
 import { formatDistanceToNow } from 'date-fns';
 import { ko } from 'date-fns/locale';
 import { useTheme } from 'next-themes';
+import { cn, normalizeEventTs } from '@/lib/utils';
+import { toast } from 'sonner';
 
 interface DetailedTimelineItemProps {
     event: NotificationItem;
@@ -17,185 +34,214 @@ interface DetailedTimelineItemProps {
 export const DetailedTimelineItem: React.FC<DetailedTimelineItemProps> = ({ event, isLast }) => {
     const [isExpanded, setIsExpanded] = useState(false);
     const { theme } = useTheme();
-    const { status, timestamp, current_step_label, message, usage, error, details, node_id, name, type } = event.payload || event;
 
-    const date = new Date(timestamp ? (timestamp < 10000000000 ? timestamp * 1000 : timestamp) : Date.now());
-    const relativeTime = formatDistanceToNow(date, { addSuffix: true, locale: ko });
+    // 1. 데이터 가공 로직 메모이제이션 (성능 및 일관성 최적화)
+    const payload = event.payload || event;
+    const { status, current_step_label, message, usage, error, details, node_id, name, type } = payload;
 
-    let Icon = Circle;
-    let colorClass = 'text-gray-400';
-    let borderClass = 'border-l-gray-200';
-    let bgClass = 'bg-gray-50';
+    const { relativeTime, dateLabel, Icon, colorClass, borderClass, bgClass } = useMemo(() => {
+        const ts = normalizeEventTs(payload);
+        const date = new Date(ts);
 
-    if (status === 'RUNNING' || status === 'STARTED') {
-        Icon = Loader2;
-        colorClass = 'text-blue-500';
-        borderClass = 'border-l-blue-200';
-        bgClass = 'bg-blue-50/50';
-    } else if (status === 'SUCCEEDED' || status === 'COMPLETED' || status === 'COMPLETE') {
-        Icon = CheckCircle;
-        colorClass = 'text-green-500';
-        borderClass = 'border-l-green-200';
-        bgClass = 'bg-green-50/50';
-    } else if (status === 'FAILED' || status === 'ABORTED') {
-        Icon = AlertCircle;
-        colorClass = 'text-red-500';
-        borderClass = 'border-l-red-200';
-        bgClass = 'bg-red-50/50';
-    } else if (status === 'PAUSED_FOR_HITP') {
-        Icon = Clock;
-        colorClass = 'text-orange-500';
-        borderClass = 'border-l-orange-200';
-        bgClass = 'bg-orange-50/50';
-    }
+        // 상태별 메타데이터 매핑
+        const config: Record<string, any> = {
+            RUNNING: { icon: Loader2, color: 'text-blue-500', bg: 'bg-blue-50/40', border: 'border-l-blue-200' },
+            STARTED: { icon: Loader2, color: 'text-blue-500', bg: 'bg-blue-50/40', border: 'border-l-blue-200' },
+            COMPLETED: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50/40', border: 'border-l-green-200' },
+            COMPLETE: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50/40', border: 'border-l-green-200' },
+            SUCCEEDED: { icon: CheckCircle, color: 'text-green-500', bg: 'bg-green-50/40', border: 'border-l-green-200' },
+            FAILED: { icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-50/40', border: 'border-l-red-200' },
+            ABORTED: { icon: AlertCircle, color: 'text-red-500', bg: 'bg-red-50/40', border: 'border-l-red-200' },
+            PAUSED_FOR_HITP: { icon: Clock, color: 'text-orange-500', bg: 'bg-orange-50/40', border: 'border-l-orange-200' },
+            DEFAULT: { icon: Circle, color: 'text-slate-400', bg: 'bg-slate-50/30', border: 'border-l-slate-200' }
+        };
+
+        const res = config[status] || config.DEFAULT;
+        return {
+            relativeTime: formatDistanceToNow(date, { addSuffix: true, locale: ko }),
+            dateLabel: date.toLocaleString(),
+            Icon: res.icon,
+            colorClass: res.color,
+            bgClass: res.bg,
+            borderClass: res.border
+        };
+    }, [status, payload]);
 
     // Type-specific icons
-    let TypeIcon: React.ElementType = ActivityIcon;
-    if (type === 'ai_thought') TypeIcon = Cpu;
-    else if (type === 'tool') TypeIcon = Terminal;
+    const TypeIcon = useMemo(() => {
+        if (type === 'ai_thought') return Cpu;
+        if (type === 'tool') return Terminal;
+        return Activity;
+    }, [type]);
+
+    const handleCopy = (data: any, label: string) => {
+        const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+        navigator.clipboard.writeText(text);
+        toast.info(`${label} copied to clipboard`);
+    };
 
     return (
-        <div className={`relative pl-8 pb-8 ${isLast ? '' : borderClass} border-l-2 last:border-l-0`}>
-            <div className={`absolute left-[-9px] top-0 bg-background p-1 rounded-full border ${isLast && status === 'RUNNING' ? 'animate-pulse border-blue-400' : 'border-gray-200'}`}>
-                <Icon className={`w-4 h-4 ${colorClass} ${status === 'RUNNING' ? 'animate-spin' : ''}`} />
+        <div className={cn(
+            "relative pl-8 pb-8 border-l-2 last:border-l-0 transition-colors",
+            isLast ? "border-transparent" : borderClass
+        )}>
+            {/* 타임라인 노드 아이콘 - 정중앙 배치를 위해 미세 조정 */}
+            <div className={cn(
+                "absolute left-[-11px] top-0 bg-background p-1 rounded-full border-2 z-10",
+                isLast && (status === 'RUNNING' || status === 'STARTED') ? 'border-blue-400 animate-pulse' : 'border-background shadow-sm'
+            )}>
+                <Icon className={cn(
+                    "w-4 h-4",
+                    colorClass,
+                    (status === 'RUNNING' || status === 'STARTED') && "animate-spin"
+                )} />
             </div>
 
-            <Card className={`mb-2 overflow-hidden transition-all ${isExpanded ? 'ring-1 ring-primary/20' : ''}`}>
+            <Card className={cn(
+                "group border transition-all duration-200 overflow-hidden",
+                isExpanded ? "shadow-md ring-1 ring-primary/10" : "hover:shadow-sm"
+            )}>
                 <div
-                    className={`p-3 flex items-start gap-3 cursor-pointer hover:bg-muted/50 ${bgClass}`}
+                    className={cn(
+                        "p-3 flex items-start gap-3 cursor-pointer",
+                        bgClass
+                    )}
                     onClick={() => setIsExpanded(!isExpanded)}
                 >
-                    <div className="mt-1">
-                        <TypeIcon className="w-4 h-4 text-muted-foreground" />
+                    <div className="p-1.5 bg-background rounded-md shadow-sm mt-0.5">
+                        <TypeIcon className="w-3.5 h-3.5 text-slate-500" />
                     </div>
 
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between mb-1">
-                            <div className="flex items-center gap-2">
-                                <span className="font-medium text-sm truncate">
-                                    {name || current_step_label || node_id || 'Unknown Step'}
+                            <div className="flex items-center gap-2 overflow-hidden flex-1">
+                                <span className="font-semibold text-sm truncate">
+                                    {name || current_step_label || node_id || 'System Operation'}
                                 </span>
-                                {node_id && <code className="text-[10px] bg-muted px-1 rounded text-muted-foreground">{node_id}</code>}
+                                {node_id && (
+                                    <Badge variant="outline" className="text-[9px] font-mono py-0 h-4 opacity-70 shrink-0">
+                                        {node_id}
+                                    </Badge>
+                                )}
                             </div>
-                            <span className="text-xs text-muted-foreground whitespace-nowrap" title={date.toLocaleString()}>
+                            <time className="text-[10px] text-slate-400 font-medium shrink-0 ml-2" title={dateLabel}>
                                 {relativeTime}
-                            </span>
+                            </time>
                         </div>
 
-                        {message && <p className="text-sm text-muted-foreground line-clamp-2">{message}</p>}
+                        {message && <p className="text-xs text-slate-500 line-clamp-1 italic">{message}</p>}
 
                         {/* Summary Badges */}
                         <div className="flex flex-wrap gap-2 mt-2">
                             {usage && (
-                                <Badge variant="secondary" className="text-[10px] h-5">
+                                <Badge variant="secondary" className="text-[9px] h-4 font-mono">
                                     {usage.total_tokens || 0} tokens
                                 </Badge>
                             )}
                             {error && (
-                                <Badge variant="destructive" className="text-[10px] h-5">
+                                <Badge variant="destructive" className="text-[9px] h-4">
                                     Error
                                 </Badge>
                             )}
                         </div>
                     </div>
 
-                    <Button variant="ghost" size="icon" className="h-6 w-6 shrink-0">
-                        {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                    </Button>
+                    <div className="shrink-0 pt-1">
+                        {isExpanded ? (
+                            <ChevronDown className="w-4 h-4 text-primary" />
+                        ) : (
+                            <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-slate-500" />
+                        )}
+                    </div>
                 </div>
 
-                {/* Expanded Details with Animation */}
-                <div style={{ maxHeight: isExpanded ? '1000px' : '0', opacity: isExpanded ? 1 : 0, transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)', overflow: 'hidden' }}>
-                    <CardContent className="p-3 bg-card border-t text-sm space-y-3">
-                        {/* Error Section */}
-                        {error && (
-                            <div className="bg-red-50 p-3 rounded-md border border-red-100 text-red-800">
-                                <div className="flex items-center gap-2 font-semibold mb-1">
-                                    <AlertTriangle className="w-4 h-4" />
-                                    Execution Failed
-                                </div>
-                                <div className="text-xs font-mono whitespace-pre-wrap max-h-60 overflow-y-auto">
-                                    {typeof error === 'string' ? error : JSON.stringify(error, null, 2)}
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Usage Section */}
-                        {usage && (
-                            <div className="grid grid-cols-3 gap-2 bg-muted/30 p-2 rounded text-xs">
-                                <div className="text-center">
-                                    <div className="text-muted-foreground">Prompt</div>
-                                    <div className="font-mono">{usage.prompt_tokens || 0}</div>
-                                </div>
-                                <div className="text-center">
-                                    <div className="text-muted-foreground">Completion</div>
-                                    <div className="font-mono">{usage.completion_tokens || 0}</div>
-                                </div>
-                                <div className="text-center font-semibold">
-                                    <div className="text-muted-foreground">Total</div>
-                                    <div className="font-mono">{usage.total_tokens || 0}</div>
-                                </div>
-                            </div>
-                        )}
-
-                        {/* Details (Input/Output) */}
-                        {details && (
-                            <div className="space-y-2">
-                                {details.prompts && (
-                                    <div>
-                                        <div className="text-xs font-semibold text-muted-foreground mb-1">Prompts</div>
-                                        <div className="bg-muted/50 rounded p-2 overflow-x-auto max-h-60">
-                                            <JsonViewer src={details.prompts} collapsed={true} theme={theme} />
+                {/* Expanded Details with Framer Motion and Lazy Rendering */}
+                <AnimatePresence>
+                    {isExpanded && (
+                        <motion.div
+                            initial={{ height: 0, opacity: 0 }}
+                            animate={{ height: 'auto', opacity: 1 }}
+                            exit={{ height: 0, opacity: 0 }}
+                            transition={{ duration: 0.2, ease: "circOut" }}
+                            className="overflow-hidden border-t"
+                        >
+                            <CardContent className="p-4 bg-card text-sm space-y-4">
+                                {/* Error Section */}
+                                {error && (
+                                    <div className="bg-red-50/50 p-3 rounded-lg border border-red-100 text-red-800">
+                                        <div className="flex items-center justify-between font-semibold mb-2">
+                                            <div className="flex items-center gap-2">
+                                                <AlertTriangle className="w-4 h-4" />
+                                                <span>Execution Failed</span>
+                                            </div>
+                                            <Button
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-6 w-6 text-red-700 hover:bg-red-100"
+                                                onClick={(e) => { e.stopPropagation(); handleCopy(error, 'Error log'); }}
+                                            >
+                                                <Copy className="w-3 h-3" />
+                                            </Button>
+                                        </div>
+                                        <div className="text-[11px] font-mono whitespace-pre-wrap max-h-60 overflow-y-auto bg-white/50 p-2 rounded border border-red-100/50">
+                                            {typeof error === 'string' ? error : JSON.stringify(error, null, 2)}
                                         </div>
                                     </div>
                                 )}
-                                {details.input && (
-                                    <div>
-                                        <div className="text-xs font-semibold text-muted-foreground mb-1">Input</div>
-                                        <div className="bg-muted/50 rounded p-2 overflow-x-auto max-h-60">
-                                            <pre className="text-xs font-mono whitespace-pre-wrap">{typeof details.input === 'string' ? details.input : JSON.stringify(details.input, null, 2)}</pre>
-                                        </div>
-                                    </div>
-                                )}
-                                {details.output && (
-                                    <div>
-                                        <div className="text-xs font-semibold text-muted-foreground mb-1">Output</div>
-                                        <div className="bg-muted/50 rounded p-2 overflow-x-auto max-h-60">
-                                            <pre className="text-xs font-mono whitespace-pre-wrap">{typeof details.output === 'string' ? details.output : JSON.stringify(details.output, null, 2)}</pre>
-                                        </div>
-                                    </div>
-                                )}
-                            </div>
-                        )}
 
-                        {/* Raw Data Fallback */}
-                        {!usage && !error && !details && (
-                            <div className="text-xs text-muted-foreground italic">
-                                No detailed information available for this step.
-                            </div>
-                        )}
-                    </CardContent>
-                </div>
+                                {/* Usage Section */}
+                                {usage && (
+                                    <div className="grid grid-cols-3 gap-3 bg-slate-50 p-3 rounded-lg border border-slate-100 text-[11px]">
+                                        <div className="text-center">
+                                            <div className="text-slate-400 font-bold mb-1 uppercase tracking-tighter">Prompt</div>
+                                            <div className="font-mono text-slate-700">{usage.prompt_tokens || 0}</div>
+                                        </div>
+                                        <div className="text-center border-x border-slate-200">
+                                            <div className="text-slate-400 font-bold mb-1 uppercase tracking-tighter">Completion</div>
+                                            <div className="font-mono text-slate-700">{usage.completion_tokens || 0}</div>
+                                        </div>
+                                        <div className="text-center font-bold">
+                                            <div className="text-primary font-bold mb-1 uppercase tracking-tighter">Total</div>
+                                            <div className="font-mono text-primary">{usage.total_tokens || 0}</div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Details (Input/Output) */}
+                                {details && (
+                                    <div className="space-y-4">
+                                        {Object.entries(details).map(([key, val]) => (
+                                            <div key={key} className="space-y-1.5">
+                                                <div className="flex items-center justify-between">
+                                                    <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">{key}</label>
+                                                    <Button
+                                                        variant="ghost"
+                                                        size="xs"
+                                                        className="h-5 px-1.5 text-[9px] flex gap-1 items-center"
+                                                        onClick={(e) => { e.stopPropagation(); handleCopy(val, key); }}
+                                                    >
+                                                        <Copy className="w-2.5 h-2.5" /> Copy
+                                                    </Button>
+                                                </div>
+                                                <div className="bg-background border rounded-lg p-2 overflow-hidden shadow-inner">
+                                                    <JsonViewer src={val} collapsed={1} theme={theme} />
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+
+                                {/* Raw Data Fallback */}
+                                {!usage && !error && !details && (
+                                    <div className="text-xs text-slate-400 text-center py-4 bg-slate-50/50 rounded-lg border border-dashed italic">
+                                        No telemetry recorded for this step.
+                                    </div>
+                                )}
+                            </CardContent>
+                        </motion.div>
+                    )}
+                </AnimatePresence>
             </Card>
         </div>
     );
 };
-
-function ActivityIcon(props: any) {
-    return (
-        <svg
-            {...props}
-            xmlns="http://www.w3.org/2000/svg"
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-        >
-            <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
-        </svg>
-    )
-}

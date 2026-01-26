@@ -56,7 +56,7 @@ const STATUS_ICON_CONFIG: Record<string, { icon: React.ElementType; className: s
 
 const StatusIcon: React.FC<{ status: string }> = ({ status }) => {
   const { icon: Icon, className } = STATUS_ICON_CONFIG[status] || STATUS_ICON_CONFIG.pending;
-  
+
   return <Icon className={cn('w-4 h-4', className)} />;
 };
 
@@ -68,14 +68,14 @@ const formatRelativeTime = (timestamp: string): string => {
   const diffMins = Math.floor(diffSecs / 60);
   const diffHours = Math.floor(diffMins / 60);
   const diffDays = Math.floor(diffHours / 24);
-  
+
   if (diffSecs < 60) return '방금 전';
   if (diffMins < 60) return `${diffMins}분 전`;
   if (diffHours < 24) return `${diffHours}시간 전`;
   if (diffDays < 7) return `${diffDays}일 전`;
-  
-  return date.toLocaleDateString('ko-KR', { 
-    month: 'short', 
+
+  return date.toLocaleDateString('ko-KR', {
+    month: 'short',
     day: 'numeric',
     hour: '2-digit',
     minute: '2-digit'
@@ -93,19 +93,11 @@ const formatExactTime = (timestamp: string): string => {
   });
 };
 
-const TimelineNode: React.FC<{
-  item: TimelineItem;
-  isSelected?: boolean;
-  isCompare?: boolean;
-  onSelect?: () => void;
-  onCompare?: () => void;
-  onRollback?: () => void;
-  onPreview?: () => void;
-  compact?: boolean;
-  isLast?: boolean;
-}> = ({
+// 개별 노드 메모이제이션으로 대규모 타임라인 성능 최적화
+const TimelineNode = React.memo(({
   item,
   isSelected,
+  selectedId,
   isCompare,
   onSelect,
   onCompare,
@@ -113,12 +105,23 @@ const TimelineNode: React.FC<{
   onPreview,
   compact,
   isLast
+}: {
+  item: TimelineItem;
+  isSelected?: boolean;
+  selectedId?: string | null;
+  isCompare?: boolean;
+  onSelect?: () => void;
+  onCompare?: () => void;
+  onRollback?: () => void;
+  onPreview?: () => void;
+  compact?: boolean;
+  isLast?: boolean;
 }) => {
   return (
-    <div className="relative flex group">
+    <div className="relative flex group" role="listitem">
       {/* 타임라인 선 */}
-      <div className="flex flex-col items-center mr-4">
-        <div 
+      <div className="flex flex-col items-center mr-4" aria-hidden="true">
+        <div
           className={cn(
             "w-8 h-8 rounded-full border-2 flex items-center justify-center bg-background z-10",
             isSelected && "border-primary bg-primary/10",
@@ -132,20 +135,24 @@ const TimelineNode: React.FC<{
           <div className="w-0.5 h-full bg-border min-h-[20px]" />
         )}
       </div>
-      
+
       {/* 콘텐츠 */}
       <div className={cn(
         "flex-1 pb-4 min-w-0",
         compact && "pb-2"
       )}>
-        <div 
+        <div
           className={cn(
-            "p-3 rounded-lg border transition-colors cursor-pointer",
-            isSelected && "border-primary bg-primary/5",
-            isCompare && "border-purple-500 bg-purple-500/5",
-            !isSelected && !isCompare && "hover:bg-muted/50"
+            "p-3 rounded-lg border transition-colors cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-primary",
+            isSelected && "border-primary bg-primary/5 shadow-sm",
+            isCompare && "border-purple-500 bg-purple-500/5 shadow-sm",
+            !isSelected && !isCompare && "hover:bg-muted/50 hover:border-muted-foreground/20"
           )}
           onClick={onSelect}
+          tabIndex={0}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect?.(); } }}
+          aria-selected={isSelected}
+          role="button"
         >
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0 flex-1">
@@ -153,32 +160,32 @@ const TimelineNode: React.FC<{
                 <span className="font-medium text-sm truncate">{item.node_name}</span>
                 {item.has_external_effect && (
                   <Tooltip>
-                    <TooltipTrigger>
-                      <Badge variant="outline" className="text-xs px-1.5">
-                        외부
+                    <TooltipTrigger asChild>
+                      <Badge variant="outline" className="text-[10px] px-1.5 border-amber-500/50 text-amber-600 bg-amber-50 shrink-0">
+                        Side Effect
                       </Badge>
                     </TooltipTrigger>
                     <TooltipContent>
-                      외부 시스템에 영향을 미쳤습니다
+                      외부 시스템(DB, API 등)에 영구적인 변경을 가한 작업입니다.
                     </TooltipContent>
                   </Tooltip>
                 )}
                 {item.is_reversible === false && (
-                  <Badge variant="destructive" className="text-xs px-1.5">
+                  <Badge variant="destructive" className="text-[10px] px-1.5 shrink-0">
                     비가역
                   </Badge>
                 )}
               </div>
-              
+
               {!compact && item.description && (
-                <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
+                <p className="text-xs text-muted-foreground mt-1 line-clamp-2 italic">
                   {item.description}
                 </p>
               )}
-              
+
               <div className="flex items-center gap-2 mt-1">
                 <Tooltip>
-                  <TooltipTrigger>
+                  <TooltipTrigger asChild>
                     <span className="text-xs text-muted-foreground flex items-center gap-1">
                       <Clock className="w-3 h-3" />
                       {formatRelativeTime(item.timestamp)}
@@ -188,26 +195,27 @@ const TimelineNode: React.FC<{
                     {formatExactTime(item.timestamp)}
                   </TooltipContent>
                 </Tooltip>
-                
+
                 {item.branch_id && item.branch_id !== 'main' && (
-                  <Badge variant="secondary" className="text-xs px-1.5">
+                  <Badge variant="secondary" className="text-[10px] px-1.5">
                     <GitBranch className="w-3 h-3 mr-1" />
                     {item.branch_id}
                   </Badge>
                 )}
               </div>
             </div>
-            
+
             {/* 액션 버튼 */}
-            <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+            <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
               {onPreview && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
+                    <Button
+                      variant="ghost"
+                      size="icon"
                       className="h-7 w-7"
                       onClick={(e) => { e.stopPropagation(); onPreview(); }}
+                      aria-label="상태 미리보기"
                     >
                       <Eye className="w-3.5 h-3.5" />
                     </Button>
@@ -218,26 +226,34 @@ const TimelineNode: React.FC<{
               {onCompare && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className={cn("h-7 w-7", isCompare && "bg-purple-100")}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={cn(
+                        "h-7 w-7 transition-all",
+                        isCompare && "bg-purple-100 text-purple-600 border border-purple-200",
+                        isSelected && "hidden"
+                      )}
                       onClick={(e) => { e.stopPropagation(); onCompare(); }}
+                      aria-label="체크포인트 비교"
                     >
                       <GitCompare className="w-3.5 h-3.5" />
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>비교하기</TooltipContent>
+                  <TooltipContent>
+                    {isSelected ? "선택됨" : selectedId ? "이 항목과 비교" : "비교 대상으로 선택"}
+                  </TooltipContent>
                 </Tooltip>
               )}
               {onRollback && item.is_reversible !== false && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Button 
-                      variant="ghost" 
-                      size="icon" 
-                      className="h-7 w-7 text-orange-500 hover:text-orange-600"
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-orange-500 hover:text-orange-600 hover:bg-orange-50"
                       onClick={(e) => { e.stopPropagation(); onRollback(); }}
+                      aria-label="이 시점으로 롤백"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
                     </Button>
@@ -251,7 +267,16 @@ const TimelineNode: React.FC<{
       </div>
     </div>
   );
-};
+}, (prev, next) => {
+  // 얕은 비교 수동 구현 (성능 최적화)
+  return prev.isSelected === next.isSelected &&
+    prev.isCompare === next.isCompare &&
+    prev.selectedId === next.selectedId &&
+    prev.item.status === next.item.status &&
+    prev.item.checkpoint_id === next.item.checkpoint_id &&
+    prev.compact === next.compact &&
+    prev.isLast === next.isLast;
+});
 
 export const CheckpointTimeline: React.FC<CheckpointTimelineProps> = ({
   items,
@@ -264,6 +289,10 @@ export const CheckpointTimeline: React.FC<CheckpointTimelineProps> = ({
   onPreview,
   compact = false,
 }) => {
+  // 비교할 대상 노드 찾기
+  const selectedNode = items.find(i => i.checkpoint_id === selectedId);
+  const compareNode = items.find(i => i.checkpoint_id === compareId);
+
   if (loading) {
     return (
       <Card>
@@ -312,45 +341,58 @@ export const CheckpointTimeline: React.FC<CheckpointTimelineProps> = ({
 
   return (
     <TooltipProvider>
-      <Card>
-      <CardHeader className="pb-3">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-base flex items-center gap-2">
-            <History className="w-4 h-4" />
-            실행 타임라인
-          </CardTitle>
-          <Badge variant="secondary">{items.length}개</Badge>
-        </div>
-        {compareId && (
-          <CardDescription className="flex items-center gap-1 text-purple-600">
-            <GitCompare className="w-3 h-3" />
-            비교 모드 - 두 체크포인트를 선택하세요
-          </CardDescription>
-        )}
-      </CardHeader>
-      <CardContent>
-        <ScrollArea className={cn(
-          compact ? "max-h-[200px]" : "max-h-[400px]"
-        )}>
-          <div className="pr-4">
-            {items.map((item, index) => (
-              <TimelineNode
-                key={item.checkpoint_id}
-                item={item}
-                isSelected={selectedId === item.checkpoint_id}
-                isCompare={compareId === item.checkpoint_id}
-                onSelect={onSelect ? () => onSelect(item) : undefined}
-                onCompare={onCompare ? () => onCompare(item) : undefined}
-                onRollback={onRollback ? () => onRollback(item) : undefined}
-                onPreview={onPreview ? () => onPreview(item) : undefined}
-                compact={compact}
-                isLast={index === items.length - 1}
-              />
-            ))}
+      <Card className="border-muted-foreground/10 shadow-md overflow-hidden">
+        <CardHeader className="pb-3 bg-muted/20 border-b">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-base flex items-center gap-2">
+              <History className="w-4 h-4 text-primary" />
+              실행 타임라인
+            </CardTitle>
+            <Badge variant="outline" className="font-mono text-[10px]">{items.length} Checkpoints</Badge>
           </div>
-        </ScrollArea>
-      </CardContent>
-    </Card>
+          {compareId ? (
+            <CardDescription className="flex items-center gap-1.5 text-purple-600 font-medium animate-in fade-in slide-in-from-top-1">
+              <GitCompare className="w-3.5 h-3.5" />
+              <span>비교 중: </span>
+              <Badge variant="outline" className="h-5 text-[10px] border-purple-200 bg-purple-50 text-purple-700">
+                {selectedNode?.node_name || 'A'}
+              </Badge>
+              <span className="text-muted-foreground text-[10px]">vs</span>
+              <Badge variant="outline" className="h-5 text-[10px] border-purple-400 bg-purple-100 text-purple-800">
+                {compareNode?.node_name || 'B'}
+              </Badge>
+            </CardDescription>
+          ) : (
+            <CardDescription className="text-xs">
+              체크포인트를 선택하여 상태를 비교하거나 롤백할 수 있습니다.
+            </CardDescription>
+          )}
+        </CardHeader>
+        <CardContent className="pt-4">
+          <ScrollArea className={cn(
+            "rounded-md",
+            compact ? "max-h-[200px]" : "max-h-[450px]"
+          )}>
+            <div className="pr-4 pb-2" role="list">
+              {items.map((item, index) => (
+                <TimelineNode
+                  key={item.checkpoint_id}
+                  item={item}
+                  isSelected={selectedId === item.checkpoint_id}
+                  selectedId={selectedId}
+                  isCompare={compareId === item.checkpoint_id}
+                  onSelect={onSelect ? () => onSelect(item) : undefined}
+                  onCompare={onCompare ? () => onCompare(item) : undefined}
+                  onRollback={onRollback ? () => onRollback(item) : undefined}
+                  onPreview={onPreview ? () => onPreview(item) : undefined}
+                  compact={compact}
+                  isLast={index === items.length - 1}
+                />
+              ))}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
     </TooltipProvider>
   );
 };

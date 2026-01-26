@@ -1,9 +1,9 @@
 import React from 'react';
-import { Card, CardContent } from '@/components/ui/card';
+import { CardContent } from '@/components/ui/card';
 import { MotionCard } from '@/components/ui/motion-card';
 import NumberTicker from '@/components/ui/number-ticker';
 import { Progress } from '@/components/ui/progress';
-import { Activity, FileJson, X } from 'lucide-react';
+import { Activity, FileJson, X, Clock } from 'lucide-react';
 import StatusBadge from '@/components/StatusBadge';
 import WorkflowTimer from '@/components/WorkflowTimer';
 import { formatTimestamp } from '@/lib/utils';
@@ -20,16 +20,106 @@ interface Props {
   compact?: boolean;
 }
 
-// 렌더링과 무관한 헬퍼 함수
-const formatTimeRemaining = (seconds?: number): string => {
-  if (!seconds || seconds <= 0) return '';
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m`;
-  return '<1m';
-};
+// 개별 아이템을 별도 컴포넌트로 분리하여 리렌더링 최적화
+const ActiveWorkflowItem = React.memo(({
+  workflow,
+  isSelected,
+  onSelect,
+  onRemove,
+  compact
+}: {
+  workflow: NotificationItem;
+  isSelected: boolean;
+  onSelect: (id: string | null) => void;
+  onRemove?: (id: string) => void;
+  compact: boolean;
+}) => {
+  const payload = workflow.payload || {};
+  const current = payload.current_segment || 0;
+  const total = payload.total_segments || 1;
+  const rawProgress = Math.min(Math.round((current / Math.max(1, total)) * 100), 100);
 
+  const executionId = payload.execution_id || workflow.execution_id || workflow.id;
+  const isWorkflowRunning = ['RUNNING', 'STARTED', 'PAUSED_FOR_HITP'].includes(payload.status || workflow.status || '');
+  const workflowStart = (payload.start_time || workflow.start_time) as number | undefined;
+
+  // 컴팩트 모드 (Popover/Sidebar 용)
+  if (compact) {
+    return (
+      <MotionCard
+        isActive={isWorkflowRunning}
+        className={`cursor-pointer transition-all border-none shadow-none hover:bg-accent ${isSelected ? 'bg-primary/5' : ''}`}
+        onClick={() => onSelect(executionId)}
+      >
+        <CardContent className="p-2 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 truncate flex-1 min-w-0">
+              <Activity className={`w-3 h-3 shrink-0 ${isWorkflowRunning ? 'text-green-500' : 'text-muted-foreground'}`} />
+              <span className="text-xs font-medium truncate">
+                {payload.workflow_alias || payload.workflow_name || 'Untitled'}
+              </span>
+            </div>
+            <StatusBadge status={payload.status || workflow.status} className="h-4 text-[9px] px-1 shrink-0" />
+          </div>
+          {total > 1 && <Progress value={rawProgress} className="h-1" />}
+        </CardContent>
+      </MotionCard>
+    );
+  }
+
+  // 전체 모드 (Monitor Page 용)
+  return (
+    <MotionCard
+      isActive={isWorkflowRunning}
+      className={`cursor-pointer border-l-4 ${isWorkflowRunning ? 'border-l-green-500' : 'border-l-muted'} ${isSelected ? 'bg-primary/5 ring-1 ring-primary/20' : ''}`}
+      onClick={() => onSelect(executionId)}
+    >
+      <CardContent className="p-4 space-y-3">
+        <div className="flex justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-muted rounded-lg">
+              <FileJson className="w-4 h-4 text-primary" />
+            </div>
+            <div>
+              <div className="text-sm font-semibold truncate max-w-[200px]">
+                {payload.workflow_alias || payload.workflowId || 'Workflow Execution'}
+              </div>
+              <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                {workflowStart ? <WorkflowTimer startTime={workflowStart} status={payload.status || workflow.status} /> : 'Waiting...'}
+              </div>
+            </div>
+          </div>
+          <StatusBadge status={payload.status || workflow.status} />
+        </div>
+
+        {total > 1 && (
+          <div className="space-y-1.5">
+            <div className="flex justify-between text-[11px]">
+              <span className="text-muted-foreground">{payload.current_step_label || `Step ${current + 1} of ${total}`}</span>
+              <span className="font-mono font-medium"><NumberTicker value={rawProgress} />%</span>
+            </div>
+            <Progress value={rawProgress} className="h-1.5" />
+          </div>
+        )}
+
+        <div className="flex items-center justify-between text-[10px] text-muted-foreground pt-1">
+          <span>Updated: {formatTimestamp(payload.last_update_time ? payload.last_update_time * 1000 : workflow.receivedAt)}</span>
+          {onRemove && !isWorkflowRunning && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onRemove(executionId); }}
+              className="p-1 hover:bg-destructive/10 hover:text-destructive rounded-md transition-colors"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      </CardContent>
+    </MotionCard>
+  );
+});
+
+// 메인 리스트 컴포넌트
 const ActiveWorkflowList: React.FC<Props> = ({
   groupedActiveWorkflows,
   selectedExecutionId,
@@ -38,158 +128,30 @@ const ActiveWorkflowList: React.FC<Props> = ({
   onRemove,
   compact = false,
 }) => {
-  // Loading state with Skeleton
   if (isLoadingSaved) {
     return (
       <div className={`space-y-3 ${compact ? 'p-2' : 'p-4'}`}>
-        {[1, 2, 3].map((i) => (
-          <Skeleton key={i} className={`${compact ? 'h-16' : 'h-24'} w-full rounded-lg`} />
-        ))}
+        {[1, 2, 3].map((i) => <Skeleton key={i} className={compact ? 'h-12' : 'h-28'} />)}
       </div>
     );
   }
 
   if (groupedActiveWorkflows.length === 0) {
-    return (
-      <EmptyState
-        icon={Activity}
-        title="활성 워크플로우 없음"
-        description="워크플로우를 실행하면 여기에 표시됩니다."
-        compact={compact}
-      />
-    );
+    return <EmptyState icon={Activity} title="No Active Workflows" description="실행 중인 작업이 없습니다." compact={compact} />;
   }
 
   return (
     <div className={`space-y-3 ${compact ? 'p-2' : 'p-4'}`}>
-      {groupedActiveWorkflows.map((workflow) => {
-        // NOTE: In a real "list" scenario where each item needs independent smoothing,
-        // we'd ideally extract this item into a separate component that calls useSmoothTaskUpdates.
-        // For now, as optimization, we'll apply NumberTicker to the progress for visual smoothness.
-
-        const payload = workflow.payload || {};
-        const current = payload.current_segment || 0;
-        const total = payload.total_segments || 1;
-        const rawProgress = Math.round((current / Math.max(1, total)) * 100);
-        const isSelected = selectedExecutionId === (payload.execution_id || workflow.execution_id);
-        const workflowStart = (payload.start_time || workflow.start_time) as number | undefined;
-        const isWorkflowRunning = (payload.status || workflow.status) === 'RUNNING';
-
-        // Compact Mode Rendering
-        if (compact) {
-          return (
-            <MotionCard
-              key={workflow.id}
-              isActive={isWorkflowRunning} // Pulse only when running
-              className={`cursor-pointer transition-colors shadow-sm ${isSelected ? 'bg-primary/5' : 'hover:bg-accent'}`}
-              onClick={() => { onSelect(payload.execution_id || workflow.execution_id); }}
-            >
-              <CardContent className="p-3 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 min-w-0 flex-1">
-                    <div className={`p-1.5 rounded-md shrink-0 ${isWorkflowRunning ? 'bg-green-100 text-green-700' : 'bg-muted text-muted-foreground'}`}>
-                      <Activity className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="font-medium text-sm truncate">
-                      {payload.workflow_alias || payload.workflow_name || 'Workflow'}
-                    </div>
-                  </div>
-                  <StatusBadge status={payload.status || workflow.status} className="text-[10px] px-1.5 py-0 h-5" />
-                </div>
-
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
-                  <div className="flex items-center gap-2">
-                    {workflowStart && (
-                      <WorkflowTimer startTime={workflowStart} status={payload.status || workflow.status} />
-                    )}
-                  </div>
-                  {total > 1 && (
-                    <div className="flex items-center gap-0.5">
-                      <NumberTicker value={rawProgress} />
-                      <span>%</span>
-                    </div>
-                  )}
-                </div>
-
-                {total > 1 && (
-                  <Progress value={rawProgress} className="h-1" />
-                )}
-              </CardContent>
-            </MotionCard>
-          );
-        }
-
-        return (
-          <MotionCard
-            key={workflow.id}
-            isActive={isWorkflowRunning} // Pulse when running
-            className={`cursor-pointer transition-colors ${isSelected ? 'bg-primary/5' : 'hover:bg-accent'}`}
-            onClick={() => { onSelect(payload.execution_id || workflow.execution_id); }}
-          >
-            <CardContent className="p-4 space-y-2">
-              <div className="flex items-start justify-between">
-                <div className="flex items-center gap-2 flex-1 min-w-0">
-                  <div className="bg-muted p-2 rounded-md shrink-0">
-                    <FileJson className="w-4 h-4 text-primary" />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-sm truncate">
-                      {payload.workflow_alias || payload.workflowId || payload.workflow_name || workflow.workflow_name || 'Workflow'}
-                    </div>
-
-                  </div>
-                </div>
-                <div className="shrink-0">
-                  <StatusBadge status={payload.status || workflow.status} />
-                </div>
-              </div>
-
-              {workflowStart && (
-                <div className="flex items-center gap-2 px-1">
-                  <WorkflowTimer startTime={workflowStart} status={payload.status || workflow.status} className={isWorkflowRunning ? 'text-green-600' : 'text-orange-600'} />
-                </div>
-              )}
-
-              {total && total > 1 && (
-                <div className="space-y-1">
-                  <div className="flex justify-between text-xs">
-                    <span>{payload.current_step_label || `Step ${(payload.current_segment ?? 0) + 1}/${total}`}</span>
-                    <div className="flex items-center gap-0.5">
-                      <NumberTicker value={rawProgress} />
-                      <span>%</span>
-                    </div>
-                  </div>
-                  <Progress value={rawProgress} className={`h-2 ${isWorkflowRunning ? 'animate-pulse' : ''}`} />
-                  {payload.estimated_remaining_seconds && (
-                    <div className="text-xs text-muted-foreground">
-                      {payload.estimated_remaining_seconds ? formatTimeRemaining(payload.estimated_remaining_seconds) : null}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              <div className="flex justify-end pt-1 items-center gap-2">
-                <div className="text-[10px] text-muted-foreground flex items-center gap-1 flex-1">
-                  <Activity className="w-3 h-3" />
-                  Updated: {formatTimestamp((payload.last_update_time ? payload.last_update_time * 1000 : workflow.receivedAt) || Date.now())}
-                </div>
-                {onRemove && (['COMPLETE', 'FAILED', 'TIMED_OUT'].includes(payload.status || workflow.status || '') || !isWorkflowRunning) && (
-                  <button
-                    className="text-muted-foreground hover:text-foreground p-1 rounded-full hover:bg-muted transition-colors"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRemove(payload.execution_id || workflow.execution_id || workflow.id);
-                    }}
-                    title="Dismiss"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            </CardContent>
-          </MotionCard>
-        );
-      })}
+      {groupedActiveWorkflows.map((workflow) => (
+        <ActiveWorkflowItem
+          key={workflow.id}
+          workflow={workflow}
+          isSelected={selectedExecutionId === (workflow.payload?.execution_id || workflow.execution_id)}
+          onSelect={onSelect}
+          onRemove={onRemove}
+          compact={compact}
+        />
+      ))}
     </div>
   );
 };
