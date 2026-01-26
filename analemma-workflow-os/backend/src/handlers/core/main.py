@@ -1130,9 +1130,20 @@ def _hydrate_state_for_config(state: Dict[str, Any], config: Dict[str, Any]) -> 
 def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Standard LLM Chat Runner with Async detection and Retry/Hydration support."""
     
+    # [FIX] Handle both full node_def and nested config structure
+    # When called via NODE_REGISTRY from builder.py, config is full node_def: {id, type, config: {...}}
+    # When called directly, config may already be the inner config dict
+    # Normalize to always use the inner config if present
+    if 'config' in config and isinstance(config['config'], dict):
+        node_id = config.get('id', 'llm')
+        actual_config = config['config'].copy()
+        actual_config['id'] = node_id  # Preserve node_id
+    else:
+        actual_config = config
+    
     # 0. Hydrate Data (Pre-execution)
     # Ensure S3 pointers defined in input_variables are downloaded
-    exec_state = _hydrate_state_for_config(state, config)
+    exec_state = _hydrate_state_for_config(state, actual_config)
     
     # [FIX] Override MOCK_MODE from state if present (payload takes precedence over Lambda env var)
     # This allows LLM Simulator to force MOCK_MODE=false even when Lambda default is true
@@ -1151,12 +1162,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # [Cancellation] Check if execution has been cancelled before starting LLM call
     execution_arn = exec_state.get("execution_arn") or exec_state.get("ExecutionArn")
     if execution_arn and check_execution_cancelled(execution_arn):
-        logger.warning(f"🚨 Execution cancelled, aborting LLM call for node {config.get('id', 'llm')}")
+        logger.warning(f"🚨 Execution cancelled, aborting LLM call for node {actual_config.get('id', 'llm')}")
         raise Exception("Execution cancelled by user")
     
     # 1. Get Retry Config
-    # [Fix] None defense: config['retry_config']가 None일 수 있음
-    retry_config = config.get("retry_config") or {}
+    # [Fix] None defense: actual_config['retry_config']가 None일 수 있음
+    retry_config = actual_config.get("retry_config") or {}
     max_retries = retry_config.get("max_retries", 0)  # Default 0 means single attempt
     base_delay = retry_config.get("base_delay", DEFAULT_RETRY_BASE_DELAY)
     
@@ -1171,7 +1182,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     while attempt <= max_retries:
         # [Cancellation] Check if execution has been cancelled before each attempt
         if execution_arn and check_execution_cancelled(execution_arn):
-            logger.warning(f"🚨 Execution cancelled during retry attempt {attempt+1}, aborting LLM call for node {config.get('id', 'llm')}")
+            logger.warning(f"🚨 Execution cancelled during retry attempt {attempt+1}, aborting LLM call for node {actual_config.get('id', 'llm')}")
             raise Exception("Execution cancelled by user")
         
         try:
@@ -1191,12 +1202,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             current_attempt_state["attempt_count"] = attempt + 1
             
             # Render prompts with current attempt count
-            prompt_template = config.get("prompt_content") or config.get("user_prompt_template", "")
+            prompt_template = actual_config.get("prompt_content") or actual_config.get("user_prompt_template", "")
             prompt = _render_template(prompt_template, current_attempt_state)
             
             # [DEBUG] Log rendered prompt for troubleshooting empty prompt issues
             if not prompt or len(prompt.strip()) < 10:
-                logger.error(f"⚠️ [PROMPT DEBUG] Empty or very short prompt detected for node {config.get('id', 'llm')}")
+                logger.error(f"⚠️ [PROMPT DEBUG] Empty or very short prompt detected for node {actual_config.get('id', 'llm')}")
                 logger.error(f"⚠️ [PROMPT DEBUG] prompt_template: {prompt_template[:200] if prompt_template else 'NONE'}...")
                 logger.error(f"⚠️ [PROMPT DEBUG] rendered prompt: {prompt[:200] if prompt else 'EMPTY'}")
                 logger.error(f"⚠️ [PROMPT DEBUG] state keys: {list(current_attempt_state.keys())}")
@@ -1204,16 +1215,16 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 input_text_val = current_attempt_state.get('input_text', '__NOT_FOUND__')
                 logger.error(f"⚠️ [PROMPT DEBUG] input_text value: {str(input_text_val)[:100] if input_text_val != '__NOT_FOUND__' else 'NOT IN STATE'}")
             
-            system_prompt_tmpl = config.get("system_prompt", "")
+            system_prompt_tmpl = actual_config.get("system_prompt", "")
             system_prompt = _render_template(system_prompt_tmpl, current_attempt_state)
             
-            node_id = config.get("id", "llm")
+            node_id = actual_config.get("id", "llm")
 
             # [Test Logic] Simulate Rate Limit Error for retry testing
             if prompt and "SIMULATE_RATE_LIMIT_ERROR" in prompt:
                 logger.warning(f"🧪 Simulation triggered: Raising Rate Limit Error for node {node_id}")
                 # Check provider for appropriate exception type
-                provider = config.get("provider", "gemini")
+                provider = actual_config.get("provider", "gemini")
                 if provider == "gemini":
                     # Simulate Gemini rate limit (will be caught and retried)
                     raise Exception("429 Resource Exhausted: Quota exceeded for Gemini API")
@@ -1227,12 +1238,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             
             # 2. Check Async Conditions
             # node_id already defined above check async
-            # [Fix] None defense: config['llm_config']가 None일 수 있음
-            model = config.get("model") or (config.get("llm_config") or {}).get("model_id") or DEFAULT_LLM_MODEL
-            max_tokens = config.get("max_tokens") or (config.get("llm_config") or {}).get("max_tokens", DEFAULT_MAX_TOKENS)
-            temperature = config.get("temperature") or (config.get("llm_config") or {}).get("temperature", DEFAULT_TEMPERATURE)
+            # [Fix] None defense: actual_config['llm_config']가 None일 수 있음
+            model = actual_config.get("model") or (actual_config.get("llm_config") or {}).get("model_id") or DEFAULT_LLM_MODEL
+            max_tokens = actual_config.get("max_tokens") or (actual_config.get("llm_config") or {}).get("max_tokens", DEFAULT_MAX_TOKENS)
+            temperature = actual_config.get("temperature") or (actual_config.get("llm_config") or {}).get("temperature", DEFAULT_TEMPERATURE)
             
-            if should_use_async_llm(config):
+            if should_use_async_llm(actual_config):
                 logger.warning(f"🚨 Async required by heuristic for node {node_id}")
                 raise AsyncLLMRequiredException("Resource-intensive processing required")
 
@@ -1240,7 +1251,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             meta = {"model": model, "max_tokens": max_tokens, "attempt": attempt + 1, "provider": "gemini"}
             
             # [Fix] Manually trigger callbacks since we are using Boto3 directly
-            callbacks = config.get("callbacks", [])
+            callbacks = actual_config.get("callbacks", [])
             if callbacks:
                 for cb in callbacks:
                     if hasattr(cb, 'on_llm_start'):
@@ -1250,7 +1261,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             pass
 
             # Provider selection: Gemini (default) or Bedrock (fallback)
-            provider = config.get("provider", "gemini")
+            provider = actual_config.get("provider", "gemini")
             
             if provider == "gemini":
                 # Use Gemini Service (Native SDK)
