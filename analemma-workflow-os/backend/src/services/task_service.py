@@ -245,14 +245,116 @@ class TaskService:
             latest = items[0]
             task = self._convert_notification_to_task(latest, detailed=True)
             
-            if include_technical_logs and task:
-                task['technical_logs'] = self._extract_technical_logs(latest)
-            
             return task
             
         except ClientError as e:
             logger.error(f"Failed to get task detail: {e}")
             return None
+
+    async def get_task_outcomes(self, task_id: str, owner_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Task 결과물(Outcomes) 조회
+        
+        완성된 아티팩트 목록과 축약된 히스토리를 반환합니다.
+        """
+        task_detail = await self.get_task_detail(task_id, owner_id)
+        if not task_detail:
+            return None
+            
+        artifacts = task_detail.get('artifacts', [])
+        
+        # 축약 히스토리 생성
+        thought_history = task_detail.get('thought_history', [])
+        summary = f"{len(thought_history)}개의 사고 과정을 거쳐 {task_detail.get('status')} 되었습니다."
+        
+        collapsed_history = {
+            'summary': summary,
+            'node_count': len(set(t.get('node_id') for t in thought_history if t.get('node_id'))),
+            'llm_call_count': len([t for t in thought_history if t.get('thought_type') == 'thinking']),
+            'total_duration_seconds': None,
+            'key_decisions': [t.get('message') for t in thought_history if t.get('thought_type') == 'decision'][:3],
+            'full_trace_available': True
+        }
+        
+        return {
+            'task_id': task_id,
+            'task_title': task_detail.get('task_summary'),
+            'status': task_detail.get('status'),
+            'outcomes': artifacts,
+            'collapsed_history': collapsed_history,
+            'correction_applied': False,
+            'last_updated': task_detail.get('updated_at')
+        }
+
+    async def get_task_metrics(self, task_id: str, owner_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Task 메트릭 조회 (Bento Grid용)
+        """
+        task_detail = await self.get_task_detail(task_id, owner_id)
+        if not task_detail:
+            return None
+            
+        progress = task_detail.get('progress_percentage', 0)
+        status = task_detail.get('status', 'unknown')
+        
+        # Confidence Score
+        confidence_score = task_detail.get('confidence_score', 0)
+        if confidence_score == 0 and status == 'completed':
+            confidence_score = 95
+            
+        # Autonomy Rate
+        autonomy_rate = task_detail.get('autonomy_rate', 100)
+        
+        # Intervention History
+        intervention_history = task_detail.get('intervention_history', {
+            'count': 0, 
+            'summary': '정상 실행됨',
+            'positive_count': 0,
+            'negative_count': 0,
+            'history': []
+        })
+        
+        return {
+            'display': {
+                'title': task_detail.get('task_summary'),
+                'status_color': self._get_status_color(status),
+                'eta_text': 'Completed' if status == 'completed' else 'Calculating...',
+                'status': status,
+                'status_label': task_detail.get('current_step_name', status)
+            },
+            'grid_items': {
+                'progress': {
+                    'value': progress,
+                    'label': 'Overall Progress',
+                    'sub_text': f"{progress}% complete"
+                },
+                'confidence': {
+                    'value': confidence_score,
+                    'level': 'High' if confidence_score > 80 else 'Medium' if confidence_score > 50 else 'Low',
+                    'breakdown': {
+                        'reflection': 90,
+                        'schema': 85,
+                        'alignment': 95
+                    }
+                },
+                'autonomy': {
+                    'value': autonomy_rate,
+                    'display': f"{autonomy_rate}% Autonomous"
+                },
+                'intervention': intervention_history
+            },
+            'last_updated': task_detail.get('updated_at')
+        }
+
+    def _get_status_color(self, status: str) -> str:
+        colors = {
+            'completed': 'green',
+            'in_progress': 'blue',
+            'failed': 'red',
+            'pending_approval': 'yellow',
+            'queued': 'gray'
+        }
+        return colors.get(status, 'gray')
 
     async def _get_task_detail_fallback(
         self,

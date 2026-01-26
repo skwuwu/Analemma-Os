@@ -75,6 +75,266 @@ components:
         request:
           type: string
           description: User request for workflow design
+    # =========================================================================
+    # Task Manager Schemas (v2.1)
+    # =========================================================================
+    TaskSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [queued, in_progress, pending_approval, completed, failed, cancelled]
+        progress_pct:
+          type: number
+          minimum: 0
+          maximum: 100
+        eta_display:
+          type: string
+          description: "Human-readable ETA (e.g., '~3 min', 'Pending')"
+        confidence_score:
+          type: number
+          minimum: 0
+          maximum: 1
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        pending_action:
+          $ref: '#/components/schemas/PendingAction'
+        quick_fix:
+          $ref: '#/components/schemas/QuickFix'
+    TaskDetail:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [queued, in_progress, pending_approval, completed, failed, cancelled]
+        progress_pct:
+          type: number
+        eta_display:
+          type: string
+        confidence_score:
+          type: number
+        confidence_components:
+          $ref: '#/components/schemas/ConfidenceComponents'
+        autonomy_rate:
+          type: number
+          description: "0.0 ~ 1.0, ratio of auto-completed steps"
+        autonomy_display:
+          type: string
+          description: "Human-readable autonomy (e.g., '85% Auto')"
+        throughput:
+          type: number
+          description: "Tokens per minute"
+        throughput_display:
+          type: string
+          description: "Human-readable throughput (e.g., '1.2k tok/min')"
+        thought_history:
+          type: array
+          items:
+            $ref: '#/components/schemas/ThoughtStep'
+        artifacts:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        intervention_history:
+          $ref: '#/components/schemas/InterventionHistory'
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        pending_action:
+          $ref: '#/components/schemas/PendingAction'
+        quick_fix:
+          $ref: '#/components/schemas/QuickFix'
+    TaskListResponse:
+      type: object
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskSummary'
+        total:
+          type: integer
+          description: "Total number of tasks matching filter"
+        filters_applied:
+          type: object
+          properties:
+            status:
+              type: string
+              nullable: true
+            include_completed:
+              type: boolean
+    TaskMetrics:
+      type: object
+      properties:
+        confidence_score:
+          type: number
+        confidence_components:
+          $ref: '#/components/schemas/ConfidenceComponents'
+        autonomy_rate:
+          type: number
+        autonomy_display:
+          type: string
+        throughput:
+          type: number
+        throughput_display:
+          type: string
+        eta_display:
+          type: string
+    ConfidenceComponents:
+      type: object
+      properties:
+        data_quality:
+          type: number
+          description: "0.0 ~ 1.0"
+        model_certainty:
+          type: number
+          description: "0.0 ~ 1.0"
+        validation_pass_rate:
+          type: number
+          description: "0.0 ~ 1.0"
+    PendingAction:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [approve, reject, modify, provide_input]
+        message:
+          type: string
+        options:
+          type: array
+          items:
+            type: string
+        step_execution_id:
+          type: string
+    QuickFix:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [retry, skip, rollback, abort]
+        label:
+          type: string
+        description:
+          type: string
+    QuickFixRequest:
+      type: object
+      required: [task_id, action]
+      properties:
+        task_id:
+          type: string
+        action:
+          type: string
+          enum: [retry, skip, rollback, abort]
+        options:
+          type: object
+          description: "Action-specific options (e.g., {step_id: '...', with_modified_input: {...}})"
+    ThoughtStep:
+      type: object
+      properties:
+        step_id:
+          type: string
+        order:
+          type: integer
+        type:
+          type: string
+          enum: [planning, execution, validation, human_in_the_loop]
+        summary:
+          type: string
+        detail:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        duration_ms:
+          type: integer
+        status:
+          type: string
+          enum: [completed, in_progress, pending, failed, skipped]
+    Artifact:
+      type: object
+      properties:
+        artifact_id:
+          type: string
+        type:
+          type: string
+          enum: [code, document, data, image, config]
+        name:
+          type: string
+        summary:
+          type: string
+        content_url:
+          type: string
+          format: uri
+          description: "Pre-signed S3 URL for artifact content"
+        created_at:
+          type: string
+          format: date-time
+    InterventionHistory:
+      type: object
+      properties:
+        total_count:
+          type: integer
+        auto_resolved_count:
+          type: integer
+        human_resolved_count:
+          type: integer
+        interventions:
+          type: array
+          items:
+            $ref: '#/components/schemas/InterventionEntry'
+        summary:
+          type: string
+          description: "Human-readable summary (e.g., '3 interventions, 2 auto-resolved')"
+    InterventionEntry:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [validation_failure, approval_required, error_recovery, user_input]
+        timestamp:
+          type: string
+          format: date-time
+        resolution:
+          type: string
+          enum: [auto, human, pending]
+        description:
+          type: string
+    OutcomesResponse:
+      type: object
+      properties:
+        outcomes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Artifact'
+        total:
+          type: integer
+    ReasoningPathResponse:
+      type: object
+      properties:
+        artifact_id:
+          type: string
+        reasoning_steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/ThoughtStep'
+        total_steps:
+          type: integer
 security:
   - bearerAuth: []
 paths:
@@ -483,6 +743,163 @@ paths:
                     type: string
       security:
         - bearerAuth: []
+  # =========================================================================
+  # Task Manager API (v2.1)
+  # =========================================================================
+  /tasks:
+    get:
+      summary: List tasks
+      description: Get list of tasks for the authenticated user (business-friendly view)
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, in_progress, pending_approval, completed, failed, cancelled]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: include_completed
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: List of tasks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskListResponse'
+      security:
+        - bearerAuth: []
+  /tasks/{taskId}:
+    get:
+      summary: Get task detail
+      description: Get detailed task information including thought history and artifacts
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: include_technical_logs
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Task detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDetail'
+        '404':
+          description: Task not found
+      security:
+        - bearerAuth: []
+  /tasks/{taskId}/metrics:
+    get:
+      summary: Get task business metrics
+      description: Get business value metrics (ETA, confidence, throughput)
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskMetrics'
+        '404':
+          description: Task not found
+      security:
+        - bearerAuth: []
+  /tasks/{taskId}/outcomes:
+    get:
+      summary: Get task outcomes
+      description: Get task outcomes (artifacts) with collapsed history
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task outcomes
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutcomesResponse'
+        '404':
+          description: Task not found
+      security:
+        - bearerAuth: []
+  /tasks/{taskId}/outcomes/{artifactId}/reasoning:
+    get:
+      summary: Get reasoning path for artifact
+      description: Get detailed reasoning steps that led to a specific artifact
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: artifactId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Reasoning path
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReasoningPathResponse'
+        '404':
+          description: Artifact not found
+      security:
+        - bearerAuth: []
+  /tasks/quick-fix:
+    post:
+      summary: Execute quick fix action
+      description: Execute a quick fix action for a failed or stuck task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QuickFixRequest'
+      responses:
+        '200':
+          description: Quick fix executed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+                  new_execution_id:
+                    type: string
+        '400':
+          description: Invalid quick fix request
+        '404':
+          description: Task not found
+      security:
+        - bearerAuth: []
 
 # ===========================================================================
 # WebSocket API Security Information (Non-OpenAPI)
@@ -513,3 +930,4 @@ paths:
 # - ✅ Prevent stale connections with TTL-based connection cleanup
 # - ✅ ownerId-based notification isolation blocks cross-tenant access
 # ===========================================================================
+

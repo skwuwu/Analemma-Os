@@ -5,14 +5,6 @@
     "test_stage": 6,
     "nodes": [
         {
-            "id": "init_distributed",
-            "type": "operator",
-            "config": {
-                "code": "print('🚀 Stage 6: Distributed MAP_REDUCE + Loop + HITL 초기화')\nimport time\n\n# 분산 처리 설정\nstate['distributed_mode'] = True\nstate['distributed_strategy'] = 'MAP_REDUCE'\n\n# 20KB 더미 데이터 생성 (S3 오프로딩 트리거용)\ndef generate_dummy_content(size_kb=20):\n    base = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. '\n    return (base * (size_kb * 1024 // len(base) + 1))[:size_kb * 1024]\n\n# 파티션 데이터 생성 (12개 아이템 → 3개 파티션, 각 20KB)\npartition_count = state.get('partition_count', 3)\nitems_per_partition = state.get('items_per_partition', 4)\ndummy_size_kb = state.get('dummy_content_size_kb', 20)\n\nall_items = []\nfor i in range(partition_count * items_per_partition):\n    all_items.append({\n        'item_id': f'item_{i}',\n        'content': f'Document {i}: ' + generate_dummy_content(dummy_size_kb),\n        'partition_id': i // items_per_partition\n    })\n\nstate['all_items'] = all_items\nstate['partition_map'] = {}\nfor p_id in range(partition_count):\n    state['partition_map'][f'partition_{p_id}'] = [\n        item for item in all_items if item['partition_id'] == p_id\n    ]\n\nstate['partition_results'] = []\nstate['loop_iterations'] = []\nstate['hitl_events'] = []\nstate['providers_used'] = []\n# NOTE: 커널 aggregator가 자동 집계하므로 여기서는 초기화만\nstate['test_start_time'] = int(time.time() * 1000)\n\ntotal_size_kb = len(all_items) * dummy_size_kb\nprint(f'✅ 파티션 생성 완료: {partition_count}개 파티션, 총 {len(all_items)}개 아이템 (~{total_size_kb}KB)')",
-                "output_key": "init_result"
-            }
-        },
-        {
             "id": "distributed_map_processor",
             "type": "for_each",
             "config": {
@@ -46,12 +38,35 @@
                                         "response_schema": {
                                             "type": "object",
                                             "properties": {
-                                                "main_themes": {"type": "array", "items": {"type": "string"}},
-                                                "sentiment": {"type": "string", "enum": ["positive", "neutral", "negative"]},
-                                                "key_entities": {"type": "array", "items": {"type": "string"}},
-                                                "confidence_score": {"type": "number"}
+                                                "main_themes": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "sentiment": {
+                                                    "type": "string",
+                                                    "enum": [
+                                                        "positive",
+                                                        "neutral",
+                                                        "negative"
+                                                    ]
+                                                },
+                                                "key_entities": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "confidence_score": {
+                                                    "type": "number"
+                                                }
                                             },
-                                            "required": ["main_themes", "sentiment", "confidence_score"]
+                                            "required": [
+                                                "main_themes",
+                                                "sentiment",
+                                                "confidence_score"
+                                            ]
                                         },
                                         "output_key": "llm_analysis_raw"
                                     }
@@ -81,7 +96,11 @@
                         "config": {
                             "condition": "state.get('hitl_required', False)",
                             "question": "파티션 분석 결과를 승인하시겠습니까?",
-                            "context_keys": ["current_partition_id", "partition_llm_results", "loop_convergence_score"],
+                            "context_keys": [
+                                "current_partition_id",
+                                "partition_llm_results",
+                                "loop_convergence_score"
+                            ],
                             "auto_approve": true,
                             "auto_approve_delay_ms": 100,
                             "on_complete": {
@@ -118,10 +137,16 @@
         }
     ],
     "edges": [
-        {"source": "init_distributed", "target": "distributed_map_processor"},
-        {"source": "distributed_map_processor", "target": "merge_partition_results"},
-        {"source": "merge_partition_results", "target": "final_verification"}
+        {
+            "source": "distributed_map_processor",
+            "target": "merge_partition_results"
+        },
+        {
+            "source": "merge_partition_results",
+            "target": "final_verification"
+        }
     ],
+    "start_node": "distributed_map_processor",
     "initial_state": {
         "test_stage": 6,
         "distributed_mode": true,
@@ -134,8 +159,80 @@
         "hitl_checkpoint_at_partition": 1,
         "cost_guardrail_enabled": true,
         "max_tokens_total": 50000,
-        "dummy_content_size_kb": 20,
+        "dummy_content_size_kb": 2,
         "s3_offload_threshold_kb": 180,
-        "verify_s3_offload": true
+        "verify_s3_offload": true,
+        "partition_map": {
+            "partition_0": [
+                {
+                    "item_id": "item_0",
+                    "content": "Document 0: Dummy data for partition 0",
+                    "partition_id": 0
+                },
+                {
+                    "item_id": "item_1",
+                    "content": "Document 1: Dummy data for partition 0",
+                    "partition_id": 0
+                },
+                {
+                    "item_id": "item_2",
+                    "content": "Document 2: Dummy data for partition 0",
+                    "partition_id": 0
+                },
+                {
+                    "item_id": "item_3",
+                    "content": "Document 3: Dummy data for partition 0",
+                    "partition_id": 0
+                }
+            ],
+            "partition_1": [
+                {
+                    "item_id": "item_4",
+                    "content": "Document 4: Dummy data for partition 1",
+                    "partition_id": 1
+                },
+                {
+                    "item_id": "item_5",
+                    "content": "Document 5: Dummy data for partition 1",
+                    "partition_id": 1
+                },
+                {
+                    "item_id": "item_6",
+                    "content": "Document 6: Dummy data for partition 1",
+                    "partition_id": 1
+                },
+                {
+                    "item_id": "item_7",
+                    "content": "Document 7: Dummy data for partition 1",
+                    "partition_id": 1
+                }
+            ],
+            "partition_2": [
+                {
+                    "item_id": "item_8",
+                    "content": "Document 8: Dummy data for partition 2",
+                    "partition_id": 2
+                },
+                {
+                    "item_id": "item_9",
+                    "content": "Document 9: Dummy data for partition 2",
+                    "partition_id": 2
+                },
+                {
+                    "item_id": "item_10",
+                    "content": "Document 10: Dummy data for partition 2",
+                    "partition_id": 2
+                },
+                {
+                    "item_id": "item_11",
+                    "content": "Document 11: Dummy data for partition 2",
+                    "partition_id": 2
+                }
+            ]
+        },
+        "partition_results": [],
+        "loop_iterations": [],
+        "hitl_events": [],
+        "providers_used": []
     }
 }

@@ -1094,6 +1094,18 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /tasks/{id}
             Method: GET
+        GetTaskOutcomesEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /tasks/{id}/outcomes
+            Method: GET
+        GetTaskMetricsEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /tasks/{id}/metrics
+            Method: GET
 
   # --- Skills API Functions ---
   ListSkillsFunction:

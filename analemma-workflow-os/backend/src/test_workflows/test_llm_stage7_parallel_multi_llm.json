@@ -5,14 +5,6 @@
     "test_stage": 7,
     "nodes": [
         {
-            "id": "init_parallel",
-            "type": "operator",
-            "config": {
-                "code": "print('🚀 Stage 7: Parallel Multi-LLM + StateBag Merge 초기화')\nimport time\n\n# 20KB 더미 컨텍스트 생성 (S3 오프로딩 트리거용)\ndef generate_context(size_kb=20):\n    base = 'The quick brown fox jumps over the lazy dog. Cloud computing enables scalable infrastructure. '\n    return (base * (size_kb * 1024 // len(base) + 1))[:size_kb * 1024]\n\n# 병렬 브랜치 프롬프트 설정 (각 20KB 컨텍스트 포함)\ndummy_size_kb = state.get('dummy_content_size_kb', 20)\nbase_prompts = [\n    'Summarize the key benefits of cloud computing.',\n    'List 3 security best practices for AWS Lambda.',\n    'Explain serverless architecture in simple terms.',\n    'Compare containers vs serverless for microservices.',\n    'Describe event-driven architecture patterns.'\n]\n\n# 각 프롬프트에 대용량 컨텍스트 추가\nbranch_prompts = []\nfor p in base_prompts:\n    branch_prompts.append(p + '\\n\\nContext: ' + generate_context(dummy_size_kb))\n\nstate['branch_prompts'] = branch_prompts\nstate['parallel_branches'] = len(branch_prompts)\nstate['branch_configs'] = []\n\nfor idx, prompt in enumerate(branch_prompts):\n    state['branch_configs'].append({\n        'branch_id': idx,\n        'prompt': prompt,\n        'status': 'pending'\n    })\n\nstate['branch_results'] = []\nstate['hitl_events'] = []\nstate['branch_start_timestamps'] = []\nstate['merged_statebag'] = {}\n# NOTE: aggregated_cost 제거 - 커널 aggregator가 처리\nstate['parallel_start_time'] = int(time.time() * 1000)\n\ntotal_size_kb = len(branch_prompts) * dummy_size_kb\nprint(f'✅ 병렬 처리 준비 완료: {len(branch_prompts)}개 브랜치 (~{total_size_kb}KB)')",
-                "output_key": "init_result"
-            }
-        },
-        {
             "id": "parallel_branch_executor",
             "type": "for_each",
             "config": {
@@ -46,11 +38,24 @@
                                         "response_schema": {
                                             "type": "object",
                                             "properties": {
-                                                "summary": {"type": "string"},
-                                                "key_points": {"type": "array", "items": {"type": "string"}},
-                                                "confidence": {"type": "number"}
+                                                "summary": {
+                                                    "type": "string"
+                                                },
+                                                "key_points": {
+                                                    "type": "array",
+                                                    "items": {
+                                                        "type": "string"
+                                                    }
+                                                },
+                                                "confidence": {
+                                                    "type": "number"
+                                                }
                                             },
-                                            "required": ["summary", "key_points", "confidence"]
+                                            "required": [
+                                                "summary",
+                                                "key_points",
+                                                "confidence"
+                                            ]
                                         },
                                         "output_key": "llm_branch_raw"
                                     }
@@ -80,7 +85,11 @@
                         "config": {
                             "condition": "state.get('branch_hitl_required', False)",
                             "question": "브랜치 분석 결과를 승인하시겠습니까?",
-                            "context_keys": ["current_branch_id", "branch_summary", "branch_confidence"],
+                            "context_keys": [
+                                "current_branch_id",
+                                "branch_summary",
+                                "branch_confidence"
+                            ],
                             "auto_approve": true,
                             "auto_approve_delay_ms": 100,
                             "on_complete": {
@@ -117,10 +126,16 @@
         }
     ],
     "edges": [
-        {"source": "init_parallel", "target": "parallel_branch_executor"},
-        {"source": "parallel_branch_executor", "target": "merge_statebag"},
-        {"source": "merge_statebag", "target": "final_verification"}
+        {
+            "source": "parallel_branch_executor",
+            "target": "merge_statebag"
+        },
+        {
+            "source": "merge_statebag",
+            "target": "final_verification"
+        }
     ],
+    "start_node": "parallel_branch_executor",
     "initial_state": {
         "test_stage": 7,
         "parallel_branches": 5,
@@ -131,8 +146,34 @@
         "verify_statebag_merge_integrity": true,
         "expected_zero_loss": true,
         "verify_cost_aggregation": true,
-        "dummy_content_size_kb": 20,
+        "dummy_content_size_kb": 2,
         "s3_offload_threshold_kb": 180,
-        "verify_s3_offload": true
+        "verify_s3_offload": true,
+        "branch_configs": [
+            {
+                "branch_id": 0,
+                "prompt": "Summarize the key benefits of cloud computing. Context: Dummy data..."
+            },
+            {
+                "branch_id": 1,
+                "prompt": "List 3 security best practices for AWS Lambda. Context: Dummy data..."
+            },
+            {
+                "branch_id": 2,
+                "prompt": "Explain serverless architecture in simple terms. Context: Dummy data..."
+            },
+            {
+                "branch_id": 3,
+                "prompt": "Compare containers vs serverless for microservices. Context: Dummy data..."
+            },
+            {
+                "branch_id": 4,
+                "prompt": "Describe event-driven architecture patterns. Context: Dummy data..."
+            }
+        ],
+        "branch_results": [],
+        "hitl_events": [],
+        "branch_start_timestamps": [],
+        "merged_statebag": {}
     }
 }

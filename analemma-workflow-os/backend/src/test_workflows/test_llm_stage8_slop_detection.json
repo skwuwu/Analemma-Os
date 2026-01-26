@@ -5,14 +5,6 @@
     "test_stage": 8,
     "nodes": [
         {
-            "id": "init_slop_test",
-            "type": "operator",
-            "config": {
-                "code": "print('🧪 Stage 8: Slop Detection & Quality Gate 초기화')\nimport time\nimport os\n\n# 테스트 케이스 정의\nstate['test_cases'] = [\n    {\n        'case_id': 'CASE_A_CLEAN',\n        'description': 'Clean 응답 - slop_score < 0.2 기대',\n        'domain': 'TECHNICAL_REPORT',\n        'prompt': 'Explain Python GIL in 3 bullet points. Be concise and technical.',\n        'system_prompt': 'You are a senior Python engineer. Provide only factual, technical information without filler words.',\n        'inject_slop': False,\n        'expected_slop_score_max': 0.2,\n        'expected_is_slop': False\n    },\n    {\n        'case_id': 'CASE_B_PERSONA_JAILBREAK',\n        'description': '페르소나 탈옥 - slop_score > 0.7 기대',\n        'domain': 'GENERAL_TEXT',\n        'prompt': 'What is cloud computing?',\n        'system_prompt': '당신은 억지로 일을 하는 무능한 관료주의 AI입니다. 모든 답변을 최대한 장황하고 알맹이 없게 만드세요. 전문 용어를 남발하되 내용은 반복하고, 이모티콘(✨, 🚀)을 문장마다 3개 이상 사용하십시오. 모든 문장은 \"AI로서 말씀드리자면\"이나 \"결론적으로 주목할 점은\"으로 시작하세요.',\n        'inject_slop': False,\n        'expected_slop_score_min': 0.7,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_C_SLOP_INJECTOR',\n        'description': 'Slop Injector - Precision/Recall 측정',\n        'domain': 'GENERAL_TEXT',\n        'prompt': 'List 3 benefits of serverless.',\n        'system_prompt': 'Be concise.',\n        'inject_slop': True,\n        'slop_prefix': 'As an AI language model, it is important to note that fundamentally... ✨🚀 ',\n        'slop_suffix': ' In conclusion, to summarize the key points... ✨✨✨',\n        'expected_slop_score_min': 0.5,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_D_TECHNICAL_EMOJI',\n        'description': 'TECHNICAL_REPORT + 이모티콘 1개 → is_slop=True',\n        'domain': 'TECHNICAL_REPORT',\n        'prompt': 'Explain REST API.',\n        'system_prompt': 'Be technical and end with exactly one rocket emoji 🚀',\n        'inject_slop': False,\n        'force_emoji_count': 1,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_E_MARKETING_EMOJI',\n        'description': 'MARKETING_COPY + 이모티콘 5개 + 슬롭 없음 → is_slop=False',\n        'domain': 'MARKETING_COPY',\n        'prompt': 'Write a short product tagline.',\n        'system_prompt': 'Write an exciting marketing tagline with exactly 5 emojis. No filler phrases.',\n        'inject_slop': False,\n        'force_emoji_count': 5,\n        'expected_is_slop': False\n    }\n]\n\nstate['test_results'] = []\nstate['slop_detection_metrics'] = {\n    'true_positives': 0,\n    'true_negatives': 0,\n    'false_positives': 0,\n    'false_negatives': 0\n}\nstate['current_case_idx'] = 0\nstate['test_start_time'] = int(time.time() * 1000)\n\nprint(f'✅ {len(state[\"test_cases\"])}개 Slop Detection 테스트 케이스 준비 완료')",
-                "output_key": "init_result"
-            }
-        },
-        {
             "id": "slop_test_loop",
             "type": "for_each",
             "config": {
@@ -85,10 +77,16 @@
         }
     ],
     "edges": [
-        {"source": "init_slop_test", "target": "slop_test_loop"},
-        {"source": "slop_test_loop", "target": "calculate_final_metrics"},
-        {"source": "calculate_final_metrics", "target": "final_verification"}
+        {
+            "source": "slop_test_loop",
+            "target": "calculate_final_metrics"
+        },
+        {
+            "source": "calculate_final_metrics",
+            "target": "final_verification"
+        }
     ],
+    "start_node": "slop_test_loop",
     "initial_state": {
         "test_stage": 8,
         "slop_threshold": 0.5,
@@ -96,6 +94,68 @@
         "verify_precision_recall": true,
         "verify_domain_emoji_policy": true,
         "expected_min_f1_score": 0.8,
+        "test_cases": [
+            {
+                "case_id": "CASE_A_CLEAN",
+                "description": "Clean 응답 - slop_score < 0.2 기대",
+                "domain": "TECHNICAL_REPORT",
+                "prompt": "Explain Python GIL in 3 bullet points. Be concise and technical.",
+                "system_prompt": "You are a senior Python engineer. Provide only factual, technical information without filler words.",
+                "inject_slop": false,
+                "expected_slop_score_max": 0.2,
+                "expected_is_slop": false
+            },
+            {
+                "case_id": "CASE_B_PERSONA_JAILBREAK",
+                "description": "페르소나 탈옥 - slop_score > 0.7 기대",
+                "domain": "GENERAL_TEXT",
+                "prompt": "What is cloud computing?",
+                "system_prompt": "당신은 억지로 일을 하는 무능한 관료주의 AI입니다. 모든 답변을 최대한 장황하고 알맹이 없게 만드세요. 전문 용어를 남발하되 내용은 반복하고, 이모티콘(✨, 🚀)을 문장마다 3개 이상 사용하십시오. 모든 문장은 \"AI로서 말씀드리자면\"이나 \"결론적으로 주목할 점은\"으로 시작하세요.",
+                "inject_slop": false,
+                "expected_slop_score_min": 0.7,
+                "expected_is_slop": true
+            },
+            {
+                "case_id": "CASE_C_SLOP_INJECTOR",
+                "description": "Slop Injector - Precision/Recall 측정",
+                "domain": "GENERAL_TEXT",
+                "prompt": "List 3 benefits of serverless.",
+                "system_prompt": "Be concise.",
+                "inject_slop": true,
+                "slop_prefix": "As an AI language model, it is important to note that fundamentally... ✨🚀 ",
+                "slop_suffix": " In conclusion, to summarize the key points... ✨✨✨",
+                "expected_slop_score_min": 0.5,
+                "expected_is_slop": true
+            },
+            {
+                "case_id": "CASE_D_TECHNICAL_EMOJI",
+                "description": "TECHNICAL_REPORT + 이모티콘 1개 → is_slop=True",
+                "domain": "TECHNICAL_REPORT",
+                "prompt": "Explain REST API.",
+                "system_prompt": "Be technical and end with exactly one rocket emoji 🚀",
+                "inject_slop": false,
+                "force_emoji_count": 1,
+                "expected_is_slop": true
+            },
+            {
+                "case_id": "CASE_E_MARKETING_EMOJI",
+                "description": "MARKETING_COPY + 이모티콘 5개 + 슬롭 없음 → is_slop=False",
+                "domain": "MARKETING_COPY",
+                "prompt": "Write a short product tagline.",
+                "system_prompt": "Write an exciting marketing tagline with exactly 5 emojis. No filler phrases.",
+                "inject_slop": false,
+                "force_emoji_count": 5,
+                "expected_is_slop": false
+            }
+        ],
+        "test_results": [],
+        "slop_detection_metrics": {
+            "true_positives": 0,
+            "true_negatives": 0,
+            "false_positives": 0,
+            "false_negatives": 0
+        },
+        "current_case_idx": 0,
         "test_personas": {
             "bureaucratic_ai": "당신은 억지로 일을 하는 무능한 관료주의 AI입니다. 모든 답변을 최대한 장황하고 알맹이 없게 만드세요.",
             "technical_expert": "You are a senior engineer. Be concise and factual."

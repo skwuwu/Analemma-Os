@@ -110,11 +110,24 @@ async def lambda_handler(event, context):
         
         # 라우팅
         if task_id:
-            # GET /tasks/{id} - Task 상세 조회
-            if http_method == 'GET':
-                return await handle_get_task_detail(task_service, task_id, owner_id, event)
+            if path.endswith('/outcomes'):
+                # GET /tasks/{id}/outcomes
+                if http_method == 'GET':
+                    return await handle_get_task_outcomes(task_service, task_id, owner_id, event)
+                else:
+                    return _response(405, {'error': f'Method {http_method} not allowed'})
+            elif path.endswith('/metrics'):
+                # GET /tasks/{id}/metrics
+                if http_method == 'GET':
+                    return await handle_get_task_metrics(task_service, task_id, owner_id, event)
+                else:
+                    return _response(405, {'error': f'Method {http_method} not allowed'})
             else:
-                return _response(405, {'error': f'Method {http_method} not allowed'})
+                # GET /tasks/{id} - Task 상세 조회
+                if http_method == 'GET':
+                    return await handle_get_task_detail(task_service, task_id, owner_id, event)
+                else:
+                    return _response(405, {'error': f'Method {http_method} not allowed'})
         else:
             # GET /tasks - Task 목록 조회
             if http_method == 'GET':
@@ -149,8 +162,8 @@ async def handle_list_tasks(
         
         response_body = {
             'tasks': tasks,
-            'count': len(tasks),
-            'filters': {
+            'total': len(tasks),
+            'filters_applied': {
                 'status': status_filter,
                 'include_completed': include_completed
             }
@@ -191,6 +204,42 @@ async def handle_get_task_detail(
     except Exception as e:
         logger.error(f"Failed to get task detail: {e}")
         return _response(500, {'error': 'Failed to retrieve task detail'})
+
+
+async def handle_get_task_outcomes(
+    task_service: TaskService,
+    task_id: str,
+    owner_id: str,
+    event: Dict
+) -> Dict:
+    """Task Outcomes 조회 핸들러"""
+    try:
+        outcomes = await task_service.get_task_outcomes(task_id, owner_id)
+        if not outcomes:
+            return _response(404, {'error': 'Task not found'})
+            
+        return _response(200, outcomes)
+    except Exception as e:
+        logger.error(f"Failed to get task outcomes: {e}")
+        return _response(500, {'error': 'Failed to retrieve task outcomes'})
+
+
+async def handle_get_task_metrics(
+    task_service: TaskService,
+    task_id: str,
+    owner_id: str,
+    event: Dict
+) -> Dict:
+    """Task Metrics 조회 핸들러"""
+    try:
+        metrics = await task_service.get_task_metrics(task_id, owner_id)
+        if not metrics:
+            return _response(404, {'error': 'Task not found'})
+            
+        return _response(200, metrics)
+    except Exception as e:
+        logger.error(f"Failed to get task metrics: {e}")
+        return _response(500, {'error': 'Failed to retrieve task metrics'})
 
 
 # 동기 래퍼 (Lambda는 비동기 핸들러를 직접 지원하지 않음)
