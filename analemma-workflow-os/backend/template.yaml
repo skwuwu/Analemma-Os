@@ -300,8 +300,14 @@ Resources:
       CorsConfiguration:
         AllowOrigins: !Split [",", !Ref AllowedOrigins]
         AllowMethods: [GET, POST, PUT, DELETE, PATCH, OPTIONS]
-        AllowHeaders: [Authorization, Content-Type, "*"]
+        AllowHeaders: 
+          - Authorization
+          - Content-Type
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
         AllowCredentials: true
+        MaxAge: 300
       Auth:
         Authorizers:
           CognitoAuthorizer:
