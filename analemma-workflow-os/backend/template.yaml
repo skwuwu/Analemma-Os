@@ -1121,12 +1121,16 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /skills
             Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
         PublicEvent:
           Type: HttpApi
           Properties:
             ApiId: !Ref HttpApi
             Path: /skills/public
             Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   CreateSkillFunction:
     Type: AWS::Serverless::Function
@@ -1148,6 +1152,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /skills
             Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   GetSkillFunction:
     Type: AWS::Serverless::Function
@@ -1169,6 +1175,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /skills/{id}
             Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   UpdateSkillFunction:
     Type: AWS::Serverless::Function
@@ -1190,6 +1198,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /skills/{id}
             Method: PUT
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   DeleteSkillFunction:
     Type: AWS::Serverless::Function
@@ -1211,6 +1221,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /skills/{id}
             Method: DELETE
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   ListExecutionsFunction:
     Type: AWS::Serverless::Function
@@ -1330,6 +1342,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /notifications
             Method: GET
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   DismissNotificationFunction:
     Type: AWS::Serverless::Function
@@ -1351,6 +1365,8 @@ Resources:
             ApiId: !Ref HttpApi
             Path: /notifications/dismiss
             Method: POST
+            Auth:
+              Authorizer: CognitoAuthorizer
 
   # ============================================
   # 📁 MediaUploadFunction - 미디어 파일 업로드 API
