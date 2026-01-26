@@ -11,7 +11,8 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Config
-STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
+# [Fix] SKELETON_S3_BUCKET 폴백 추가 - SegmentRunnerService와 동일한 버킷 사용 보장
+STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
 METRIC_NAMESPACE = os.environ.get('METRIC_NAMESPACE', 'Analemma/MissionSimulator')
 
 # Step Functions client (lazy init)

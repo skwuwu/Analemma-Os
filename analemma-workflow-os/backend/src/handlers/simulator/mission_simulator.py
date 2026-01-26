@@ -133,7 +133,8 @@ def _count_lambda_invocations(execution_arn: str) -> int:
 METRIC_NAMESPACE = os.environ.get('METRIC_NAMESPACE', 'Analemma/MissionSimulator')
 DISTRIBUTED_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN')
 STANDARD_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
-STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
+# [Fix] SKELETON_S3_BUCKET 폴백 추가 - SegmentRunnerService와 동일한 버킷 사용 보장
+STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE')
 # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴 (로컬 테스트 시 사용)
 WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')

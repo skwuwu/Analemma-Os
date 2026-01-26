@@ -101,7 +101,8 @@ LLM_SIMULATOR_STATE_MACHINE_ARN = os.environ.get('LLM_SIMULATOR_STATE_MACHINE_AR
 # Fallback to distributed orchestrator if LLM Simulator SM not configured
 DISTRIBUTED_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN')
 STANDARD_STATE_MACHINE_ARN = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
-STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET')
+# [Fix] SKELETON_S3_BUCKET 폴백 추가 - SegmentRunnerService와 동일한 버킷 사용 보장
+STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
 
 # 🚨 IMPORTANT: LLM Simulator runs with MOCK_MODE=false
 MOCK_MODE = 'false'  # Real LLM calls!

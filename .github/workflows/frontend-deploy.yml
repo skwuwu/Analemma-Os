@@ -55,6 +55,14 @@ jobs:
           # Default PARAM_NAME_WS updated to match SSM parameter used in this repo
           PARAM_NAME_WS: ${{ secrets.WS_URL_SSM_PARAM || '/my-app/dev/websocket-url' }}
 
+      # 2.5. Inject Cognito configuration from secrets
+      - name: Set Cognito environment variables
+        run: |
+          echo "VITE_AWS_USER_POOL_ID=${{ secrets.COGNITO_USER_POOL_ID }}" >> .env.local
+          echo "VITE_AWS_USER_POOL_WEB_CLIENT_ID=${{ secrets.COGNITO_CLIENT_ID }}" >> .env.local
+          echo "VITE_AWS_REGION=${{ env.AWS_REGION }}" >> .env.local
+          echo "Cognito variables added to .env.local"
+
       # 3. Install dependencies and build
       - name: Install dependencies
         run: npm ci
