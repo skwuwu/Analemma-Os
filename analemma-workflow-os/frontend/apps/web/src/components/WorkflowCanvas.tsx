@@ -383,7 +383,7 @@ const WorkflowCanvasInner = () => {
       
       return () => clearTimeout(timeoutId);
     }
-  }, [recentChanges.length, nodes, edges, requestSuggestions, requestAudit]);
+  }, [recentChanges.length, requestSuggestions, requestAudit]);
 
   // 키보드 단축키 핸들러
   useEffect(() => {
