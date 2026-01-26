@@ -29,6 +29,12 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
   const isReconnecting = useRef(false);
   const maxReconnectAttempts = 10; // 최대 재연결 시도 횟수
 
+  // Store callbacks in refs to avoid recreating connect function
+  const optionsRef = useRef(options);
+  useEffect(() => {
+    optionsRef.current = options;
+  }, [options]);
+
   // 1. React Query for fetching saved notifications
   const {
     data: notifications = [],
@@ -314,7 +320,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
             updateNotificationsCache(notification);
 
             // Callback
-            options.onWorkflowStatusUpdate?.(notification);
+            optionsRef.current.onWorkflowStatusUpdate?.(notification);
 
             // Toast Logic
             if (notification.action === 'hitp_pause') {
@@ -334,13 +340,13 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
               }
             }
           } else if (data.type === 'workflow_component_stream') {
-            if (options.onWorkflowComponentStream) {
+            if (optionsRef.current.onWorkflowComponentStream) {
               try {
                 // Backend may send payload as object or JSON string
                 const componentData = typeof data.payload === 'string' 
                   ? JSON.parse(data.payload) 
                   : data.payload;
-                options.onWorkflowComponentStream(componentData);
+                optionsRef.current.onWorkflowComponentStream(componentData);
               } catch (e) {
                 console.error("Invalid component JSON:", data.payload, e);
               }
@@ -365,7 +371,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     } catch (e) {
       console.error('Failed to connect notifications WS', e);
     }
-  }, [cancelReconnect, options, queryClient, refetch, scheduleReconnect, updateNotificationsCache]);
+  }, [cancelReconnect, queryClient, refetch, scheduleReconnect, updateNotificationsCache]);
 
   // Keep connectRef updated with the latest connect function
   useEffect(() => {
