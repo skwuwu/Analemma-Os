@@ -186,9 +186,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     });
   }, [queryClient]);
 
-  // WebSocket 재연결 함수 - connectRef를 사용하여 최신 connect 함수 참조
-  const connectRef = useRef<() => Promise<void>>();
-
+  // WebSocket 재연결 함수
   const scheduleReconnect = useCallback(() => {
     if (reconnectAttempts.current >= maxReconnectAttempts) {
       console.error(`❌ WebSocket 재연결 최대 시도 횟수(${maxReconnectAttempts}) 초과. 수동 재연결 필요`);
@@ -209,10 +207,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
 
     reconnectTimeoutId.current = setTimeout(async () => {
       try {
-        // Use ref to get the latest connect function
-        if (connectRef.current) {
-          await connectRef.current();
-        }
+        await connectWebSocket();
       } catch (error) {
         console.error('❌ WebSocket 재연결 실패:', error);
         isReconnecting.current = false;
@@ -229,7 +224,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     isReconnecting.current = false;
   }, []);
 
-  const connect = useCallback(async () => {
+  const connectWebSocket = async () => {
     try {
       let url = WS_URL;
       if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
@@ -373,12 +368,11 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     } catch (e) {
       console.error('Failed to connect notifications WS', e);
     }
-  }, [cancelReconnect, queryClient, refetch, scheduleReconnect, updateNotificationsCache]);
+  };
 
-  // Keep connectRef updated with the latest connect function
-  useEffect(() => {
-    connectRef.current = connect;
-  }, [connect]);
+  const connect = useCallback(async () => {
+    await connectWebSocket();
+  }, []);
 
   const disconnect = useCallback(() => {
     wsRef.current?.close();
