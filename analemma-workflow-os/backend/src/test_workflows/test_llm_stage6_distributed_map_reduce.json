@@ -1,9 +1,38 @@
 {
     "workflow_name": "LLM Stage 6 - Distributed MAP_REDUCE + Loop + HITL",
-    "description": "분산 MAP_REDUCE 모드에서 LLM 호출, Loop 반복, HITL 승인 통합 검증",
-    "version": "2.1.0",
+    "description": "분산 MAP_REDUCE 모드에서 LLM 호출, Loop 반복, HITL 승인 통합 검증 (operator_official 리팩토링)",
+    "version": "2.2.0",
     "test_stage": 6,
     "nodes": [
+        {
+            "id": "init_distributed",
+            "type": "operator_official",
+            "config": {
+                "strategy": "merge_objects",
+                "params": {
+                    "objects": [
+                        {
+                            "distributed_mode": true,
+                            "distributed_strategy": "MAP_REDUCE",
+                            "partition_results": [],
+                            "loop_iterations": [],
+                            "hitl_events": [],
+                            "providers_used": []
+                        }
+                    ]
+                },
+                "output_key": "init_result"
+            }
+        },
+        {
+            "id": "set_start_time",
+            "type": "operator_official",
+            "config": {
+                "strategy": "timestamp",
+                "params": {"format": "epoch_ms"},
+                "output_key": "test_start_time"
+            }
+        },
         {
             "id": "distributed_map_processor",
             "type": "for_each",
@@ -14,11 +43,45 @@
                 "max_concurrency": 3,
                 "nodes": [
                     {
-                        "id": "partition_init",
-                        "type": "operator",
+                        "id": "partition_init_id",
+                        "type": "operator_official",
                         "config": {
-                            "code": "import time\n\npartition_key = list(state.get('current_partition', {}).keys())[0] if isinstance(state.get('current_partition'), dict) else 'partition_0'\npartition_items = state.get('current_partition', {}).get(partition_key, [])\npartition_id = int(partition_key.split('_')[-1]) if '_' in partition_key else 0\n\nstate['current_partition_id'] = partition_id\nstate['current_partition_items'] = partition_items\nstate['partition_start_time'] = int(time.time() * 1000)\nstate['partition_loop_count'] = 0\nstate['partition_llm_results'] = []\n\nprint(f'📦 파티션 {partition_id} 처리 시작: {len(partition_items)}개 아이템')",
-                            "output_key": "partition_init_result"
+                            "strategy": "deep_get",
+                            "input_key": "current_partition",
+                            "params": {"path": "partition_id", "default": 0},
+                            "output_key": "current_partition_id"
+                        }
+                    },
+                    {
+                        "id": "partition_init_items",
+                        "type": "operator_official",
+                        "config": {
+                            "strategy": "deep_get",
+                            "input_key": "current_partition",
+                            "params": {"path": "items", "default": []},
+                            "output_key": "current_partition_items"
+                        }
+                    },
+                    {
+                        "id": "partition_init_time",
+                        "type": "operator_official",
+                        "config": {
+                            "strategy": "timestamp",
+                            "params": {"format": "epoch_ms"},
+                            "output_key": "partition_start_time"
+                        }
+                    },
+                    {
+                        "id": "partition_init_counters",
+                        "type": "operator_official",
+                        "config": {
+                            "strategy": "merge_objects",
+                            "params": {
+                                "objects": [
+                                    {"partition_loop_count": 0, "partition_llm_results": [], "loop_convergence_score": 0}
+                                ]
+                            },
+                            "output_key": "partition_counters_init"
                         }
                     },
                     {
@@ -38,45 +101,44 @@
                                         "response_schema": {
                                             "type": "object",
                                             "properties": {
-                                                "main_themes": {
-                                                    "type": "array",
-                                                    "items": {
-                                                        "type": "string"
-                                                    }
-                                                },
-                                                "sentiment": {
-                                                    "type": "string",
-                                                    "enum": [
-                                                        "positive",
-                                                        "neutral",
-                                                        "negative"
-                                                    ]
-                                                },
-                                                "key_entities": {
-                                                    "type": "array",
-                                                    "items": {
-                                                        "type": "string"
-                                                    }
-                                                },
-                                                "confidence_score": {
-                                                    "type": "number"
-                                                }
+                                                "main_themes": {"type": "array", "items": {"type": "string"}},
+                                                "sentiment": {"type": "string", "enum": ["positive", "neutral", "negative"]},
+                                                "key_entities": {"type": "array", "items": {"type": "string"}},
+                                                "confidence_score": {"type": "number"}
                                             },
-                                            "required": [
-                                                "main_themes",
-                                                "sentiment",
-                                                "confidence_score"
-                                            ]
+                                            "required": ["main_themes", "sentiment", "confidence_score"]
                                         },
                                         "output_key": "llm_analysis_raw"
                                     }
                                 },
                                 {
-                                    "id": "update_loop_state",
-                                    "type": "operator",
+                                    "id": "parse_llm_result",
+                                    "type": "operator_official",
                                     "config": {
-                                        "code": "import json\n\npartition_id = state.get('current_partition_id', 0)\nloop_count = state.get('partition_loop_count', 0) + 1\nstate['partition_loop_count'] = loop_count\n\n# LLM 결과 파싱\nllm_raw = state.get('llm_analysis_raw', '{}')\ntry:\n    if isinstance(llm_raw, str):\n        llm_result = json.loads(llm_raw)\n    else:\n        llm_result = llm_raw\nexcept:\n    llm_result = {'confidence_score': 0.5}\n\n# 수렴 점수 업데이트\nconfidence = llm_result.get('confidence_score', 0.5)\nstate['loop_convergence_score'] = confidence\n\n# LLM 결과 저장\nstate['partition_llm_results'].append({\n    'iteration': loop_count,\n    'confidence': confidence,\n    'themes': llm_result.get('main_themes', []),\n    'sentiment': llm_result.get('sentiment', 'neutral')\n})\n\n# Provider 추적\nusage = state.get('usage', {})\nprovider = usage.get('provider', 'unknown')\nif provider not in state.get('providers_used', []):\n    state.setdefault('providers_used', []).append(provider)\n\nstate['loop_iterations'].append({\n    'partition_id': partition_id,\n    'iteration': loop_count,\n    'llm_called': True,\n    'confidence': confidence\n})\n\nprint(f'🔄 파티션 {partition_id} Loop {loop_count}: confidence={confidence:.2f}')",
-                                        "output_key": "loop_update_result"
+                                        "strategy": "json_parse",
+                                        "input_key": "llm_analysis_raw",
+                                        "params": {"strict": false, "default": {"confidence_score": 0.5, "main_themes": [], "sentiment": "neutral"}},
+                                        "output_key": "llm_parsed"
+                                    }
+                                },
+                                {
+                                    "id": "extract_confidence",
+                                    "type": "operator_official",
+                                    "config": {
+                                        "strategy": "deep_get",
+                                        "input_key": "llm_parsed",
+                                        "params": {"path": "confidence_score", "default": 0.5},
+                                        "output_key": "loop_convergence_score"
+                                    }
+                                },
+                                {
+                                    "id": "increment_loop_count",
+                                    "type": "operator_official",
+                                    "config": {
+                                        "strategy": "math_expression",
+                                        "input_key": "partition_loop_count",
+                                        "params": {"expression": "x + 1", "default": 1},
+                                        "output_key": "partition_loop_count"
                                     }
                                 }
                             ]
@@ -84,10 +146,15 @@
                     },
                     {
                         "id": "check_hitl_trigger",
-                        "type": "operator",
+                        "type": "operator_official",
                         "config": {
-                            "code": "partition_id = state.get('current_partition_id', 0)\nhitl_checkpoint = state.get('hitl_checkpoint_at_partition', 1)\n\nif partition_id == hitl_checkpoint and state.get('hitl_enabled', True):\n    state['hitl_required'] = True\n    state['pre_hitl_state_keys'] = list(state.keys())\n    print(f'⏸️ 파티션 {partition_id}에서 HITL 체크포인트 발동')\nelse:\n    state['hitl_required'] = False\n    print(f'✅ 파티션 {partition_id}: HITL 불필요, 계속 진행')",
-                            "output_key": "hitl_check_result"
+                            "strategy": "if_else",
+                            "params": {
+                                "condition": "$.current_partition_id == $.hitl_checkpoint_at_partition and $.hitl_enabled == true",
+                                "then": true,
+                                "else": false
+                            },
+                            "output_key": "hitl_required"
                         }
                     },
                     {
@@ -96,57 +163,144 @@
                         "config": {
                             "condition": "state.get('hitl_required', False)",
                             "question": "파티션 분석 결과를 승인하시겠습니까?",
-                            "context_keys": [
-                                "current_partition_id",
-                                "partition_llm_results",
-                                "loop_convergence_score"
-                            ],
+                            "context_keys": ["current_partition_id", "loop_convergence_score"],
                             "auto_approve": true,
-                            "auto_approve_delay_ms": 100,
-                            "on_complete": {
-                                "code": "partition_id = state.get('current_partition_id', 0)\nstate['post_hitl_state_keys'] = list(state.keys())\nstate['hitl_events'].append({\n    'partition_id': partition_id,\n    'pre_hitl_state_keys': state.get('pre_hitl_state_keys', []),\n    'post_hitl_state_keys': state.get('post_hitl_state_keys', []),\n    'decision': 'approved'\n})\nprint(f'✅ 파티션 {partition_id} HITL 승인 완료')"
-                            }
+                            "auto_approve_delay_ms": 100
                         }
                     },
                     {
-                        "id": "finalize_partition",
-                        "type": "operator",
+                        "id": "finalize_partition_time",
+                        "type": "operator_official",
                         "config": {
-                            "code": "import time\n\npartition_id = state.get('current_partition_id', 0)\nend_time = int(time.time() * 1000)\nstart_time = state.get('partition_start_time', end_time)\n\n# 파티션 결과 집계 - 커널 aggregator가 자동 합산하므로 개별 usage만 포함\nusage = state.get('usage', {})\nresult = {\n    'partition_id': partition_id,\n    'status': 'completed',\n    'loop_iterations': state.get('partition_loop_count', 0),\n    'final_confidence': state.get('loop_convergence_score', 0),\n    'llm_results': state.get('partition_llm_results', []),\n    'usage': usage,  # 개별 usage - 커널이 평탄화(Flatten) 후 합산\n    'latency_ms': end_time - start_time\n}\n\n# ⚠️ race condition 방지: aggregated_usage 직접 수정 금지!\n# 커널 레벨 aggregator가 partition_results[].usage를 자동 집계함\n\nprint(f'✅ 파티션 {partition_id} 완료: {result[\"loop_iterations\"]} iterations, confidence={result[\"final_confidence\"]:.2f}')\nstate['partition_final_result'] = result",
-                            "output_key": "partition_result"
+                            "strategy": "timestamp",
+                            "params": {"format": "epoch_ms"},
+                            "output_key": "partition_end_time"
+                        }
+                    },
+                    {
+                        "id": "build_partition_result",
+                        "type": "operator_official",
+                        "config": {
+                            "strategy": "merge_objects",
+                            "params": {
+                                "objects": []
+                            },
+                            "input": {
+                                "partition_id": "{{current_partition_id}}",
+                                "status": "completed",
+                                "loop_iterations": "{{partition_loop_count}}",
+                                "final_confidence": "{{loop_convergence_score}}",
+                                "usage": "{{usage}}"
+                            },
+                            "output_key": "partition_final_result"
                         }
                     }
                 ]
             }
         },
         {
-            "id": "merge_partition_results",
-            "type": "operator",
+            "id": "count_completed_partitions",
+            "type": "operator_official",
             "config": {
-                "code": "import time\n\npartition_results = state.get('partition_results', [])\n\n# 결과 병합\nall_themes = []\nall_sentiments = []\ntotal_confidence = 0\n\nfor p_result in partition_results:\n    if isinstance(p_result, dict):\n        for llm_result in p_result.get('llm_results', []):\n            all_themes.extend(llm_result.get('themes', []))\n            all_sentiments.append(llm_result.get('sentiment', 'neutral'))\n        total_confidence += p_result.get('final_confidence', 0)\n\n# 중복 제거\nunique_themes = list(set(all_themes))\n\n# 최종 sentiment 결정\nsentiment_counts = {}\nfor s in all_sentiments:\n    sentiment_counts[s] = sentiment_counts.get(s, 0) + 1\nfinal_sentiment = max(sentiment_counts, key=sentiment_counts.get) if sentiment_counts else 'neutral'\n\n# 평균 confidence\navg_confidence = total_confidence / len(partition_results) if partition_results else 0\nstate['loop_convergence_score'] = avg_confidence\n\nstate['merged_output'] = {\n    'unique_themes': unique_themes,\n    'final_sentiment': final_sentiment,\n    'average_confidence': avg_confidence,\n    'partition_count': len(partition_results)\n}\n\nstate['final_merged_result'] = state['merged_output']\n\nend_time = int(time.time() * 1000)\nstate['test_end_time'] = end_time\nstate['total_latency_ms'] = end_time - state.get('test_start_time', end_time)\n\nprint(f'✅ MAP_REDUCE 병합 완료: {len(unique_themes)} themes, sentiment={final_sentiment}, confidence={avg_confidence:.2f}')",
-                "output_key": "merge_result"
+                "strategy": "list_filter",
+                "input_key": "partition_results",
+                "params": {
+                    "condition": "$.status == 'completed'"
+                },
+                "output_key": "completed_partitions"
             }
         },
         {
-            "id": "final_verification",
-            "type": "operator",
+            "id": "count_total_iterations",
+            "type": "operator_official",
             "config": {
-                "code": "partition_results = state.get('partition_results', [])\ncompleted = len([p for p in partition_results if isinstance(p, dict) and p.get('status') == 'completed'])\nexpected = state.get('partition_count', 3)\n\nhitl_count = len(state.get('hitl_events', []))\nloop_iterations = len(state.get('loop_iterations', []))\n\n# 커널 aggregator가 집계한 usage 사용 (개별 partition 결과에서 평탄화)\ntotal_tokens = 0\ntotal_cost = 0\nfor p in partition_results:\n    if isinstance(p, dict):\n        usage = p.get('usage', {})\n        total_tokens += usage.get('total_tokens', usage.get('input_tokens', 0) + usage.get('output_tokens', 0))\n        total_cost += usage.get('cost', 0)\n\n# S3 오프로딩 여부 확인\ns3_offloaded = state.get('_s3_offload_triggered', False)\nstate_size_kb = len(str(state)) // 1024\n\nif completed >= expected:\n    state['TEST_RESULT'] = f'✅ STAGE6 SUCCESS: {completed}/{expected} partitions, {loop_iterations} iters, {hitl_count} HITLs, {total_tokens} tokens, ${total_cost:.4f}, S3={s3_offloaded} ({state_size_kb}KB)'\nelse:\n    state['TEST_RESULT'] = f'❌ STAGE6 PARTIAL: {completed}/{expected} partitions completed'\n\nprint(state['TEST_RESULT'])",
-                "output_key": "verification_result"
+                "strategy": "list_reduce",
+                "input_key": "partition_results",
+                "params": {
+                    "operation": "sum",
+                    "field": "loop_iterations"
+                },
+                "output_key": "total_loop_iterations"
+            }
+        },
+        {
+            "id": "calc_avg_confidence",
+            "type": "operator_official",
+            "config": {
+                "strategy": "list_reduce",
+                "input_key": "partition_results",
+                "params": {
+                    "operation": "avg",
+                    "field": "final_confidence"
+                },
+                "output_key": "average_confidence"
+            }
+        },
+        {
+            "id": "set_end_time",
+            "type": "operator_official",
+            "config": {
+                "strategy": "timestamp",
+                "params": {"format": "epoch_ms"},
+                "output_key": "test_end_time"
+            }
+        },
+        {
+            "id": "count_completed",
+            "type": "operator_official",
+            "config": {
+                "strategy": "list_count",
+                "input_key": "completed_partitions",
+                "output_key": "completed_count"
+            }
+        },
+        {
+            "id": "count_hitl_events",
+            "type": "operator_official",
+            "config": {
+                "strategy": "list_count",
+                "input_key": "hitl_events",
+                "params": {"default": 0},
+                "output_key": "hitl_count"
+            }
+        },
+        {
+            "id": "check_success",
+            "type": "operator_official",
+            "config": {
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.completed_count >= $.partition_count",
+                    "then": "SUCCESS",
+                    "else": "PARTIAL"
+                },
+                "output_key": "test_status"
+            }
+        },
+        {
+            "id": "build_test_result",
+            "type": "operator_official",
+            "config": {
+                "strategy": "string_template",
+                "params": {
+                    "template": "✅ STAGE6 {{test_status}}: {{completed_count}}/{{partition_count}} partitions, {{total_loop_iterations}} iterations, {{hitl_count}} HITLs, avg_confidence={{average_confidence}}"
+                },
+                "output_key": "TEST_RESULT"
             }
         }
     ],
     "edges": [
-        {
-            "source": "distributed_map_processor",
-            "target": "merge_partition_results"
-        },
-        {
-            "source": "merge_partition_results",
-            "target": "final_verification"
-        }
+        {"source": "init_distributed", "target": "set_start_time"},
+        {"source": "set_start_time", "target": "distributed_map_processor"},
+        {"source": "distributed_map_processor", "target": "count_completed_partitions"},
+        {"source": "count_completed_partitions", "target": "count_total_iterations"},
+        {"source": "count_total_iterations", "target": "calc_avg_confidence"},
+        {"source": "calc_avg_confidence", "target": "set_end_time"},
+        {"source": "set_end_time", "target": "count_completed"},
+        {"source": "count_completed", "target": "count_hitl_events"},
+        {"source": "count_hitl_events", "target": "check_success"},
+        {"source": "check_success", "target": "build_test_result"}
     ],
-    "start_node": "distributed_map_processor",
     "initial_state": {
         "test_stage": 6,
         "distributed_mode": true,
@@ -157,82 +311,40 @@
         "loop_convergence_threshold": 0.8,
         "hitl_enabled": true,
         "hitl_checkpoint_at_partition": 1,
+        "hitl_events": [],
         "cost_guardrail_enabled": true,
         "max_tokens_total": 50000,
-        "dummy_content_size_kb": 2,
         "s3_offload_threshold_kb": 180,
         "verify_s3_offload": true,
-        "partition_map": {
-            "partition_0": [
-                {
-                    "item_id": "item_0",
-                    "content": "Document 0: Dummy data for partition 0",
-                    "partition_id": 0
-                },
-                {
-                    "item_id": "item_1",
-                    "content": "Document 1: Dummy data for partition 0",
-                    "partition_id": 0
-                },
-                {
-                    "item_id": "item_2",
-                    "content": "Document 2: Dummy data for partition 0",
-                    "partition_id": 0
-                },
-                {
-                    "item_id": "item_3",
-                    "content": "Document 3: Dummy data for partition 0",
-                    "partition_id": 0
-                }
-            ],
-            "partition_1": [
-                {
-                    "item_id": "item_4",
-                    "content": "Document 4: Dummy data for partition 1",
-                    "partition_id": 1
-                },
-                {
-                    "item_id": "item_5",
-                    "content": "Document 5: Dummy data for partition 1",
-                    "partition_id": 1
-                },
-                {
-                    "item_id": "item_6",
-                    "content": "Document 6: Dummy data for partition 1",
-                    "partition_id": 1
-                },
-                {
-                    "item_id": "item_7",
-                    "content": "Document 7: Dummy data for partition 1",
-                    "partition_id": 1
-                }
-            ],
-            "partition_2": [
-                {
-                    "item_id": "item_8",
-                    "content": "Document 8: Dummy data for partition 2",
-                    "partition_id": 2
-                },
-                {
-                    "item_id": "item_9",
-                    "content": "Document 9: Dummy data for partition 2",
-                    "partition_id": 2
-                },
-                {
-                    "item_id": "item_10",
-                    "content": "Document 10: Dummy data for partition 2",
-                    "partition_id": 2
-                },
-                {
-                    "item_id": "item_11",
-                    "content": "Document 11: Dummy data for partition 2",
-                    "partition_id": 2
-                }
-            ]
-        },
-        "partition_results": [],
-        "loop_iterations": [],
-        "hitl_events": [],
-        "providers_used": []
+        "partition_map": [
+            {
+                "partition_id": 0,
+                "items": [
+                    {"item_id": "item_0", "content": "Document 0: Analysis of cloud computing paradigms and their impact on modern enterprise architecture. The evolution of distributed systems has fundamentally changed how organizations approach scalability and reliability."},
+                    {"item_id": "item_1", "content": "Document 1: Serverless computing represents a significant shift in application deployment strategies, enabling developers to focus on business logic rather than infrastructure management."},
+                    {"item_id": "item_2", "content": "Document 2: Container orchestration platforms like Kubernetes have become essential for managing microservices at scale, providing automated deployment, scaling, and operations."},
+                    {"item_id": "item_3", "content": "Document 3: Event-driven architectures enable loose coupling between services, improving system resilience and allowing for independent scaling of components."}
+                ]
+            },
+            {
+                "partition_id": 1,
+                "items": [
+                    {"item_id": "item_4", "content": "Document 4: Machine learning operations (MLOps) bridges the gap between data science experimentation and production deployment, ensuring reproducibility and monitoring."},
+                    {"item_id": "item_5", "content": "Document 5: API gateway patterns provide centralized management of cross-cutting concerns like authentication, rate limiting, and request transformation."},
+                    {"item_id": "item_6", "content": "Document 6: Infrastructure as Code (IaC) enables version-controlled, repeatable infrastructure provisioning, reducing configuration drift and improving auditability."},
+                    {"item_id": "item_7", "content": "Document 7: Observability practices combining logs, metrics, and traces provide comprehensive visibility into distributed system behavior and performance."}
+                ]
+            },
+            {
+                "partition_id": 2,
+                "items": [
+                    {"item_id": "item_8", "content": "Document 8: Zero-trust security models assume no implicit trust, requiring verification for every access request regardless of network location."},
+                    {"item_id": "item_9", "content": "Document 9: Data mesh architectures decentralize data ownership, treating data as a product with dedicated teams responsible for quality and accessibility."},
+                    {"item_id": "item_10", "content": "Document 10: Edge computing brings computation closer to data sources, reducing latency and bandwidth requirements for IoT and real-time applications."},
+                    {"item_id": "item_11", "content": "Document 11: GitOps practices extend DevOps principles to infrastructure and application delivery, using Git as the single source of truth."}
+                ]
+            }
+        ],
+        "large_context_for_s3_test": "This is a large context block designed to trigger S3 offloading when the state size exceeds the threshold. The quick brown fox jumps over the lazy dog. Cloud computing enables scalable infrastructure. Serverless architectures reduce operational overhead. Microservices promote modularity and independent deployment. Container orchestration automates application lifecycle management. Event-driven systems enable reactive and resilient applications. API gateways centralize cross-cutting concerns. Infrastructure as Code ensures reproducible environments. Observability provides insights into distributed system behavior. Zero-trust security assumes breach and verifies continuously. Data mesh decentralizes data ownership and governance. Edge computing reduces latency for real-time applications. GitOps extends version control to infrastructure management. Machine learning operations bridge experimentation and production. Continuous integration and deployment accelerate software delivery. Site reliability engineering balances feature velocity with system stability. Chaos engineering proactively identifies system weaknesses. Feature flags enable controlled rollouts and experimentation. Service mesh provides observability and security for microservices. Platform engineering creates self-service infrastructure capabilities."
     }
 }
