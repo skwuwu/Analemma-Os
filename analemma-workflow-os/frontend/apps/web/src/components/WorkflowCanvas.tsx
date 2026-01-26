@@ -377,8 +377,11 @@ const WorkflowCanvasInner = () => {
   useEffect(() => {
     if (recentChanges.length > 0) {
       const timeoutId = setTimeout(() => {
-        requestSuggestions({ nodes, edges });
-        requestAudit({ nodes, edges });
+        // Capture current nodes/edges at callback execution time
+        const currentNodes = useWorkflowStore.getState().nodes;
+        const currentEdges = useWorkflowStore.getState().edges;
+        requestSuggestions({ nodes: currentNodes, edges: currentEdges });
+        requestAudit({ nodes: currentNodes, edges: currentEdges });
       }, 2000); // 2초 디바운스
       
       return () => clearTimeout(timeoutId);
