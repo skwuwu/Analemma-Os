@@ -1242,6 +1242,8 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             model = actual_config.get("model") or (actual_config.get("llm_config") or {}).get("model_id") or DEFAULT_LLM_MODEL
             max_tokens = actual_config.get("max_tokens") or (actual_config.get("llm_config") or {}).get("max_tokens", DEFAULT_MAX_TOKENS)
             temperature = actual_config.get("temperature") or (actual_config.get("llm_config") or {}).get("temperature", DEFAULT_TEMPERATURE)
+            # [Fix] Extract response_schema for structured output (JSON mode)
+            response_schema = actual_config.get("response_schema") or (actual_config.get("llm_config") or {}).get("response_schema")
             
             if should_use_async_llm(actual_config):
                 logger.warning(f"🚨 Async required by heuristic for node {node_id}")
@@ -1330,7 +1332,8 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             user_prompt=prompt,
                             system_instruction=system_prompt,
                             max_output_tokens=max_tokens,
-                            temperature=temperature
+                            temperature=temperature,
+                            response_schema=response_schema  # [Fix] Enable JSON mode when schema provided
                         )
                     
                     # Extract text from Gemini response structure
@@ -2142,8 +2145,9 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         logger.warning(f"for_each config missing input_list_key/items_path: {config.keys()}")
         return {output_key: []}
     
-    if "." in input_list_key:
-        input_list_key = input_list_key.split(".")[-1] # Simple extraction for now
+    # [Fix] Remove broken path simplification - _get_nested_value already handles dot-paths!
+    # OLD (WRONG): if "." in input_list_key: input_list_key = input_list_key.split(".")[-1]
+    # The input_list_key should be kept as-is (e.g., "input_items.items_to_process")
         
     # [Critical Guard] Validate essential config before proceeding
     if not input_list_key:

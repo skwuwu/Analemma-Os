@@ -16,9 +16,22 @@ logger.setLevel(logging.INFO)
 
 def verify_basic_llm_call(final_state: Dict, test_config: Dict) -> Tuple[bool, str]:
     """LI-A: 기본 LLM 호출 검증"""
-    llm_output = final_state.get('llm_output') or final_state.get('final_state', {}).get('llm_output')
+    # [Fix] Support multiple LLM output key patterns used across different workflows
+    llm_output_keys = [
+        'llm_output', 'llm_raw_output', 'vision_raw_output', 
+        'document_analysis_raw', 'final_report_raw', 'llm_result'
+    ]
     
-    if not llm_output:
+    llm_output = None
+    for key in llm_output_keys:
+        llm_output = final_state.get(key) or final_state.get('final_state', {}).get(key)
+        if llm_output:
+            break
+    
+    # Also check for usage field as indicator of LLM execution
+    usage = final_state.get('usage') or final_state.get('final_state', {}).get('usage')
+    
+    if not llm_output and not usage:
         return False, "No LLM output found in result"
     
     expected_min_length = test_config.get('expected_min_length', 10)

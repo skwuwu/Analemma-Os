@@ -121,13 +121,30 @@ class OperatorStrategy(str, Enum):
 # =============================================================================
 
 def _json_parse(input_val: Any, params: Dict[str, Any]) -> Any:
-    """Parse JSON string to object."""
+    """Parse JSON string to object.
+    
+    Handles common LLM output formats:
+    - Plain JSON: {"key": "value"}
+    - Markdown code blocks: ```json\n{"key": "value"}\n```
+    - Mixed content with JSON embedded
+    """
+    import re
+    
     if input_val is None:
         return params.get("default", None)
     if isinstance(input_val, (dict, list)):
         return input_val  # Already parsed
+    
+    text = str(input_val).strip()
+    
+    # Try to extract JSON from markdown code blocks (```json ... ```)
+    # This handles LLM responses that wrap JSON in markdown
+    code_block_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+    if code_block_match:
+        text = code_block_match.group(1).strip()
+    
     try:
-        return json.loads(str(input_val))
+        return json.loads(text)
     except json.JSONDecodeError as e:
         if params.get("strict", True):
             raise ValueError(f"Invalid JSON: {e}")

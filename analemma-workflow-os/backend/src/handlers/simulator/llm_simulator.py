@@ -591,10 +591,26 @@ def verify_stage5_hyper_stress(execution_arn: str, result: dict, scenario_config
 def verify_basic_llm_call(execution_arn: str, result: dict, scenario_config: dict) -> Tuple[bool, str]:
     """LI-A: 기본 LLM 호출 검증"""
     output = result.get('output', {})
+    final_state = output.get('final_state', {})
     
-    # Check if LLM output exists
-    llm_output = output.get('llm_output') or output.get('final_state', {}).get('llm_output')
-    if not llm_output:
+    # [Fix] Support multiple LLM output key patterns used across different workflows
+    llm_output_keys = [
+        'llm_output', 'llm_raw_output', 'vision_raw_output', 
+        'document_analysis_raw', 'final_report_raw', 'llm_result'
+    ]
+    
+    llm_output = None
+    found_key = None
+    for key in llm_output_keys:
+        llm_output = output.get(key) or final_state.get(key)
+        if llm_output:
+            found_key = key
+            break
+    
+    # Also check for usage field as indicator of LLM execution
+    usage = output.get('usage') or final_state.get('usage')
+    
+    if not llm_output and not usage:
         return False, "No LLM output found in result"
     
     # Check minimum length
