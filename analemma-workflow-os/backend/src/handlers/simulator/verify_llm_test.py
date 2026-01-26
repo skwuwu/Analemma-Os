@@ -1769,6 +1769,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     
     v2.3: Nested final_state 자동 추출
     - Step Functions 출력이 {status, final_state: {...}} 구조일 때 자동 추출
+    - final_state가 비어있으면 test_result.output에서 추출
     """
     logger.info(f"Verifying LLM test: {event.get('scenario_key')}")
     
@@ -1779,10 +1780,27 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     verification_type = event.get('verification_type', 'standard')
     
     # ========================================
-    # v2.3: Nested final_state 자동 추출
+    # v2.3: Robust final_state 추출
     # ========================================
-    # Step Functions 출력이 {status: "SUCCEEDED", final_state: {...}} 구조일 때
-    # 실제 final_state가 중첩되어 있으면 자동 추출
+    # final_state가 비어있거나 None이면 test_result.output에서 추출
+    if not final_state or (isinstance(final_state, dict) and not final_state):
+        test_result = event.get('test_result', {})
+        output = test_result.get('output', {})
+        
+        # output이 문자열이면 파싱
+        if isinstance(output, str):
+            try:
+                output = json.loads(output)
+            except (json.JSONDecodeError, ValueError):
+                logger.warning(f"Failed to parse test_result.output as JSON")
+                output = {}
+        
+        # output.final_state 또는 output 자체를 사용
+        if isinstance(output, dict):
+            final_state = output.get('final_state', output)
+            logger.info(f"[Fallback] Extracted final_state from test_result.output, keys: {list(final_state.keys())[:5] if isinstance(final_state, dict) else 'N/A'}")
+    
+    # final_state가 문자열이면 파싱
     if isinstance(final_state, str):
         try:
             final_state = json.loads(final_state)
