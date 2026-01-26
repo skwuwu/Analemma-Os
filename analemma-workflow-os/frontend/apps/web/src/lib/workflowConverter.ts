@@ -35,8 +35,16 @@ export interface BackendWorkflow {
 
 export interface BackendNode {
   id: string;
-  type: 'llm_chat' | 'operator' | 'api_call' | 'db_query' | 'for_each' | 'router' | 'trigger';
-  provider?: 'openai' | 'bedrock';
+  type: 
+    // 사용자가 프론트엔드에서 생성하는 타입들 (코드가 자동 변환)
+    | 'operator'       // operator, trigger, control(human) → operator
+    | 'llm_chat'       // aiModel → llm_chat
+    | 'for_each'       // control(loop/for_each) → for_each
+    | 'parallel_group' // control(parallel) → parallel_group
+    | 'subgraph'       // group → subgraph
+    | 'api_call'       // operator(api_call) → api_call
+    | 'db_query';      // operator(db_query) → db_query
+  provider?: 'openai' | 'bedrock' | 'anthropic' | 'google';
   model?: string;
   prompt_content?: string;
   system_prompt?: string;
@@ -44,16 +52,32 @@ export interface BackendNode {
   max_tokens?: number;
   writes_state_key?: string;
   sets?: { [key: string]: any };
+  config?: { [key: string]: any };  // nested config object for complex nodes
   position?: { x: number; y: number };
+  hitp?: boolean;  // Human-in-the-loop flag
+  // Parallel support
+  branches?: Array<{ branch_id?: string; nodes?: BackendNode[]; sub_workflow?: { nodes: BackendNode[] } }>;
+  // For-each support
+  items_path?: string;
+  input_list_key?: string;
+  sub_workflow?: { nodes: BackendNode[] };
+  item_key?: string;
+  output_key?: string;
+  max_iterations?: number;
+  // Subgraph support
+  subgraph_ref?: string;
+  subgraph_inline?: { nodes: BackendNode[]; edges: BackendEdge[] };
   [key: string]: any;
 }
 
 export interface BackendEdge {
-  type: 'normal' | 'edge' | 'flow' | 'if' | 'while' | 'hitp' | 'conditional_edge';
+  type: 'normal' | 'edge' | 'flow' | 'if' | 'while' | 'hitp' | 'conditional_edge' | 'pause';
   source: string;
   target: string;
   condition?: string | { lhs: string; op: string; rhs: string };
-  mapping?: { [key: string]: string };
+  // conditional_edge support
+  router_func?: string;  // router function name registered in NODE_REGISTRY
+  mapping?: { [key: string]: string };  // router return value -> target node mapping
   max_iterations?: number;
   [key: string]: any;
 }
@@ -85,6 +109,24 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
     case 'operator':
       backendNode.type = 'operator';
       backendNode.sets = node.data.sets || {};
+      // api_call, db_query는 operatorType으로 분기
+      if (node.data.operatorType === 'api_call') {
+        backendNode.type = 'api_call';
+        backendNode.config = {
+          url: node.data.url || '',
+          method: node.data.method || 'GET',
+          headers: node.data.headers || {},
+          params: node.data.params || {},
+          json: node.data.json || node.data.body,
+          timeout: node.data.timeout || 10,
+        };
+      } else if (node.data.operatorType === 'database' || node.data.operatorType === 'db_query') {
+        backendNode.type = 'db_query';
+        backendNode.config = {
+          query: node.data.query || '',
+          connection_string: node.data.connection_string || node.data.connectionString,
+        };
+      }
       break;
     case 'trigger':
       backendNode.type = 'operator';
@@ -96,17 +138,54 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       };
       break;
     case 'control':
-      backendNode.type = 'operator';
-      backendNode.sets = {
-        _frontend_type: 'control',
-        control_type: node.data.controlType || 'while',
-        whileCondition: node.data.whileCondition,
-        max_iterations: node.data.max_iterations || 10
-      };
+      // Control type → 백엔드 타입으로 자동 분류
+      const controlType = node.data.controlType || 'loop';
+      
+      if (controlType === 'for_each' || controlType === 'loop') {
+        // for_each: 리스트 반복 처리
+        backendNode.type = 'for_each';
+        backendNode.config = {
+          items_path: node.data.items_path || node.data.itemsPath || 'state.items',
+          item_key: node.data.item_key || node.data.itemKey || 'item',
+          output_key: node.data.output_key || node.data.outputKey || 'for_each_results',
+          max_iterations: node.data.max_iterations || node.data.maxIterations || 20,
+          sub_workflow: node.data.sub_workflow || { nodes: [] },
+        };
+      } else if (controlType === 'parallel') {
+        // parallel: 병렬 브랜치 실행
+        backendNode.type = 'parallel_group';
+        backendNode.config = {
+          branches: node.data.branches || [],
+        };
+      } else if (controlType === 'human') {
+        // human: 사람 개입 (HITP)
+        backendNode.type = 'operator';
+        backendNode.hitp = true;
+        backendNode.sets = {
+          _frontend_type: 'control',
+          control_type: 'human',
+          approval_message: node.data.approval_message || node.data.condition,
+        };
+      } else {
+        // 기타 control (while 등): operator로 저장하고 엣지로 처리
+        backendNode.type = 'operator';
+        backendNode.sets = {
+          _frontend_type: 'control',
+          control_type: controlType,
+          whileCondition: node.data.whileCondition,
+          max_iterations: node.data.max_iterations || 10
+        };
+      }
+      break;
+    case 'group':
+      // group: 서브그래프
+      backendNode.type = 'subgraph';
+      backendNode.subgraph_ref = node.data.subgraph_ref || node.data.subgraphRef || node.data.groupId;
+      backendNode.subgraph_inline = node.data.subgraph_inline || node.data.subgraphInline;
       break;
     default:
       backendNode.type = 'operator';
-      backendNode.sets = {};
+      backendNode.sets = node.data?.sets || {};
   }
 
   // Persist position if available so frontend layout is preserved
@@ -306,10 +385,77 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           ...node.sets
         };
         break;
-      default:
+      case 'for_each':
+        // for_each → control(for_each)
+        frontendType = 'control';
+        label = 'For Each';
+        const forEachConfig = node.config || {};
+        nodeData = {
+          label,
+          controlType: 'for_each',
+          items_path: forEachConfig.items_path || node.items_path,
+          itemsPath: forEachConfig.items_path || node.items_path,
+          item_key: forEachConfig.item_key || node.item_key || 'item',
+          output_key: forEachConfig.output_key || node.output_key || 'for_each_results',
+          max_iterations: forEachConfig.max_iterations || node.max_iterations || 20,
+          sub_workflow: forEachConfig.sub_workflow || node.sub_workflow,
+        };
+        break;
+      case 'parallel_group':
+        // parallel_group → control(parallel)
+        frontendType = 'control';
+        label = 'Parallel';
+        const parallelConfig = node.config || {};
+        nodeData = {
+          label,
+          controlType: 'parallel',
+          branches: parallelConfig.branches || node.branches || [],
+        };
+        break;
+      case 'subgraph':
+        // subgraph → group
+        frontendType = 'group';
+        label = 'Group';
+        nodeData = {
+          label,
+          subgraph_ref: node.subgraph_ref || node.config?.subgraph_ref,
+          subgraphRef: node.subgraph_ref || node.config?.subgraph_ref,
+          subgraph_inline: node.subgraph_inline || node.config?.subgraph_inline,
+        };
+        break;
+      case 'api_call':
+        // api_call → operator(api_call)
         frontendType = 'operator';
-        label = 'Block';
-        nodeData = { label };
+        label = 'API Call';
+        const apiConfig = node.config || {};
+        nodeData = {
+          label,
+          operatorType: 'api_call',
+          url: apiConfig.url || node.url || '',
+          method: apiConfig.method || node.method || 'GET',
+          headers: apiConfig.headers || node.headers || {},
+          params: apiConfig.params || node.params || {},
+          json: apiConfig.json || node.json,
+          timeout: apiConfig.timeout || node.timeout || 10,
+        };
+        break;
+      case 'db_query':
+        // db_query → operator(database)
+        frontendType = 'operator';
+        label = 'Database Query';
+        const dbConfig = node.config || {};
+        nodeData = {
+          label,
+          operatorType: 'database',
+          query: dbConfig.query || node.query || '',
+          connection_string: dbConfig.connection_string || node.connection_string,
+        };
+        break;
+      default:
+        // 기타 런타임 전용 타입(vision, skill_executor 등)은 일반 operator로 표시
+        frontendType = 'operator';
+        label = node.type || 'Block';
+        nodeData = { label, ...(node.config || node.sets || {}) };
     }
 
     return {

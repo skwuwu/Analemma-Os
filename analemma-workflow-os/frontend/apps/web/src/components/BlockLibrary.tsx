@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Brain, Clock, Webhook, Zap, MessageSquare, Mail, Globe, Calendar, Github, Database, MessageCircle, FolderOpen, Search, GripVertical, ChevronDown, ChevronRight, type LucideIcon } from 'lucide-react';
+import { Brain, Clock, Webhook, Zap, MessageSquare, Mail, Globe, Calendar, Github, Database, MessageCircle, FolderOpen, Search, GripVertical, ChevronDown, ChevronRight, Repeat, GitFork, type LucideIcon } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -54,6 +54,8 @@ export const BLOCK_CATEGORIES: { title: string; type: BlockType; items: Omit<Blo
     title: 'Controls',
     type: 'control',
     items: [
+      { id: 'for_each', label: 'For Each Loop', icon: Repeat, description: 'Iterate over a list of items and execute sub-workflow for each', defaultData: { controlType: 'for_each', items_path: 'state.items', item_key: 'item', output_key: 'results', max_iterations: 20 } },
+      { id: 'parallel', label: 'Parallel Branches', icon: GitFork, description: 'Execute multiple branches concurrently', defaultData: { controlType: 'parallel', branches: [] } },
       { id: 'while', label: 'While Loop', icon: Clock, description: 'Repeat workflow steps while a condition is true', defaultData: { controlType: 'loop', condition: 'count < 5' } },
       { id: 'confirmation', label: 'User Intervention', icon: MessageSquare, description: 'Pause workflow execution for human approval or input', defaultData: { controlType: 'human', condition: 'approval_required' } },
     ]

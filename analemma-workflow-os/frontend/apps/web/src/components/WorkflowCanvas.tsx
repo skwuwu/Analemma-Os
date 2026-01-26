@@ -9,6 +9,7 @@ import {
   ReactFlowInstance,
   BackgroundVariant,
   useReactFlow,
+  useOnSelectionChange,
   SelectionMode,
   OnSelectionChangeParams,
 } from '@xyflow/react';

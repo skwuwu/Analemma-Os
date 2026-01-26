@@ -112,6 +112,14 @@ const NodeForm = ({
     controlType: node?.data.controlType || 'while',
     whileCondition: node?.data.whileCondition || '',
     maxIterations: node?.data.max_iterations || node?.data.maxIterations || 10,
+    // for_each 필드
+    items_path: node?.data.items_path || 'state.items',
+    item_key: node?.data.item_key || 'item',
+    output_key: node?.data.output_key || 'results',
+    // parallel 필드
+    branches: node?.data.branches || [],
+    // human(HITL) 필드
+    approval_message: node?.data.approval_message || '',
   }));
 
   const [selectedTargetNode, setSelectedTargetNode] = useState<string>('');
@@ -145,6 +153,15 @@ const NodeForm = ({
         if (formData.controlType === 'while') {
           updates.whileCondition = formData.whileCondition;
           updates.maxIterations = Number(formData.maxIterations);
+        } else if (formData.controlType === 'for_each') {
+          updates.items_path = formData.items_path;
+          updates.item_key = formData.item_key;
+          updates.output_key = formData.output_key;
+          updates.max_iterations = Number(formData.maxIterations);
+        } else if (formData.controlType === 'parallel') {
+          updates.branches = formData.branches;
+        } else if (formData.controlType === 'human') {
+          updates.approval_message = formData.approval_message;
         }
         break;
     }
@@ -278,6 +295,69 @@ const NodeForm = ({
                 <div className="space-y-2">
                     <Label>Max Iterations</Label>
                     <Input type="number" value={formData.maxIterations} onChange={(e) => updateField('maxIterations', e.target.value)} />
+                </div>
+                </>
+            )}
+            {formData.controlType === 'for_each' && (
+                <>
+                <div className="space-y-2">
+                    <Label>Items Path</Label>
+                    <Input 
+                      value={formData.items_path} 
+                      onChange={(e) => updateField('items_path', e.target.value)} 
+                      placeholder="e.g. state.items or $.data.list" 
+                    />
+                    <p className="text-xs text-muted-foreground">반복할 배열의 경로 (JSONPath 또는 점 표기법)</p>
+                </div>
+                <div className="space-y-2">
+                    <Label>Item Key</Label>
+                    <Input 
+                      value={formData.item_key} 
+                      onChange={(e) => updateField('item_key', e.target.value)} 
+                      placeholder="item" 
+                    />
+                    <p className="text-xs text-muted-foreground">각 반복에서 현재 아이템을 참조할 변수명</p>
+                </div>
+                <div className="space-y-2">
+                    <Label>Output Key</Label>
+                    <Input 
+                      value={formData.output_key} 
+                      onChange={(e) => updateField('output_key', e.target.value)} 
+                      placeholder="results" 
+                    />
+                    <p className="text-xs text-muted-foreground">결과가 저장될 배열 변수명</p>
+                </div>
+                <div className="space-y-2">
+                    <Label>Max Iterations</Label>
+                    <Input type="number" value={formData.maxIterations} onChange={(e) => updateField('maxIterations', e.target.value)} />
+                </div>
+                </>
+            )}
+            {formData.controlType === 'parallel' && (
+                <>
+                <div className="space-y-2">
+                    <Label>Parallel Branches</Label>
+                    <p className="text-xs text-muted-foreground">
+                      이 노드에서 나가는 여러 연결이 병렬로 실행됩니다.<br/>
+                      캔버스에서 이 노드를 여러 대상에 연결하세요.
+                    </p>
+                </div>
+                </>
+            )}
+            {formData.controlType === 'human' && (
+                <>
+                <div className="space-y-2">
+                    <Label>Approval Message</Label>
+                    <Textarea 
+                      value={formData.approval_message} 
+                      onChange={(e) => updateField('approval_message', e.target.value)} 
+                      placeholder="예: 고가 거래가 감지되었습니다. 승인하시겠습니까?" 
+                      className="min-h-[80px]"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      워크플로우가 여기서 일시 정지될 때 사용자에게 표시되는 메시지입니다.<br/>
+                      사용자는 이 메시지를 보고 Resume 시 피드백을 입력합니다.
+                    </p>
                 </div>
                 </>
             )}
