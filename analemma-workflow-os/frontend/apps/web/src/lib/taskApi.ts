@@ -102,6 +102,82 @@ export async function getTaskMetrics(taskId: string): Promise<any> {
   return parseApiResponse<any>(response);
 }
 
+/**
+ * Artifact의 추론 경로 조회 (Reasoning Path)
+ * 
+ * 특정 결과물이 어떤 사고 과정을 거쳐 생성되었는지 추적
+ */
+export async function getReasoningPath(taskId: string, artifactId: string): Promise<{
+  artifact_id: string;
+  artifact_title: string;
+  reasoning_steps: Array<{
+    step_id: string;
+    timestamp: string;
+    step_type: 'decision' | 'observation' | 'action' | 'reasoning';
+    content: string;
+    node_id?: string | null;
+    confidence?: number | null;
+  }>;
+  total_steps: number;
+  total_duration_seconds?: number | null;
+}> {
+  const response = await makeAuthenticatedRequest(
+    `${API_BASE}/tasks/${encodeURIComponent(taskId)}/outcomes/${encodeURIComponent(artifactId)}/reasoning`
+  );
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error('Reasoning path not found');
+    }
+    throw new Error('Failed to get reasoning path');
+  }
+  return parseApiResponse(response);
+}
+
+// ===== Execution Healing Status API =====
+
+export interface HealingFix {
+  timestamp: string;
+  issue_type: string;
+  fix_description: string;
+  success: boolean;
+}
+
+export interface RemainingIssue {
+  issue_id: string;
+  issue_type: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  description: string;
+}
+
+export interface HealingStatusResponse {
+  executionArn: string;
+  healing_active: boolean;
+  healing_attempts: number;
+  max_attempts: number;
+  current_strategy?: 'retry' | 'fallback' | 'skip' | 'escalate';
+  fixes_applied: HealingFix[];
+  remaining_issues: RemainingIssue[];
+  last_healing_at?: string | null;
+}
+
+/**
+ * 실행 Healing 상태 조회
+ * 
+ * 워크플로우 실행 중 자가 치유 시도 및 결과를 조회
+ */
+export async function getHealingStatus(executionId: string): Promise<HealingStatusResponse> {
+  const response = await makeAuthenticatedRequest(
+    `${API_BASE}/executions/${encodeURIComponent(executionId)}/healing-status`
+  );
+  if (!response.ok) {
+    if (response.status === 404) {
+      throw new Error('Execution not found');
+    }
+    throw new Error('Failed to get healing status');
+  }
+  return parseApiResponse<HealingStatusResponse>(response);
+}
+
 // ===== Status Display Helpers =====
 
 export const STATUS_DISPLAY_MAP: Record<string, { label: string; color: string; icon: string }> = {

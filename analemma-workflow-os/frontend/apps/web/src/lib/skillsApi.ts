@@ -274,11 +274,9 @@ export async function loadSkillAsSubgraph(skillId: string): Promise<SubgraphDefi
 }
 
 // -----------------------------------------------------------------------------
-// React Query Hooks (Optional - if using TanStack Query)
+// React Query Hooks
 // -----------------------------------------------------------------------------
 
-// If you're using TanStack Query, you can uncomment and use these hooks:
-/*
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 
 export const skillsQueryKeys = {
@@ -356,4 +354,3 @@ export function useSaveSubgraphAsSkill() {
     },
   });
 }
-*/

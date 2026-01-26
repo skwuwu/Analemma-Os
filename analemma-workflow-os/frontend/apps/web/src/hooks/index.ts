@@ -14,3 +14,15 @@ export { useWorkflowApi } from './useWorkflowApi';
 export { useWorkflowRecovery } from './useWorkflowRecovery';
 export { useWorkflowStreamProcessor } from './useWorkflowStreamProcessor';
 export { useWorkflowTimer } from './useWorkflowTimer';
+
+// Skills API hooks
+export {
+  useSkills,
+  useSkill,
+  usePublicSkills,
+  useCreateSkill,
+  useUpdateSkill,
+  useDeleteSkill,
+  useSaveSubgraphAsSkill,
+  skillsQueryKeys,
+} from '@/lib/skillsApi';

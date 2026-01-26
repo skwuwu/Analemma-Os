@@ -332,9 +332,34 @@ components:
         reasoning_steps:
           type: array
           items:
-            $ref: '#/components/schemas/ThoughtStep'
+            $ref: '#/components/schemas/ReasoningStep'
         total_steps:
           type: integer
+        total_duration_seconds:
+          type: number
+          nullable: true
+          description: "Total time taken for all reasoning steps in seconds"
+    ReasoningStep:
+      type: object
+      properties:
+        step_id:
+          type: string
+        step_type:
+          type: string
+          enum: [decision, action, observation, thought]
+        content:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        confidence:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        node_id:
+          type: string
+          nullable: true
 security:
   - bearerAuth: []
 paths:
@@ -689,6 +714,75 @@ paths:
           description: Execution not found
         '400':
           description: Cannot stop execution
+      security:
+        - bearerAuth: []
+  /executions/{id}/healing-status:
+    get:
+      summary: Get execution healing status
+      description: Returns the current self-healing status for an execution, including healing attempts, fixes applied, and remaining issues.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Healing status details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  executionArn:
+                    type: string
+                  healing_active:
+                    type: boolean
+                    description: "Whether self-healing is currently active"
+                  healing_attempts:
+                    type: integer
+                    description: "Number of healing attempts made"
+                  max_attempts:
+                    type: integer
+                    description: "Maximum allowed healing attempts"
+                  current_strategy:
+                    type: string
+                    enum: [retry, fallback, skip, escalate]
+                    description: "Current healing strategy being applied"
+                  fixes_applied:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        timestamp:
+                          type: string
+                          format: date-time
+                        issue_type:
+                          type: string
+                        fix_description:
+                          type: string
+                        success:
+                          type: boolean
+                  remaining_issues:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        issue_id:
+                          type: string
+                        issue_type:
+                          type: string
+                        severity:
+                          type: string
+                          enum: [low, medium, high, critical]
+                        description:
+                          type: string
+                  last_healing_at:
+                    type: string
+                    format: date-time
+                    nullable: true
+        '404':
+          description: Execution not found
       security:
         - bearerAuth: []
   /notifications:
