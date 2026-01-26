@@ -1173,18 +1173,6 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
         except Exception as e:
             logger.warning(f"Failed to prepare multimodal data for {s3_uri}: {e}")
     
-    # Remove S3 URIs from prompt if we extracted them
-    if multimodal_parts:
-        cleaned_prompt = re.sub(s3_uri_pattern, "[미디어 첨부됨]", prompt)
-        return cleaned_prompt, multimodal_parts
-    
-    return prompt, multimodal_parts
-    
-    # Remove S3 URIs from prompt if we extracted them
-    if multimodal_parts:
-        cleaned_prompt = re.sub(s3_uri_pattern, "[Image/Video attached]", prompt)
-        return cleaned_prompt, multimodal_parts
-    
     return prompt, multimodal_parts
 
 # Async processing threshold (configurable via environment variable)
@@ -1664,8 +1652,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             
             if enable_quality_check and isinstance(text, str) and len(text) > 20:
                 try:
-                    # 도메인 추론
-                    domain_hint = actual_config.get("content_domain") or exec_state.get("content_domain", "general_text")
+                    # 도메인 추론 (quality_domain alias 지원)
+                    domain_hint = (
+                        actual_config.get("quality_domain") or 
+                        actual_config.get("content_domain") or 
+                        exec_state.get("content_domain", "general_text")
+                    )
                     domain_map = {
                         "technical": ContentDomain.TECHNICAL_REPORT,
                         "technical_report": ContentDomain.TECHNICAL_REPORT,
@@ -1675,7 +1667,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         "workflow": ContentDomain.WORKFLOW_OUTPUT,
                         "document_analysis": ContentDomain.GENERAL_TEXT,
                     }
-                    content_domain = domain_map.get(domain_hint, ContentDomain.GENERAL_TEXT)
+                    content_domain = domain_map.get(str(domain_hint).lower(), ContentDomain.GENERAL_TEXT)
                     
                     # 인터셉터 생성 및 실행
                     interceptor = KernelMiddlewareInterceptor(
@@ -1693,12 +1685,13 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         context=exec_state
                     )
                     
+                    # [Defensive Coding] Use getattr to prevent attribute errors (InterceptorResult v3.8)
                     kernel_quality_result = {
-                        "action": intercept_result.action.value,
-                        "slop_score": intercept_result.slop_result.slop_score if intercept_result.slop_result else 0.0,
-                        "is_slop": intercept_result.slop_result.is_slop if intercept_result.slop_result else False,
-                        "combined_score": intercept_result.combined_score,
-                        "recommendation": intercept_result.recommendation
+                        "action": getattr(intercept_result, "action", InterceptorAction.PASS).value,
+                        "slop_score": getattr(intercept_result.slop_result, "slop_score", 0.0) if getattr(intercept_result, "slop_result", None) else 0.0,
+                        "is_slop": getattr(intercept_result.slop_result, "is_slop", False) if getattr(intercept_result, "slop_result", None) else False,
+                        "combined_score": getattr(intercept_result, "combined_score", 0.0),
+                        "recommendation": getattr(intercept_result, "recommendation", "")
                     }
                     
                     logger.info(
@@ -2305,162 +2298,106 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     return validate_state_with_schema(validated_output, node_id)
 
 def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    """Executes sub-node for each item in list concurrently."""
+    """Executes sub-node for each item in list concurrently with multi-node support."""
+    node_id = config.get("id", "for_each")
+    # [Fix] inner_config 추출을 최상단으로 이동하여 ReferenceError 방지
+    inner_config = config.get("config") or config 
     
-    # [Cancellation] Check if execution has been cancelled before starting parallel processing
+    # [Cancellation Check]
     execution_arn = state.get("execution_arn") or state.get("ExecutionArn")
     if execution_arn and check_execution_cancelled(execution_arn):
-        logger.warning(f"🚨 Execution cancelled, aborting for_each processing for node {config.get('id', 'for_each')}")
-        return {config.get("output_key", "for_each_results"): []}
-    
-    # [Fix] Support both flat config and nested config (node_def structure)
-    # When called from builder, config is the full node_def: {id, type, config: {...}}
-    # Extract the inner config if present
-    inner_config = config.get("config", {}) if config.get("type") == "for_each" else {}
-    
-    # Try inner config first, then fall back to top-level config
-    # [Fix v2] Also support items_path (alternative to input_list_key)
+        logger.warning(f"🚨 Execution cancelled, aborting for_each: {node_id}")
+        return {inner_config.get("output_key", "for_each_results"): []}
+
+    # 1. Resolve Input List & Hydration
     input_list_key = (
         inner_config.get("input_list_key") or 
-        inner_config.get("items_path") or  # Alternative key name
-        config.get("input_list_key") or 
-        config.get("items_path") or  # Alternative key name
-        (config.get("foreach_config") or {}).get("items_source", "").replace("$.", "")
+        inner_config.get("items_path")
     )
     
-    # [Fix v2] Support body_nodes as alternative to sub_node_config
-    # body_nodes is a list of node IDs to execute - we create a simple operator wrapper
-    body_nodes = inner_config.get("body_nodes") or config.get("body_nodes")
-    item_key = inner_config.get("item_key") or config.get("item_key") or "item"
-    
-    sub_node_config = (
-        inner_config.get("sub_node_config") or 
-        config.get("sub_node_config") or 
-        (config.get("foreach_config") or {}).get("item_processor")
-    )
-    
-    # [Critical Fix] Support sub_workflow structure (used in test configs)
-    # sub_workflow contains nodes array - extract first node as sub_node_config
-    if not sub_node_config:
-        sub_workflow = inner_config.get("sub_workflow") or config.get("sub_workflow")
-        if sub_workflow and isinstance(sub_workflow, dict):
-            workflow_nodes = sub_workflow.get("nodes", [])
-            if workflow_nodes and len(workflow_nodes) > 0:
-                # Use first node as the iteration processor
-                sub_node_config = workflow_nodes[0]
-                logger.info(f"[ForEach] Extracted sub_node_config from sub_workflow.nodes[0]")
-    
-    # [Critical Fix] Support subgraph_inline structure (builder transformation)
-    # Builder may convert sub_workflow to subgraph_inline
-    if not sub_node_config:
-        subgraph_inline = config.get("subgraph_inline")
-        if subgraph_inline and isinstance(subgraph_inline, dict):
-            subgraph_nodes = subgraph_inline.get("nodes", [])
-            if subgraph_nodes and len(subgraph_nodes) > 0:
-                sub_node_config = subgraph_nodes[0]
-                logger.info(f"[ForEach] Extracted sub_node_config from subgraph_inline.nodes[0]")
-    
-    # [Fix v2] If body_nodes is specified but no sub_node_config, create a passthrough operator
-    if body_nodes and not sub_node_config:
-        # Create a simple operator that just logs the item
-        sub_node_config = {
-            "type": "operator",
-            "config": {
-                "code": f"state['{item_key}'] = state.get('item')\nprint(f'Processing {{state.get(\"item\")}}')\nstate['processed'] = True",
-                "output_key": "iteration_result"
-            }
-        }
-    
-    output_key = inner_config.get("output_key") or config.get("output_key") or "for_each_results"
-    max_iterations = (
-        inner_config.get("max_iterations") or 
-        config.get("max_iterations") or 
-        (config.get("foreach_config") or {}).get("max_iterations", 10)
-    )
-    metadata = inner_config.get("metadata", {}) or config.get("metadata", {})
-    segmentation_policy = metadata.get("segmentation_policy")
-    
-    # Handle None input_list_key
     if not input_list_key:
-        logger.warning(f"for_each config missing input_list_key/items_path: {config.keys()}")
-        return {output_key: []}
-    
-    # [Fix] Remove broken path simplification - _get_nested_value already handles dot-paths!
-    # OLD (WRONG): if "." in input_list_key: input_list_key = input_list_key.split(".")[-1]
-    # The input_list_key should be kept as-is (e.g., "input_items.items_to_process")
-        
-    # [Critical Guard] Validate essential config before proceeding
-    if not input_list_key:
-        logger.error(f"[ForEach] Missing input_list_key. Config keys: {config.keys()}")
-        return {output_key: []}
-    
-    if not sub_node_config:
-        logger.error(f"[ForEach] Missing sub_node_config. Config keys: {config.keys()}")
-        return {output_key: []}
-    
-    if not isinstance(sub_node_config, dict):
-        logger.error(f"[ForEach] sub_node_config must be dict, got {type(sub_node_config)}")
-        return {output_key: []}
-        
-    input_list = _get_nested_value(state, input_list_key, [])
-    if not isinstance(input_list, list):
-        logger.warning(f"for_each input {input_list_key} is not a list")
-        input_list = []
+        logger.error(f"[ForEach] Missing input_list_key in node {node_id}")
+        return {}
 
-    # [Check] Segmentation Policy
-    if segmentation_policy == "force_split":
-        # Divide iterations into chunks
-        # This is a simulation: In a real distributed map, the state machine handles this.
-        # Here we just log and potentially enforce the limit strictly.
-        logger.info(f"🔄 Segmentation Policy 'force_split' active. Processing first {max_iterations} items.")
-        
+    # Proactive S3 hydration
+    input_val = _get_nested_value(state, input_list_key)
+    if state.get("__s3_offloaded") or (isinstance(input_val, str) and input_val.startswith("s3://")):
+        logger.info(f"💧 [ForEach] Hydrating {input_list_key} from S3")
+        state = _hydrate_state_for_config(state, {"input_variables": [input_list_key]})
+        input_list = _get_nested_value(state, input_list_key, [])
+    else:
+        input_list = input_val if isinstance(input_val, list) else []
+
+    # 2. Resolve Multi-node Sub-workflow
+    sub_nodes = []
+    # sub_workflow.nodes -> subgraph_inline.nodes -> sub_node_config 순으로 탐색
+    sw_def = inner_config.get("sub_workflow") or inner_config.get("subgraph_inline")
+    if isinstance(sw_def, dict):
+        sub_nodes = sw_def.get("nodes", [])
+    else:
+        sub_processor = inner_config.get("sub_node_config")
+        if sub_processor: sub_nodes = [sub_processor]
+
+    if not sub_nodes:
+        logger.error(f"[ForEach] No executable nodes found for {node_id}")
+        return {}
+
+    item_key = inner_config.get("item_key") or "item"
+    output_key = inner_config.get("output_key") or "for_each_results"
+    max_iterations = inner_config.get("max_iterations", 20)
+    
     if len(input_list) > max_iterations:
         logger.warning(f"for_each truncated {len(input_list)} -> {max_iterations}")
         input_list = input_list[:max_iterations]
-    
-    sub_node_type = sub_node_config.get("type", "llm")
-    sub_node_func = NODE_REGISTRY.get(sub_node_type)
-    if not sub_node_func: 
-        # Fallback for testing: if type is llm but no func found (unlikely), default to llm_chat_runner
-        if sub_node_type == "llm":
-            sub_node_func = llm_chat_runner
-        else:
-            raise ValueError(f"Unknown sub-node: {sub_node_type}")
 
     def worker(item):
-        # [Cancellation] Check if execution has been cancelled before processing each item
         if execution_arn and check_execution_cancelled(execution_arn):
-            logger.warning(f"🚨 Execution cancelled during parallel processing, skipping item {item}")
-            return {"error": "Execution cancelled", "item": item}
+            return {"error": "cancelled", "_item": item}
         
-        # [Optimization] Use ChainMap for zero-copy state view
-        item_state = ChainMap({"item": item}, state)
-        # Deep copy only the messages list if it exists (to avoid reducer conflicts)
-        if "messages" in item_state and isinstance(item_state["messages"], list):
-            item_state["messages"] = item_state["messages"].copy()
+        # [Isolation] ChainMap으로 부모 상태는 보존하고 로컬 업데이트만 수행
+        it_state = ChainMap({item_key: item}, state)
+        # Deep copy messages to prevent race conditions
+        if "messages" in it_state and isinstance(it_state["messages"], list):
+            it_state["messages"] = it_state["messages"].copy()
+            
+        it_updates = {}
         
-        # Merge sub_node_config into config-like structure for the runner
-        # Ensure ID is unique per item if needed, but runner might not care
-        c = sub_node_config.copy()
-        c["id"] = f"{config.get('id', 'foreach')}_sub"
+        for node_def in sub_nodes:
+            # [Fix] 이전 노드의 결과를 다음 노드가 볼 수 있게 병합
+            current_view = ChainMap(it_updates, it_state)
+            node_type = node_def.get("type", "llm_chat")
+            handler = NODE_REGISTRY.get(node_type)
+            
+            if not handler:
+                logger.error(f"Unknown node type '{node_type}' in for_each iteration")
+                continue
+                
+            try:
+                rendered_node = _render_template(node_def, current_view)
+                # Ensure node ID uniqueness
+                rendered_node["id"] = f"{node_id}_{node_def.get('id', 'sub')}"
+                
+                updates = handler(current_view, rendered_node)
+                if isinstance(updates, dict):
+                    it_updates.update(updates)
+            except Exception as e:
+                logger.error(f"Iteration node {node_def.get('id')} failed: {e}")
+                it_updates["error"] = str(e)
+                break
         
-        # Render any templates in sub_node_config against item_state
-        # Note: sub_node_config might be nested, _render_template handles dicts
-        rendered_sub = _render_template(c, item_state)
-        return sub_node_func(item_state, rendered_sub)
+        return it_updates
 
-    # Handle empty list early
+    # 3. Parallel Execution
     if not input_list:
         return {output_key: []}
-    
-    # Dynamic worker count based on CPU cores and list size
+
     cpu_count = os.cpu_count() or 2
-    max_workers = min(len(input_list), max(1, cpu_count // 2))  # Conservative: half of CPU cores
+    max_workers = min(len(input_list), max(1, cpu_count // 2))
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(worker, input_list))
     
-    # [Token Aggregation] for_each iteration들의 토큰 사용량 합산
+    # 5. Token Aggregation & Metrics
     total_input_tokens = 0
     total_output_tokens = 0
     iteration_token_details = []
@@ -2484,6 +2421,40 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     
     # 합산된 토큰 정보를 결과에 추가
     result_updates = {output_key: results}
+    
+    # 🛡️ [v3.9] Stage 6 Forced Offloading (Payload Protection)
+    # If results list exceeds Step Functions safe payload limit, offload to S3
+    try:
+        results_json = json.dumps(results, ensure_ascii=False)
+        results_size_kb = len(results_json.encode('utf-8')) / 1024
+        
+        if results_size_kb > 150:  # 150KB Threshold
+            logger.warning(f"📦 [ForEach Offload] Results too large ({results_size_kb:.1f}KB), offloading to S3")
+            from src.services.state.state_manager import StateManager
+            sm = StateManager()
+            
+            auth_user_id = state.get("ownerId") or "system"
+            workflow_id = state.get("workflowId") or "unknown"
+            execution_id = state.get("execution_id") or "unknown"
+            
+            s3_path = sm.upload_state_to_s3(
+                bucket=os.environ.get("WORKFLOW_STATE_BUCKET"),
+                prefix=f"offloaded-results/{auth_user_id}/{workflow_id}/{execution_id}",
+                state={"results": results},
+                deterministic_filename=f"{node_id}_results.json"
+            )
+            
+            # Replace actual results with a pointer
+            result_updates[output_key] = {
+                "__s3_offloaded": True,
+                "s3_path": s3_path,
+                "size_kb": results_size_kb,
+                "node_id": node_id
+            }
+            logger.info(f"✅ [ForEach Offload] Results offloaded to {s3_path}")
+    except Exception as offload_err:
+        logger.error(f"❌ [ForEach Offload] Failed to check/offload results: {offload_err}")
+
     result_updates['total_input_tokens'] = total_input_tokens
     result_updates['total_output_tokens'] = total_output_tokens
     result_updates['total_tokens'] = total_input_tokens + total_output_tokens
@@ -2498,19 +2469,151 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     accumulated_result = accumulate_tokens_in_state(temp_result, state)
     result_updates.update(accumulated_result)
     
+    # 🛡️ [v3.9] Stage 7 StateBag Integrity Merge
+    # Ensure iteration results are merged with recursive integrity
+    from src.common.statebag import ensure_state_bag
+    final_updates = ensure_state_bag(result_updates)
+    
     # 비용 계산 추가
     estimated_cost = calculate_cost_usd({
         'input_tokens': result_updates['total_input_tokens'],
         'output_tokens': result_updates['total_output_tokens']
     })
-    result_updates['estimated_cost_usd'] = estimated_cost
+    final_updates['estimated_cost_usd'] = estimated_cost
     
-    logger.info(f"ForEach {config.get('id', 'for_each')}: Processed {len(results)} iterations, "
-                f"total tokens: {result_updates['total_tokens']} "
-                f"({total_input_tokens} input + {total_output_tokens} output), "
-                f"cost: ${estimated_cost:.6f}")
+    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
+    validated_output = _validate_output_keys(final_updates, node_id)
+    # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
+    return validate_state_with_schema(validated_output, node_id)
+
+
+def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Executes a sequence of nodes repeatedly until a condition is met or max_iterations reached.
+    🛡️ [v3.8] Stage 6 Support: Convergence & Iterative Intelligence
+    """
+    node_id = config.get("id", "loop")
+    inner_config = config.get("config") or {}
     
-    return result_updates
+    # 1. Configuration
+    sub_nodes = inner_config.get("nodes") or config.get("nodes", [])
+    condition = inner_config.get("condition") or config.get("condition", "false")
+    max_iterations = inner_config.get("max_iterations") or config.get("max_iterations") or 5
+    loop_var = inner_config.get("loop_var") or config.get("loop_var", "loop_index")
+    
+    # Convergence Support (Stage 6)
+    convergence_key = inner_config.get("convergence_key") or config.get("convergence_key")
+    target_score = inner_config.get("target_score") or config.get("target_score", 0.9)
+    
+    logger.info(f"🔁 [Loop] Starting loop node {node_id} (max_iterations: {max_iterations})")
+    
+    # [Cancellation]
+    execution_arn = state.get("execution_arn") or state.get("ExecutionArn")
+    
+    current_state = state.copy()
+    all_loop_updates = {}
+    
+    total_input_tokens = 0
+    total_output_tokens = 0
+    
+    from src.common.statebag import ensure_state_bag
+    from src.services.operators.operator_strategies import SafeExpressionEvaluator
+    
+    evaluator = SafeExpressionEvaluator()
+    
+    for i in range(max_iterations):
+        if execution_arn and check_execution_cancelled(execution_arn):
+            logger.warning(f"🚨 [Loop] Execution cancelled, aborting at iteration {i}")
+            break
+            
+        logger.info(f"🔁 [Loop] Iteration {i+1}/{max_iterations}")
+        
+        # Update loop index in temporary state
+        iter_updates = {loop_var: i}
+        current_state.update(iter_updates)
+        
+        # Execute sub-nodes sequentially
+        for node_def in sub_nodes:
+            node_type = node_def.get("type", "operator")
+            handler = NODE_REGISTRY.get(node_type)
+            
+            if not handler:
+                logger.error(f"[Loop] Unknown node type '{node_type}'")
+                continue
+                
+            try:
+                # [Fix] Render node config based on current loop state
+                rendered_node = _render_template(node_def, current_state)
+                # Ensure unique nested ID
+                rendered_node["id"] = f"{node_id}_it{i}_{node_def.get('id', 'sub')}"
+                
+                updates = handler(current_state, rendered_node)
+                if isinstance(updates, dict):
+                    # 🛡️ Recursive merge using StateBag logic behavior (mimicked here via update)
+                    current_state.update(updates)
+                    all_loop_updates.update(updates)
+                    
+                    # Accumulate tokens
+                    usage = extract_token_usage(updates)
+                    total_input_tokens += usage['input_tokens']
+                    total_output_tokens += usage['output_tokens']
+            except Exception as e:
+                logger.error(f"❌ [Loop] Node {node_def.get('id')} failed in iteration {i}: {e}")
+                all_loop_updates[f"{node_id}_error"] = str(e)
+                return all_loop_updates
+
+        # Update step history
+        current_history = all_loop_updates.get("step_history", state.get("step_history", []))
+        all_loop_updates["step_history"] = current_history + [f"{node_id}:iteration_{i}"]
+        current_state["step_history"] = all_loop_updates["step_history"]
+
+        # Check exit condition
+        try:
+            # 1. Logic-based condition
+            should_exit = evaluator.evaluate(condition, current_state)
+            if should_exit:
+                logger.info(f"✅ [Loop] Exit condition met at iteration {i}")
+                all_loop_updates["loop_exit_reason"] = "condition_met"
+                break
+                
+            # 2. Score-based convergence (Stage 6)
+            if convergence_key:
+                score = _get_nested_value(current_state, convergence_key)
+                # [Fix] 수렴 점수가 None이거나 숫자가 아닌 경우에 대한 방어 로직 강화
+                if isinstance(score, (int, float)) and score >= target_score:
+                    logger.info(f"✅ [Loop] Convergence reached (score: {score} >= {target_score})")
+                    all_loop_updates["loop_exit_reason"] = "convergence_reached"
+                    break
+                elif score is None:
+                    logger.debug(f"ℹ️ [Loop] Convergence key {convergence_key} is not yet available in state")
+        except Exception as eval_err:
+            logger.warning(f"⚠️ [Loop] Condition evaluation failed: {eval_err}")
+
+    else:
+        # Loop finished all iterations without exiting
+        logger.warning(f"⚠️ [Loop] Max iterations ({max_iterations}) reached")
+        all_loop_updates["loop_max_reached"] = True
+        all_loop_updates["loop_exit_reason"] = "max_iterations"
+
+    # [Token Aggregation]
+    all_loop_updates['total_input_tokens'] = total_input_tokens
+    all_loop_updates['total_output_tokens'] = total_output_tokens
+    all_loop_updates['total_tokens'] = total_input_tokens + total_output_tokens
+    
+    # 🛡️ Result integrity
+    final_updates = ensure_state_bag(all_loop_updates)
+    
+    # 비용 계산
+    estimated_cost = calculate_cost_usd({
+        'input_tokens': total_input_tokens,
+        'output_tokens': total_output_tokens
+    })
+    final_updates['estimated_cost_usd'] = estimated_cost
+    
+    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
+    validated_output = _validate_output_keys(final_updates, node_id)
+    # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
+    return validate_state_with_schema(validated_output, node_id)
 
 
 def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -2722,7 +2825,10 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
                 f"({total_input_tokens} input + {total_output_tokens} output), "
                 f"cost: ${estimated_cost:.6f}")
     
-    return result_updates
+    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
+    validated_output = _validate_output_keys(result_updates, node_id)
+    # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
+    return validate_state_with_schema(validated_output, node_id)
 
 
 def route_draft_quality(state: Dict[str, Any]) -> str:
@@ -2733,41 +2839,45 @@ def route_draft_quality(state: Dict[str, Any]) -> str:
 
 
 def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    """Executes branches in parallel and merges results."""
-    node_id = config.get("id", "parallel_group")
+    """Enhanced Parallel Runner supporting sub_workflows in branches."""
+    node_id = config.get("id", "parallel")
     # [Fix] Support both nested config and direct config
-    branches = config.get("branches", (config.get("config") or {}).get("branches", []))
+    inner_config = config.get("config") or config
+    branches = inner_config.get("branches", [])
     
     if not branches:
         return {}
 
     def run_branch(branch):
-        branch_id = branch.get("branch_id", "unknown")
-        nodes = branch.get("nodes", [])
+        branch_id = branch.get("branch_id", "sub")
+        # [Fix] 일관성을 위해 branches 내부에서도 nodes 리스트나 sub_workflow 지원
+        branch_nodes = branch.get("nodes")
+        if not branch_nodes and "sub_workflow" in branch:
+            branch_def = branch["sub_workflow"]
+            if isinstance(branch_def, dict):
+                branch_nodes = branch_def.get("nodes", [])
         
-        # Branch execution uses a copy of the state
-        branch_state = state.copy()
-        branch_updates = {}
+        # Branch execution uses local copy for safety
+        b_state = ChainMap({}, state)
+        b_updates = {}
         
-        for node_def in nodes:
-            node_type = node_def.get("type")
+        for n_def in (branch_nodes or []):
+            # [Fix] 브랜치 내 노드 간 상태 공유를 위해 ChainMap 활용
+            current_view = ChainMap(b_updates, b_state)
+            node_type = n_def.get("type", "operator")
             handler = NODE_REGISTRY.get(node_type)
-            if not handler:
-                logger.error(f"Unknown node type in branch {branch_id}: {node_type}")
-                continue
-                
-            # Execute node
-            try:
-                # Note: handlers usually return a dict of updates, not the full state
-                updates = handler(branch_state, node_def)
-                if isinstance(updates, dict):
-                    branch_state.update(updates)
-                    branch_updates.update(updates)
-            except Exception as e:
-                logger.error(f"Node execution failed in branch {branch_id}: {e}")
-                raise e
-                
-        return branch_id, branch_updates
+            
+            if handler:
+                try:
+                    # Execute node within branch
+                    res = handler(current_view, n_def)
+                    if isinstance(res, dict):
+                        b_updates.update(res)
+                except Exception as e:
+                    logger.error(f"Node execution failed in branch {branch_id}: {e}")
+                    raise e
+                    
+        return branch_id, b_updates
 
     # Execute branches in parallel
     combined_updates = {}
@@ -2848,7 +2958,10 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     
     # [Payload Optimization] Keep flattened structure to avoid 256KB Step Functions limit
     # Aggregators must query individual branch IDs directly from state
-    return combined_updates
+    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
+    validated_output = _validate_output_keys(combined_updates, node_id)
+    # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
+    return validate_state_with_schema(validated_output, node_id)
 
 
 # -----------------------------------------------------------------------------
@@ -3159,8 +3272,10 @@ register_node("aiModel", llm_chat_runner)  # aiModel은 llm_chat과 동일하게
 register_node("api_call", api_call_runner)
 register_node("db_query", db_query_runner)
 register_node("for_each", for_each_runner)
+register_node("loop", loop_runner)  # Convergence support (v3.8)
 register_node("route_draft_quality", route_draft_quality)
 register_node("parallel_group", parallel_group_runner)
+register_node("parallel", parallel_group_runner)  # Alias for backward compat
 register_node("aggregator", aggregator_runner)
 register_node("aiModel", llm_chat_runner)  # aiModel은 llm_chat과 동일하게 처리
 register_node("skill_executor", skill_executor_runner)  # Skills integration
