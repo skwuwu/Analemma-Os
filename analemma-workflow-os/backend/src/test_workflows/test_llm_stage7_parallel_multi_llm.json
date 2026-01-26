@@ -1,0 +1,138 @@
+{
+    "workflow_name": "LLM Stage 7 - Parallel Multi-LLM + StateBag Merge",
+    "description": "동시 다중 LLM 호출에서 상태 격리 및 결과 병합 검증",
+    "version": "2.1.0",
+    "test_stage": 7,
+    "nodes": [
+        {
+            "id": "init_parallel",
+            "type": "operator",
+            "config": {
+                "code": "print('🚀 Stage 7: Parallel Multi-LLM + StateBag Merge 초기화')\nimport time\n\n# 20KB 더미 컨텍스트 생성 (S3 오프로딩 트리거용)\ndef generate_context(size_kb=20):\n    base = 'The quick brown fox jumps over the lazy dog. Cloud computing enables scalable infrastructure. '\n    return (base * (size_kb * 1024 // len(base) + 1))[:size_kb * 1024]\n\n# 병렬 브랜치 프롬프트 설정 (각 20KB 컨텍스트 포함)\ndummy_size_kb = state.get('dummy_content_size_kb', 20)\nbase_prompts = [\n    'Summarize the key benefits of cloud computing.',\n    'List 3 security best practices for AWS Lambda.',\n    'Explain serverless architecture in simple terms.',\n    'Compare containers vs serverless for microservices.',\n    'Describe event-driven architecture patterns.'\n]\n\n# 각 프롬프트에 대용량 컨텍스트 추가\nbranch_prompts = []\nfor p in base_prompts:\n    branch_prompts.append(p + '\\n\\nContext: ' + generate_context(dummy_size_kb))\n\nstate['branch_prompts'] = branch_prompts\nstate['parallel_branches'] = len(branch_prompts)\nstate['branch_configs'] = []\n\nfor idx, prompt in enumerate(branch_prompts):\n    state['branch_configs'].append({\n        'branch_id': idx,\n        'prompt': prompt,\n        'status': 'pending'\n    })\n\nstate['branch_results'] = []\nstate['hitl_events'] = []\nstate['branch_start_timestamps'] = []\nstate['merged_statebag'] = {}\n# NOTE: aggregated_cost 제거 - 커널 aggregator가 처리\nstate['parallel_start_time'] = int(time.time() * 1000)\n\ntotal_size_kb = len(branch_prompts) * dummy_size_kb\nprint(f'✅ 병렬 처리 준비 완료: {len(branch_prompts)}개 브랜치 (~{total_size_kb}KB)')",
+                "output_key": "init_result"
+            }
+        },
+        {
+            "id": "parallel_branch_executor",
+            "type": "for_each",
+            "config": {
+                "items_key": "branch_configs",
+                "item_variable": "current_branch",
+                "output_key": "branch_results",
+                "max_concurrency": 3,
+                "nodes": [
+                    {
+                        "id": "branch_init",
+                        "type": "operator",
+                        "config": {
+                            "code": "import time\n\nbranch_config = state.get('current_branch', {})\nbranch_id = branch_config.get('branch_id', 0)\nprompt = branch_config.get('prompt', 'Hello')\n\nstate['current_branch_id'] = branch_id\nstate['current_prompt'] = prompt\nstate['branch_start_time'] = int(time.time() * 1000)\nstate['branch_loop_count'] = 0\nstate['branch_llm_calls'] = 0\n\n# 시작 타임스탬프 기록\nstate.setdefault('branch_start_timestamps', []).append(state['branch_start_time'])\n\nprint(f'🌿 브랜치 {branch_id} 시작: \"{prompt[:50]}...\"')",
+                            "output_key": "branch_init_result"
+                        }
+                    },
+                    {
+                        "id": "branch_loop",
+                        "type": "loop",
+                        "config": {
+                            "max_iterations": 2,
+                            "condition": "state.get('branch_loop_count', 0) < state.get('max_loop_per_branch', 2)",
+                            "nodes": [
+                                {
+                                    "id": "llm_branch_call",
+                                    "type": "aiModel",
+                                    "config": {
+                                        "model": "gemini-2.0-flash",
+                                        "provider": "gemini",
+                                        "prompt_template": "{{ state.current_prompt }}\n\nProvide a concise, structured response in JSON format with:\n1. summary: A 2-3 sentence summary\n2. key_points: List of 3-5 key points\n3. confidence: Your confidence score (0-1)",
+                                        "response_schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "summary": {"type": "string"},
+                                                "key_points": {"type": "array", "items": {"type": "string"}},
+                                                "confidence": {"type": "number"}
+                                            },
+                                            "required": ["summary", "key_points", "confidence"]
+                                        },
+                                        "output_key": "llm_branch_raw"
+                                    }
+                                },
+                                {
+                                    "id": "update_branch_state",
+                                    "type": "operator",
+                                    "config": {
+                                        "code": "import json\n\nbranch_id = state.get('current_branch_id', 0)\nloop_count = state.get('branch_loop_count', 0) + 1\nstate['branch_loop_count'] = loop_count\nstate['branch_llm_calls'] = state.get('branch_llm_calls', 0) + 1\n\n# LLM 결과 파싱\nllm_raw = state.get('llm_branch_raw', '{}')\ntry:\n    if isinstance(llm_raw, str):\n        llm_result = json.loads(llm_raw)\n    else:\n        llm_result = llm_raw\nexcept:\n    llm_result = {'confidence': 0.7, 'summary': 'Parse failed'}\n\nstate['branch_confidence'] = llm_result.get('confidence', 0.7)\nstate['branch_summary'] = llm_result.get('summary', '')\nstate['branch_key_points'] = llm_result.get('key_points', [])\n\nprint(f'🔄 브랜치 {branch_id} Loop {loop_count}: confidence={state[\"branch_confidence\"]:.2f}')",
+                                        "output_key": "branch_loop_result"
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "id": "check_branch_hitl",
+                        "type": "operator",
+                        "config": {
+                            "code": "branch_id = state.get('current_branch_id', 0)\nhitl_at_branch = state.get('hitl_at_branch', 2)\n\nif branch_id == hitl_at_branch and state.get('hitl_enabled', True):\n    state['branch_hitl_required'] = True\n    print(f'⏸️ 브랜치 {branch_id}에서 HITL 발동')\nelse:\n    state['branch_hitl_required'] = False",
+                            "output_key": "branch_hitl_check"
+                        }
+                    },
+                    {
+                        "id": "branch_hitl",
+                        "type": "hitl",
+                        "config": {
+                            "condition": "state.get('branch_hitl_required', False)",
+                            "question": "브랜치 분석 결과를 승인하시겠습니까?",
+                            "context_keys": ["current_branch_id", "branch_summary", "branch_confidence"],
+                            "auto_approve": true,
+                            "auto_approve_delay_ms": 100,
+                            "on_complete": {
+                                "code": "branch_id = state.get('current_branch_id', 0)\nstate['hitl_events'].append({\n    'branch_id': branch_id,\n    'decision': 'approved'\n})\nprint(f'✅ 브랜치 {branch_id} HITL 승인')"
+                            }
+                        }
+                    },
+                    {
+                        "id": "finalize_branch",
+                        "type": "operator",
+                        "config": {
+                            "code": "import time\n\nbranch_id = state.get('current_branch_id', 0)\nend_time = int(time.time() * 1000)\nstart_time = state.get('branch_start_time', end_time)\n\nusage = state.get('usage', {})\n\nresult = {\n    'branch_id': branch_id,\n    'status': 'completed',\n    'prompt': state.get('current_prompt', '')[:50],\n    'summary': state.get('branch_summary', ''),\n    'key_points': state.get('branch_key_points', []),\n    'confidence': state.get('branch_confidence', 0),\n    'loop_iterations': state.get('branch_loop_count', 0),\n    'llm_calls': state.get('branch_llm_calls', 0),\n    'usage': usage,  # 개별 usage - 커널이 평탄화(Flatten) 후 합산\n    'latency_ms': end_time - start_time\n}\n\n# ⚠️ race condition 방지: aggregated_cost 직접 수정 금지!\n# 커널 레벨 aggregator가 branch_results[].usage를 자동 집계함\n\nprint(f'✅ 브랜치 {branch_id} 완료: {result[\"loop_iterations\"]} loops, confidence={result[\"confidence\"]:.2f}')\nstate['branch_final_result'] = result",
+                            "output_key": "branch_result"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "merge_statebag",
+            "type": "operator",
+            "config": {
+                "code": "import time\n\nbranch_results = state.get('branch_results', [])\n\n# StateBag 병합\nmerged = {\n    'branch_results': {},\n    'all_summaries': [],\n    'all_key_points': [],\n    'total_llm_calls': 0,\n    'max_confidence': 0\n}\n\nfor result in branch_results:\n    if isinstance(result, dict):\n        branch_id = result.get('branch_id', 0)\n        merged['branch_results'][str(branch_id)] = result\n        merged['all_summaries'].append(result.get('summary', ''))\n        merged['all_key_points'].extend(result.get('key_points', []))\n        merged['total_llm_calls'] += result.get('llm_calls', 0)\n        merged['max_confidence'] = max(merged['max_confidence'], result.get('confidence', 0))\n\nstate['merged_statebag'] = merged\n\nend_time = int(time.time() * 1000)\nstate['parallel_end_time'] = end_time\nstate['total_latency_ms'] = end_time - state.get('parallel_start_time', end_time)\n\nprint(f'✅ StateBag 병합 완료: {len(merged[\"branch_results\"])} branches, {merged[\"total_llm_calls\"]} LLM calls')",
+                "output_key": "merge_result"
+            }
+        },
+        {
+            "id": "final_verification",
+            "type": "operator",
+            "config": {
+                "code": "branch_results = state.get('branch_results', [])\nexpected = state.get('parallel_branches', 5)\ncompleted = len([b for b in branch_results if isinstance(b, dict) and b.get('status') == 'completed'])\n\nhitl_count = len(state.get('hitl_events', []))\nmerged = state.get('merged_statebag', {})\n\n# 커널 aggregator가 집계한 usage 사용 (개별 branch 결과에서 평탄화)\ntotal_cost = 0\ntotal_tokens = 0\nfor b in branch_results:\n    if isinstance(b, dict):\n        usage = b.get('usage', {})\n        total_cost += usage.get('cost', 0)\n        total_tokens += usage.get('total_tokens', usage.get('input_tokens', 0) + usage.get('output_tokens', 0))\n\n# StateBag 병합 무결성 검증\nmerged_branch_count = len(merged.get('branch_results', {}))\nloss_detected = completed != merged_branch_count\n\n# S3 오프로딩 여부 확인\ns3_offloaded = state.get('_s3_offload_triggered', False)\nstate_size_kb = len(str(state)) // 1024\n\nif completed >= expected and not loss_detected:\n    state['TEST_RESULT'] = f'✅ STAGE7 SUCCESS: {completed}/{expected} branches, {hitl_count} HITLs, ${total_cost:.4f}, {total_tokens} tokens, 0% loss, S3={s3_offloaded} ({state_size_kb}KB)'\nelse:\n    state['TEST_RESULT'] = f'❌ STAGE7 ISSUES: {completed}/{expected} branches, loss={loss_detected}'\n\nprint(state['TEST_RESULT'])",
+                "output_key": "verification_result"
+            }
+        }
+    ],
+    "edges": [
+        {"source": "init_parallel", "target": "parallel_branch_executor"},
+        {"source": "parallel_branch_executor", "target": "merge_statebag"},
+        {"source": "merge_statebag", "target": "final_verification"}
+    ],
+    "initial_state": {
+        "test_stage": 7,
+        "parallel_branches": 5,
+        "max_concurrency": 3,
+        "max_loop_per_branch": 2,
+        "hitl_enabled": true,
+        "hitl_at_branch": 2,
+        "verify_statebag_merge_integrity": true,
+        "expected_zero_loss": true,
+        "verify_cost_aggregation": true,
+        "dummy_content_size_kb": 20,
+        "s3_offload_threshold_kb": 180,
+        "verify_s3_offload": true
+    }
+}

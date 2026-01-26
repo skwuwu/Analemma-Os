@@ -141,11 +141,42 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         else:
             skipped_count += 1
         
+        # Extract provider information from test result
+        # Structure: result -> test_result -> output (final_state) -> usage -> provider
+        test_result = result.get('test_result', {})
+        
+        # Handle both direct output and nested structure
+        if isinstance(test_result, dict):
+            # Check for 'output' key (Step Functions format)
+            final_state = test_result.get('output', test_result)
+            
+            # Handle case where output is a JSON string
+            if isinstance(final_state, str):
+                try:
+                    final_state = json.loads(final_state)
+                except:
+                    final_state = {}
+            
+            # Extract usage from final_state or nested final_state
+            usage = final_state.get('usage') or final_state.get('final_state', {}).get('usage', {})
+            provider = usage.get('provider', 'unknown')
+        else:
+            usage = {}
+            provider = 'unknown'
+        
+        # Log provider info for debugging
+        if provider != 'unknown':
+            logger.info(f"Scenario {scenario}: provider={provider}")
+        else:
+            logger.warning(f"Scenario {scenario}: provider not found in result")
+        
         scenarios[scenario] = {
             'status': status,
             'message': verification.get('message', ''),
-            'test_result': result.get('test_result', {}),
-            'verification': verification
+            'test_result': test_result,
+            'verification': verification,
+            'provider': provider,
+            'usage': usage
         }
     
     overall_status = 'SUCCESS' if failed_count == 0 else 'FAILURE'

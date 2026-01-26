@@ -21,7 +21,10 @@
                     "STAGE2_FLOW_CONTROL",
                     "STAGE3_VISION_BASIC",
                     "STAGE4_VISION_MAP",
-                    "STAGE5_HYPER_STRESS"
+                    "STAGE5_HYPER_STRESS",
+                    "STAGE6_DISTRIBUTED_MAP_REDUCE",
+                    "STAGE7_PARALLEL_MULTI_LLM",
+                    "STAGE8_SLOP_DETECTION"
                 ]
             },
             "Next": "InitializeSimulator"
@@ -145,7 +148,13 @@
                             "FunctionName": "${VerifyLLMTestFunction}",
                             "Payload": {
                                 "scenario.$": "$.scenario",
-                                "test_result.$": "$.test_result"
+                                "scenario_key.$": "$.scenario",
+                                "test_result.$": "$.test_result",
+                                "final_state.$": "$.test_result.output",
+                                "test_config": {
+                                    "include_task_abstraction_verification": true,
+                                    "verify_provider": true
+                                }
                             }
                         },
                         "ResultSelector": {

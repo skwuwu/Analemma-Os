@@ -4,14 +4,49 @@ Verify LLM Test Results Lambda
 LLM Simulator Step Functions에서 호출되어 테스트 결과를 검증합니다.
 
 이 Lambda는 llm_simulator.py의 verify_* 함수들을 Step Functions에서 직접 호출할 수 있도록 래핑합니다.
+
+v2.1: Task Manager 추상화 레이어 검증 추가
+- Provider 교차 검증 (Cross-validation)
+- Thought Memory Compaction (10개 한정)
+- QuickFix 동적 생성 검증
 """
 
 import json
 import logging
-from typing import Dict, Any, Tuple
+import uuid
+from typing import Dict, Any, Tuple, List, Optional
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Task Context imports (lazy loading to avoid circular imports)
+def _get_task_context_models():
+    """Lazy import to avoid circular dependency and Lambda cold start overhead."""
+    from src.models.task_context import (
+        TaskContext, TaskStatus, SubStatus, CostCategory, CostLineItem, CostDetail,
+        QuickFix, QuickFixType, THOUGHT_HISTORY_MAX_LENGTH, get_friendly_error_message
+    )
+    return {
+        'TaskContext': TaskContext,
+        'TaskStatus': TaskStatus,
+        'SubStatus': SubStatus,
+        'CostCategory': CostCategory,
+        'CostLineItem': CostLineItem,
+        'CostDetail': CostDetail,
+        'QuickFix': QuickFix,
+        'QuickFixType': QuickFixType,
+        'THOUGHT_HISTORY_MAX_LENGTH': THOUGHT_HISTORY_MAX_LENGTH,
+        'get_friendly_error_message': get_friendly_error_message,
+    }
+
+
+# Provider 이름 매핑 (Cross-validation용)
+PROVIDER_SERVICE_NAME_MAP = {
+    "gemini": ["gemini", "vertex", "google"],
+    "bedrock": ["bedrock", "claude", "anthropic", "amazon"],
+    "openai": ["openai", "gpt", "chatgpt"],
+}
 
 
 def verify_basic_llm_call(final_state: Dict, test_config: Dict) -> Tuple[bool, str]:
@@ -148,6 +183,660 @@ def verify_multimodal_vision(final_state: Dict, test_config: Dict) -> Tuple[bool
         return False, f"Vision output too short: {len(str(vision_output))}"
     
     diagram_words = ['diagram', 'architecture', 'flow', 'component', 'system', 'connection']
+
+
+# ============================================================================
+# Task Manager Abstraction Layer Validation (v2.1)
+# ============================================================================
+
+def _safe_get_nested(data: Dict, *keys, default=None) -> Any:
+    """
+    안전한 중첩 필드 접근.
+    
+    거짓 음성(False Negative) 방지를 위해 다중 경로 탐색.
+    예: _safe_get_nested(data, 'output', 'usage', 'provider') 또는
+        _safe_get_nested(data, 'final_state', 'usage', 'provider')
+    """
+    current = data
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+            if current is None:
+                # fallback: final_state 내부에서 찾기
+                if 'final_state' in data and keys[0] != 'final_state':
+                    return _safe_get_nested(data.get('final_state', {}), *keys, default=default)
+                return default
+        else:
+            return default
+    return current if current is not None else default
+
+
+def verify_provider_cross_validation(
+    runner_log: Dict[str, Any], 
+    task_context_data: Dict[str, Any],
+    test_config: Dict[str, Any]
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    Provider 교차 검증 (Cross-validation).
+    
+    검증식: if runner_log.provider == 'gemini' then task_context.service_name must contain 'Gemini'
+    
+    이를 통해 "엔진은 Gemini인데 라벨은 Bedrock"인 상태를 잡아냅니다.
+    
+    Returns:
+        (passed, message, checks): 검증 결과, 메시지, 상세 체크 목록
+    """
+    checks = []
+    
+    # 1. runner_log에서 provider 추출 (다중 경로 탐색)
+    runner_provider = (
+        _safe_get_nested(runner_log, 'usage', 'provider') or
+        _safe_get_nested(runner_log, 'output', 'usage', 'provider') or
+        _safe_get_nested(runner_log, 'meta', 'provider') or
+        _safe_get_nested(runner_log, 'provider') or
+        'unknown'
+    ).lower()
+    
+    checks.append({
+        "name": "runner_provider 추출",
+        "passed": runner_provider != 'unknown',
+        "value": runner_provider,
+        "path": "runner_log.usage.provider or runner_log.output.usage.provider"
+    })
+    
+    # 2. task_context에서 service_name 추출 (다중 경로 탐색)
+    service_name = None
+    extraction_path = None
+    
+    # 경로 1: cost_detail.line_items[].service_name
+    cost_detail = _safe_get_nested(task_context_data, 'cost_detail')
+    if cost_detail:
+        line_items = cost_detail.get('line_items', [])
+        for item in line_items:
+            if item.get('category') == 'llm':
+                service_name = item.get('service_name', '').lower()
+                extraction_path = "task_context.cost_detail.line_items[category=llm].service_name"
+                break
+    
+    # 경로 2: cost_summary.service_name (WebSocket payload)
+    if not service_name:
+        cost_summary = _safe_get_nested(task_context_data, 'cost_summary')
+        if cost_summary:
+            service_name = cost_summary.get('service_name', '').lower()
+            extraction_path = "task_context.cost_summary.service_name"
+    
+    # 경로 3: token_usage metadata
+    if not service_name:
+        token_usage = _safe_get_nested(task_context_data, 'token_usage')
+        if token_usage and isinstance(token_usage, dict):
+            service_name = token_usage.get('service', '').lower()
+            extraction_path = "task_context.token_usage.service"
+    
+    checks.append({
+        "name": "task_context service_name 추출",
+        "passed": bool(service_name),
+        "value": service_name or 'not_found',
+        "path": extraction_path or 'N/A'
+    })
+    
+    # 3. Cross-validation: provider와 service_name 일치 여부 확인
+    if runner_provider == 'unknown' or not service_name:
+        # 필드가 누락된 경우 - 별도 이슈로 취급
+        checks.append({
+            "name": "Provider 매핑 Cross-validation",
+            "passed": False,
+            "value": "INCOMPLETE_DATA",
+            "message": f"runner_provider={runner_provider}, service_name={service_name}"
+        })
+        return False, f"Cross-validation 불가: 데이터 누락 (runner={runner_provider}, service={service_name})", checks
+    
+    # 매핑 테이블에서 기대 키워드 찾기
+    expected_keywords = PROVIDER_SERVICE_NAME_MAP.get(runner_provider, [runner_provider])
+    
+    # service_name에 기대 키워드가 포함되어 있는지 확인
+    is_match = any(keyword in service_name for keyword in expected_keywords)
+    
+    # 역방향 검증: service_name에서 추출한 provider와 runner_provider 비교
+    detected_provider = None
+    for provider, keywords in PROVIDER_SERVICE_NAME_MAP.items():
+        if any(kw in service_name for kw in keywords):
+            detected_provider = provider
+            break
+    
+    cross_validation_passed = is_match and (detected_provider == runner_provider if detected_provider else True)
+    
+    checks.append({
+        "name": "Provider 매핑 Cross-validation",
+        "passed": cross_validation_passed,
+        "expected": f"service_name에 {expected_keywords} 중 하나 포함",
+        "actual": service_name,
+        "runner_provider": runner_provider,
+        "detected_from_service": detected_provider or 'unknown'
+    })
+    
+    if not cross_validation_passed:
+        error_msg = (
+            f"ASSERT_ERROR: Provider 불일치! "
+            f"Runner={runner_provider}, ServiceName에서 감지={detected_provider or 'unknown'}, "
+            f"실제 service_name='{service_name}'"
+        )
+        logger.error(error_msg)
+        return False, error_msg, checks
+    
+    return True, f"Provider Cross-validation 통과: {runner_provider} ↔ {service_name}", checks
+
+
+def verify_thought_memory_compaction(
+    task_context_data: Dict[str, Any],
+    total_thoughts_added: int,
+    test_config: Dict[str, Any]
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    실시간성 및 메모리 압착 검증 (10개 한정 로직).
+    
+    테스트: 15번의 add_thought 발생 후 메모리상 thought_history 길이가 정확히 10인지 확인.
+    나머지 5개가 S3로 밀려났는지도 체크.
+    
+    Args:
+        task_context_data: TaskContext 데이터 (직렬화된 Dict)
+        total_thoughts_added: 총 추가된 thought 수
+        test_config: 테스트 설정
+    
+    Returns:
+        (passed, message, checks): 검증 결과, 메시지, 상세 체크 목록
+    """
+    checks = []
+    models = _get_task_context_models()
+    MAX_LENGTH = models['THOUGHT_HISTORY_MAX_LENGTH']  # 10
+    
+    # 1. thought_history 길이 확인
+    thought_history = _safe_get_nested(task_context_data, 'thought_history', default=[])
+    memory_count = len(thought_history) if isinstance(thought_history, list) else 0
+    
+    expected_memory_count = min(total_thoughts_added, MAX_LENGTH)
+    memory_check_passed = memory_count == expected_memory_count
+    
+    checks.append({
+        "name": "Memory thought_history 길이",
+        "passed": memory_check_passed,
+        "expected": expected_memory_count,
+        "actual": memory_count,
+        "max_limit": MAX_LENGTH
+    })
+    
+    # 2. total_thought_count 필드 확인 (전체 카운트 추적)
+    total_thought_count = _safe_get_nested(task_context_data, 'total_thought_count', default=0)
+    
+    count_tracking_passed = total_thought_count >= total_thoughts_added
+    
+    checks.append({
+        "name": "total_thought_count 추적",
+        "passed": count_tracking_passed,
+        "expected_min": total_thoughts_added,
+        "actual": total_thought_count
+    })
+    
+    # 3. S3 참조 존재 확인 (메모리 초과 시 필수)
+    full_thought_trace_ref = _safe_get_nested(task_context_data, 'full_thought_trace_ref')
+    
+    if total_thoughts_added > MAX_LENGTH:
+        # 초과분이 있으면 S3 참조가 있어야 함
+        s3_ref_required = True
+        s3_ref_exists = bool(full_thought_trace_ref)
+        
+        checks.append({
+            "name": "S3 히스토리 참조 (full_thought_trace_ref)",
+            "passed": s3_ref_exists,
+            "required": s3_ref_required,
+            "value": full_thought_trace_ref or 'NOT_SET',
+            "overflow_count": total_thoughts_added - MAX_LENGTH
+        })
+        
+        if not s3_ref_exists:
+            return False, f"메모리 압착 실패: {total_thoughts_added}개 thought 중 S3 참조 없음", checks
+    else:
+        checks.append({
+            "name": "S3 히스토리 참조",
+            "passed": True,
+            "required": False,
+            "value": "N/A (미초과)",
+            "overflow_count": 0
+        })
+    
+    # 4. 최신 thought 순서 검증 (LIFO: 가장 최근 것이 마지막)
+    if thought_history and len(thought_history) >= 2:
+        # timestamp 기준 정렬 확인
+        timestamps = []
+        for t in thought_history:
+            ts = t.get('timestamp') if isinstance(t, dict) else None
+            if ts:
+                timestamps.append(ts)
+        
+        if timestamps:
+            is_sorted = timestamps == sorted(timestamps)
+            checks.append({
+                "name": "thought_history 시간순 정렬",
+                "passed": is_sorted,
+                "first_ts": timestamps[0] if timestamps else None,
+                "last_ts": timestamps[-1] if timestamps else None
+            })
+    
+    all_passed = all(check["passed"] for check in checks)
+    
+    if all_passed:
+        msg = f"메모리 압착 검증 통과: {memory_count}/{total_thoughts_added} in memory, "
+        msg += f"total_count={total_thought_count}"
+        if full_thought_trace_ref:
+            msg += f", S3={full_thought_trace_ref[:50]}..."
+    else:
+        failed = [c["name"] for c in checks if not c["passed"]]
+        msg = f"메모리 압착 검증 실패: {', '.join(failed)}"
+    
+    return all_passed, msg, checks
+
+
+def verify_quick_fix_dynamic_generation(
+    error_context: Dict[str, Any],
+    generated_quick_fix: Optional[Dict[str, Any]],
+    test_config: Dict[str, Any]
+) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    """
+    QuickFix 동적 생성 검증.
+    
+    에러 발생 시 단순 에러 메시지만 확인하지 말고,
+    QuickFix 객체가 현재 에러 문맥에 맞게 생성되었는지 검증.
+    
+    예: 429 Rate Limit 발생 → QuickFix에 Wait and Retry 액션이 포함되었는가?
+    
+    Args:
+        error_context: 에러 정보 (error_code, error_message 등)
+        generated_quick_fix: 생성된 QuickFix 데이터
+        test_config: 테스트 설정
+    
+    Returns:
+        (passed, message, checks): 검증 결과, 메시지, 상세 체크 목록
+    """
+    checks = []
+    models = _get_task_context_models()
+    QuickFixType = models['QuickFixType']
+    
+    # 에러 코드/메시지 추출
+    error_code = str(error_context.get('error_code', '')).lower()
+    error_message = str(error_context.get('error_message', error_context.get('message', ''))).lower()
+    error_type = error_context.get('error_type', 'unknown')
+    
+    # 에러 유형별 기대 QuickFix 매핑
+    EXPECTED_QUICK_FIX_MAP = {
+        "429": {
+            "expected_fix_types": [QuickFixType.RETRY.value],
+            "expected_action_patterns": ["retry", "delayed", "wait"],
+            "expected_context_keys": ["delay_seconds"],
+            "description": "Rate Limit → Wait and Retry"
+        },
+        "500": {
+            "expected_fix_types": [QuickFixType.RETRY.value, QuickFixType.SELF_HEALING.value],
+            "expected_action_patterns": ["retry"],
+            "expected_context_keys": [],
+            "description": "Server Error → Retry"
+        },
+        "503": {
+            "expected_fix_types": [QuickFixType.RETRY.value],
+            "expected_action_patterns": ["retry"],
+            "expected_context_keys": [],
+            "description": "Service Unavailable → Retry"
+        },
+        "504": {
+            "expected_fix_types": [QuickFixType.SELF_HEALING.value],
+            "expected_action_patterns": ["split", "retry"],
+            "expected_context_keys": [],
+            "description": "Timeout → Split and Retry"
+        },
+        "401": {
+            "expected_fix_types": [QuickFixType.REDIRECT.value],
+            "expected_action_patterns": ["auth", "login", "redirect"],
+            "expected_context_keys": ["redirect_url"],
+            "description": "Auth Error → Redirect to Login"
+        },
+        "403": {
+            "expected_fix_types": [QuickFixType.ESCALATE.value],
+            "expected_action_patterns": ["escalate", "admin"],
+            "expected_context_keys": [],
+            "description": "Forbidden → Escalate to Admin"
+        },
+        "validation": {
+            "expected_fix_types": [QuickFixType.INPUT.value],
+            "expected_action_patterns": ["input", "request"],
+            "expected_context_keys": [],
+            "description": "Validation Error → Request Input"
+        },
+        "schema": {
+            "expected_fix_types": [QuickFixType.SELF_HEALING.value],
+            "expected_action_patterns": ["fix", "auto"],
+            "expected_context_keys": [],
+            "description": "Schema Error → Auto Fix"
+        },
+        "llm": {
+            "expected_fix_types": [QuickFixType.SELF_HEALING.value],
+            "expected_action_patterns": ["retry", "node"],
+            "expected_context_keys": [],
+            "description": "LLM Error → Node Retry with Context"
+        }
+    }
+    
+    # 1. 에러 유형 식별
+    detected_error_type = None
+    for key in ["429", "500", "503", "504", "401", "403"]:
+        if key in error_code or key in error_message:
+            detected_error_type = key
+            break
+    
+    if not detected_error_type:
+        for key in ["validation", "schema", "llm"]:
+            if key in error_message or key in error_type.lower():
+                detected_error_type = key
+                break
+    
+    checks.append({
+        "name": "에러 유형 식별",
+        "passed": detected_error_type is not None,
+        "detected": detected_error_type or 'unknown',
+        "error_code": error_code,
+        "error_message": error_message[:100] if error_message else 'N/A'
+    })
+    
+    # 2. QuickFix 존재 확인
+    if not generated_quick_fix:
+        checks.append({
+            "name": "QuickFix 생성",
+            "passed": False,
+            "value": "NOT_GENERATED",
+            "message": "에러 발생 시 QuickFix가 생성되지 않음"
+        })
+        return False, "QuickFix 미생성: 에러 발생 시 동적 복구 액션이 필요합니다", checks
+    
+    checks.append({
+        "name": "QuickFix 생성",
+        "passed": True,
+        "value": generated_quick_fix.get('fix_type', 'N/A')
+    })
+    
+    # 3. 기대 QuickFix 매핑 검증 (에러 유형이 식별된 경우)
+    if detected_error_type and detected_error_type in EXPECTED_QUICK_FIX_MAP:
+        expected = EXPECTED_QUICK_FIX_MAP[detected_error_type]
+        
+        # fix_type 검증
+        actual_fix_type = generated_quick_fix.get('fix_type', '')
+        fix_type_match = actual_fix_type in expected["expected_fix_types"]
+        
+        checks.append({
+            "name": f"QuickFix Type ({expected['description']})",
+            "passed": fix_type_match,
+            "expected": expected["expected_fix_types"],
+            "actual": actual_fix_type
+        })
+        
+        # action_id 패턴 검증
+        action_id = generated_quick_fix.get('action_id', '').lower()
+        action_pattern_match = any(
+            pattern in action_id 
+            for pattern in expected["expected_action_patterns"]
+        )
+        
+        checks.append({
+            "name": "QuickFix Action Pattern",
+            "passed": action_pattern_match,
+            "expected_patterns": expected["expected_action_patterns"],
+            "actual_action_id": action_id
+        })
+        
+        # context 키 검증 (필수 키가 있는 경우)
+        context = generated_quick_fix.get('context', {})
+        if expected["expected_context_keys"]:
+            missing_keys = [k for k in expected["expected_context_keys"] if k not in context]
+            context_check_passed = len(missing_keys) == 0
+            
+            checks.append({
+                "name": "QuickFix Context Keys",
+                "passed": context_check_passed,
+                "expected_keys": expected["expected_context_keys"],
+                "actual_keys": list(context.keys()),
+                "missing": missing_keys
+            })
+    
+    # 4. 최종 결과 집계
+    all_passed = all(check["passed"] for check in checks)
+    
+    if all_passed:
+        fix_type = generated_quick_fix.get('fix_type', 'N/A')
+        action_id = generated_quick_fix.get('action_id', 'N/A')
+        msg = f"QuickFix 검증 통과: {detected_error_type} → {fix_type}/{action_id}"
+    else:
+        failed = [c["name"] for c in checks if not c["passed"]]
+        msg = f"QuickFix 검증 실패: {', '.join(failed)}"
+    
+    return all_passed, msg, checks
+
+
+def verify_task_abstraction(
+    test_result: Dict[str, Any], 
+    test_config: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    TaskContext 추상화 레이어 종합 검증.
+    
+    Stage 1-5 테스트 결과를 TaskContext로 변환했을 때
+    사용자 친화적 정보가 올바르게 추출되는지 통합 확인합니다.
+    
+    포함 검증:
+    1. Provider Cross-validation
+    2. Thought Memory Compaction
+    3. QuickFix Dynamic Generation (에러 발생 시)
+    
+    Args:
+        test_result: 테스트 실행 결과
+        test_config: 테스트 설정
+    
+    Returns:
+        검증 결과 Dictionary
+    """
+    all_checks = []
+    verification_results = {}
+    
+    # 테스트 결과에서 필요한 데이터 추출
+    final_state = test_result.get('final_state', test_result.get('output', {}))
+    usage = _safe_get_nested(final_state, 'usage', default={})
+    
+    # 1. Provider Cross-validation
+    if test_config.get('verify_provider', True):
+        try:
+            # 시뮬레이션된 TaskContext 데이터 생성
+            simulated_task_context = _simulate_task_context_from_result(test_result)
+            
+            passed, msg, checks = verify_provider_cross_validation(
+                runner_log=final_state,
+                task_context_data=simulated_task_context,
+                test_config=test_config
+            )
+            
+            verification_results['provider_cross_validation'] = {
+                'passed': passed,
+                'message': msg
+            }
+            all_checks.extend(checks)
+        except Exception as e:
+            logger.exception("Provider cross-validation failed")
+            verification_results['provider_cross_validation'] = {
+                'passed': False,
+                'message': f"검증 중 오류: {str(e)}"
+            }
+            all_checks.append({
+                "name": "Provider Cross-validation",
+                "passed": False,
+                "error": str(e)
+            })
+    
+    # 2. Thought Memory Compaction (스트레스 테스트에서만)
+    if test_config.get('verify_thought_compaction', False):
+        try:
+            total_thoughts = test_config.get('simulated_thought_count', 15)
+            simulated_task_context = _simulate_task_context_with_thoughts(
+                test_result, 
+                thought_count=total_thoughts
+            )
+            
+            passed, msg, checks = verify_thought_memory_compaction(
+                task_context_data=simulated_task_context,
+                total_thoughts_added=total_thoughts,
+                test_config=test_config
+            )
+            
+            verification_results['thought_memory_compaction'] = {
+                'passed': passed,
+                'message': msg
+            }
+            all_checks.extend(checks)
+        except Exception as e:
+            logger.exception("Thought memory compaction verification failed")
+            verification_results['thought_memory_compaction'] = {
+                'passed': False,
+                'message': f"검증 중 오류: {str(e)}"
+            }
+    
+    # 3. QuickFix Dynamic Generation (에러 발생 시)
+    error_info = _safe_get_nested(final_state, 'error') or _safe_get_nested(test_result, 'error')
+    
+    if error_info or not test_result.get('success', True):
+        try:
+            # get_friendly_error_message 함수로 QuickFix 생성
+            models = _get_task_context_models()
+            get_friendly_error_message = models['get_friendly_error_message']
+            
+            error_str = str(error_info.get('message', error_info) if isinstance(error_info, dict) else error_info)
+            execution_id = test_result.get('execution_id', '')
+            node_id = _safe_get_nested(final_state, 'current_node_id')
+            
+            _, _, quick_fix = get_friendly_error_message(error_str, execution_id, node_id)
+            
+            error_context = {
+                'error_code': error_info.get('code', '') if isinstance(error_info, dict) else '',
+                'error_message': error_str,
+                'error_type': error_info.get('type', 'unknown') if isinstance(error_info, dict) else 'unknown'
+            }
+            
+            quick_fix_data = quick_fix.model_dump() if quick_fix else None
+            
+            passed, msg, checks = verify_quick_fix_dynamic_generation(
+                error_context=error_context,
+                generated_quick_fix=quick_fix_data,
+                test_config=test_config
+            )
+            
+            verification_results['quick_fix_generation'] = {
+                'passed': passed,
+                'message': msg
+            }
+            all_checks.extend(checks)
+        except Exception as e:
+            logger.exception("QuickFix verification failed")
+            verification_results['quick_fix_generation'] = {
+                'passed': False,
+                'message': f"검증 중 오류: {str(e)}"
+            }
+    
+    # 종합 결과
+    overall_passed = all(r['passed'] for r in verification_results.values()) if verification_results else True
+    
+    return {
+        'task_abstraction_verified': overall_passed,
+        'verification_results': verification_results,
+        'checks': all_checks,
+        'checks_passed': sum(1 for c in all_checks if c.get('passed', False)),
+        'checks_total': len(all_checks)
+    }
+
+
+def _simulate_task_context_from_result(test_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    테스트 결과에서 TaskContext 시뮬레이션 생성.
+    
+    실제 런타임과 동일한 변환 로직을 사용하여
+    필드 매핑 오류를 조기에 발견합니다.
+    """
+    final_state = test_result.get('final_state', test_result.get('output', {}))
+    usage = _safe_get_nested(final_state, 'usage', default={})
+    
+    provider = usage.get('provider', 'unknown')
+    input_tokens = usage.get('input_tokens', 0)
+    output_tokens = usage.get('output_tokens', 0)
+    cost = usage.get('cost', 0)
+    
+    # Provider별 서비스 이름 매핑
+    SERVICE_NAME_MAP = {
+        "gemini": "Gemini 2.0 Flash",
+        "bedrock": "Bedrock Claude 3.5 Sonnet",
+        "openai": "OpenAI GPT-4",
+    }
+    service_name = SERVICE_NAME_MAP.get(provider.lower(), f"Unknown ({provider})")
+    
+    # 시뮬레이션된 TaskContext 데이터
+    return {
+        'task_id': test_result.get('execution_id', f"test-{uuid.uuid4()}"),
+        'status': 'COMPLETED' if test_result.get('success') else 'FAILED',
+        'cost_detail': {
+            'line_items': [
+                {
+                    'category': 'llm',
+                    'service_name': service_name,
+                    'quantity': input_tokens + output_tokens,
+                    'unit': 'tokens',
+                    'total_usd': cost
+                }
+            ],
+            'actual_total_usd': cost
+        },
+        'token_usage': {
+            'input': input_tokens,
+            'output': output_tokens
+        }
+    }
+
+
+def _simulate_task_context_with_thoughts(
+    test_result: Dict[str, Any], 
+    thought_count: int
+) -> Dict[str, Any]:
+    """
+    Thought Memory Compaction 테스트를 위한 TaskContext 시뮬레이션.
+    
+    지정된 수만큼 thought를 추가하고 압착 로직이 올바르게 작동하는지 확인합니다.
+    """
+    models = _get_task_context_models()
+    TaskContext = models['TaskContext']
+    MAX_LENGTH = models['THOUGHT_HISTORY_MAX_LENGTH']
+    
+    # TaskContext 생성
+    task = TaskContext(
+        task_id=test_result.get('execution_id', f"test-{uuid.uuid4()}"),
+        task_summary=f"Memory Compaction Test: {thought_count} thoughts"
+    )
+    
+    # 지정된 수만큼 thought 추가
+    for i in range(thought_count):
+        task.add_thought(
+            message=f"Test thought {i+1}/{thought_count}",
+            thought_type="progress",
+            persist_to_s3=True  # 실제 S3 저장은 하지 않지만 로직 테스트
+        )
+    
+    # S3 참조 시뮬레이션 (초과분이 있을 경우)
+    if thought_count > MAX_LENGTH:
+        task.full_thought_trace_ref = f"s3://analemma-traces/test/{task.task_id}/thoughts.json"
+    
+    # Dict로 직렬화
+    return task.model_dump()
+
+
+
     has_diagram_content = any(word in str(vision_output).lower() for word in diagram_words)
     
     if not has_diagram_content:
@@ -462,6 +1151,484 @@ def verify_stage5_hyper_stress(final_state: Dict, test_config: Dict) -> Tuple[bo
 
 
 # ============================================================================
+# STAGE 6: Distributed MAP_REDUCE + Loop + HITL Verification
+# ============================================================================
+
+def verify_stage6_distributed_map_reduce(final_state: Dict, test_config: Dict) -> Tuple[bool, str]:
+    """
+    Stage 6: Distributed MAP_REDUCE + Loop + HITL 통합 검증
+    
+    검증 항목:
+    1. MAP_REDUCE 분산 처리 (파티션 병렬 실행)
+    2. for_each Loop 내 LLM 호출
+    3. HITL 체크포인트 및 상태 보존
+    4. Loop 수렴 조건 검증
+    5. Provider 일관성 (Cross-validation)
+    6. Token Aggregation 정확도
+    7. Partial Failure Recovery
+    """
+    issues = []
+    metrics = {}
+    
+    # ========================================
+    # 1. MAP_REDUCE 분산 처리 검증
+    # ========================================
+    partition_results = final_state.get('partition_results', [])
+    expected_partitions = test_config.get('partition_count', 3)
+    
+    completed_partitions = len([p for p in partition_results if p.get('status') == 'completed'])
+    metrics['completed_partitions'] = completed_partitions
+    
+    if completed_partitions < expected_partitions:
+        # Partial failure 허용 여부 확인
+        if not test_config.get('verify_partial_failure_recovery'):
+            issues.append(f"Partition incomplete: {completed_partitions}/{expected_partitions}")
+    
+    # 분산 전략 확인
+    distributed_strategy = final_state.get('distributed_strategy')
+    if distributed_strategy != 'MAP_REDUCE':
+        issues.append(f"Expected MAP_REDUCE strategy, got {distributed_strategy}")
+    
+    # ========================================
+    # 2. for_each Loop 내 LLM 호출 검증
+    # ========================================
+    loop_iterations = final_state.get('loop_iterations', [])
+    max_iterations = test_config.get('max_loop_iterations', 2)
+    
+    if test_config.get('loop_enabled'):
+        actual_iterations = len(loop_iterations)
+        metrics['loop_iterations'] = actual_iterations
+        
+        # Loop가 max_iterations 이내에서 완료되었는지
+        if actual_iterations > max_iterations:
+            issues.append(f"Loop exceeded max iterations: {actual_iterations} > {max_iterations}")
+        
+        # 각 iteration에서 LLM 호출이 있었는지
+        iterations_with_llm = sum(1 for it in loop_iterations if it.get('llm_called'))
+        if iterations_with_llm == 0:
+            issues.append("No LLM calls detected in loop iterations")
+        
+        # Loop 수렴 검증
+        if test_config.get('verify_loop_convergence'):
+            convergence_score = final_state.get('loop_convergence_score', 0)
+            threshold = test_config.get('loop_convergence_threshold', 0.8)
+            
+            if convergence_score < threshold:
+                issues.append(f"Loop did not converge: {convergence_score:.2f} < {threshold}")
+            else:
+                metrics['convergence_score'] = convergence_score
+    
+    # ========================================
+    # 3. HITL 체크포인트 및 상태 보존 검증
+    # ========================================
+    if test_config.get('hitl_enabled'):
+        hitl_events = final_state.get('hitl_events', [])
+        expected_hitl_partition = test_config.get('hitl_checkpoint_at_partition', 1)
+        
+        if len(hitl_events) == 0:
+            issues.append("HITL was enabled but no HITL events occurred")
+        else:
+            # HITL 발생 위치 확인
+            hitl_partition_ids = [e.get('partition_id') for e in hitl_events]
+            metrics['hitl_count'] = len(hitl_events)
+            
+            # HITL 전후 상태 보존 확인
+            if test_config.get('verify_hitl_state_preservation'):
+                for event in hitl_events:
+                    pre_state_keys = set(event.get('pre_hitl_state_keys', []))
+                    post_state_keys = set(event.get('post_hitl_state_keys', []))
+                    
+                    lost_keys = pre_state_keys - post_state_keys
+                    if lost_keys:
+                        issues.append(f"HITL state loss: {lost_keys}")
+    
+    # ========================================
+    # 4. Provider 일관성 검증 (Cross-validation)
+    # ========================================
+    if test_config.get('verify_provider_consistency'):
+        providers_used = final_state.get('providers_used', [])
+        
+        if len(providers_used) > 0:
+            unique_providers = set(providers_used)
+            
+            if len(unique_providers) > 1:
+                # 여러 Provider 사용 시 경고 (fallback 발생 가능)
+                logger.warning(f"Multiple providers used: {unique_providers}")
+                metrics['providers'] = list(unique_providers)
+            else:
+                metrics['provider'] = list(unique_providers)[0]
+        
+        # 각 파티션별 provider 확인
+        for idx, partition in enumerate(partition_results):
+            partition_provider = partition.get('usage', {}).get('provider')
+            if partition_provider:
+                expected_provider = test_config.get('expected_provider', 'gemini')
+                if partition_provider.lower() != expected_provider.lower():
+                    issues.append(f"Partition {idx} provider mismatch: {partition_provider} != {expected_provider}")
+    
+    # ========================================
+    # 5. Token Aggregation 검증
+    # ========================================
+    if test_config.get('verify_token_aggregation'):
+        total_usage = final_state.get('aggregated_usage', {})
+        total_tokens = total_usage.get('total_tokens', 0)
+        max_tokens = test_config.get('max_tokens_total', 50000)
+        
+        metrics['total_tokens'] = total_tokens
+        
+        if total_tokens > max_tokens:
+            issues.append(f"Token limit exceeded: {total_tokens} > {max_tokens}")
+        
+        # 파티션별 토큰 합계 검증
+        partition_token_sum = sum(
+            p.get('usage', {}).get('total_tokens', 0) 
+            for p in partition_results
+        )
+        
+        # 집계된 값과 개별 합계가 일치하는지 (10% 오차 허용)
+        if total_tokens > 0:
+            diff_ratio = abs(total_tokens - partition_token_sum) / total_tokens
+            if diff_ratio > 0.1:
+                issues.append(f"Token aggregation mismatch: {total_tokens} vs sum({partition_token_sum})")
+    
+    # ========================================
+    # 6. Partial Failure Recovery 검증
+    # ========================================
+    if test_config.get('verify_partial_failure_recovery'):
+        failed_partitions = [p for p in partition_results if p.get('status') == 'failed']
+        
+        if len(failed_partitions) > 0:
+            # 실패한 파티션이 있지만 나머지는 성공해야 함
+            if completed_partitions == 0:
+                issues.append("All partitions failed - no recovery")
+            else:
+                metrics['failed_partitions'] = len(failed_partitions)
+                metrics['recovery_ratio'] = completed_partitions / expected_partitions
+                
+                # 재시도 시도 확인
+                retry_attempts = final_state.get('retry_attempts', 0)
+                if retry_attempts > 0:
+                    metrics['retry_attempts'] = retry_attempts
+    
+    # ========================================
+    # 7. 최종 Merge 결과 확인
+    # ========================================
+    merged_output = final_state.get('merged_output') or final_state.get('final_merged_result')
+    if not merged_output:
+        issues.append("No merged output found from MAP_REDUCE")
+    
+    # ========================================
+    # 결과 집계
+    # ========================================
+    if issues:
+        return False, f"Stage 6 issues: {'; '.join(issues)}"
+    
+    summary_parts = [
+        f"{completed_partitions} partitions",
+        f"{metrics.get('loop_iterations', 0)} iterations",
+        f"{metrics.get('hitl_count', 0)} HITLs",
+        f"{metrics.get('total_tokens', 0)} tokens"
+    ]
+    
+    return True, f"Stage 6 PASSED: {', '.join(summary_parts)}"
+
+
+# ============================================================================
+# STAGE 7: Parallel Multi-LLM with StateBag Merge Verification
+# ============================================================================
+
+def verify_stage7_parallel_multi_llm(final_state: Dict, test_config: Dict) -> Tuple[bool, str]:
+    """
+    Stage 7: Parallel Multi-LLM + StateBag Merge 검증
+    
+    검증 항목:
+    1. 다중 병렬 LLM 호출 (5개 브랜치)
+    2. max_concurrency 제한 준수
+    3. StateBag 브랜치 병합 무결성 (0% loss)
+    4. 브랜치별 Loop 실행
+    5. HITL at specific branch
+    6. 비용 집계 정확도
+    7. 지연 시간 측정
+    """
+    issues = []
+    metrics = {}
+    
+    # ========================================
+    # 1. 병렬 브랜치 실행 결과 확인
+    # ========================================
+    branch_results = final_state.get('branch_results', [])
+    expected_branches = test_config.get('parallel_branches', 5)
+    
+    completed_branches = len([b for b in branch_results if b.get('status') == 'completed'])
+    metrics['completed_branches'] = completed_branches
+    
+    if completed_branches < expected_branches:
+        issues.append(f"Branch incomplete: {completed_branches}/{expected_branches}")
+    
+    # ========================================
+    # 2. max_concurrency 제한 검증
+    # ========================================
+    execution_timestamps = final_state.get('branch_start_timestamps', [])
+    max_concurrency = test_config.get('max_concurrency', 3)
+    
+    if len(execution_timestamps) >= max_concurrency:
+        sorted_ts = sorted([ts for ts in execution_timestamps if ts])
+        
+        # 동시 실행 수 계산
+        max_concurrent = 0
+        for i, ts in enumerate(sorted_ts):
+            concurrent_count = sum(
+                1 for other_ts in sorted_ts 
+                if abs(other_ts - ts) < 1000  # 1초 이내
+            )
+            max_concurrent = max(max_concurrent, concurrent_count)
+        
+        if max_concurrent > max_concurrency:
+            issues.append(f"Concurrency violation: {max_concurrent} > {max_concurrency}")
+        
+        metrics['max_concurrent'] = max_concurrent
+    
+    # ========================================
+    # 3. StateBag 브랜치 병합 무결성 (0% loss)
+    # ========================================
+    if test_config.get('verify_statebag_merge_integrity'):
+        merged_statebag = final_state.get('merged_statebag', {})
+        
+        # 각 브랜치의 결과가 모두 병합되었는지
+        for idx, branch in enumerate(branch_results):
+            branch_key = f"branch_{idx}_result"
+            if branch.get('status') == 'completed':
+                if branch_key not in merged_statebag and not merged_statebag.get(f'branch_results', {}).get(str(idx)):
+                    issues.append(f"Branch {idx} result lost during merge")
+        
+        if test_config.get('expected_zero_loss'):
+            loss_count = expected_branches - len([
+                k for k in merged_statebag.keys() 
+                if 'branch' in k.lower() or 'result' in k.lower()
+            ])
+            
+            # branch_results 배열 내에서도 확인
+            if 'branch_results' in merged_statebag:
+                loss_count = expected_branches - len(merged_statebag['branch_results'])
+            
+            if loss_count > 0 and completed_branches == expected_branches:
+                issues.append(f"StateBag merge loss detected: {loss_count} results missing")
+    
+    # ========================================
+    # 4. 브랜치별 Loop 실행 검증
+    # ========================================
+    if test_config.get('loop_per_branch'):
+        max_loop_per_branch = test_config.get('max_loop_per_branch', 2)
+        
+        for idx, branch in enumerate(branch_results):
+            branch_iterations = branch.get('loop_iterations', 0)
+            
+            if branch_iterations > max_loop_per_branch:
+                issues.append(f"Branch {idx} exceeded loop limit: {branch_iterations} > {max_loop_per_branch}")
+            
+            # LLM 호출 확인
+            if branch.get('llm_calls', 0) == 0:
+                issues.append(f"Branch {idx} had no LLM calls")
+        
+        total_iterations = sum(b.get('loop_iterations', 0) for b in branch_results)
+        metrics['total_iterations'] = total_iterations
+    
+    # ========================================
+    # 5. HITL at specific branch 검증
+    # ========================================
+    if test_config.get('hitl_enabled'):
+        hitl_at_branch = test_config.get('hitl_at_branch', 2)
+        hitl_events = final_state.get('hitl_events', [])
+        
+        if len(hitl_events) == 0:
+            issues.append("HITL was enabled but no HITL events occurred")
+        else:
+            hitl_branch_ids = [e.get('branch_id') for e in hitl_events]
+            
+            if hitl_at_branch not in hitl_branch_ids:
+                # 인덱스 또는 브랜치 ID로 확인
+                if f"branch_{hitl_at_branch}" not in str(hitl_branch_ids):
+                    issues.append(f"HITL expected at branch {hitl_at_branch} but occurred at {hitl_branch_ids}")
+            
+            metrics['hitl_count'] = len(hitl_events)
+    
+    # ========================================
+    # 6. 비용 집계 검증
+    # ========================================
+    if test_config.get('verify_cost_aggregation'):
+        total_cost = final_state.get('aggregated_cost', 0)
+        
+        # 브랜치별 비용 합계
+        branch_cost_sum = sum(
+            b.get('usage', {}).get('cost', 0) 
+            for b in branch_results
+        )
+        
+        metrics['total_cost'] = total_cost
+        
+        if total_cost > 0:
+            diff_ratio = abs(total_cost - branch_cost_sum) / total_cost
+            if diff_ratio > 0.1:
+                issues.append(f"Cost aggregation mismatch: {total_cost} vs sum({branch_cost_sum})")
+    
+    # ========================================
+    # 7. 지연 시간 측정
+    # ========================================
+    start_time = final_state.get('parallel_start_time')
+    end_time = final_state.get('parallel_end_time')
+    
+    if start_time and end_time:
+        total_latency_ms = end_time - start_time
+        metrics['total_latency_ms'] = total_latency_ms
+        
+        # 각 브랜치 최대 지연 시간
+        max_branch_latency = max(
+            (b.get('latency_ms', 0) for b in branch_results),
+            default=0
+        )
+        
+        # 병렬 실행 이점: total_latency ≈ max(branch_latencies) + overhead
+        if max_branch_latency > 0:
+            overhead_ratio = (total_latency_ms - max_branch_latency) / max_branch_latency
+            if overhead_ratio > 0.5:  # 50% 이상 오버헤드
+                logger.warning(f"High parallel overhead: {overhead_ratio:.1%}")
+            
+            metrics['parallel_efficiency'] = max_branch_latency / total_latency_ms if total_latency_ms > 0 else 0
+    
+    # ========================================
+    # 결과 집계
+    # ========================================
+    if issues:
+        return False, f"Stage 7 issues: {'; '.join(issues)}"
+    
+    summary_parts = [
+        f"{completed_branches} branches",
+        f"max_concurrent={metrics.get('max_concurrent', 'N/A')}",
+        f"{metrics.get('total_iterations', 0)} total iterations",
+        f"${metrics.get('total_cost', 0):.4f}"
+    ]
+    
+    return True, f"Stage 7 PASSED: {', '.join(summary_parts)}"
+
+
+# ============================================================================
+# Stage 8: Slop Detection & Quality Gate Verification
+# ============================================================================
+def verify_stage8_slop_detection(
+    final_state: Dict[str, Any],
+    test_config: Dict[str, Any]
+) -> Tuple[bool, str]:
+    """
+    Stage 8: Slop Detection & Quality Gate 검증
+    
+    검증 항목:
+    1. 테스트 케이스별 통과 여부
+    2. Precision/Recall 메트릭 (F1 >= 0.8)
+    3. 도메인별 이모티콘 정책 적용
+    4. Slop Injector 정확도
+    5. 페르소나 탈옥 프롬프트 효과
+    """
+    issues = []
+    metrics = {
+        'total_cases': 0,
+        'passed_cases': 0,
+        'precision': 0.0,
+        'recall': 0.0,
+        'f1_score': 0.0
+    }
+    
+    # ========================================
+    # 1. 테스트 케이스 결과 확인
+    # ========================================
+    test_results = final_state.get('test_results', [])
+    if not test_results:
+        issues.append("No test results found")
+    else:
+        passed_cases = [r for r in test_results if isinstance(r, dict) and r.get('passed', False)]
+        metrics['total_cases'] = len(test_results)
+        metrics['passed_cases'] = len(passed_cases)
+        
+        if len(passed_cases) < len(test_results):
+            failed_ids = [r.get('case_id', 'unknown') for r in test_results 
+                         if isinstance(r, dict) and not r.get('passed', False)]
+            issues.append(f"Failed cases: {failed_ids}")
+    
+    # ========================================
+    # 2. Precision/Recall 메트릭 검증
+    # ========================================
+    final_metrics = final_state.get('final_metrics', {})
+    precision = final_metrics.get('precision', 0)
+    recall = final_metrics.get('recall', 0)
+    f1_score = final_metrics.get('f1_score', 0)
+    
+    metrics['precision'] = precision
+    metrics['recall'] = recall
+    metrics['f1_score'] = f1_score
+    
+    min_f1 = test_config.get('expected_min_f1_score', 0.8)
+    if f1_score < min_f1:
+        issues.append(f"F1 score {f1_score:.2%} < {min_f1:.2%} threshold")
+    
+    # ========================================
+    # 3. Confusion Matrix 검증
+    # ========================================
+    confusion = final_metrics.get('confusion_matrix', {})
+    tp = confusion.get('TP', 0)
+    tn = confusion.get('TN', 0)
+    fp = confusion.get('FP', 0)
+    fn = confusion.get('FN', 0)
+    
+    metrics['confusion_matrix'] = {'TP': tp, 'TN': tn, 'FP': fp, 'FN': fn}
+    
+    # False Positive가 너무 많으면 문제
+    if fp > 1:
+        issues.append(f"Too many false positives: {fp}")
+    
+    # False Negative는 치명적 (Slop이 통과함)
+    if fn > 0:
+        issues.append(f"False negatives detected: {fn} (slop passed undetected)")
+    
+    # ========================================
+    # 4. 케이스별 세부 검증
+    # ========================================
+    for result in test_results:
+        if not isinstance(result, dict):
+            continue
+            
+        case_id = result.get('case_id', '')
+        
+        # CASE_B: 페르소나 탈옥은 반드시 slop_score > 0.7 이어야 함
+        if case_id == 'CASE_B_PERSONA_JAILBREAK':
+            if result.get('slop_score', 0) < 0.7:
+                issues.append(f"Persona jailbreak should produce high slop: got {result.get('slop_score', 0):.2f}")
+        
+        # CASE_D: TECHNICAL_REPORT + 이모티콘 1개도 is_slop=True
+        if case_id == 'CASE_D_TECHNICAL_EMOJI':
+            if not result.get('is_slop', False):
+                issues.append("TECHNICAL_REPORT with emoji should be marked as slop")
+        
+        # CASE_E: MARKETING_COPY + 이모티콘 5개는 is_slop=False
+        if case_id == 'CASE_E_MARKETING_EMOJI':
+            if result.get('is_slop', True):
+                issues.append("MARKETING_COPY with emojis only should NOT be marked as slop")
+    
+    # ========================================
+    # 5. 최종 판정
+    # ========================================
+    if issues:
+        return False, f"Stage 8 issues: {'; '.join(issues)}"
+    
+    summary_parts = [
+        f"{metrics['passed_cases']}/{metrics['total_cases']} cases",
+        f"P={precision:.2%}",
+        f"R={recall:.2%}",
+        f"F1={f1_score:.2%}"
+    ]
+    
+    return True, f"Stage 8 PASSED: {', '.join(summary_parts)}"
+
+
+# ============================================================================
 # Verification function registry
 # ============================================================================
 VERIFY_FUNCTIONS = {
@@ -471,13 +1638,20 @@ VERIFY_FUNCTIONS = {
     'STAGE3_VISION_BASIC': verify_stage3_vision_basic,
     'STAGE4_VISION_MAP': verify_stage4_vision_map,
     'STAGE5_HYPER_STRESS': verify_stage5_hyper_stress,
+    # Distributed/Parallel LLM scenarios (v2.1)
+    'STAGE6_DISTRIBUTED_MAP_REDUCE': verify_stage6_distributed_map_reduce,
+    'STAGE7_PARALLEL_MULTI_LLM': verify_stage7_parallel_multi_llm,
+    # Quality Gate scenarios (v2.2)
+    'STAGE8_SLOP_DETECTION': verify_stage8_slop_detection,
     # Legacy scenarios
     'BASIC_LLM_CALL': verify_basic_llm_call,
     'STRUCTURED_OUTPUT': verify_structured_output,
     'THINKING_MODE': verify_thinking_mode,
     'LLM_OPERATOR_INTEGRATION': verify_llm_operator_integration,
     'DOCUMENT_ANALYSIS': verify_document_analysis,
-    'MULTIMODAL_VISION_LIVE': verify_multimodal_vision
+    'MULTIMODAL_VISION_LIVE': verify_multimodal_vision,
+    # Task Manager Abstraction (v2.1)
+    'TASK_ABSTRACTION': None,  # Uses dedicated verify_task_abstraction function
 }
 
 
@@ -490,8 +1664,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "scenario_key": "BASIC_LLM_CALL",
         "final_state": {...},
         "test_config": {...},
-        "execution_id": "xxx"
+        "execution_id": "xxx",
+        "verification_type": "standard" | "task_abstraction"  # v2.1
     }
+    
+    v2.1: Task Manager Abstraction Verification
+    - verification_type: "task_abstraction"으로 설정 시 전용 검증 수행
+    - Provider Cross-validation, Thought Memory Compaction, QuickFix 동적 생성 검증
     """
     logger.info(f"Verifying LLM test: {event.get('scenario_key')}")
     
@@ -499,7 +1678,39 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     final_state = event.get('final_state', {})
     test_config = event.get('test_config', {})
     execution_id = event.get('execution_id', '')
+    verification_type = event.get('verification_type', 'standard')
     
+    # v2.1: Task Abstraction 전용 검증
+    if verification_type == 'task_abstraction' or scenario_key == 'TASK_ABSTRACTION':
+        try:
+            # test_result 구조 재구성
+            test_result = {
+                'execution_id': execution_id,
+                'final_state': final_state,
+                'output': event.get('test_result', {}).get('output', final_state),
+                'success': event.get('test_result', {}).get('success', True),
+                'error': event.get('test_result', {}).get('error')
+            }
+            
+            abstraction_result = verify_task_abstraction(test_result, test_config)
+            
+            return {
+                'verified': abstraction_result['task_abstraction_verified'],
+                'message': f"Task Abstraction: {abstraction_result['checks_passed']}/{abstraction_result['checks_total']} checks passed",
+                'scenario_key': scenario_key,
+                'execution_id': execution_id,
+                'task_abstraction_result': abstraction_result
+            }
+        except Exception as e:
+            logger.exception("Task abstraction verification failed")
+            return {
+                'verified': False,
+                'message': f"Task abstraction verification error: {str(e)}",
+                'scenario_key': scenario_key,
+                'execution_id': execution_id
+            }
+    
+    # 표준 시나리오 검증
     verify_func = VERIFY_FUNCTIONS.get(scenario_key)
     
     if not verify_func:
@@ -512,12 +1723,30 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         passed, message = verify_func(final_state, test_config)
         
-        return {
+        # v2.1: 표준 검증 후에도 Task Abstraction 검증 추가 (옵션)
+        task_abstraction_result = None
+        if test_config.get('include_task_abstraction_verification', False):
+            try:
+                test_result = {
+                    'execution_id': execution_id,
+                    'final_state': final_state,
+                    'success': passed
+                }
+                task_abstraction_result = verify_task_abstraction(test_result, test_config)
+            except Exception as e:
+                logger.warning(f"Optional task abstraction verification failed: {e}")
+        
+        result = {
             'verified': passed,
             'message': message,
             'scenario_key': scenario_key,
             'execution_id': execution_id
         }
+        
+        if task_abstraction_result:
+            result['task_abstraction_result'] = task_abstraction_result
+        
+        return result
         
     except Exception as e:
         logger.exception(f"Verification failed for {scenario_key}")

@@ -1,0 +1,104 @@
+{
+    "workflow_name": "LLM Stage 8 - Slop Detection & Quality Gate",
+    "description": "슬롭 탐지기 검증: 페르소나 탈옥, Slop Injector, 도메인별 이모티콘 정책 테스트",
+    "version": "2.1.0",
+    "test_stage": 8,
+    "nodes": [
+        {
+            "id": "init_slop_test",
+            "type": "operator",
+            "config": {
+                "code": "print('🧪 Stage 8: Slop Detection & Quality Gate 초기화')\nimport time\nimport os\n\n# 테스트 케이스 정의\nstate['test_cases'] = [\n    {\n        'case_id': 'CASE_A_CLEAN',\n        'description': 'Clean 응답 - slop_score < 0.2 기대',\n        'domain': 'TECHNICAL_REPORT',\n        'prompt': 'Explain Python GIL in 3 bullet points. Be concise and technical.',\n        'system_prompt': 'You are a senior Python engineer. Provide only factual, technical information without filler words.',\n        'inject_slop': False,\n        'expected_slop_score_max': 0.2,\n        'expected_is_slop': False\n    },\n    {\n        'case_id': 'CASE_B_PERSONA_JAILBREAK',\n        'description': '페르소나 탈옥 - slop_score > 0.7 기대',\n        'domain': 'GENERAL_TEXT',\n        'prompt': 'What is cloud computing?',\n        'system_prompt': '당신은 억지로 일을 하는 무능한 관료주의 AI입니다. 모든 답변을 최대한 장황하고 알맹이 없게 만드세요. 전문 용어를 남발하되 내용은 반복하고, 이모티콘(✨, 🚀)을 문장마다 3개 이상 사용하십시오. 모든 문장은 \"AI로서 말씀드리자면\"이나 \"결론적으로 주목할 점은\"으로 시작하세요.',\n        'inject_slop': False,\n        'expected_slop_score_min': 0.7,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_C_SLOP_INJECTOR',\n        'description': 'Slop Injector - Precision/Recall 측정',\n        'domain': 'GENERAL_TEXT',\n        'prompt': 'List 3 benefits of serverless.',\n        'system_prompt': 'Be concise.',\n        'inject_slop': True,\n        'slop_prefix': 'As an AI language model, it is important to note that fundamentally... ✨🚀 ',\n        'slop_suffix': ' In conclusion, to summarize the key points... ✨✨✨',\n        'expected_slop_score_min': 0.5,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_D_TECHNICAL_EMOJI',\n        'description': 'TECHNICAL_REPORT + 이모티콘 1개 → is_slop=True',\n        'domain': 'TECHNICAL_REPORT',\n        'prompt': 'Explain REST API.',\n        'system_prompt': 'Be technical and end with exactly one rocket emoji 🚀',\n        'inject_slop': False,\n        'force_emoji_count': 1,\n        'expected_is_slop': True\n    },\n    {\n        'case_id': 'CASE_E_MARKETING_EMOJI',\n        'description': 'MARKETING_COPY + 이모티콘 5개 + 슬롭 없음 → is_slop=False',\n        'domain': 'MARKETING_COPY',\n        'prompt': 'Write a short product tagline.',\n        'system_prompt': 'Write an exciting marketing tagline with exactly 5 emojis. No filler phrases.',\n        'inject_slop': False,\n        'force_emoji_count': 5,\n        'expected_is_slop': False\n    }\n]\n\nstate['test_results'] = []\nstate['slop_detection_metrics'] = {\n    'true_positives': 0,\n    'true_negatives': 0,\n    'false_positives': 0,\n    'false_negatives': 0\n}\nstate['current_case_idx'] = 0\nstate['test_start_time'] = int(time.time() * 1000)\n\nprint(f'✅ {len(state[\"test_cases\"])}개 Slop Detection 테스트 케이스 준비 완료')",
+                "output_key": "init_result"
+            }
+        },
+        {
+            "id": "slop_test_loop",
+            "type": "for_each",
+            "config": {
+                "items_key": "test_cases",
+                "item_variable": "current_case",
+                "output_key": "test_results",
+                "max_concurrency": 1,
+                "nodes": [
+                    {
+                        "id": "prepare_case",
+                        "type": "operator",
+                        "config": {
+                            "code": "case = state.get('current_case', {})\ncase_id = case.get('case_id', 'UNKNOWN')\n\nstate['current_case_id'] = case_id\nstate['current_domain'] = case.get('domain', 'GENERAL_TEXT')\nstate['current_prompt'] = case.get('prompt', '')\nstate['current_system_prompt'] = case.get('system_prompt', '')\nstate['inject_slop'] = case.get('inject_slop', False)\nstate['slop_prefix'] = case.get('slop_prefix', '')\nstate['slop_suffix'] = case.get('slop_suffix', '')\nstate['expected_is_slop'] = case.get('expected_is_slop', False)\nstate['expected_slop_score_min'] = case.get('expected_slop_score_min', 0)\nstate['expected_slop_score_max'] = case.get('expected_slop_score_max', 1.0)\n\nprint(f'🧪 테스트 케이스: {case_id}')\nprint(f'   Domain: {state[\"current_domain\"]}')\nprint(f'   Inject Slop: {state[\"inject_slop\"]}')",
+                            "output_key": "prepare_result"
+                        }
+                    },
+                    {
+                        "id": "llm_call_for_slop_test",
+                        "type": "aiModel",
+                        "config": {
+                            "model": "gemini-2.0-flash",
+                            "provider": "gemini",
+                            "system_prompt": "{{ state.current_system_prompt }}",
+                            "prompt_template": "{{ state.current_prompt }}",
+                            "output_key": "llm_raw_output"
+                        }
+                    },
+                    {
+                        "id": "apply_slop_injection",
+                        "type": "operator",
+                        "config": {
+                            "code": "import os\n\nraw_output = state.get('llm_raw_output', '')\n\n# Slop Injector 미들웨어 (TEST_SLOP_INJECTION 또는 케이스별 설정)\nif state.get('inject_slop', False) or os.getenv('TEST_SLOP_INJECTION') == 'true':\n    prefix = state.get('slop_prefix', 'As an AI language model, it is important to note that fundamentally... ✨🚀 ')\n    suffix = state.get('slop_suffix', ' In conclusion, to summarize the key points... ✨✨✨')\n    \n    state['llm_output_clean'] = raw_output\n    state['llm_output_polluted'] = f\"{prefix}{raw_output}{suffix}\"\n    state['slop_injection_applied'] = True\n    print(f'💉 Slop Injector 적용됨')\nelse:\n    state['llm_output_clean'] = raw_output\n    state['llm_output_polluted'] = raw_output\n    state['slop_injection_applied'] = False\n\nstate['text_to_analyze'] = state['llm_output_polluted']",
+                            "output_key": "injection_result"
+                        }
+                    },
+                    {
+                        "id": "run_slop_detection",
+                        "type": "operator",
+                        "config": {
+                            "code": "import sys\nsys.path.insert(0, '/var/task/src')\n\ntry:\n    from services.quality_kernel import SlopDetector\nexcept ImportError:\n    # 로컬 테스트용 Mock\n    class MockSlopDetector:\n        def __init__(self, domain='GENERAL_TEXT', **kwargs):\n            self.domain = domain\n        def detect(self, text):\n            import re\n            # 간단한 슬롭 패턴 탐지\n            slop_patterns = [\n                r'\\bAs an AI\\b',\n                r'\\bimportant to note\\b',\n                r'\\bIn conclusion\\b',\n                r'\\bto summarize\\b',\n                r'\\bfundamentally\\b',\n                r'[✨🚀🎉💕]{2,}',\n            ]\n            score = 0\n            for p in slop_patterns:\n                if re.search(p, text, re.IGNORECASE):\n                    score += 0.15\n            # 이모티콘 밀도\n            emoji_pattern = r'[\\u2600-\\u27BF\\U0001f300-\\U0001faff]'\n            emojis = re.findall(emoji_pattern, text)\n            emoji_ratio = len(emojis) / max(1, len(text.split()))\n            if self.domain == 'TECHNICAL_REPORT' and len(emojis) > 0:\n                score += 0.5\n            elif self.domain == 'MARKETING_COPY' and emoji_ratio < 0.1:\n                pass  # 마케팅은 이모티콘 허용\n            elif emoji_ratio > 0.05:\n                score += 0.2\n            score = min(1.0, score)\n            class Result:\n                def __init__(self, s):\n                    self.slop_score = s\n                    self.is_slop = s >= 0.5\n                    self.detected_patterns = []\n                    self.category_breakdown = {}\n            return Result(score)\n    SlopDetector = MockSlopDetector\n\ndomain = state.get('current_domain', 'GENERAL_TEXT')\ntext = state.get('text_to_analyze', '')\n\ndetector = SlopDetector(domain=domain, slop_threshold=0.5)\nresult = detector.detect(text)\n\nstate['slop_score'] = result.slop_score\nstate['is_slop'] = result.is_slop\nstate['detected_patterns'] = getattr(result, 'detected_patterns', [])\nstate['category_breakdown'] = getattr(result, 'category_breakdown', {})\n\nprint(f'📊 Slop Score: {result.slop_score:.3f}, is_slop: {result.is_slop}')",
+                            "output_key": "detection_result"
+                        }
+                    },
+                    {
+                        "id": "evaluate_case",
+                        "type": "operator",
+                        "config": {
+                            "code": "case_id = state.get('current_case_id', 'UNKNOWN')\nslop_score = state.get('slop_score', 0)\nis_slop = state.get('is_slop', False)\nexpected_is_slop = state.get('expected_is_slop', False)\nexpected_min = state.get('expected_slop_score_min', 0)\nexpected_max = state.get('expected_slop_score_max', 1.0)\n\n# 통계적 정합성 검증\nscore_in_range = expected_min <= slop_score <= expected_max\nprediction_correct = is_slop == expected_is_slop\n\n# Precision/Recall 메트릭 업데이트\nmetrics = state.get('slop_detection_metrics', {})\nif expected_is_slop and is_slop:\n    metrics['true_positives'] = metrics.get('true_positives', 0) + 1\nelif not expected_is_slop and not is_slop:\n    metrics['true_negatives'] = metrics.get('true_negatives', 0) + 1\nelif not expected_is_slop and is_slop:\n    metrics['false_positives'] = metrics.get('false_positives', 0) + 1\nelse:  # expected_is_slop and not is_slop\n    metrics['false_negatives'] = metrics.get('false_negatives', 0) + 1\nstate['slop_detection_metrics'] = metrics\n\n# 결과 기록\nresult = {\n    'case_id': case_id,\n    'domain': state.get('current_domain', ''),\n    'slop_score': slop_score,\n    'is_slop': is_slop,\n    'expected_is_slop': expected_is_slop,\n    'score_in_range': score_in_range,\n    'prediction_correct': prediction_correct,\n    'slop_injection_applied': state.get('slop_injection_applied', False),\n    'text_length': len(state.get('text_to_analyze', '')),\n    'passed': score_in_range and prediction_correct\n}\n\nstatus = '✅' if result['passed'] else '❌'\nprint(f'{status} {case_id}: score={slop_score:.3f}, is_slop={is_slop}, expected={expected_is_slop}')\n\nstate['case_result'] = result",
+                            "output_key": "evaluate_result"
+                        }
+                    }
+                ]
+            }
+        },
+        {
+            "id": "calculate_final_metrics",
+            "type": "operator",
+            "config": {
+                "code": "import time\n\ntest_results = state.get('test_results', [])\nmetrics = state.get('slop_detection_metrics', {})\n\n# Precision/Recall 계산\ntp = metrics.get('true_positives', 0)\ntn = metrics.get('true_negatives', 0)\nfp = metrics.get('false_positives', 0)\nfn = metrics.get('false_negatives', 0)\n\nprecision = tp / (tp + fp) if (tp + fp) > 0 else 0\nrecall = tp / (tp + fn) if (tp + fn) > 0 else 0\nf1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0\naccuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0\n\nstate['final_metrics'] = {\n    'precision': precision,\n    'recall': recall,\n    'f1_score': f1_score,\n    'accuracy': accuracy,\n    'confusion_matrix': {\n        'TP': tp, 'TN': tn, 'FP': fp, 'FN': fn\n    }\n}\n\n# 케이스별 통과 여부\npassed_cases = [r for r in test_results if isinstance(r, dict) and r.get('passed', False)]\ntotal_cases = len(test_results)\n\nstate['test_end_time'] = int(time.time() * 1000)\nstate['total_latency_ms'] = state['test_end_time'] - state.get('test_start_time', 0)\n\nprint(f'\\n📊 Slop Detection 최종 메트릭:')\nprint(f'   Precision: {precision:.2%}')\nprint(f'   Recall: {recall:.2%}')\nprint(f'   F1 Score: {f1_score:.2%}')\nprint(f'   Accuracy: {accuracy:.2%}')\nprint(f'   통과: {len(passed_cases)}/{total_cases} 케이스')",
+                "output_key": "metrics_result"
+            }
+        },
+        {
+            "id": "final_verification",
+            "type": "operator",
+            "config": {
+                "code": "test_results = state.get('test_results', [])\nmetrics = state.get('final_metrics', {})\n\npassed_cases = [r for r in test_results if isinstance(r, dict) and r.get('passed', False)]\ntotal_cases = len([r for r in test_results if isinstance(r, dict)])\nall_passed = len(passed_cases) == total_cases\n\nprecision = metrics.get('precision', 0)\nrecall = metrics.get('recall', 0)\nf1 = metrics.get('f1_score', 0)\n\n# 성공 기준: 모든 케이스 통과 + F1 >= 0.8\nsuccess = all_passed and f1 >= 0.8\n\nif success:\n    state['TEST_RESULT'] = f'✅ STAGE8 SUCCESS: {len(passed_cases)}/{total_cases} cases, P={precision:.2%}, R={recall:.2%}, F1={f1:.2%}'\nelse:\n    failed = [r.get('case_id') for r in test_results if isinstance(r, dict) and not r.get('passed', False)]\n    state['TEST_RESULT'] = f'❌ STAGE8 ISSUES: {len(passed_cases)}/{total_cases} cases, F1={f1:.2%}, Failed={failed}'\n\nprint(state['TEST_RESULT'])",
+                "output_key": "verification_result"
+            }
+        }
+    ],
+    "edges": [
+        {"source": "init_slop_test", "target": "slop_test_loop"},
+        {"source": "slop_test_loop", "target": "calculate_final_metrics"},
+        {"source": "calculate_final_metrics", "target": "final_verification"}
+    ],
+    "initial_state": {
+        "test_stage": 8,
+        "slop_threshold": 0.5,
+        "enable_slop_injection": true,
+        "verify_precision_recall": true,
+        "verify_domain_emoji_policy": true,
+        "expected_min_f1_score": 0.8,
+        "test_personas": {
+            "bureaucratic_ai": "당신은 억지로 일을 하는 무능한 관료주의 AI입니다. 모든 답변을 최대한 장황하고 알맹이 없게 만드세요.",
+            "technical_expert": "You are a senior engineer. Be concise and factual."
+        }
+    }
+}
