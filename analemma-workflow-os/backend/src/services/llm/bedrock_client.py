@@ -167,7 +167,7 @@ def invoke_bedrock_stream(
         - Incremental UTF-8 decoder로 멀티바이트 문자(한글 등) 깨짐 방지
         - UI delay로 렌더링 가독성 확보
     """
-    model_to_use = model_id or MODEL_GEMINI_FLASH  # Gemini를 기본값으로 변경
+    model_to_use = model_id or MODEL_HAIKU  # Claude Haiku를 기본값으로 변경 (on-demand 지원)
     
     # Mock 모드 처리
     if is_mock_mode():
@@ -191,8 +191,8 @@ def invoke_bedrock_stream(
     # Note: Gemini 모델은 상위 레이어(codesign_assistant)에서 직접 gemini_service 호출
     # bedrock_client는 Claude fallback 전용
     if "gemini" in model_to_use.lower():
-        logger.warning(f"Gemini model requested in bedrock_client (unexpected). Falling back to Claude.")
-        model_to_use = MODEL_SONNET
+        logger.warning(f"Gemini model requested in bedrock_client (unexpected). Falling back to Claude Haiku.")
+        model_to_use = MODEL_HAIKU  # on-demand 지원되는 Haiku로 변경
     
     # Claude (Bedrock) 호출
     logger.info(f"Using Bedrock Claude model: {model_to_use}")

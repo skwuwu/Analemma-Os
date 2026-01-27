@@ -787,7 +787,8 @@ async def stream_codesign_response(
     recent_changes: List[Dict[str, Any]] = None,
     session_id: str = None,
     connection_ids: List[str] = None,
-    use_gemini_long_context: bool = True
+    use_gemini_long_context: bool = True,
+    model_id: str = None
 ) -> AsyncGenerator[str, None]:
     """
     Co-design 스트리밍 응답 생성 (Gemini Native 우선)
@@ -828,26 +829,31 @@ async def stream_codesign_response(
         return
     
     # ──────────────────────────────────────────────────────────
-    # Gemini Native 라우팅 결정
+    # 모델 기반 라우팅 결정 (model_id 우선)
     # ──────────────────────────────────────────────────────────
     use_gemini = False
-    model_config = None
     
-    if GEMINI_AVAILABLE and use_gemini_long_context:
-        # 모델 라우터를 통한 자동 선택
-        if get_codesign_config:
-            try:
-                model_config = get_codesign_config(current_workflow, user_request, recent_changes)
-                if model_config and is_gemini_model:
-                    use_gemini = is_gemini_model(model_config.model_id)
-            except Exception as e:
-                logger.warning(f"Model router failed, falling back: {e}")
-        else:
-            # 모델 라우터가 없으면 Gemini 기본 사용
-            use_gemini = True
-    
-    logger.info(f"Co-design model selection: use_gemini={use_gemini}, "
-               f"model={model_config.model_id if model_config else 'default'}")
+    if model_id:
+        # model_id에 따라 Gemini 또는 Bedrock 선택
+        use_gemini = "gemini" in model_id.lower()
+        logger.info(f"Model-based routing: model_id={model_id}, use_gemini={use_gemini}")
+    else:
+        # model_id가 없으면 기존 로직 사용
+        if GEMINI_AVAILABLE and use_gemini_long_context:
+            # 모델 라우터를 통한 자동 선택
+            if get_codesign_config:
+                try:
+                    model_config = get_codesign_config(current_workflow, user_request, recent_changes)
+                    if model_config and is_gemini_model:
+                        use_gemini = is_gemini_model(model_config.model_id)
+                except Exception as e:
+                    logger.warning(f"Model router failed, falling back: {e}")
+            else:
+                # 모델 라우터가 없으면 Gemini 기본 사용
+                use_gemini = True
+        
+        logger.info(f"Legacy routing: use_gemini={use_gemini}, "
+                   f"model={model_config.model_id if model_config else 'default'}")
     
     try:
         if use_gemini:
@@ -867,7 +873,8 @@ async def stream_codesign_response(
             async for chunk in _stream_bedrock_codesign(
                 user_request=user_request,
                 context=context,
-                connection_ids=connection_ids
+                connection_ids=connection_ids,
+                model_id=model_id
             ):
                 yield chunk
             
@@ -1415,7 +1422,8 @@ async def _attempt_self_correction(
 async def _stream_bedrock_codesign(
     user_request: str,
     context: 'CodesignContext',
-    connection_ids: List[str] = None
+    connection_ids: List[str] = None,
+    model_id: str = None
 ) -> AsyncGenerator[str, None]:
     """
     Bedrock (Claude) Co-design 스트리밍 (Fallback)
@@ -1434,7 +1442,7 @@ async def _stream_bedrock_codesign(
     )
     
     # Bedrock 스트리밍 호출
-    for chunk in invoke_bedrock_model_stream(system_prompt, user_request):
+    for chunk in invoke_bedrock_model_stream(system_prompt, user_request, model_id):
         chunk = chunk.strip()
         if not chunk:
             continue

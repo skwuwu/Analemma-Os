@@ -676,37 +676,39 @@ AVAILABLE_MODELS = {
     # ──────────────────────────────────────────────────────────
     # Premium Tier - 전체 워크플로우 생성용 (Fallback)
     # ──────────────────────────────────────────────────────────
-    "claude-3.5-sonnet": ModelConfig(
-        model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
-        max_tokens=8192,
-        cost_per_1k_tokens=3.0,  # $3.00 per 1K tokens (input)
-        tier=ModelTier.PREMIUM,
-        provider=ModelProvider.ANTHROPIC,
-        expected_ttft_ms=400,
-        expected_tps=60,
-    ),
-    "gpt-4o": ModelConfig(
-        model_id="gpt-4o-2024-08-06",
-        max_tokens=4096,
-        cost_per_1k_tokens=2.5,  # $2.50 per 1K tokens (input)
-        tier=ModelTier.PREMIUM,
-        provider=ModelProvider.OPENAI,
-        expected_ttft_ms=350,
-        expected_tps=70,
-    ),
+    # Claude 3.5 Sonnet (실제로는 Haiku로 폴백됨 - 구현되지 않음)
+    # "claude-3.5-sonnet": ModelConfig(
+    #     model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+    #     max_tokens=8192,
+    #     cost_per_1k_tokens=3.0,  # $3.00 per 1K tokens (input)
+    #     tier=ModelTier.PREMIUM,
+    #     provider=ModelProvider.ANTHROPIC,
+    #     expected_ttft_ms=400,
+    #     expected_tps=60,
+    # ),
+    # "gpt-4o": ModelConfig(  # TODO: OpenAI API 구현 필요
+    #     model_id="gpt-4o-2024-08-06",
+    #     max_tokens=4096,
+    #     cost_per_1k_tokens=2.5,  # $2.50 per 1K tokens (input)
+    #     tier=ModelTier.PREMIUM,
+    #     provider=ModelProvider.OPENAI,
+    #     expected_ttft_ms=350,
+    #     expected_tps=70,
+    # ),
     
     # ──────────────────────────────────────────────────────────
     # Standard Tier - 복잡한 Co-design용
     # ──────────────────────────────────────────────────────────
-    "claude-3-sonnet": ModelConfig(
-        model_id="anthropic.claude-3-sonnet-20240229-v1:0",
-        max_tokens=4096,
-        cost_per_1k_tokens=3.0,  # $3.00 per 1K tokens (input)
-        tier=ModelTier.STANDARD,
-        provider=ModelProvider.ANTHROPIC,
-        expected_ttft_ms=450,
-        expected_tps=55,
-    ),
+    # Claude 3 Sonnet (실제로는 Haiku로 폴백됨 - 구현되지 않음)
+    # "claude-3-sonnet": ModelConfig(
+    #     model_id="anthropic.claude-3-sonnet-20240229-v1:0",
+    #     max_tokens=4096,
+    #     cost_per_1k_tokens=3.0,  # $3.00 per 1K tokens (input)
+    #     tier=ModelTier.STANDARD,
+    #     provider=ModelProvider.ANTHROPIC,
+    #     expected_ttft_ms=450,
+    #     expected_tps=55,
+    # ),
     
     # ──────────────────────────────────────────────────────────
     # Economy Tier - 단순 Co-design용
@@ -720,15 +722,15 @@ AVAILABLE_MODELS = {
         expected_ttft_ms=200,
         expected_tps=120,
     ),
-    "llama-3.1-70b": ModelConfig(
-        model_id="meta.llama3-1-70b-instruct-v1:0",
-        max_tokens=2048,
-        cost_per_1k_tokens=0.99,  # $0.99 per 1K tokens (input)
-        tier=ModelTier.ECONOMY,
-        provider=ModelProvider.META,
-        expected_ttft_ms=300,
-        expected_tps=80,
-    ),
+    # "llama-3.1-70b": ModelConfig(  # TODO: Meta Llama Bedrock 구현 필요
+    #     model_id="meta.llama3-1-70b-instruct-v1:0",
+    #     max_tokens=2048,
+    #     cost_per_1k_tokens=0.99,  # $0.99 per 1K tokens (input)
+    #     tier=ModelTier.ECONOMY,
+    #     provider=ModelProvider.META,
+    #     expected_ttft_ms=300,
+    #     expected_tps=80,
+    # ),
 }
 
 
@@ -768,13 +770,21 @@ def _detect_long_context_need(user_request: str) -> bool:
 
 
 def _is_gemini_available() -> bool:
-    """Gemini API 사용 가능 여부 확인"""
-    # 환경변수 또는 Secrets Manager에서 API 키 확인
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if api_key:
-        return True
-    # Secrets Manager 확인은 실제 호출 시 수행
-    return os.getenv("GEMINI_SECRET_NAME") is not None
+    """Gemini API 사용 가능 여부 확인 (Vertex AI SDK 기반)"""
+    try:
+        # Vertex AI 초기화 가능 여부 확인
+        from src.services.llm.gemini_service import _init_vertexai
+        return _init_vertexai()
+    except Exception as e:
+        logger.debug(f"Gemini availability check failed: {e}")
+        # Fallback: 환경변수 기반 기본 확인
+        project_id = os.getenv("GCP_PROJECT_ID")
+        has_creds = (
+            os.getenv("GCP_SERVICE_ACCOUNT_KEY") or
+            os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or
+            os.getenv("GCP_SA_SECRET_NAME")
+        )
+        return bool(project_id and has_creds)
 
 
 # ============================================================

@@ -5,6 +5,14 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 from decimal import Decimal
+
+# Import model provider function for LLM node validation
+try:
+    from src.common.model_router import get_model_provider, ModelProvider
+except ImportError:
+    get_model_provider = None
+    ModelProvider = None
+
 # Avoid importing boto3.dynamodb.conditions at module import time because
 # test environments use a lightweight boto3 shim (repo-level boto3.py) or
 # inject fake dynamodb modules via sys.modules. Import Key lazily where
@@ -184,6 +192,18 @@ def _validate_workflow_config(cfg):
                         return None, 'max_iterations must be a positive integer'
                 except Exception:
                     return None, 'max_iterations must be a positive integer'
+            
+            # Auto-correct provider based on model for LLM nodes
+            model = n.get('model')
+            if model and get_model_provider:
+                try:
+                    correct_provider = get_model_provider(model).value.lower()
+                    current_provider = n.get('provider')
+                    if current_provider != correct_provider:
+                        n['provider'] = correct_provider
+                        logger.info(f"Auto-corrected provider for LLM node {n.get('id', 'unknown')}: {current_provider} -> {correct_provider} (based on model: {model})")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-correct provider for model {model}: {e}")
     
     return cfg, None
 

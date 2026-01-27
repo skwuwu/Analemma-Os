@@ -303,6 +303,11 @@ def cached_get_workflow_config(
             workflow_config = workflow_item.get('config')
             
             if workflow_config:
+                # JSON string인 경우 파싱
+                if isinstance(workflow_config, str):
+                    import json
+                    workflow_config = json.loads(workflow_config)
+                
                 # 캐시에 저장
                 cache.put(owner_id, workflow_id, workflow_config)
                 logger.debug(f"Loaded and cached workflow config: {owner_id}/{workflow_id}")

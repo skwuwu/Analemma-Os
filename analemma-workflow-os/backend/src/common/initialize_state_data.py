@@ -4,6 +4,12 @@ import time
 import logging
 import boto3
 
+# Import DecimalEncoder for JSON serialization
+try:
+    from src.common.json_utils import DecimalEncoder
+except ImportError:
+    DecimalEncoder = None
+
 # [Priority 1 Optimization] Pre-compilation: Load partition_map from DB
 # Runtime partitioning used only as fallback
 try:
@@ -515,7 +521,23 @@ def lambda_handler(event, context):
     uses_inline_manifest = distributed_strategy["strategy"] in ("MAP_REDUCE", "BATCHED")
     
     # [Payload Safety] Calculate manifest size to prevent inline explosion
-    manifest_json = json.dumps(segment_manifest, ensure_ascii=False)
+    if DecimalEncoder:
+        manifest_json = json.dumps(segment_manifest, cls=DecimalEncoder, ensure_ascii=False)
+    else:
+        # Fallback: try to convert decimals manually
+        def convert_decimals(obj):
+            if isinstance(obj, dict):
+                return {k: convert_decimals(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_decimals(v) for v in obj]
+            elif hasattr(obj, '__class__') and 'Decimal' in obj.__class__.__name__:
+                return float(obj) if '.' in str(obj) else int(obj)
+            else:
+                return obj
+        
+        converted_manifest = convert_decimals(segment_manifest)
+        manifest_json = json.dumps(converted_manifest, ensure_ascii=False)
+    
     manifest_size_kb = len(manifest_json.encode('utf-8')) / 1024
     
     # If manifest is too large (> 50KB), force offload regardless of strategy

@@ -626,7 +626,8 @@ async def handle_codesign_stream(owner_id: str, event: Dict):
                 current_workflow=current_workflow,
                 recent_changes=recent_changes,
                 session_id=session_id,
-                connection_ids=None  # WebSocket 연결 ID는 별도 처리
+                connection_ids=None,  # WebSocket 연결 ID는 별도 처리
+                model_id=selected_model_id
             )
         
         logger.info(f"Started workflow streaming for session {session_id[:8]}...")
@@ -917,7 +918,8 @@ async def _lambda_handler_streaming_async(event, response_stream, context):
                     current_workflow=current_workflow,
                     recent_changes=recent_changes,
                     session_id=session_id,
-                    connection_ids=None
+                    connection_ids=None,
+                    model_id=selected_model_id
                 )
             
             # ── 진짜 스트리밍: 청크를 즉시 response_stream에 write ──
