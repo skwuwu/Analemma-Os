@@ -6,7 +6,6 @@ import { WorkflowCanvas } from '@/components/WorkflowCanvas.tsx';
 import { BlockLibrary } from '@/components/BlockLibrary.tsx';
 import { SavedWorkflows } from '@/components/SavedWorkflows.tsx';
 import { ActiveWorkflowIndicator } from '@/components/ActiveWorkflowIndicator.tsx';
-import { WorkflowChat } from '@/components/WorkflowChat';
 import { Button } from '@/components/ui/button.tsx';
 import { Badge } from '@/components/ui/badge';
 import { LogOut, Activity } from 'lucide-react';
@@ -245,20 +244,12 @@ const Index = ({ signOut }: IndexProps) => {
             <WorkflowCanvas />
           </div>
 
-          {/* Right: SavedWorkflows CRUD & AI Chat (350px) */}
+          {/* Right: SavedWorkflows (includes CRUD & AI Chat) */}
           <div className="w-[350px] flex-shrink-0 border-l border-border flex flex-col bg-background z-10">
-            {/* Top: Saved Workflows CRUD (60%) */}
-            <div className="h-[60%] border-b border-border overflow-hidden flex flex-col">
-              <SavedWorkflows
-                currentWorkflow={currentWorkflow}
-                onLoadWorkflow={handleLoadWorkflow}
-              />
-            </div>
-
-            {/* Bottom: AI Codesigner Chat (40%) */}
-            <div className="h-[40%] flex flex-col overflow-hidden">
-              <WorkflowChat />
-            </div>
+            <SavedWorkflows
+              currentWorkflow={currentWorkflow}
+              onLoadWorkflow={handleLoadWorkflow}
+            />
           </div>
         </div>
       </div>
