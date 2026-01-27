@@ -16,7 +16,7 @@ import logging
 import os
 import asyncio
 import uuid
-from typing import Dict, Any, Optional, Generator, Callable
+from typing import Dict, Any, Optional, Generator, Callable, AsyncGenerator
 from functools import wraps
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -449,7 +449,7 @@ async def _lambda_handler_async(event, context):
         return _error_response(e)
 
 
-def _generate_initial_workflow_stream(user_request: str, owner_id: str, session_id: str) -> Generator[str, None, None]:
+async def _generate_initial_workflow_stream(user_request: str, owner_id: str, session_id: str) -> AsyncGenerator[str, None]:
     """
     빈 Canvas에서 초기 워크플로우를 생성하는 스트리밍 함수
     Agentic Designer 로직을 사용하여 완전한 워크플로우를 생성합니다.

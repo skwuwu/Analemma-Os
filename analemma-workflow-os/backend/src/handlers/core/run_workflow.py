@@ -139,6 +139,7 @@ def lambda_handler(event, context):
     # the Step Functions execution. Asynchronous notification of completion
     # is handled by Step Functions -> EventBridge -> dedicated Notify lambda.
     # Handle OPTIONS request for CORS early (skip heavy logging/parsing)
+    # Note: CORS is managed by API Gateway (template.yaml CorsConfiguration)
     if event.get('httpMethod') == 'OPTIONS' or event.get('requestContext', {}).get('http', {}).get('method') == 'OPTIONS':
         return {"statusCode": 200, "body": ""}
 
@@ -171,8 +172,29 @@ def lambda_handler(event, context):
             logger.debug(f"Event structure: {json.dumps(event, default=str)}")
             return {
                 'statusCode': 400,
-                'body': json.dumps({'error': 'Missing workflow id in path'})
+                'body': json.dumps({'error': 'Missing workflow id in path', 'details': 'workflowId parameter is required'})
             }
+
+        # 🚀 Initialize test_config_to_inject early to avoid UnboundLocalError
+        test_config_to_inject = None
+        
+        # 🚀 [CRITICAL FIX] MOCK_MODE 처리를 오케스트레이터 선택보다 먼저 수행
+        # 이렇게 해야 test_config_to_inject가 오케스트레이터 선택 시 사용 가능
+        mock_mode = os.environ.get('MOCK_MODE', 'false').lower()
+        test_keyword = None
+        
+        # Parse body first to check for test configurations
+        parsed_body = None
+        if event.get('body'):
+            try:
+                parsed_body = json.loads(event['body'])
+                
+                # 직접 test_workflow_config가 API Body에 있는 경우
+                if mock_mode == 'true' and 'test_workflow_config' in parsed_body:
+                    test_config_to_inject = parsed_body['test_workflow_config']
+                    logger.info("🧪 MOCK_MODE: Direct test_workflow_config injection")
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse event body as JSON")
 
         # 🚀 동적 오케스트레이터 선택 로직
         # 워크플로우 복잡도에 따라 Standard vs Distributed Map 오케스트레이터를 동적으로 선택
@@ -302,7 +324,7 @@ def lambda_handler(event, context):
             logger.error("STOP: Orchestrator ARN not configured")
             return {
                 'statusCode': 500,
-                'body': json.dumps({'error': 'Orchestrator ARN not configured'})
+                'body': json.dumps({'error': 'Orchestrator ARN not configured', 'details': 'WORKFLOW_ORCHESTRATOR_ARN environment variable is missing'})
             }
 
         # 입력값: 필요시 event['body']에서 파싱
@@ -444,7 +466,7 @@ def lambda_handler(event, context):
             logger.error("STOP: Authentication failed: %s", str(e))
             return {
                 'statusCode': 401,
-                'body': json.dumps({'error': 'Unauthorized'})
+                'body': json.dumps({'error': 'Unauthorized', 'details': str(e)})
             }
 
         # --- Idempotency check (tenant-scoped) ---
@@ -511,7 +533,9 @@ def lambda_handler(event, context):
                                 'statusCode': 200,
                                 'body': json.dumps({
                                     'executionArn': existing.get('executionArn'),
-                                    'startDate': existing.get('startDate')
+                                    'startDate': existing.get('startDate'),
+                                    'cached': True,
+                                    'message': 'Returning cached execution result'
                                 })
                             }
                         # In-progress: tell caller to wait
@@ -520,7 +544,11 @@ def lambda_handler(event, context):
                                         tenant_scoped_key, existing)
                             return {
                                 'statusCode': 409,
-                                'body': json.dumps({'error': 'Idempotent request already in progress'})
+                                'body': json.dumps({
+                                    'error': 'Idempotent request already in progress',
+                                    'executionArn': existing.get('executionArn'),
+                                    'message': 'A workflow execution with this idempotency key is already running'
+                                })
                             }
                         # Failed: attempt to atomically re-claim the key for a retry
                         elif existing_status == 'FAILED':
@@ -585,7 +613,12 @@ def lambda_handler(event, context):
                     logger.error("Quota exceeded for owner=%s (usage=%d, limit=%d)", owner_id, current_usage, limit)
                     return {
                         'statusCode': 429,
-                        'body': json.dumps({'error': 'Monthly quota exceeded', 'usage': current_usage, 'limit': limit})
+                        'body': json.dumps({
+                            'error': 'Monthly quota exceeded',
+                            'currentUsage': current_usage,
+                            'limit': limit,
+                            'message': f'You have reached your monthly limit of {limit} workflow runs'
+                        })
                     }
                 
                 # Generate reservation ID for segment runner to skip quota checks
@@ -616,51 +649,6 @@ def lambda_handler(event, context):
         # Add quota reservation to payload if available
         if quota_reservation_id:
             payload['quota_reservation_id'] = quota_reservation_id
-        
-        # 🚀 MOCK_MODE 전용: 테스트 키워드나 직접 설정 주입으로 DynamoDB 우회
-        mock_mode = os.environ.get('MOCK_MODE', 'false').lower()
-        test_config_to_inject = None
-        
-        # 1. 직접 test_workflow_config가 API Body에 있는 경우
-        if mock_mode == 'true' and isinstance(parsed_body, dict) and 'test_workflow_config' in parsed_body:
-            test_config_to_inject = parsed_body['test_workflow_config']
-            logger.info("🧪 MOCK_MODE: Direct test_workflow_config injection")
-        
-        # 2. 키워드 검출로 테스트 워크플로우를 로드하는 경우
-        elif mock_mode == 'true' and test_keyword:
-            try:
-                # 키워드에 매핑된 워크플로우 ID 사용
-                mapped_workflow_id = test_workflow_mappings.get(test_keyword)
-                if mapped_workflow_id:
-                    # Base directory 계산 (backend/src/handlers/core -> backend)
-                    base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-                    
-                    # JSON 파일 경로 탐색
-                    logger.info(f"Looking for test workflow: {mapped_workflow_id}")
-                    possible_paths = [
-                        f"/var/task/test_workflows/{mapped_workflow_id}.json",  # Lambda container (context=./backend/src)
-                        f"./test_workflows/{mapped_workflow_id}.json",
-                        f"../test_workflows/{mapped_workflow_id}.json",       # Local dev / legacy
-                        f"/opt/test_workflows/{mapped_workflow_id}.json",     # Lambda Layer
-                        f"backend/src/test_workflows/{mapped_workflow_id}.json",  # Local development
-                        f"{base_dir}/src/test_workflows/{mapped_workflow_id}.json",  # Absolute path from backend
-                    ]
-                    
-                    test_workflow_path = None
-                    for path in possible_paths:
-                        if os.path.exists(path):
-                            test_workflow_path = path
-                            break
-                    
-                    if test_workflow_path:
-                        with open(test_workflow_path, 'r', encoding='utf-8') as f:
-                            test_config_to_inject = json.load(f)
-                        logger.info(f"🧪 MOCK_MODE: Loaded test workflow config from {test_workflow_path} for keyword '{test_keyword}'")
-                    else:
-                        logger.error(f"🚨 Test workflow file not found for keyword '{test_keyword}' -> {mapped_workflow_id}")
-                        
-            except Exception as e:
-                logger.error(f"🚨 Failed to load test workflow for keyword '{test_keyword}': {e}")
         
         # 테스트 설정이 있으면 Step Functions payload에 추가
         if test_config_to_inject:
@@ -762,7 +750,8 @@ def lambda_handler(event, context):
                 'statusCode': 500,
                 'body': json.dumps({
                     'error': 'Failed to upload large input state to S3 before execution',
-                    'detail': str(e)
+                    'details': str(e),
+                    'message': 'The workflow input is too large and could not be stored'
                 })
             }
 
@@ -879,7 +868,9 @@ def lambda_handler(event, context):
                     'body': json.dumps({
                         'error': 'Failed to record idempotency key after starting execution',
                         'executionArn': response.get('executionArn'),
-                        'detail': str(exc)
+                        'startDate': response.get('startDate').isoformat() if response.get('startDate') else None,
+                        'details': str(exc),
+                        'message': 'Workflow started but idempotency tracking failed'
                     })
                 }
 
@@ -887,16 +878,31 @@ def lambda_handler(event, context):
             'statusCode': 200,
             'body': json.dumps({
                 'executionArn': response.get('executionArn'),
-                'startDate': response.get('startDate').isoformat() if response.get('startDate') else None
+                'startDate': response.get('startDate').isoformat() if response.get('startDate') else None,
+                'workflowId': workflow_id,
+                'message': 'Workflow execution started successfully'
             })
         }
     except ClientError as e:
+        error_code = (e.response.get('Error') or {}).get('Code', 'UnknownError')
+        error_message = (e.response.get('Error') or {}).get('Message', str(e))
+        logger.error(f"AWS ClientError: {error_code} - {error_message}")
         return {
             'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            'body': json.dumps({
+                'error': 'AWS service error',
+                'errorCode': error_code,
+                'details': error_message,
+                'message': 'An error occurred while communicating with AWS services'
+            })
         }
     except Exception as e:
+        logger.exception("Unexpected error in run_workflow handler")
         return {
             'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            'body': json.dumps({
+                'error': 'Internal server error',
+                'details': str(e),
+                'message': 'An unexpected error occurred while starting the workflow'
+            })
         }

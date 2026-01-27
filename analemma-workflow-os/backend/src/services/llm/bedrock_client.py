@@ -148,22 +148,24 @@ def invoke_bedrock_stream(
     chunk_size: int = 512
 ) -> Generator[str, None, None]:
     """
-    Bedrock 스트리밍 호출 (JSONL 형식)
+    통합 LLM 스트리밍 호출 (Gemini 우선, Claude 폴백)
     
     Args:
         system_prompt: 시스템 프롬프트
         user_request: 사용자 요청
-        model_id: 모델 ID (기본: Claude Sonnet)
+        model_id: 모델 ID (gemini-*, claude-*)
         chunk_size: 청크 크기
         
     Yields:
         JSONL 형식의 응답 청크
         
     Technical Notes:
+        - Gemini Native API를 우선 호출
+        - Gemini 실패 시 Bedrock Claude로 자동 폴백
         - Incremental UTF-8 decoder로 멀티바이트 문자(한글 등) 깨짐 방지
         - UI delay로 렌더링 가독성 확보
     """
-    model_to_use = model_id or MODEL_SONNET
+    model_to_use = model_id or MODEL_GEMINI_FLASH  # Gemini를 기본값으로 변경
     
     # Mock 모드 처리
     if is_mock_mode():
@@ -184,7 +186,19 @@ def invoke_bedrock_stream(
         yield json.dumps({"type": "status", "data": "done"}) + "\n"
         return
     
-    # 실제 Bedrock 호출
+    # Gemini 모델 우선 시도
+    if "gemini" in model_to_use.lower():
+        try:
+            logger.info(f"Using Gemini model: {model_to_use}")
+            from services.llm.gemini_client import invoke_gemini_stream
+            yield from invoke_gemini_stream(system_prompt, user_request, model_to_use)
+            return
+        except Exception as e:
+            logger.warning(f"Gemini stream failed, falling back to Claude: {e}")
+            model_to_use = MODEL_SONNET  # Claude Sonnet으로 폴백
+    
+    # Claude (Bedrock) 호출
+    logger.info(f"Using Bedrock Claude model: {model_to_use}")
     client = get_bedrock_client()
     payload = {
         "anthropic_version": "bedrock-2023-05-31",
