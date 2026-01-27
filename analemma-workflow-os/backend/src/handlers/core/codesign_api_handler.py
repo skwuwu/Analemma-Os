@@ -586,7 +586,7 @@ async def handle_codesign_stream(owner_id: str, event: Dict):
             )
             logger.info(f"Using model for Co-design: {selected_model_id}")
             
-            generator = stream_codesign_response(
+            generator = await stream_codesign_response(
                 user_request=user_request,
                 current_workflow=current_workflow,
                 recent_changes=recent_changes,
@@ -874,7 +874,7 @@ async def _lambda_handler_streaming_async(event, response_stream, context):
                     session_id=session_id
                 )
             else:
-                generator = stream_codesign_response(
+                generator = await stream_codesign_response(
                     user_request=user_request,
                     current_workflow=current_workflow,
                     recent_changes=recent_changes,
@@ -885,7 +885,7 @@ async def _lambda_handler_streaming_async(event, response_stream, context):
             # ── 진짜 스트리밍: 청크를 즉시 response_stream에 write ──
             chunk_count = 0
             try:
-                for chunk in generator:
+                async for chunk in generator:
                     if chunk:
                         response_stream.write(chunk.encode('utf-8'))
                         # 강제 플러시로 즉시 전송 (TTFT 최적화)
