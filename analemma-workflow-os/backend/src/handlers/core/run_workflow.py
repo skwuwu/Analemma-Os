@@ -196,137 +196,6 @@ def lambda_handler(event, context):
             except json.JSONDecodeError:
                 logger.warning("Failed to parse event body as JSON")
 
-        # 🚀 동적 오케스트레이터 선택 로직
-        # 워크플로우 복잡도에 따라 Standard vs Distributed Map 오케스트레이터를 동적으로 선택
-        orchestrator_arn = None
-        orchestrator_type = 'standard'  # 기본값
-        selection_metadata = {}
-        cache_hit = False
-        selection_start_time = time.time()  # 성능 측정용
-        
-        try:
-            # 워크플로우 설정 가져오기 (우선순위: test_config > DB config)
-            workflow_config = None
-            
-            # 1. 테스트 설정이 있으면 우선 사용 (MOCK_MODE)
-            if test_config_to_inject:
-                workflow_config = test_config_to_inject
-                logger.info("🧪 Using test workflow config for orchestrator selection")
-            
-            # 2. DB에서 워크플로우 설정 가져오기 (캐시 사용)
-            if not workflow_config:
-                try:
-                    from src.services.workflow.cache_manager import cached_get_workflow_config
-                    
-                    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
-                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-                    if WORKFLOWS_TABLE:
-                        wf_table = dynamodb.Table(WORKFLOWS_TABLE)
-                        
-                        # 🚀 캐시를 사용한 워크플로우 설정 조회 (레이턴시 최적화)
-                        cache_lookup_start = time.time()
-                        workflow_config = cached_get_workflow_config(wf_table, owner_id, workflow_id)
-                        cache_lookup_time = (time.time() - cache_lookup_start) * 1000
-                        
-                        if workflow_config:
-                            cache_hit = True
-                            logger.info(f"✅ Loaded workflow config (cached, {cache_lookup_time:.1f}ms) for orchestrator selection: {workflow_id}")
-                        else:
-                            logger.warning(f"⚠️ Workflow not found for orchestrator selection: {workflow_id}")
-                    else:
-                        logger.warning("⚠️ WORKFLOWS_TABLE not configured")
-                        
-                except ImportError:
-                    # 캐시 모듈이 없으면 기본 DB 조회
-                    logger.warning("⚠️ Cache module not available, using direct DB query")
-                    try:
-                        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
-                        WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-                        if WORKFLOWS_TABLE:
-                            wf_table = dynamodb.Table(WORKFLOWS_TABLE)
-                            wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})
-                            if 'Item' in wf_resp:
-                                workflow_config = wf_resp['Item'].get('config')
-                                logger.info(f"📦 Loaded workflow config (direct DB) for orchestrator selection: {workflow_id}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Direct DB query failed: {e}")
-                        
-                except Exception as e:
-                    logger.warning(f"⚠️ Cached workflow config fetch failed: {e}")
-            
-            # 3. 오케스트레이터 선택 로직 실행
-            if workflow_config:
-                from src.services.workflow.orchestrator_selector import select_orchestrator, get_orchestrator_selection_summary
-                
-                # 복잡도 분석 및 오케스트레이터 선택
-                orchestrator_arn, orchestrator_type, selection_metadata = select_orchestrator(workflow_config)
-                
-                # 선택 결과 로깅
-                selection_summary = get_orchestrator_selection_summary(orchestrator_type, selection_metadata)
-                logger.info(f"🎯 Orchestrator selected: {selection_summary}")
-                
-                # 메타데이터를 payload에 추가 (디버깅 및 모니터링용)
-                payload['orchestrator_selection'] = {
-                    'type': orchestrator_type,
-                    'metadata': selection_metadata,
-                    'summary': selection_summary,
-                    'cache_hit': cache_hit
-                }
-            else:
-                # 워크플로우 설정이 없으면 기본 Standard 오케스트레이터 사용
-                orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
-                orchestrator_type = 'standard'
-                logger.warning("⚠️ No workflow config available, using default Standard orchestrator")
-                
-                payload['orchestrator_selection'] = {
-                    'type': 'standard',
-                    'metadata': {'selection_reason': 'No workflow config available, using default'},
-                    'summary': 'STANDARD selected: No config available, using default',
-                    'cache_hit': cache_hit
-                }
-                
-        except ImportError as e:
-            # 선택 모듈이 없으면 기본 오케스트레이터 사용
-            orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
-            orchestrator_type = 'standard'
-            logger.warning(f"⚠️ Orchestrator selector module not available, using Standard: {e}")
-            
-        except Exception as e:
-            # 선택 로직 실패 시 기본 오케스트레이터로 폴백
-            orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
-            orchestrator_type = 'standard'
-            logger.warning(f"⚠️ Orchestrator selection failed, falling back to Standard: {e}")
-            
-            payload['orchestrator_selection'] = {
-                'type': 'standard',
-                'metadata': {'selection_reason': f'Selection failed: {str(e)}', 'fallback_used': True},
-                'summary': f'STANDARD selected: Selection failed, using fallback',
-                'cache_hit': cache_hit
-            }
-        
-        # 🚀 성능 메트릭 수집
-        try:
-            from src.services.orchestrator_metrics import record_orchestrator_selection_metrics
-            record_orchestrator_selection_metrics(
-                orchestrator_type=orchestrator_type,
-                selection_metadata=selection_metadata,
-                selection_start_time=selection_start_time,
-                workflow_id=workflow_id,
-                owner_id=owner_id,
-                cache_hit=cache_hit
-            )
-        except ImportError:
-            logger.debug("Metrics module not available, skipping metrics collection")
-        except Exception as e:
-            logger.warning(f"Failed to record orchestrator selection metrics: {e}")
-        
-        if not orchestrator_arn:
-            logger.error("STOP: Orchestrator ARN not configured")
-            return {
-                'statusCode': 500,
-                'body': json.dumps({'error': 'Orchestrator ARN not configured', 'details': 'WORKFLOW_ORCHESTRATOR_ARN environment variable is missing'})
-            }
-
         # 입력값: 필요시 event['body']에서 파싱
         # Support two shapes from src.clients:
         # 1) { "input_data": { ... } } (preferred)
@@ -759,6 +628,143 @@ def lambda_handler(event, context):
         # can mark the idempotency record COMPLETED/FAILED based on terminal state.
         if tenant_scoped_key:
             payload['idempotency_key'] = tenant_scoped_key
+
+        # 🚀 동적 오케스트레이터 선택 로직
+        # 워크플로우 복잡도에 따라 Standard vs Distributed Map 오케스트레이터를 동적으로 선택
+        # NOTE: This must occur AFTER owner_id and payload initialization
+        orchestrator_arn = None
+        orchestrator_type = 'standard'  # 기본값
+        selection_metadata = {}
+        cache_hit = False
+        selection_start_time = time.time()  # 성능 측정용
+        
+        try:
+            # 워크플로우 설정 가져오기 (우선순위: test_config > DB config > payload config)
+            workflow_config = None
+            
+            # 1. 테스트 설정이 있으면 우선 사용 (MOCK_MODE)
+            if test_config_to_inject:
+                workflow_config = test_config_to_inject
+                logger.info("🧪 Using test workflow config for orchestrator selection")
+            
+            # 2. payload에 이미 로드된 workflow_config 사용
+            elif 'workflow_config' in payload:
+                workflow_config = payload['workflow_config']
+                logger.info("✅ Using workflow_config from payload for orchestrator selection")
+            
+            # 3. DB에서 워크플로우 설정 가져오기 (캐시 사용)
+            else:
+                try:
+                    from src.services.workflow.cache_manager import cached_get_workflow_config
+                    
+                    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
+                    if WORKFLOWS_TABLE:
+                        wf_table = dynamodb.Table(WORKFLOWS_TABLE)
+                        
+                        # 🚀 캐시를 사용한 워크플로우 설정 조회 (레이턴시 최적화)
+                        cache_lookup_start = time.time()
+                        workflow_config = cached_get_workflow_config(wf_table, owner_id, workflow_id)
+                        cache_lookup_time = (time.time() - cache_lookup_start) * 1000
+                        
+                        if workflow_config:
+                            cache_hit = True
+                            logger.info(f"✅ Loaded workflow config (cached, {cache_lookup_time:.1f}ms) for orchestrator selection: {workflow_id}")
+                        else:
+                            logger.warning(f"⚠️ Workflow not found for orchestrator selection: {workflow_id}")
+                    else:
+                        logger.warning("⚠️ WORKFLOWS_TABLE not configured")
+                        
+                except ImportError:
+                    # 캐시 모듈이 없으면 기본 DB 조회
+                    logger.warning("⚠️ Cache module not available, using direct DB query")
+                    try:
+                        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+                        WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
+                        if WORKFLOWS_TABLE:
+                            wf_table = dynamodb.Table(WORKFLOWS_TABLE)
+                            wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})
+                            if 'Item' in wf_resp:
+                                workflow_config = wf_resp['Item'].get('config')
+                                logger.info(f"📦 Loaded workflow config (direct DB) for orchestrator selection: {workflow_id}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Direct DB query failed: {e}")
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Cached workflow config fetch failed: {e}")
+            
+            # 4. 오케스트레이터 선택 로직 실행
+            if workflow_config:
+                from src.services.workflow.orchestrator_selector import select_orchestrator, get_orchestrator_selection_summary
+                
+                # 복잡도 분석 및 오케스트레이터 선택
+                orchestrator_arn, orchestrator_type, selection_metadata = select_orchestrator(workflow_config)
+                
+                # 선택 결과 로깅
+                selection_summary = get_orchestrator_selection_summary(orchestrator_type, selection_metadata)
+                logger.info(f"🎯 Orchestrator selected: {selection_summary}")
+                
+                # 메타데이터를 payload에 추가 (디버깅 및 모니터링용)
+                payload['orchestrator_selection'] = {
+                    'type': orchestrator_type,
+                    'metadata': selection_metadata,
+                    'summary': selection_summary,
+                    'cache_hit': cache_hit
+                }
+            else:
+                # 워크플로우 설정이 없으면 기본 Standard 오케스트레이터 사용
+                orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
+                orchestrator_type = 'standard'
+                logger.warning("⚠️ No workflow config available, using default Standard orchestrator")
+                
+                payload['orchestrator_selection'] = {
+                    'type': 'standard',
+                    'metadata': {'selection_reason': 'No workflow config available, using default'},
+                    'summary': 'STANDARD selected: No config available, using default',
+                    'cache_hit': cache_hit
+                }
+                
+        except ImportError as e:
+            # 선택 모듈이 없으면 기본 오케스트레이터 사용
+            orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
+            orchestrator_type = 'standard'
+            logger.warning(f"⚠️ Orchestrator selector module not available, using Standard: {e}")
+            
+        except Exception as e:
+            # 선택 로직 실패 시 기본 오케스트레이터로 폴백
+            orchestrator_arn = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN')
+            orchestrator_type = 'standard'
+            logger.warning(f"⚠️ Orchestrator selection failed, falling back to Standard: {e}")
+            
+            payload['orchestrator_selection'] = {
+                'type': 'standard',
+                'metadata': {'selection_reason': f'Selection failed: {str(e)}', 'fallback_used': True},
+                'summary': f'STANDARD selected: Selection failed, using fallback',
+                'cache_hit': cache_hit
+            }
+        
+        # 🚀 성능 메트릭 수집
+        try:
+            from src.services.orchestrator_metrics import record_orchestrator_selection_metrics
+            record_orchestrator_selection_metrics(
+                orchestrator_type=orchestrator_type,
+                selection_metadata=selection_metadata,
+                selection_start_time=selection_start_time,
+                workflow_id=workflow_id,
+                owner_id=owner_id,
+                cache_hit=cache_hit
+            )
+        except ImportError:
+            logger.debug("Metrics module not available, skipping metrics collection")
+        except Exception as e:
+            logger.warning(f"Failed to record orchestrator selection metrics: {e}")
+        
+        if not orchestrator_arn:
+            logger.error("STOP: Orchestrator ARN not configured")
+            return {
+                'statusCode': 500,
+                'body': json.dumps({'error': 'Orchestrator ARN not configured', 'details': 'WORKFLOW_ORCHESTRATOR_ARN environment variable is missing'})
+            }
 
         # [v2.1] Start the Step Functions execution with retry
         # API Throttling(ProvisionedThroughputExceededException) 대응

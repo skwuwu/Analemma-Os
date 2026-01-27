@@ -226,7 +226,8 @@ jobs:
           WORKFLOW_STATE_BUCKET: ${{ secrets.WORKFLOW_STATE_BUCKET }}
         run: |
           # AllowedOrigins uses default value from template.yaml (not GitHub Secrets)
-          PARAM_OVERRIDES="StageName=${STAGE_NAME} CognitoIssuerUrl=${COGNITO_ISSUER_URL} CognitoAudience=${COGNITO_AUDIENCE} OpenAiApiKey=${OPENAI_API_KEY} AnthropicApiKey=${ANTHROPIC_API_KEY} GoogleApiKey=${GOOGLE_API_KEY}"
+          # MockMode defaults to "false" for production LLM calls
+          PARAM_OVERRIDES="StageName=${STAGE_NAME} MockMode=false CognitoIssuerUrl=${COGNITO_ISSUER_URL} CognitoAudience=${COGNITO_AUDIENCE} OpenAiApiKey=${OPENAI_API_KEY} AnthropicApiKey=${ANTHROPIC_API_KEY} GoogleApiKey=${GOOGLE_API_KEY}"
 
           # Inject GCP settings for Vertex AI Gemini integration
           if [ -n "${GCP_PROJECT_ID}" ]; then

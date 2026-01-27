@@ -81,7 +81,8 @@ except ImportError:
 
 # 🚨 [Critical Fix] graph_dsl은 src/common/에 위치함 (src/services/design/ 아님)
 from src.common.graph_dsl import validate_workflow, normalize_workflow
-from src.services.design.logical_auditor import audit_workflow, LogicalAuditor
+# 🚨 [Critical Fix] logical_auditor는 src/handlers/core/에 위치함
+from src.handlers.core.logical_auditor import audit_workflow, LogicalAuditor
 
 # Gemini 서비스 import
 try:
