@@ -119,8 +119,12 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   
   // Detail View Tab State (Business vs Technical)
   const [detailViewTab, setDetailViewTab] = useState<'business' | 'technical'>('business');
-  const [technicalSubTab, setTechnicalSubTab] = useState<'graph' | 'timeline' | 'nodes'>('graph');
+  const [technicalSubTab, setTechnicalSubTab] = useState<'graph' | 'timeline' | 'nodes' | 'summary'>('graph');
   const [responseText, setResponseText] = useState('');
+  
+  // Summary state
+  const [summary, setSummary] = useState<any>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
   
   // 기존 notifications 훅 (WebSocket 연결 유지)
   const { notifications } = useNotifications();
@@ -229,6 +233,43 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     setRollbackTarget(item);
     setRollbackDialogOpen(true);
   }, []);
+  
+  // Gemini 요약 생성 함수
+  const fetchSummary = useCallback(async (type: 'business' | 'technical' | 'full') => {
+    if (!taskManager.selectedTask) return;
+    
+    setSummaryLoading(true);
+    try {
+      const response = await fetch(
+        `${API_BASE}/tasks/${taskManager.selectedTask.task_id}?action=summarize&type=${type}`,
+        { 
+          headers: { 
+            'Content-Type': 'application/json',
+          },
+          credentials: 'include'
+        }
+      );
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch summary: ${response.statusText}`);
+      }
+      
+      const data = await response.json();
+      setSummary(data);
+      
+      if (data.cached) {
+        toast.success('캐시된 요약을 불러왔습니다');
+      } else {
+        toast.success('Gemini가 요약을 생성했습니다');
+      }
+    } catch (error) {
+      console.error('Failed to fetch summary:', error);
+      toast.error('요약 생성 실패');
+      setSummary(null);
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [taskManager.selectedTask, API_BASE]);
   
   const handleResumeWorkflow = useCallback(async () => {
     if (!taskManager.selectedTask || !responseText.trim()) {
@@ -463,7 +504,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                       
                       {/* 기술 탭 - 서브탭 시스템 */}
                       <TabsContent value="technical" className="flex-1 overflow-hidden mt-0">
-                        <Tabs value={technicalSubTab} onValueChange={(v) => setTechnicalSubTab(v as 'graph' | 'timeline' | 'nodes')} className="h-full flex flex-col">
+                        <Tabs value={technicalSubTab} onValueChange={(v) => setTechnicalSubTab(v as 'graph' | 'timeline' | 'nodes' | 'summary')} className="h-full flex flex-col">
                           {/* Technical 서브탭 헤더 */}
                           <div className="px-4 pt-2 border-b border-slate-800">
                             <TabsList className="bg-slate-900">
@@ -478,6 +519,10 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                               <TabsTrigger value="nodes" className="data-[state=active]:bg-slate-800 text-xs">
                                 <Box className="w-3 h-3 mr-1.5" />
                                 Nodes
+                              </TabsTrigger>
+                              <TabsTrigger value="summary" className="data-[state=active]:bg-slate-800 text-xs">
+                                <Bot className="w-3 h-3 mr-1.5" />
+                                Summary
                               </TabsTrigger>
                             </TabsList>
                           </div>
@@ -589,6 +634,154 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 />
                               </div>
                             </div>
+                          </TabsContent>
+                          
+                          {/* Summary 서브탭 (Gemini 요약) */}
+                          <TabsContent value="summary" className="flex-1 overflow-hidden mt-0">
+                            <ScrollArea className="h-full">
+                              <div className="p-6 space-y-6">
+                                {/* 요약 타입 선택 */}
+                                <div className="flex gap-2">
+                                  <Button 
+                                    size="sm" 
+                                    onClick={() => fetchSummary('business')} 
+                                    disabled={summaryLoading}
+                                    className="bg-blue-600 hover:bg-blue-700"
+                                  >
+                                    {summaryLoading ? (
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    ) : (
+                                      <Bot className="w-4 h-4 mr-2" />
+                                    )}
+                                    비즈니스 요약
+                                  </Button>
+                                  <Button 
+                                    size="sm" 
+                                    variant="outline" 
+                                    onClick={() => fetchSummary('technical')} 
+                                    disabled={summaryLoading}
+                                  >
+                                    {summaryLoading ? (
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    ) : (
+                                      <GitBranch className="w-4 h-4 mr-2" />
+                                    )}
+                                    기술 요약
+                                  </Button>
+                                  <Button 
+                                    size="sm" 
+                                    variant="outline" 
+                                    onClick={() => fetchSummary('full')} 
+                                    disabled={summaryLoading}
+                                  >
+                                    {summaryLoading ? (
+                                      <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                                    ) : (
+                                      <LayoutGrid className="w-4 h-4 mr-2" />
+                                    )}
+                                    전체 요약
+                                  </Button>
+                                </div>
+                                
+                                {/* 로딩 */}
+                                {summaryLoading && (
+                                  <div className="flex items-center gap-2 text-slate-400 bg-slate-800/30 p-4 rounded-lg border border-slate-700">
+                                    <Loader2 className="w-5 h-5 animate-spin" />
+                                    <span>Gemini 2.0 Flash가 실행 로그를 분석하고 있습니다...</span>
+                                  </div>
+                                )}
+                                
+                                {/* 요약 결과 */}
+                                {summary && !summaryLoading && (
+                                  <div className="space-y-4">
+                                    {/* 캐시 뱃지 */}
+                                    {summary.cached && (
+                                      <Badge variant="outline" className="text-green-400 border-green-700">
+                                        <CheckCircle2 className="w-3 h-3 mr-1" />
+                                        캐시됨 (즉시 조회)
+                                      </Badge>
+                                    )}
+                                    
+                                    {/* 요약 텍스트 */}
+                                    <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
+                                      <h3 className="font-semibold mb-3 text-slate-100 flex items-center gap-2">
+                                        <Bot className="w-4 h-4" />
+                                        요약
+                                      </h3>
+                                      <p className="text-slate-300 text-sm whitespace-pre-wrap leading-relaxed">
+                                        {summary.summary}
+                                      </p>
+                                    </div>
+                                    
+                                    {/* 인사이트 */}
+                                    {summary.key_insights && summary.key_insights.length > 0 && (
+                                      <div className="bg-blue-900/20 p-4 rounded-lg border border-blue-700/50">
+                                        <h3 className="font-semibold mb-3 text-blue-300 flex items-center gap-2">
+                                          <GitBranch className="w-4 h-4" />
+                                          핵심 인사이트
+                                        </h3>
+                                        <ul className="space-y-2">
+                                          {summary.key_insights.map((insight: string, i: number) => (
+                                            <li key={i} className="text-slate-300 text-sm flex gap-2">
+                                              <span className="text-blue-400 shrink-0">•</span>
+                                              <span>{insight}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    
+                                    {/* 권장사항 */}
+                                    {summary.recommendations && summary.recommendations.length > 0 && (
+                                      <div className="bg-amber-900/20 p-4 rounded-lg border border-amber-700/50">
+                                        <h3 className="font-semibold mb-3 text-amber-300 flex items-center gap-2">
+                                          <AlertCircle className="w-4 h-4" />
+                                          개선 권장사항
+                                        </h3>
+                                        <ul className="space-y-2">
+                                          {summary.recommendations.map((rec: string, i: number) => (
+                                            <li key={i} className="text-slate-300 text-sm flex gap-2">
+                                              <span className="text-amber-400 shrink-0">•</span>
+                                              <span>{rec}</span>
+                                            </li>
+                                          ))}
+                                        </ul>
+                                      </div>
+                                    )}
+                                    
+                                    {/* 메타데이터 */}
+                                    <div className="text-xs text-slate-500 flex flex-wrap gap-4 bg-slate-900/50 p-3 rounded border border-slate-800">
+                                      <span className="flex items-center gap-1">
+                                        <Bot className="w-3 h-3" />
+                                        모델: {summary.model_used}
+                                      </span>
+                                      <span className="flex items-center gap-1">
+                                        <Box className="w-3 h-3" />
+                                        토큰: {summary.token_usage?.total_tokens?.toLocaleString() || 'N/A'}
+                                      </span>
+                                      <span className="flex items-center gap-1">
+                                        <Clock className="w-3 h-3" />
+                                        생성 시간: {summary.generation_time_ms}ms
+                                      </span>
+                                      {summary.token_usage?.estimated_cost_usd && (
+                                        <span className="flex items-center gap-1 text-green-400">
+                                          💰 비용: ${summary.token_usage.estimated_cost_usd.toFixed(6)}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                                
+                                {/* 초기 상태 */}
+                                {!summary && !summaryLoading && (
+                                  <div className="text-center py-12 text-slate-500">
+                                    <Bot className="w-16 h-16 mx-auto mb-4 opacity-20" />
+                                    <p className="text-lg mb-2">Gemini 2.0 Flash로 실행 로그 요약</p>
+                                    <p className="text-sm">위 버튼을 클릭하여 AI가 분석한 요약을 확인하세요</p>
+                                  </div>
+                                )}
+                              </div>
+                            </ScrollArea>
                           </TabsContent>
                         </Tabs>
                       </TabsContent>

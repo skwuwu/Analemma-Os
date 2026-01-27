@@ -121,9 +121,15 @@ async def handle_request(event, context):
         
         # 라우팅
         if task_id:
-            # GET /tasks/{id} - Task 상세 조회
+            # GET /tasks/{id} - Task 상세 조회 또는 요약
             if http_method == 'GET':
-                return await handle_get_task_detail(task_service, task_id, owner_id, event)
+                action = _get_query_param(event, 'action')
+                
+                if action == 'summarize':
+                    # GET /tasks/{id}?action=summarize&type=business
+                    return await handle_summarize_task(task_service, task_id, owner_id, event)
+                else:
+                    return await handle_get_task_detail(task_service, task_id, owner_id, event)
             else:
                 return _response(405, {'error': f'Method {http_method} not allowed'})
         else:
@@ -202,3 +208,52 @@ async def handle_get_task_detail(
     except Exception as e:
         logger.error(f"Failed to get task detail: {e}")
         return _response(500, {'error': 'Failed to retrieve task detail'})
+
+
+async def handle_summarize_task(
+    task_service: TaskService,
+    task_id: str,
+    owner_id: str,
+    event: Dict
+) -> Dict:
+    """
+    Task 로그 요약 핸들러
+    
+    [v3.0] Gemini 2.0 Flash를 사용한 실행 로그 요약
+    - Context Caching으로 비용 최적화
+    - DynamoDB 캐싱으로 중복 요청 방지
+    
+    Query Params:
+        type: business | technical | full (기본값: business)
+    """
+    
+    summary_type = _get_query_param(event, 'type', 'business')
+    
+    # 타입 검증
+    if summary_type not in ['business', 'technical', 'full']:
+        return _response(400, {
+            'error': 'Invalid summary type',
+            'allowed_types': ['business', 'technical', 'full']
+        })
+    
+    try:
+        summary = await task_service.generate_execution_summary(
+            task_id=task_id,
+            owner_id=owner_id,
+            summary_type=summary_type
+        )
+        
+        logger.info(
+            f"Generated summary for {task_id[:8]}... (type={summary_type}, "
+            f"cached={summary.get('cached', False)})"
+        )
+        return _response(200, summary)
+        
+    except ValueError as e:
+        return _response(404, {'error': str(e)})
+    except Exception as e:
+        logger.error(f"Failed to generate summary: {e}")
+        return _response(500, {
+            'error': 'Summary generation failed',
+            'details': str(e)
+        })

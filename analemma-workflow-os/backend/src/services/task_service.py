@@ -1236,3 +1236,274 @@ class ContextAwareLogger:
     def report_warning(self, message: str) -> None:
         """경고 보고"""
         self.report_thought(message, thought_type="warning", is_important=True)
+
+    async def generate_execution_summary(
+        self,
+        task_id: str,
+        owner_id: str,
+        summary_type: str = "business"
+    ) -> Dict[str, Any]:
+        """
+        Gemini를 사용하여 실행 로그를 요약
+        
+        [v3.0] LLM 기반 로그 요약 기능
+        - Context Caching으로 비용 최적화
+        - DynamoDB 캐싱으로 중복 호출 방지
+        
+        Args:
+            task_id: 실행 ID
+            owner_id: 사용자 ID
+            summary_type: 요약 타입 (business | technical | full)
+        
+        Returns:
+            {
+                "summary": "요약 텍스트",
+                "key_insights": ["인사이트1", "인사이트2"],
+                "recommendations": ["권장사항1", "권장사항2"],
+                "token_usage": {...},
+                "generation_time_ms": 1234,
+                "cached": false
+            }
+        """
+        # 1. 캐시된 요약 확인
+        cache_key = f"summary#{owner_id}#{task_id}#{summary_type}"
+        cached_summary = await self._get_cached_summary(cache_key)
+        if cached_summary:
+            logger.info(f"Returning cached summary for {task_id[:8]}... (type={summary_type})")
+            cached_summary["cached"] = True
+            return cached_summary
+        
+        # 2. Task 데이터 로드
+        task_detail = await self.get_task_detail(task_id, owner_id, include_technical_logs=False)
+        if not task_detail:
+            raise ValueError(f"Task not found: {task_id}")
+        
+        # state_history 추출
+        state_history = []
+        payload = task_detail.get('payload', {})
+        if payload:
+            state_history = payload.get('state_history', [])
+            if not state_history:
+                step_state = payload.get('step_function_state', {})
+                state_history = step_state.get('state_history', [])
+        
+        if not state_history:
+            return {
+                "summary": "실행 이력이 없습니다.",
+                "key_insights": [],
+                "recommendations": [],
+                "cached": False
+            }
+        
+        # 3. 프롬프트 생성
+        prompt = self._build_summary_prompt(state_history, summary_type, task_detail)
+        
+        # 4. Gemini 호출
+        from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
+        
+        gemini = GeminiService(config=GeminiConfig(
+            model=GeminiModel.GEMINI_2_0_FLASH,
+            temperature=0.3,
+            max_output_tokens=2048
+        ))
+        
+        start_time = time.time()
+        
+        # Context Caching: state_history를 캐싱하여 비용 절감
+        context_to_cache = None
+        if len(state_history) > 30:  # 충분히 큰 경우만 캐싱
+            context_to_cache = self._serialize_history_for_cache(state_history)
+        
+        response = gemini.invoke_model(
+            user_prompt=prompt,
+            system_instruction="당신은 워크플로우 실행 로그를 분석하는 전문가입니다. 간결하고 명확하게 요약하세요.",
+            response_schema={
+                "type": "object",
+                "properties": {
+                    "summary": {
+                        "type": "string",
+                        "description": "전체 실행 요약 (3-5문장)"
+                    },
+                    "key_insights": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "주요 인사이트 (3-5개)"
+                    },
+                    "recommendations": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "개선 권장사항 (0-3개, 없으면 빈 배열)"
+                    }
+                },
+                "required": ["summary", "key_insights", "recommendations"]
+            },
+            context_to_cache=context_to_cache
+        )
+        
+        generation_time_ms = int((time.time() - start_time) * 1000)
+        
+        # 5. 응답 파싱
+        result = response.get("parsed", {})
+        result["token_usage"] = response.get("metadata", {}).get("token_usage", {})
+        result["generation_time_ms"] = generation_time_ms
+        result["model_used"] = "gemini-2.0-flash"
+        result["cached"] = False
+        
+        # 6. 결과 캐싱 (24시간 TTL)
+        await self._cache_summary(cache_key, result, ttl_hours=24)
+        
+        logger.info(
+            f"Generated summary for {task_id[:8]}... (type={summary_type}, "
+            f"tokens={result['token_usage'].get('total_tokens', 0)}, "
+            f"time={generation_time_ms}ms)"
+        )
+        
+        return result
+
+    def _build_summary_prompt(
+        self,
+        state_history: List[Dict[str, Any]],
+        summary_type: str,
+        task_detail: Dict[str, Any]
+    ) -> str:
+        """요약 프롬프트 생성"""
+        
+        # state_history 샘플링 (너무 길면 최근 N개만)
+        MAX_HISTORY_ENTRIES = 50
+        sampled_history = state_history[-MAX_HISTORY_ENTRIES:] if len(state_history) > MAX_HISTORY_ENTRIES else state_history
+        
+        history_text = "\n".join([
+            f"[{i+1}] {entry.get('state_name', 'unknown')} - {entry.get('status', 'N/A')} "
+            f"(duration: {entry.get('duration', 0)}ms)"
+            for i, entry in enumerate(sampled_history)
+        ])
+        
+        if summary_type == "business":
+            prompt = f"""
+다음은 '{task_detail.get('task_summary', 'AI 작업')}'의 실행 로그입니다.
+
+**현재 상태:** {task_detail.get('status')}
+**진행률:** {task_detail.get('progress_percentage')}%
+**실행 단계:** (최근 {len(sampled_history)}개)
+{history_text}
+
+**비즈니스 관점에서 다음을 분석하세요:**
+1. 이 작업이 무엇을 달성했는지 요약 (기술 용어 최소화)
+2. 핵심 성과 및 인사이트 (3-5개)
+3. 비즈니스 가치와 개선 권장사항 (있으면 1-3개, 없으면 빈 배열)
+"""
+        
+        elif summary_type == "technical":
+            token_usage = task_detail.get('token_usage', {})
+            prompt = f"""
+다음은 워크플로우 실행의 기술 로그입니다.
+
+**Execution ID:** {task_detail.get('task_id')}
+**Status:** {task_detail.get('status')}
+**Workflow:** {task_detail.get('workflow_name')}
+**State History:** (최근 {len(sampled_history)}개)
+{history_text}
+
+**Token Usage:** {json.dumps(token_usage) if token_usage else 'N/A'}
+
+**기술 관점에서 다음을 분석하세요:**
+1. 실행 흐름 요약 (병목 구간, 재시도, 에러 포함)
+2. 성능 메트릭 인사이트 (latency, token usage, 비용 추정)
+3. 최적화 가능 영역 (있으면 1-3개, 없으면 빈 배열)
+"""
+        
+        else:  # full
+            prompt = f"""
+다음은 워크플로우 '{task_detail.get('workflow_name')}'의 전체 실행 로그입니다.
+
+**기본 정보:**
+- Execution ID: {task_detail.get('task_id')}
+- Status: {task_detail.get('status')}
+- Progress: {task_detail.get('progress_percentage')}%
+- Started: {task_detail.get('started_at')}
+- Updated: {task_detail.get('updated_at')}
+
+**실행 히스토리:** (최근 {len(sampled_history)}개)
+{history_text}
+
+**종합 분석:**
+1. 전체 실행 흐름 요약 (비즈니스 + 기술)
+2. 핵심 인사이트 (3-5개)
+3. 종합 개선 제안 (있으면 1-3개, 없으면 빈 배열)
+"""
+        
+        return prompt
+
+    def _serialize_history_for_cache(self, state_history: List[Dict[str, Any]]) -> str:
+        """state_history를 캐싱용 문자열로 직렬화"""
+        # 중요 필드만 추출하여 크기 최소화
+        simplified = [
+            {
+                "name": entry.get('state_name', 'unknown'),
+                "status": entry.get('status', 'N/A'),
+                "duration": entry.get('duration', 0)
+            }
+            for entry in state_history
+        ]
+        return json.dumps(simplified, ensure_ascii=False)
+
+    async def _get_cached_summary(self, cache_key: str) -> Optional[Dict[str, Any]]:
+        """DynamoDB에서 캐시된 요약 조회"""
+        try:
+            response = await asyncio.get_event_loop().run_in_executor(
+                None,
+                partial(
+                    self.task_events_table.get_item,
+                    Key={'task_id': cache_key, 'event_id': 'SUMMARY_CACHE'}
+                )
+            )
+            
+            item = response.get('Item')
+            if not item:
+                return None
+            
+            # TTL 확인
+            ttl = item.get('ttl', 0)
+            if ttl < int(time.time()):
+                return None
+            
+            # 캐시된 데이터 반환
+            cached_data = item.get('cached_summary')
+            if cached_data:
+                return json.loads(cached_data) if isinstance(cached_data, str) else cached_data
+            
+            return None
+            
+        except ClientError as e:
+            if 'ResourceNotFoundException' in str(e):
+                # 테이블 없으면 무시
+                return None
+            logger.warning(f"Failed to get cached summary: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Cache retrieval error: {e}")
+            return None
+
+    async def _cache_summary(self, cache_key: str, summary_data: Dict[str, Any], ttl_hours: int = 24) -> None:
+        """DynamoDB에 요약 결과 캐싱"""
+        try:
+            cache_item = {
+                'task_id': cache_key,
+                'event_id': 'SUMMARY_CACHE',
+                'cached_summary': json.dumps(summary_data, ensure_ascii=False),
+                'ttl': int(time.time()) + (ttl_hours * 60 * 60),
+                'cached_at': int(time.time() * 1000)
+            }
+            
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                partial(self.task_events_table.put_item, Item=cache_item)
+            )
+            
+            logger.debug(f"Cached summary: {cache_key} (TTL: {ttl_hours}h)")
+            
+        except ClientError as e:
+            if 'ResourceNotFoundException' not in str(e):
+                logger.warning(f"Failed to cache summary: {e}")
+        except Exception as e:
+            logger.warning(f"Cache write error: {e}")
