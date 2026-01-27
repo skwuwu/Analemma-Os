@@ -33,7 +33,6 @@ import { RollbackDialog } from './RollbackDialog';
 import { SuggestionOverlay } from './SuggestionOverlay';
 import { EmptyCanvasGuide } from './EmptyCanvasGuide';
 import { AuditPanel } from './AuditPanel';
-import { ContextualSideRail, RailTab } from './ContextualSideRail';
 
 import { Button } from './ui/button';
 import {
@@ -79,9 +78,8 @@ const WorkflowCanvasInner = () => {
   // Empty Canvas Guide visibility
   const [emptyGuideVisible, setEmptyGuideVisible] = useState(true);
 
-  // Audit Panel state
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [activePanelTab, setActivePanelTab] = useState<RailTab>('audit');
+  // Audit Panel state (Audit only, no Timeline)
+  const [auditPanelOpen, setAuditPanelOpen] = useState(false);
 
   // ==========================================
   // 2. NODE/EDGE TYPES (useMemo)
@@ -649,20 +647,43 @@ const WorkflowCanvasInner = () => {
         <SuggestionOverlay />
       </div>
 
-      {/* Contextual Side Rail for Audit */}
-      <ContextualSideRail
-        activeTab={activePanelTab}
-        onTabChange={setActivePanelTab}
-        issueCount={issueSummary.total}
-        hasErrors={issueSummary.errors > 0}
-        isExecuting={false}
-        panelOpen={rightPanelOpen}
-        onTogglePanel={() => setRightPanelOpen(!rightPanelOpen)}
-      />
+      {/* Audit Toggle Button */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setAuditPanelOpen(!auditPanelOpen)}
+            className={cn(
+              "fixed top-1/2 right-6 -translate-y-1/2 z-30 h-12 w-12 rounded-xl border-2 transition-all shadow-lg",
+              auditPanelOpen ? "bg-slate-800 border-blue-400 text-blue-400" : "bg-slate-900/80 border-slate-700 text-slate-400 hover:text-slate-100 hover:border-slate-600",
+              issueSummary.errors > 0 && !auditPanelOpen && "border-red-500/50 text-red-400 animate-pulse"
+            )}
+          >
+            <div className="relative">
+              <Layers className="w-5 h-5" />
+              {issueSummary.total > 0 && (
+                <span className={cn(
+                  "absolute -top-2 -right-2 min-w-[18px] h-[18px] rounded-full text-[10px] font-bold flex items-center justify-center",
+                  issueSummary.errors > 0 ? "bg-red-500 text-white" : "bg-blue-500 text-white"
+                )}>
+                  {issueSummary.total}
+                </span>
+              )}
+            </div>
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="left" className="bg-slate-900 border-slate-800">
+          <p className="font-semibold">Workflow Validation</p>
+          <p className="text-xs text-slate-400">
+            {issueSummary.total === 0 ? "No issues" : `${issueSummary.errors} errors, ${issueSummary.warnings} warnings`}
+          </p>
+        </TooltipContent>
+      </Tooltip>
 
       {/* Audit Panel Sidebar */}
       <AnimatePresence>
-        {rightPanelOpen && (
+        {auditPanelOpen && (
           <motion.div
             initial={{ x: 400 }}
             animate={{ x: 0 }}
@@ -673,12 +694,12 @@ const WorkflowCanvasInner = () => {
             <div className="p-6 pb-2">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-base font-semibold text-slate-100">
-                  {activePanelTab === 'audit' && 'Workflow Validation'}
+                  Workflow Validation
                 </h3>
                 <Button
                   variant="ghost"
                   size="icon"
-                  onClick={() => setRightPanelOpen(false)}
+                  onClick={() => setAuditPanelOpen(false)}
                   className="h-8 w-8 text-slate-400 hover:text-slate-100"
                 >
                   <PanelRightClose className="w-4 h-4" />
@@ -686,18 +707,16 @@ const WorkflowCanvasInner = () => {
               </div>
             </div>
             
-            {activePanelTab === 'audit' && (
-              <AuditPanel 
-                standalone 
-                className="flex-1 overflow-hidden"
-                onRefresh={async () => {
-                  const session = await fetchAuthSession();
-                  const idToken = session.tokens?.idToken?.toString();
-                  await requestAudit({ nodes, edges }, idToken);
-                  toast.success('Validation refreshed');
-                }}
-              />
-            )}
+            <AuditPanel 
+              standalone 
+              className="flex-1 overflow-hidden"
+              onRefresh={async () => {
+                const session = await fetchAuthSession();
+                const idToken = session.tokens?.idToken?.toString();
+                await requestAudit({ nodes, edges }, idToken);
+                toast.success('Validation refreshed');
+              }}
+            />
           </motion.div>
         )}
       </AnimatePresence>
