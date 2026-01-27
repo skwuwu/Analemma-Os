@@ -1023,6 +1023,46 @@
         "state_durations.$": "$.state_data.state_durations",
         "total_segments.$": "$.state_data.total_segments"
       },
+      "Next": "NotifyExecutionSuccess"
+    },
+    "NotifyExecutionSuccess": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::events:putEvents",
+      "Comment": "Publish workflow success event to trigger ExecutionProgressNotifierFunction",
+      "Parameters": {
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "backend-workflow",
+            "DetailType": "WorkflowExecutionSucceeded",
+            "Detail": {
+              "execution_id.$": "$$.Execution.Id",
+              "conversation_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "status": "SUCCEEDED",
+              "notification_type": "execution_progress",
+              "message": "Distributed workflow execution completed successfully",
+              "distributed_execution": true,
+              "final_state.$": "$.execution_result.final_state",
+              "final_state_s3_path.$": "$.execution_result.final_state_s3_path",
+              "total_segments.$": "$.state_data.total_segments",
+              "start_time.$": "$.state_data.start_time"
+            }
+          }
+        ]
+      },
+      "ResultPath": "$.success_notification_result",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Comment": "EventBridge publish failure should not stop workflow success",
+          "ResultPath": "$.success_notification_error",
+          "Next": "WorkflowSucceeded"
+        }
+      ],
       "Next": "WorkflowSucceeded"
     },
     "WorkflowSucceeded": {
