@@ -659,6 +659,12 @@ export const NodeEditorDialog = ({
     } else if (nodeType === 'trigger') {
       const { triggerType, triggerHour, triggerMinute } = formData;
       Object.assign(updates, { triggerType, triggerHour: Number(triggerHour || 0), triggerMinute: Number(triggerMinute || 0) });
+      // Generate configValue for display
+      if (triggerType === 'time') {
+        const hour = String(triggerHour || 0).padStart(2, '0');
+        const minute = String(triggerMinute || 0).padStart(2, '0');
+        Object.assign(updates, { configValue: `${hour}:${minute}` });
+      }
     } else if (nodeType === 'control') {
       const { controlType, whileCondition, maxIterations, strategy, output_key } = formData;
       Object.assign(updates, { controlType, whileCondition, maxIterations: Number(maxIterations || 0) });

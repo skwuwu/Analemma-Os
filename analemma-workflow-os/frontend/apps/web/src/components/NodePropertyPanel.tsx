@@ -565,6 +565,10 @@ const NodeForm = ({
         if (formData.triggerType === 'time') {
           updates.triggerHour = Number(formData.triggerHour);
           updates.triggerMinute = Number(formData.triggerMinute);
+          // Generate configValue for display (e.g., "09:00")
+          const hour = String(formData.triggerHour || 0).padStart(2, '0');
+          const minute = String(formData.triggerMinute || 0).padStart(2, '0');
+          updates.configValue = `${hour}:${minute}`;
         }
         break;
       case 'control':

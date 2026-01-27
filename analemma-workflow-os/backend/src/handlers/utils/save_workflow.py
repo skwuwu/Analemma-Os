@@ -488,6 +488,13 @@ def lambda_handler(event, context):
             cfg_for_check = None
 
         has_time_trigger = _config_contains_time_trigger(cfg_for_check or {})
+        
+        # Debug logging to see what's being checked
+        logger.info(f"Time trigger detection: has_time_trigger={has_time_trigger}")
+        if cfg_for_check:
+            logger.info(f"Config nodes count: {len(cfg_for_check.get('nodes', []))}")
+            for i, node in enumerate(cfg_for_check.get('nodes', [])[:3]):  # Log first 3 nodes
+                logger.info(f"Node {i}: type={node.get('type')}, blockId={node.get('blockId')}, sets={node.get('sets', {}).get('trigger_type') if isinstance(node.get('sets'), dict) else None}")
 
         # If a time trigger exists, enforce that the workflow is scheduled and
         # that next_run_time is provided. Otherwise default is_scheduled to false
@@ -495,8 +502,12 @@ def lambda_handler(event, context):
         if has_time_trigger:
             # coerce body['is_scheduled'] to true (string 'true') if not set
             body['is_scheduled'] = str(True).lower()
+            # Auto-generate next_run_time if not provided (use current time + 1 hour as default)
             if 'next_run_time' not in body or body.get('next_run_time') in (None, ''):
-                return _response(400, {'error': 'Workflow contains a time trigger: next_run_time must be provided'})
+                from datetime import datetime, timedelta
+                default_next_run = datetime.utcnow() + timedelta(hours=1)
+                body['next_run_time'] = default_next_run.isoformat() + 'Z'
+                logger.info(f"Auto-generated next_run_time for time trigger: {body['next_run_time']}")
         else:
             # Not scheduled: ensure is_scheduled=false and no next_run_time
             body['is_scheduled'] = str(False).lower()

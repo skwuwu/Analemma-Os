@@ -389,7 +389,7 @@ def _generate_session_id(owner_id: str) -> str:
     return f"session_{owner_id[:8]}_{uuid.uuid4().hex[:16]}"
 
 
-async def lambda_handler(event, context):
+async def _lambda_handler_async(event, context):
     """Co-design Assistant API Lambda 핸들러"""
     
     # CORS preflight 처리
@@ -727,7 +727,7 @@ def lambda_handler_sync(event, context):
     loop = get_or_create_event_loop()
     
     try:
-        return loop.run_until_complete(lambda_handler(event, context))
+        return loop.run_until_complete(_lambda_handler_async(event, context))
     except RuntimeError as e:
         # 이미 실행 중인 루프가 있는 경우 (중첩 호출) - 폴백 경로
         if "This event loop is already running" in str(e):
@@ -760,7 +760,7 @@ def lambda_handler_sync(event, context):
 # Lambda Function URL RESPONSE_STREAM 핸들러 (AWS 공식 규격)
 # ============================================================================
 
-async def lambda_handler_streaming(event, response_stream, context):
+async def _lambda_handler_streaming_async(event, response_stream, context):
     """
     AWS Lambda Function URL RESPONSE_STREAM 모드용 핸들러.
     
@@ -938,7 +938,7 @@ def lambda_handler_streaming_sync(event, response_stream, context):
     """
     loop = get_or_create_event_loop()
     return loop.run_until_complete(
-        lambda_handler_streaming(event, response_stream, context)
+        _lambda_handler_streaming_async(event, response_stream, context)
     )
 
 
