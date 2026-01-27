@@ -137,7 +137,6 @@ def calculate_cost(usage: Dict[str, Any], model: str) -> Decimal:
 try:
     from src.common.logging_utils import log_execution_context
     
-    @log_execution_context
     def lambda_handler(event, context):
         """
         Step Functions 워크플로우 완료 이벤트를 처리하여 사용량을 집계하고 비용을 계산

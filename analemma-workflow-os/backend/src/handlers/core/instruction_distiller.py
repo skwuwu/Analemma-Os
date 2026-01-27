@@ -684,7 +684,6 @@ def _compress_instructions(
         return instructions[:target_count]
 
 
-@log_execution_context
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     HITL 승인 이벤트를 처리하여 지침을 증류합니다.
