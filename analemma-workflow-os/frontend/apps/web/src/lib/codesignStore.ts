@@ -336,19 +336,52 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
         }
       }
       
-      // 각 issue가 올바른 형식인지 검증
+      // 각 issue가 올바른 형식인지 검증하고 강제 변환
       const validIssues = issues.filter(issue => {
         return issue && 
                typeof issue === 'object' && 
-               typeof issue.message === 'string' &&
+               issue.message !== undefined &&
+               issue.message !== null &&
                ['error', 'warning', 'info'].includes(issue.level);
-      }).map(issue => ({
-        level: issue.level,
-        type: issue.type || 'unknown',
-        message: String(issue.message),
-        suggestion: issue.suggestion ? String(issue.suggestion) : undefined,
-        affectedNodes: Array.isArray(issue.affectedNodes) ? issue.affectedNodes : undefined
-      }));
+      }).map(issue => {
+        // message를 안전하게 문자열로 변환
+        let messageStr: string;
+        if (typeof issue.message === 'string') {
+          messageStr = issue.message;
+        } else if (typeof issue.message === 'object') {
+          try {
+            messageStr = JSON.stringify(issue.message);
+          } catch {
+            messageStr = String(issue.message);
+          }
+        } else {
+          messageStr = String(issue.message);
+        }
+
+        // suggestion도 안전하게 문자열로 변환
+        let suggestionStr: string | undefined;
+        if (issue.suggestion) {
+          if (typeof issue.suggestion === 'string') {
+            suggestionStr = issue.suggestion;
+          } else if (typeof issue.suggestion === 'object') {
+            try {
+              suggestionStr = JSON.stringify(issue.suggestion);
+            } catch {
+              suggestionStr = String(issue.suggestion);
+            }
+          } else {
+            suggestionStr = String(issue.suggestion);
+          }
+        }
+
+        return {
+          level: issue.level as AuditLevel,
+          type: issue.type || 'unknown',
+          message: messageStr,
+          suggestion: suggestionStr,
+          affectedNodes: Array.isArray(issue.affectedNodes) ? issue.affectedNodes : []
+        };
+      });
       
       console.log('Validated issues:', validIssues);
       get().setAuditIssues(validIssues);

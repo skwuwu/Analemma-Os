@@ -164,6 +164,29 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
   const config = levelConfig[issue.level] || levelConfig.info;
   const Icon = config.icon;
 
+  // 안전하게 message를 문자열로 변환
+  const messageText = React.useMemo(() => {
+    if (typeof issue.message === 'string') {
+      return issue.message;
+    }
+    if (issue.message && typeof issue.message === 'object') {
+      return JSON.stringify(issue.message);
+    }
+    return String(issue.message || '알 수 없는 오류');
+  }, [issue.message]);
+
+  // 안전하게 suggestion을 문자열로 변환
+  const suggestionText = React.useMemo(() => {
+    if (!issue.suggestion) return null;
+    if (typeof issue.suggestion === 'string') {
+      return issue.suggestion;
+    }
+    if (typeof issue.suggestion === 'object') {
+      return JSON.stringify(issue.suggestion);
+    }
+    return String(issue.suggestion);
+  }, [issue.suggestion]);
+
   return (
     <div
       className={cn(
@@ -191,7 +214,7 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
             )}
           </div>
           <p className="text-sm leading-relaxed">
-            {issue.message}
+            {messageText}
           </p>
         </div>
         <ChevronRight
@@ -206,10 +229,10 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
       {isExpanded && (
         <div className="mt-3 pl-6 space-y-2">
           {/* 제안 */}
-          {issue.suggestion && (
+          {suggestionText && (
             <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
               <span className="text-base leading-none">💡</span>
-              <span>{issue.suggestion}</span>
+              <span>{suggestionText}</span>
             </div>
           )}
 
