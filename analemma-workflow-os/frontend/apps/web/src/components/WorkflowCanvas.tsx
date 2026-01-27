@@ -32,6 +32,7 @@ import { SuggestionOverlay } from './SuggestionOverlay';
 import { SuggestionList } from './SuggestionList';
 import { AuditPanel } from './AuditPanel';
 import { EmptyCanvasGuide } from './EmptyCanvasGuide';
+import { ContextualSideRail, RailTab } from './ContextualSideRail';
 import { Button } from './ui/button';
 import {
   Trash2,
@@ -40,9 +41,7 @@ import {
   ChevronRight,
   Play,
   History,
-  PanelRightOpen,
   PanelRightClose,
-  Zap,
   ShieldAlert,
   Menu
 } from 'lucide-react';
@@ -51,6 +50,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore } from '@/lib/codesignStore';
 import { useCanvasMode } from '@/hooks/useCanvasMode';
+import { useAutoValidation } from '@/hooks/useAutoValidation';
+import { WorkflowStatusIndicator } from './WorkflowStatusIndicator';
 import { usePlanBriefing, useCheckpoints, useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { toast } from 'sonner';
 import type { TimelineItem, RollbackRequest } from '@/lib/types';
@@ -128,6 +129,41 @@ const WorkflowCanvasInner = () => {
   // Canvas mode detection
   const canvasMode = useCanvasMode();
 
+  // Auto-validation (background linter)
+  const validation = useAutoValidation({
+    enabled: canvasMode !== 'agentic',
+    debounceMs: 1500,
+    onValidationComplete: (issueCount) => {
+      if (issueCount > 0 && !rightPanelOpen) {
+        // Auto-open audit panel if errors found
+        console.log(`[AutoValidation] Found ${issueCount} issues`);
+      }
+    }
+  });
+
+  // Contextual Auto-switching: React to workflow state changes
+  useEffect(() => {
+    // Auto-switch to Timeline when execution starts
+    if (currentExecutionId && activePanelTab !== 'timeline') {
+      console.log('[ContextualRail] Execution started, switching to Timeline');
+      setActivePanelTab('timeline');
+      if (!rightPanelOpen) {
+        setRightPanelOpen(true);
+      }
+    }
+  }, [currentExecutionId, activePanelTab, rightPanelOpen]);
+
+  useEffect(() => {
+    // Auto-switch to Audit when critical errors are detected
+    if (validation.hasErrors && !currentExecutionId && activePanelTab !== 'audit') {
+      console.log('[ContextualRail] Critical errors detected, switching to Audit');
+      setActivePanelTab('audit');
+      if (!rightPanelOpen) {
+        setRightPanelOpen(true);
+      }
+    }
+  }, [validation.hasErrors, currentExecutionId, activePanelTab, rightPanelOpen]);
+
   // Wrap workflow actions to record changes for Co-design
   const addNodeWithTracking = useCallback((node: Node) => {
     addNode(node);
@@ -192,7 +228,7 @@ const WorkflowCanvasInner = () => {
 
   // Right Panel System
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [activePanelTab, setActivePanelTab] = useState<string>('timeline');
+  const [activePanelTab, setActivePanelTab] = useState<RailTab>('timeline');
 
   // Plan Briefing & Time Machine state
   const [briefingOpen, setBriefingOpen] = useState(false);
@@ -482,14 +518,31 @@ const WorkflowCanvasInner = () => {
               )}
             </AnimatePresence>
 
-            <Button variant="default" size="sm" onClick={handlePreviewExecution} disabled={planBriefing.isLoading || nodes.length === 0} className="gap-2 bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-600/20">
-              <Play className="w-4 h-4 fill-white" />
-              {planBriefing.isLoading ? 'Processing...' : 'Simulate Run'}
-            </Button>
+            {/* Status Indicator (replaces manual Simulate Run) */}
+            {nodes.length > 0 && (
+              <WorkflowStatusIndicator
+                issueCount={validation.issueCount}
+                hasErrors={validation.hasErrors}
+                hasWarnings={validation.hasWarnings}
+                onClick={() => {
+                  if (validation.issueCount > 0) {
+                    setRightPanelOpen(true);
+                    setActivePanelTab('audit');
+                  }
+                }}
+              />
+            )}
 
-            <Button variant="outline" size="sm" onClick={() => setRightPanelOpen(!rightPanelOpen)} className={cn("gap-2 border-slate-700 bg-slate-900/50", rightPanelOpen && "bg-slate-800")}>
-              {rightPanelOpen ? <PanelRightClose className="w-4 h-4" /> : <PanelRightOpen className="w-4 h-4" />}
-              Insight Centre
+            {/* Unified Run Button (with pre-flight check) */}
+            <Button 
+              variant="default" 
+              size="sm" 
+              onClick={handlePreviewExecution} 
+              disabled={planBriefing.isLoading || nodes.length === 0 || validation.hasErrors} 
+              className="gap-2 bg-blue-600 hover:bg-blue-700 shadow-lg shadow-blue-600/20"
+            >
+              <Play className="w-4 h-4 fill-white" />
+              {planBriefing.isLoading ? 'Checking...' : 'Run'}
             </Button>
           </div>
 
@@ -562,6 +615,17 @@ const WorkflowCanvasInner = () => {
           </div>
         </div>
 
+        {/* Contextual Side Rail (replaces Insight Centre button) */}
+        <ContextualSideRail
+          activeTab={activePanelTab}
+          onTabChange={setActivePanelTab}
+          issueCount={validation.issueCount}
+          hasErrors={validation.hasErrors}
+          isExecuting={!!currentExecutionId}
+          panelOpen={rightPanelOpen}
+          onTogglePanel={() => setRightPanelOpen(!rightPanelOpen)}
+        />
+
         {/* Unified Sidebar Panel */}
         <AnimatePresence>
           {rightPanelOpen && (
@@ -574,24 +638,19 @@ const WorkflowCanvasInner = () => {
             >
               <div className="p-6 pb-2">
                 <div className="flex items-center justify-between mb-6">
-                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-100 flex items-center gap-2">
-                    <Zap className="w-4 h-4 text-blue-500" />
-                    Insight_Matrix
+                  <h3 className="text-sm font-black uppercase tracking-widest text-slate-100">
+                    {activePanelTab === 'timeline' && 'Execution Timeline'}
+                    {activePanelTab === 'audit' && 'Validation Results'}
+                    {activePanelTab === 'agents' && 'AI Design Agents'}
                   </h3>
                   <Button variant="ghost" size="icon" onClick={() => setRightPanelOpen(false)} className="h-8 w-8 text-slate-500 hover:text-white">
                     <PanelRightClose className="w-4 h-4" />
                   </Button>
                 </div>
 
-                <Tabs value={activePanelTab} onValueChange={setActivePanelTab} className="w-full">
-                  <TabsList className="w-full grid grid-cols-3 bg-slate-900/50 border border-slate-800 rounded-xl p-1 h-10">
-                    <TabsTrigger value="timeline" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-blue-400 transition-all">Timeline</TabsTrigger>
-                    <TabsTrigger value="audit" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-amber-400 transition-all">Audit</TabsTrigger>
-                    <TabsTrigger value="ai" className="rounded-lg text-[10px] font-black uppercase tracking-tighter data-[state=active]:bg-slate-800 data-[state=active]:text-emerald-400 transition-all">Agents</TabsTrigger>
-                  </TabsList>
-
-                  <div className="mt-6 flex-1 overflow-hidden">
-                    <TabsContent value="timeline" className="m-0 h-[calc(100vh-200px)] overflow-y-auto custom-scrollbar">
+                <div className="flex-1 overflow-hidden">
+                  {activePanelTab === 'timeline' && (
+                    <div className="h-[calc(100vh-180px)] overflow-y-auto custom-scrollbar">
                       {currentExecutionId ? (
                         <CheckpointTimeline
                           items={checkpoints.timeline}
@@ -613,17 +672,21 @@ const WorkflowCanvasInner = () => {
                           <p className="text-[10px] font-black uppercase">No active operations</p>
                         </div>
                       )}
-                    </TabsContent>
+                    </div>
+                  )}
 
-                    <TabsContent value="audit" className="m-0 h-[calc(100vh-200px)] overflow-y-auto">
+                  {activePanelTab === 'audit' && (
+                    <div className="h-[calc(100vh-180px)] overflow-y-auto">
                       <AuditPanel standalone />
-                    </TabsContent>
+                    </div>
+                  )}
 
-                    <TabsContent value="ai" className="m-0 h-[calc(100vh-200px)] overflow-y-auto">
+                  {activePanelTab === 'agents' && (
+                    <div className="h-[calc(100vh-180px)] overflow-y-auto">
                       <SuggestionList />
-                    </TabsContent>
-                  </div>
-                </Tabs>
+                    </div>
+                  )}
+                </div>
               </div>
             </motion.div>
           )}

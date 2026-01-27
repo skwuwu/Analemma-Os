@@ -1,12 +1,7 @@
 import { Handle, Position } from '@xyflow/react';
 import {
-  Mail,
   Globe,
-  Calendar,
-  Github,
   Database,
-  MessageCircle,
-  FolderOpen,
   X,
   CheckCircle2,
   AlertCircle,
@@ -18,16 +13,15 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
-// 서비스별 색상 및 설정 객체
+// 서비스별 색상 및 설정 객체 (실제 구현된 operator만 포함)
 const OPERATOR_CONFIG = {
-  email: { icon: Mail, color: '6 78% 55%', label: 'Email' },
-  browser: { icon: Globe, color: '25 95% 60%', label: 'Browser' },
-  calendar: { icon: Calendar, color: '200 100% 50%', label: 'Calendar' },
-  github: { icon: Github, color: '0 0% 9%', label: 'GitHub' },
+  custom: { icon: Globe, color: '25 95% 60%', label: 'Custom' },
+  api_call: { icon: Globe, color: '200 100% 50%', label: 'API Call' },
   database: { icon: Database, color: '190 100% 28%', label: 'Database' },
-  slack: { icon: MessageCircle, color: '295 45% 22%', label: 'Slack' },
-  drive: { icon: FolderOpen, color: '45 90% 45%', label: 'Drive' },
-  default: { icon: Mail, color: '25 95% 60%', label: 'Integration' }
+  db_query: { icon: Database, color: '190 100% 28%', label: 'Database' },
+  safe_operator: { icon: CheckCircle2, color: '142 76% 36%', label: 'Safe Transform' },
+  operator_official: { icon: CheckCircle2, color: '142 76% 36%', label: 'Safe Transform' },
+  default: { icon: Globe, color: '25 95% 60%', label: 'Operator' }
 } as const;
 
 interface OperatorNodeProps {

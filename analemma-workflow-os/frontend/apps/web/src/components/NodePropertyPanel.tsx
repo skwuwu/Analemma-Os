@@ -270,9 +270,9 @@ export const NodePropertyPanel = () => {
         <div className="w-16 h-16 rounded-3xl bg-white shadow-sm flex items-center justify-center mb-6 opacity-40">
           <Settings className="w-8 h-8 text-slate-300" />
         </div>
-        <h3 className="font-bold text-slate-400 text-sm mb-1">탐색 준비 완료</h3>
+        <h3 className="font-bold text-slate-400 text-sm mb-1">No Node Selected</h3>
         <p className="text-[11px] text-slate-300 leading-relaxed">
-          캔버스의 노드를 선택하여<br />핵심 로직과 인프라 연결을 구성하세요.
+          Select a node from the canvas<br />to edit its properties and connections.
         </p>
       </div>
     );

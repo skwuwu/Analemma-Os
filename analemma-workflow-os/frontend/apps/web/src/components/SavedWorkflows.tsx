@@ -13,6 +13,7 @@ import { uploadMedia, SUPPORTED_MEDIA_TYPES, MAX_FILE_SIZE_MB, type UploadedMedi
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { useState, useRef, useLayoutEffect, useMemo } from 'react';
 import { convertWorkflowToBackendFormat, convertWorkflowFromBackendFormat, type BackendWorkflow } from '@/lib/workflowConverter';
+import { useCodesignStore } from '@/lib/codesignStore';
 
 import { TEST_KEYWORD_DESCRIPTIONS, BUILD_TIME_TEST_KEYWORDS } from '@/lib/testConstants';
 import { Node, Edge } from '@xyflow/react';
@@ -39,6 +40,7 @@ export const SavedWorkflows = ({
   onLoadWorkflow?: (workflow: WorkflowData) => void;
 }) => {
   const { clearWorkflow, loadWorkflow, subgraphs } = useWorkflowStore();
+  const { auditIssues, requestAudit, requestSimulation } = useCodesignStore();
   const {
     workflows,
     isLoading,
@@ -92,6 +94,42 @@ export const SavedWorkflows = ({
     if (!currentWorkflow || (!currentWorkflow.nodes?.length && !currentWorkflow.edges?.length)) {
       toast.error('No workflow to save');
       return;
+    }
+
+    // 최종 검증: Save 시점에 시뮬레이션 실행
+    console.log('[SavedWorkflows] Running final validation before save...');
+    
+    try {
+      // 1. Audit 체크
+      await requestAudit(
+        { nodes: currentWorkflow.nodes, edges: currentWorkflow.edges },
+        undefined
+      );
+
+      // 2. 심각한 오류가 있으면 저장 차단
+      const criticalIssues = auditIssues.filter(issue => issue.level === 'error');
+      if (criticalIssues.length > 0) {
+        toast.error(`Cannot save: ${criticalIssues.length} critical issue(s) found. Please fix them first.`);
+        console.error('[SavedWorkflows] Critical issues:', criticalIssues);
+        return;
+      }
+
+      // 3. Simulation 실행 (경로 검증)
+      const simulationResult = await requestSimulation(
+        { nodes: currentWorkflow.nodes, edges: currentWorkflow.edges },
+        {},
+        undefined
+      );
+
+      if (simulationResult && !simulationResult.success) {
+        toast.warning(`Workflow has logical issues but will be saved. Check audit panel for details.`);
+      } else {
+        toast.success('Validation passed ✓');
+      }
+    } catch (error) {
+      console.error('[SavedWorkflows] Validation failed:', error);
+      // 검증 실패해도 저장은 허용 (경고만)
+      toast.warning('Validation incomplete, proceeding with save');
     }
 
     // subgraphs를 포함한 완전한 워크플로우 객체 생성

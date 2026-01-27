@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Brain, Clock, Webhook, Zap, MessageSquare, Mail, Globe, Calendar, Github, Database, MessageCircle, FolderOpen, Search, GripVertical, ChevronDown, ChevronRight, Repeat, GitFork, type LucideIcon } from 'lucide-react';
+import { Brain, Clock, Webhook, Zap, MessageSquare, Globe, Database, Search, GripVertical, ChevronDown, ChevronRight, Repeat, GitFork, CheckCircle2, type LucideIcon } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Input } from '@/components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -44,10 +44,9 @@ export const BLOCK_CATEGORIES: { title: string; type: BlockType; items: Omit<Blo
     type: 'operator',
     items: [
       { id: 'custom-operator', label: 'Custom Operator', icon: Globe, description: '사용자 정의 코드/설정으로 동작하는 커스텀 연산자', defaultData: { operatorType: 'custom', operatorVariant: 'custom', action: 'Custom Action' } },
-      { id: 'email', label: 'Email', icon: Mail, description: 'Send emails through SMTP or email service providers', defaultData: { operatorType: 'email', operatorVariant: 'official', action: 'Send Email' } },
-      { id: 'github', label: 'GitHub', icon: Github, description: 'Interact with GitHub repositories, issues, and pull requests', defaultData: { operatorType: 'github', operatorVariant: 'official', action: 'Create Issue' } },
-      { id: 'database', label: 'Database', icon: Database, description: 'Query and manipulate data in various database systems', defaultData: { operatorType: 'database', operatorVariant: 'official', action: 'Query Data' } },
-      { id: 'slack', label: 'Slack', icon: MessageCircle, description: 'Send messages and notifications to Slack channels', defaultData: { operatorType: 'slack', operatorVariant: 'official', action: 'Send Message' } },
+      { id: 'api_call', label: 'API Call', icon: Globe, description: 'HTTP API 요청 실행 (REST API, webhook 등)', defaultData: { operatorType: 'api_call', operatorVariant: 'official', action: 'API Request', url: '', method: 'GET' } },
+      { id: 'database', label: 'Database Query', icon: Database, description: 'SQL 쿼리 실행 및 데이터 조작', defaultData: { operatorType: 'database', operatorVariant: 'official', action: 'Query Data', query: '' } },
+      { id: 'safe_operator', label: 'Safe Transform', icon: Zap, description: '50+ 내장 변환 전략 (list_filter, json_parse, string_template 등)', defaultData: { operatorType: 'safe_operator', operatorVariant: 'official', action: 'Transform Data', strategy: 'list_filter' } },
     ]
   },
   {

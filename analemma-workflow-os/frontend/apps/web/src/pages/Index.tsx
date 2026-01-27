@@ -6,7 +6,6 @@ import { WorkflowCanvas } from '@/components/WorkflowCanvas.tsx';
 import { BlockLibrary } from '@/components/BlockLibrary.tsx';
 import { SavedWorkflows } from '@/components/SavedWorkflows.tsx';
 import { ActiveWorkflowIndicator } from '@/components/ActiveWorkflowIndicator.tsx';
-import { NodePropertyPanel } from '@/components/NodePropertyPanel';
 import { WorkflowChat } from '@/components/WorkflowChat';
 import { Button } from '@/components/ui/button.tsx';
 import { Badge } from '@/components/ui/badge';
@@ -61,7 +60,7 @@ const Index = ({ signOut }: IndexProps) => {
   );
 
   const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
-  const [isSavedWorkflowsOpen, setIsSavedWorkflowsOpen] = useState(false);
+
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -79,7 +78,6 @@ const Index = ({ signOut }: IndexProps) => {
   const handleLoadWorkflow = (workflow: WorkflowData) => {
     setCurrentWorkflow(workflow.id, workflow.name, workflow.inputs);
     loadWorkflow({ nodes: workflow.nodes, edges: workflow.edges });
-    setIsSavedWorkflowsOpen(false);
   };
 
   const handleSignOut = async () => {
@@ -135,16 +133,6 @@ const Index = ({ signOut }: IndexProps) => {
           <div className="flex items-center gap-2">
             <ActiveWorkflowIndicator />
             
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setIsSavedWorkflowsOpen(true)}
-              className="flex items-center gap-2"
-            >
-              <FolderOpen className="w-4 h-4" />
-              저장된 워크플로우
-            </Button>
-
             <Button
               variant="outline"
               size="sm"
@@ -241,20 +229,7 @@ const Index = ({ signOut }: IndexProps) => {
               </DialogContent>
             </Dialog>
 
-            {/* Saved Workflows Dialog */}
-            <Dialog open={isSavedWorkflowsOpen} onOpenChange={setIsSavedWorkflowsOpen}>
-              <DialogContent className="max-w-4xl h-[80vh] flex flex-col">
-                <DialogHeader>
-                  <DialogTitle>저장된 워크플로우</DialogTitle>
-                </DialogHeader>
-                <div className="flex-1 overflow-hidden">
-                  <SavedWorkflows
-                    currentWorkflow={currentWorkflow}
-                    onLoadWorkflow={handleLoadWorkflow}
-                  />
-                </div>
-              </DialogContent>
-            </Dialog>
+
           </div>
         </div>
 
@@ -270,15 +245,18 @@ const Index = ({ signOut }: IndexProps) => {
             <WorkflowCanvas />
           </div>
 
-          {/* Right: Property CRUD & AI Chat (350px) */}
+          {/* Right: SavedWorkflows CRUD & AI Chat (350px) */}
           <div className="w-[350px] flex-shrink-0 border-l border-border flex flex-col bg-background z-10">
-            {/* Top: Property CRUD (45%) */}
-            <div className="h-[45%] border-b border-border overflow-hidden flex flex-col">
-              <NodePropertyPanel />
+            {/* Top: Saved Workflows CRUD (60%) */}
+            <div className="h-[60%] border-b border-border overflow-hidden flex flex-col">
+              <SavedWorkflows
+                currentWorkflow={currentWorkflow}
+                onLoadWorkflow={handleLoadWorkflow}
+              />
             </div>
 
-            {/* Bottom: AI Codesigner Chat (55%) */}
-            <div className="h-[55%] flex flex-col overflow-hidden">
+            {/* Bottom: AI Codesigner Chat (40%) */}
+            <div className="h-[40%] flex flex-col overflow-hidden">
               <WorkflowChat />
             </div>
           </div>
