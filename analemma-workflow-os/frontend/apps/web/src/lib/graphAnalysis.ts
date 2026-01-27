@@ -528,52 +528,51 @@ export function analyzeWorkflowGraph(
   // Parallel source 노드 ID 수집
   const parallelSourceIds = new Set(parallelGroups.map(g => g.sourceNodeId));
   
-  // 5. 고아 노드 감지 (orphan nodes)
+  // 5. Orphan node detection
   const orphanNodes = findOrphanNodes(nodes, edges);
   if (orphanNodes.length > 0) {
     warnings.push({
       type: 'orphan_node',
-      message: `${orphanNodes.length}개의 노드가 다른 노드와 연결되어 있지 않습니다.`,
+      message: `${orphanNodes.length} node${orphanNodes.length > 1 ? 's are' : ' is'} not connected to any other nodes.`,
       nodeIds: orphanNodes,
-      suggestion: '이 노드들을 워크플로우에 연결하거나 제거하세요.'
+      suggestion: 'Connect these nodes to the workflow or remove them.'
     });
   }
-  
-  // 6. 도달 불가능한 노드 감지 (unreachable nodes)
+
+  // 6. Unreachable node detection
   const unreachableNodes = findUnreachableNodes(nodes, edges);
   if (unreachableNodes.length > 0) {
     warnings.push({
       type: 'unreachable_node',
-      message: `${unreachableNodes.length}개의 노드가 시작점에서 도달할 수 없습니다.`,
+      message: `${unreachableNodes.length} node${unreachableNodes.length > 1 ? 's are' : ' is'} unreachable from any start point.`,
       nodeIds: unreachableNodes,
-      suggestion: '이 노드들을 시작점과 연결하거나 제거하세요.'
+      suggestion: 'Connect these nodes to a start point or remove them.'
     });
   }
-  
-  // 7. 과도한 병렬 분기 경고 (많은 out-degree)
+
+  // 7. Excessive parallel branches warning
   parallelGroups.forEach(pg => {
     if (pg.branches.length > 10) {
       warnings.push({
         type: 'many_branches',
-        message: `노드에서 ${pg.branches.length}개의 분기가 있습니다. 실행 시간이 길어질 수 있습니다.`,
+        message: `Node has ${pg.branches.length} parallel branches. This may increase execution time.`,
         nodeIds: [pg.sourceNodeId],
-        suggestion: '병렬 분기를 여러 단계로 분할하는 것을 고려하세요.'
+        suggestion: 'Consider splitting parallel branches into multiple stages.'
       });
     }
   });
-  
-  // 8. 데드락 경고 (상호 순환 참조)
+
+  // 8. Deadlock warning (overlapping cycles)
   if (cycles.length > 1) {
-    // 여러 사이클이 서로 얽혀 있는 경우 데드락 가능성
-    const overlappingCycles = cycles.filter((c1, i) => 
+    const overlappingCycles = cycles.filter((c1, i) =>
       cycles.some((c2, j) => i !== j && c1.loopNodes.some(n => c2.loopNodes.includes(n)))
     );
     if (overlappingCycles.length > 0) {
       warnings.push({
         type: 'accidental_cycle',
-        message: '여러 사이클이 겹쳐 있어 데드락이 발생할 수 있습니다.',
+        message: 'Multiple overlapping cycles detected. This may cause deadlocks.',
         nodeIds: overlappingCycles.flatMap(c => c.loopNodes),
-        suggestion: '사이클 구조를 단순화하고 명확한 제어 흐름을 설계하세요.'
+        suggestion: 'Simplify cycle structure and design clear control flow.'
       });
     }
   }

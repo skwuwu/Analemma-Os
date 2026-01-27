@@ -533,6 +533,19 @@ const WorkflowCanvasInner = () => {
                 issueCount={validation.issueCount}
                 hasErrors={validation.hasErrors}
                 hasWarnings={validation.hasWarnings}
+                warnings={validation.warnings}
+                onNodeClick={(nodeId) => {
+                  const node = nodes.find(n => n.id === nodeId);
+                  if (node && reactFlowInstance) {
+                    reactFlowInstance.fitView({
+                      nodes: [node],
+                      duration: 400,
+                      padding: 0.5
+                    });
+                    setSelectedNode(node);
+                    setEditorOpen(true);
+                  }
+                }}
               />
             )}
           </div>
