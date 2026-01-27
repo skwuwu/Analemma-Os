@@ -1,9 +1,4 @@
-/**
- * AuditPanel: 워크플로우 검증 결과 패널
- * 
- * 워크플로우의 논리적 오류, 경고, 정보를 표시합니다.
- */
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useCodesignStore, AuditIssue, selectIssueSummary } from '@/lib/codesignStore';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -15,7 +10,8 @@ import {
   CheckCircle2,
   ChevronRight,
   RefreshCw,
-  ExternalLink
+  ExternalLink,
+  PanelRightClose
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -23,6 +19,7 @@ interface AuditPanelProps {
   issues?: AuditIssue[];
   onNodeClick?: (nodeId: string) => void;
   onRefresh?: () => void;
+  onClose?: () => void;
   isLoading?: boolean;
   className?: string;
   standalone?: boolean;
@@ -59,6 +56,7 @@ export function AuditPanel({
   issues: externalIssues,
   onNodeClick,
   onRefresh,
+  onClose,
   isLoading = false,
   className,
   standalone = false
@@ -68,6 +66,22 @@ export function AuditPanel({
 
   // 외부에서 전달된 issues가 있으면 사용, 없으면 store 사용
   const issues = externalIssues ?? storeIssues;
+
+  // handleClose 함수 추가
+  const handleClose = () => {
+    if (onClose) {
+      onClose();
+    } else {
+      console.warn("onClose prop is missing in AuditPanel");
+    }
+  };
+
+  // useEffect로 패널 열릴 때 데이터 가져오기 (중복 호출 방지)
+  useEffect(() => {
+    if (standalone && issues.length === 0 && onRefresh) {
+      onRefresh();
+    }
+  }, [standalone, issues.length, onRefresh]);
 
   // 레벨별 정렬 (error > warning > info)
   const sortedIssues = [...issues].sort((a, b) => {
@@ -125,17 +139,29 @@ export function AuditPanel({
             )}
           </div>
         </div>
-        {onRefresh && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-7 px-2"
-            onClick={onRefresh}
-            disabled={isLoading}
-          >
-            <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
-          </Button>
-        )}
+        <div className="flex items-center gap-1">
+          {onRefresh && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2"
+              onClick={onRefresh}
+              disabled={isLoading}
+            >
+              <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
+            </Button>
+          )}
+          {onClose && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 w-7 p-0"
+              onClick={handleClose}
+            >
+              <PanelRightClose className="w-3.5 h-3.5" />
+            </Button>
+          )}
+        </div>
       </div>
 
       {/* 이슈 목록 */}

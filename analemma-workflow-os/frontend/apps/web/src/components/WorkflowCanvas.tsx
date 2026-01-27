@@ -191,6 +191,14 @@ const WorkflowCanvasInner = () => {
     total: auditIssues.length
   }), [auditIssues]);
 
+  // Memoized audit refresh handler
+  const handleAuditRefresh = useCallback(async () => {
+    const session = await fetchAuthSession();
+    const idToken = session.tokens?.idToken?.toString();
+    await requestAudit({ nodes, edges }, idToken);
+    toast.success('Validation refreshed');
+  }, [nodes, edges, requestAudit]);
+
   // Canvas mode detection
   const canvasMode = useCanvasMode();
 
@@ -658,31 +666,12 @@ const WorkflowCanvasInner = () => {
             transition={{ type: 'spring', damping: 25, stiffness: 200 }}
             className="absolute right-0 top-0 bottom-0 w-96 border-l border-slate-800 bg-slate-950/50 backdrop-blur-xl z-30 flex flex-col"
           >
-            <div className="p-6 pb-2">
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-base font-semibold text-slate-100">
-                  Workflow Validation
-                </h3>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => setAuditPanelOpen(false)}
-                  className="h-8 w-8 text-slate-400 hover:text-slate-100"
-                >
-                  <PanelRightClose className="w-4 h-4" />
-                </Button>
-              </div>
-            </div>
-            
             <AuditPanel 
               standalone 
               className="flex-1 overflow-hidden"
-              onRefresh={async () => {
-                const session = await fetchAuthSession();
-                const idToken = session.tokens?.idToken?.toString();
-                await requestAudit({ nodes, edges }, idToken);
-                toast.success('Validation refreshed');
-              }}
+              onRefresh={handleAuditRefresh}
+              onClose={() => setAuditPanelOpen(false)}
+              key="audit-panel"
             />
           </motion.div>
         )}
