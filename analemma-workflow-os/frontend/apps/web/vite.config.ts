@@ -35,25 +35,39 @@ export default defineConfig(({ mode }) => ({
         warn(warning);
       },
       output: {
-        // Only split vendor libraries, let Rollup handle app code automatically
         manualChunks(id) {
-          // React ecosystem - must be first loaded
+          // 1. Zustand stores - must load before app code
+          if (id.includes('src/lib/workflowStore') || 
+              id.includes('src/lib/codesignStore') ||
+              id.includes('src/lib/streamingFetch') ||
+              id.includes('src/lib/jsonlParser')) {
+            return 'stores';
+          }
+          
+          // 2. React ecosystem - core dependency
           if (id.includes('node_modules/react-dom')) {
             return 'react-vendor';
           }
           if (id.includes('node_modules/react/') || id.includes('node_modules/react-is')) {
             return 'react-vendor';
           }
-          // XYFlow - separate heavy library
+          
+          // 3. Zustand library
+          if (id.includes('node_modules/zustand')) {
+            return 'zustand-vendor';
+          }
+          
+          // 4. XYFlow - separate heavy library
           if (id.includes('node_modules/@xyflow')) {
             return 'xyflow';
           }
-          // TanStack Query
+          
+          // 5. TanStack Query
           if (id.includes('node_modules/@tanstack')) {
             return 'tanstack';
           }
-          // DO NOT manually chunk application code
-          // Let Rollup determine the optimal split to avoid circular deps
+          
+          // Let Rollup handle remaining app code
         },
       },
     },
