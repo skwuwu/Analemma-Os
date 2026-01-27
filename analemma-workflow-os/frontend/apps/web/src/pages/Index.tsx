@@ -9,7 +9,7 @@ import { ActiveWorkflowIndicator } from '@/components/ActiveWorkflowIndicator.ts
 import { WorkflowChat } from '@/components/WorkflowChat';
 import { Button } from '@/components/ui/button.tsx';
 import { Badge } from '@/components/ui/badge';
-import { LogOut, Activity, FolderOpen } from 'lucide-react';
+import { LogOut, Activity } from 'lucide-react';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { User, BarChart3, Key } from 'lucide-react';
 import { updatePassword } from 'aws-amplify/auth';
