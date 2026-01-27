@@ -21,7 +21,15 @@ from src.common.exceptions import (
 )
 from src.common.logging_utils import get_logger
 
-logger = get_logger(__name__)
+# 직접 Logger 생성 (lazy import 회피)
+from aws_lambda_powertools import Logger
+import os
+log_level = os.getenv("LOG_LEVEL", "INFO")
+logger = Logger(
+    service=os.getenv("AWS_LAMBDA_FUNCTION_NAME", "analemma-backend"),
+    level=log_level,
+    child=True
+)
 
 
 def handle_dynamodb_error(

@@ -17,7 +17,13 @@ except ImportError:
 
 # 구조화된 로깅 설정
 try:
-    logger = get_logger(__name__)
+    # 직접 Logger 생성 (lazy import 회피)
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    logger = Logger(
+        service=os.getenv("AWS_LAMBDA_FUNCTION_NAME", "analemma-backend"),
+        level=log_level,
+        child=True
+    )
 except:
     import logging
     logger = logging.getLogger(__name__)
@@ -34,7 +40,10 @@ usage_table = dynamodb.Table(USER_USAGE_TABLE) if USER_USAGE_TABLE else None
 # 공통 모듈 임포트
 try:
     from src.common.constants import TTLConfig, ModelPricing, QuotaLimits
-    from src.common.logging_utils import get_logger, log_business_event
+    # get_logger 직접 import (lazy import 회피)
+    from aws_lambda_powertools import Logger
+    import os
+    from src.common.logging_utils import log_business_event
     from src.common.error_handlers import handle_dynamodb_error
 except ImportError:
     # Fallback for backward compatibility

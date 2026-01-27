@@ -33,8 +33,10 @@ try:
     from src.common.constants import is_mock_mode, LLMModels
     from src.common.secrets_utils import get_gemini_api_key
     from src.common.aws_clients import get_dynamodb_resource, get_s3_client, get_bedrock_client
+    # get_logger 직접 import (lazy import 회피)
+    from aws_lambda_powertools import Logger
+    import os
     from src.common.logging_utils import (
-        get_logger as get_powertools_logger,
         get_metrics,
         get_tracer,
         log_external_service_call,
@@ -86,7 +88,13 @@ except ImportError:
 
 # 로거 설정 (Powertools 사용 가능 시 구조화된 로깅)
 if _USE_COMMON and _USE_POWERTOOLS:
-    logger = get_powertools_logger(__name__)
+    # 직접 Logger 생성 (lazy import 회피)
+    log_level = os.getenv("LOG_LEVEL", "INFO")
+    logger = Logger(
+        service=os.getenv("AWS_LAMBDA_FUNCTION_NAME", "analemma-backend"),
+        level=log_level,
+        child=True
+    )
     tracer = get_tracer()
     metrics = get_metrics()
 else:
