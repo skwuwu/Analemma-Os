@@ -547,28 +547,27 @@ const WorkflowCanvasInner = () => {
               )}
             </AnimatePresence>
 
-            {/* Status Indicator using graphAnalysis - Opens Audit Panel */}
+            {/* Status Indicator - Opens Audit Panel instead of Popover */}
             {nodes.length > 0 && (
-              <div onClick={() => setAuditPanelOpen(true)} className="cursor-pointer">
-                <WorkflowStatusIndicator
-                  issueCount={validation.issueCount}
-                  hasErrors={validation.hasErrors}
-                  hasWarnings={validation.hasWarnings}
-                  warnings={validation.warnings}
-                  onNodeClick={(nodeId) => {
-                    const node = nodes.find(n => n.id === nodeId);
-                    if (node && reactFlowInstance) {
-                      reactFlowInstance.fitView({
-                        nodes: [node],
-                        duration: 400,
-                        padding: 0.5
-                      });
-                      setSelectedNode(node);
-                      setEditorOpen(true);
-                    }
-                  }}
-                />
-              </div>
+              <WorkflowStatusIndicator
+                issueCount={validation.issueCount}
+                hasErrors={validation.hasErrors}
+                hasWarnings={validation.hasWarnings}
+                warnings={validation.warnings}
+                onNodeClick={(nodeId) => {
+                  const node = nodes.find(n => n.id === nodeId);
+                  if (node && reactFlowInstance) {
+                    reactFlowInstance.fitView({
+                      nodes: [node],
+                      duration: 400,
+                      padding: 0.5
+                    });
+                    setSelectedNode(node);
+                    setEditorOpen(true);
+                  }
+                }}
+                onClick={() => setAuditPanelOpen(true)}
+              />
             )}
           </div>
 

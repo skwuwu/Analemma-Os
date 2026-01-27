@@ -1,0 +1,15 @@
+[
+    [
+        1769511603952,
+        "/var/task/src/services/llm/structure_tools.py:33: UserWarning: Field name \"schema\" in \"StructureDefinition\" shadows an attribute in parent \"BaseModel\"\n"
+    ],
+    [
+        1769511603952,
+        "class StructureDefinition(BaseModel):\n"
+    ],
+    [
+        1769511603974,
+        "START RequestId: 25118181-7143-40cb-bb01-9cf619ac11d4 Version: $LATEST\n"
+    ],
+    [
+        1769511604061
