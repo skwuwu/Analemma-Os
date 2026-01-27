@@ -555,7 +555,9 @@ async def handle_codesign_stream(owner_id: str, event: Dict) -> Dict:
                    f"changes={len(recent_changes)}, mode={canvas_mode}")
         
         if canvas_mode == "agentic-designer":
-            # Canvas가 비어있고 대화 기록도 없음 - Agentic Designer 모드로 전환
+            # [Refactor] Send mode metadata first
+            yield json.dumps({"type": "metadata", "data": {"mode": canvas_mode}}) + "\n"
+            
             logger.info(f"Empty canvas detected - switching to Agentic Designer mode")
             generator = _generate_initial_workflow_stream(
                 user_request=user_request,
@@ -563,7 +565,9 @@ async def handle_codesign_stream(owner_id: str, event: Dict) -> Dict:
                 session_id=session_id
             )
         else:
-            # Canvas에 내용이 있거나 대화 기록이 있음 - Co-design 모드 사용
+            # [Refactor] Send mode metadata first
+            yield json.dumps({"type": "metadata", "data": {"mode": canvas_mode}}) + "\n"
+            
             logger.info(f"Using Co-design mode (canvas_mode={canvas_mode})")
             
             # Co-design 모드용 모델 선택

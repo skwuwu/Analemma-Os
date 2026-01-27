@@ -102,26 +102,18 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     };
   };
 
-  // 순서 검증 함수
+  // 순서 검증 함수 (v2.0: 백엔드 GSI 정렬 신뢰, 네트워크 지연만 체크)
+  // Backend CheckpointService uses ScanIndexForward=True, guarantees ordering
+  // Only validate severe network delays (>5s past messages)
   const isNotificationOutOfOrder = useCallback((existing: NotificationItem, newNotification: NotificationItem): boolean => {
-    // 1. Sequence number 비교 (가장 정확)
-    if (existing.payload?.sequence_number && newNotification.payload?.sequence_number) {
-      return newNotification.payload.sequence_number <= existing.payload.sequence_number;
-    }
+    const NETWORK_DELAY_THRESHOLD_MS = 5000; // 5초 이상 과거면 무시
     
-    // 2. Server timestamp 비교
-    if (existing.payload?.server_timestamp && newNotification.payload?.server_timestamp) {
-      return newNotification.payload.server_timestamp <= existing.payload.server_timestamp;
-    }
+    // receivedAt 기반 간단 체크 (네트워크 지연만 방어)
+    const existingTime = existing.receivedAt || 0;
+    const newTime = newNotification.receivedAt || Date.now();
     
-    // 3. Segment 진행률 비교 (fallback)
-    if (existing.current_segment !== undefined && newNotification.current_segment !== undefined) {
-      // 세그먼트가 역행하는 경우만 out-of-order로 판단
-      return newNotification.current_segment < existing.current_segment;
-    }
-    
-    // 4. 판단할 수 없는 경우 허용
-    return false;
+    // 새 메시지가 기존 메시지보다 5초 이상 과거면 out-of-order
+    return newTime < (existingTime - NETWORK_DELAY_THRESHOLD_MS);
   }, []);
 
   // Helper to update query cache with new notification (optimized to avoid sorting on every update)
@@ -149,9 +141,11 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
           receivedAt: Date.now(),
         };
         
-        // Only sort if position might have changed (when updating existing)
-        if (existingIndex > 0 && updated[existingIndex].receivedAt > updated[0].receivedAt) {
-          return updated.sort((a, b) => b.receivedAt - a.receivedAt).slice(0, MAX_NOTIFICATIONS);
+        // Backend guarantees order, no need to re-sort on every update
+        // Only move to front if significantly newer (avoid micro-reordering)
+        if (existingIndex > 0 && updated[existingIndex].receivedAt > updated[0].receivedAt + 1000) {
+          const item = updated.splice(existingIndex, 1)[0];
+          return [item, ...updated].slice(0, MAX_NOTIFICATIONS);
         }
         return updated.slice(0, MAX_NOTIFICATIONS);
       }

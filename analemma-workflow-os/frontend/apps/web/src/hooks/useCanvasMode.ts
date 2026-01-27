@@ -93,18 +93,26 @@ export function useCanvasMode(): CanvasModeInfo {
     }))
   );
 
-  const { hasHistory, isGenerating } = useCodesignStore(
+  const { hasHistory, isGenerating, remoteMode } = useCodesignStore(
     useShallow((state) => ({
       hasHistory: state.recentChanges.length > 0 || state.messages.length > 0,
-      // isGenerating이 없으면 false (향후 추가 가능)
       isGenerating: (state as any).isGenerating || false,
+      remoteMode: state.remoteMode,
     }))
   );
 
-  return useMemo(
+  const modeInfo = useMemo(
     () => deriveMode(nodeCount, edgeCount, hasHistory, isGenerating),
     [nodeCount, edgeCount, hasHistory, isGenerating]
   );
+
+  // 백엔드에서 강제한 모드가 있으면 덮어씌움
+  return useMemo(() => {
+    if (remoteMode) {
+      return { ...modeInfo, mode: remoteMode, reason: 'remote_sync' };
+    }
+    return modeInfo;
+  }, [modeInfo, remoteMode]);
 }
 
 export default useCanvasMode;

@@ -14,7 +14,7 @@ import { StateDiffViewer } from '@/components/StateDiffViewer';
 import { useCheckpoints, useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { NotificationItem, TimelineItem as CheckpointTimelineItem, RollbackRequest } from '@/lib/types';
 import { toast } from 'sonner';
-import { normalizeEventTs } from '@/lib/utils';
+import { normalizeEventTs, calculateProgress } from '@/lib/utils';
 import { ConfidenceGauge } from '@/components/ui/confidence-gauge';
 import NumberTicker from '@/components/ui/number-ticker';
 
@@ -47,9 +47,11 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
     setResponseText,
     onClose,
 }) => {
-    const rawProgress = Math.round(((latestStatus?.payload?.current_segment || 0) / (latestStatus?.payload?.total_segments || 1)) * 100);
-    // Ensure progress is valid number and between 0-100
-    const progress = Math.min(Math.max(isNaN(rawProgress) ? 0 : rawProgress, 0), 100);
+    // 중앙화된 progress 계산 유틸리티 사용 (0-100% 범위 보장, 100% 초과 방지)
+    const progress = calculateProgress(
+        latestStatus?.payload?.current_segment,
+        latestStatus?.payload?.total_segments
+    );
 
     // Check for confidence score in payload (business metrics)
     // Assuming structure: payload.metrics.confidence_score or payload.confidence_score
@@ -99,6 +101,23 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
     const handleRollbackExecute = useCallback(async (request: Omit<RollbackRequest, 'preview_only'>) => {
         return await executeRollback(request);
     }, [executeRollback]);
+
+    // Resume 페이로드 처리 (v2.0: any 제거, 타입 안전성 강화)
+    const handleResume = useCallback(() => {
+        if (!latestStatus || !selectedExecutionId) return;
+        
+        try {
+            const payload = sanitizeResumePayload(
+                { ...latestStatus, execution_id: selectedExecutionId },
+                responseText
+            );
+            resumeWorkflow(payload);
+            setResponseText('');
+        } catch (e) {
+            console.error('Resume workflow failed:', e);
+            toast.error('워크플로우 재개 실패');
+        }
+    }, [latestStatus, selectedExecutionId, responseText, resumeWorkflow, sanitizeResumePayload, setResponseText]);
 
     return (
         <>
@@ -221,16 +240,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                         className="mb-3 bg-white"
                                     />
                                     <Button
-                                        onClick={() => {
-                                            try {
-                                                if (!latestStatus || !selectedExecutionId) return;
-                                                const payload = sanitizeResumePayload({ ...latestStatus, execution_id: selectedExecutionId } as any, responseText);
-                                                resumeWorkflow(payload);
-                                                setResponseText('');
-                                            } catch (e) {
-                                                console.error('Resume failed', e);
-                                            }
-                                        }}
+                                        onClick={handleResume}
                                         disabled={!responseText.trim()}
                                     >
                                         Resume Workflow

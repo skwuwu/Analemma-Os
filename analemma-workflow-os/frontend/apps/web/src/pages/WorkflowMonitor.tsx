@@ -70,6 +70,7 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
   const [showGraphView, setShowGraphView] = useState(true);
 
   // [변경 1] Active Workflows 그룹화 (execution_id로 dedupe 하고 최신 항목만 유지)
+  // Note: Map already maintains insertion order, notifications come pre-sorted from backend
   const groupedActiveWorkflows = useMemo(() => {
     const map = new Map<string, NotificationItem>();
     (Array.isArray(notifications) ? notifications : [])
@@ -85,7 +86,8 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
         }
       });
 
-    return Array.from(map.values()).sort((a, b) => (b.receivedAt || 0) - (a.receivedAt || 0));
+    // Backend notifications already sorted, trust the order
+    return Array.from(map.values());
   }, [notifications]);
 
   // Normalize event timestamps (returns milliseconds)
@@ -98,6 +100,7 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
   };
 
   // Selected timeline: use `executionTimelines` as the single source of truth.
+  // Note: Backend already sorts timeline with ScanIndexForward=True, no need to re-sort
   const selectedWorkflowTimeline = useMemo(() => {
     if (!selectedExecutionId) return [] as NotificationItem[];
 
@@ -106,8 +109,8 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
       return executionTimelines[key] || (selectedNotification ? [selectedNotification] : []);
     }
 
-    const timeline = executionTimelines[selectedExecutionId] || [];
-    return [...timeline].sort((a, b) => normalizeEventTs(a) - normalizeEventTs(b));
+    // Backend CheckpointService already returns sorted timeline, trust it
+    return executionTimelines[selectedExecutionId] || [];
   }, [executionTimelines, selectedExecutionId, isNotificationSelection, selectedNotificationId, selectedNotification]);
 
   const latestStatus = selectedWorkflowTimeline.length > 0 ? selectedWorkflowTimeline[selectedWorkflowTimeline.length - 1] : null;

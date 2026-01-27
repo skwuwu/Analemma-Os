@@ -37,9 +37,21 @@ export interface ExecutionTimelineHook {
 }
 
 /**
- * Deterministic ID 생성 (멱등성 보장)
+ * Extract or generate ID (v2.0: 백엔드 checkpoint_id 우선 사용)
+ * Backend CheckpointService already generates deterministic checkpoint_id
  */
 function generateDeterministicId(event: NotificationItem): string {
+    // 1. 백엔드 checkpoint_id가 있으면 그대로 사용 (동기화)
+    if ((event as any).checkpoint_id) {
+        return (event as any).checkpoint_id;
+    }
+    
+    // 2. notification_id가 있으면 사용
+    if ((event as any).notification_id || event.id) {
+        return `timeline-${(event as any).notification_id || event.id}`;
+    }
+    
+    // 3. Fallback: 간단한 hash 생성 (레거시 호환)
     const execId = event.payload?.execution_id || event.execution_id || '';
     const ts = event.payload?.timestamp || event.timestamp || event.receivedAt || 0;
     const msg = event.message || event.payload?.message || '';

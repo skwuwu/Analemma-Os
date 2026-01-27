@@ -62,7 +62,7 @@ export const useWorkflowStreamProcessor = ({
   onLog
 }: UseWorkflowStreamProcessorProps) => {
   // Co-design store access
-  const { recordChange, addMessage } = useCodesignStore();
+  const { recordChange, addMessage, setRemoteMode } = useCodesignStore();
   const idCounterRef = useRef<number>(0);
 
   const generateId = useCallback(() => {
@@ -248,6 +248,15 @@ export const useWorkflowStreamProcessor = ({
     }
 
     // 4. Fallbacks & metadata
+    if (message.type === 'metadata' && message.data) {
+      const mode = (message.data as any).mode;
+      if (mode) {
+        setRemoteMode(mode);
+        onLog?.(`mode synced: ${mode}`);
+      }
+      return true;
+    }
+
     if (message.type === 'status') return handleStatusMessage(message);
 
     if (message.type === 'text' && message.data) {

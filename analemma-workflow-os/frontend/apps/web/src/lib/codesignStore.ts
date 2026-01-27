@@ -35,6 +35,7 @@ export type SuggestionStatus = 'pending' | 'accepted' | 'rejected';
 export type AuditLevel = 'error' | 'warning' | 'info';
 
 export type SyncStatus = 'idle' | 'syncing' | 'error';
+export type CanvasMode = 'agentic-designer' | 'co-design' | 'generating';
 
 export interface CodesignChange {
   timestamp: number;
@@ -122,6 +123,10 @@ interface CodesignState {
   togglePanel: () => void;
   setActiveTab: (tab: CodesignState['activeTab']) => void;
 
+  // Actions - Remote Driven State
+  remoteMode: CanvasMode | null;
+  setRemoteMode: (mode: CanvasMode | null) => void;
+
   // Actions - AI Assistant (API calls)
   requestSuggestions: (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => Promise<void>;
   requestAudit: (workflowData: { nodes: Node[], edges: Edge[] }, authToken?: string) => Promise<void>;
@@ -143,6 +148,9 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
   lastSyncTime: null,
   isPanelOpen: false,
   activeTab: 'chat',
+  remoteMode: null,
+
+  setRemoteMode: (mode) => set({ remoteMode: mode }),
 
   // ─────────────────────────────────────────────
   // 변경 추적 Actions

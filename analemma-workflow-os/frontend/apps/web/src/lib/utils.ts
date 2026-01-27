@@ -143,6 +143,40 @@ export function normalizeEventTs(candidate: any): number {
   return num < 10000000000 ? num * 1000 : num;
 }
 
+/**
+ * Progress 계산 유틸리티 (중복 제거)
+ * - 0-100% 범위 보장
+ * - NaN 방지
+ * - 100% 초과 방지 (AI가 예상보다 많은 세그먼트 실행 시)
+ */
+export function calculateProgress(current: number | undefined, total: number | undefined): number {
+  const curr = current || 0;
+  const tot = Math.max(total || 1, 1); // 0 분모 방지
+  const raw = Math.round((curr / tot) * 100);
+  return Math.min(Math.max(isNaN(raw) ? 0 : raw, 0), 100);
+}
+
+/**
+ * 상대 시간 포맷팅 (중복 제거)
+ * - "Just now", "5m ago", "2h ago", "날짜" 형식
+ */
+export function formatRelativeTime(timestamp: number | undefined): string {
+  if (!timestamp) return '';
+  const ms = timestamp < 10000000000 ? timestamp * 1000 : timestamp;
+  const diffMs = Date.now() - ms;
+  const diffSecs = Math.floor(diffMs / 1000);
+  const diffMins = Math.floor(diffSecs / 60);
+  const diffHours = Math.floor(diffMins / 60);
+  const diffDays = Math.floor(diffHours / 24);
+
+  if (diffSecs < 60) return 'Just now';
+  if (diffMins < 60) return `${diffMins}m ago`;
+  if (diffHours < 24) return `${diffHours}h ago`;
+  if (diffDays < 7) return `${diffDays}d ago`;
+  
+  return new Date(ms).toLocaleDateString();
+}
+
 // Safe JSON parse helper used across UI: returns parsed object or { raw: original }
 export const safeParseJson = (data: unknown): any => {
   if (typeof data === 'string') {

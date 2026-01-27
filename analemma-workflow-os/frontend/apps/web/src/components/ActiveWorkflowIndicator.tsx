@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import ActiveWorkflowList from '@/components/ActiveWorkflowList';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { cn } from '@/lib/utils';
+import { cn, normalizeEventTs } from '@/lib/utils';
 
 export const ActiveWorkflowIndicator: React.FC = () => {
     const navigate = useNavigate();
@@ -25,7 +25,7 @@ export const ActiveWorkflowIndicator: React.FC = () => {
                     payload: {
                         execution_id: e.executionArn || e.execution_id,
                         status: e.status,
-                        start_time: e.startDate ? new Date(e.startDate).getTime() : undefined,
+                        start_time: normalizeEventTs(e.startDate || e.start_time),
                         workflowId: e.workflowId,
                         workflow_alias: e.workflow_alias,
                         workflow_name: e.workflow_name,

@@ -6,7 +6,7 @@ import { Progress } from '@/components/ui/progress';
 import { Activity, FileJson, X, Clock } from 'lucide-react';
 import StatusBadge from '@/components/StatusBadge';
 import WorkflowTimer from '@/components/WorkflowTimer';
-import { formatTimestamp } from '@/lib/utils';
+import { formatTimestamp, calculateProgress } from '@/lib/utils';
 import type { NotificationItem } from '@/lib/types';
 import { EmptyState } from '@/components/ui/empty-state';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -35,9 +35,10 @@ const ActiveWorkflowItem = React.memo(({
   compact: boolean;
 }) => {
   const payload = workflow.payload || {};
+  // 중앙화된 progress 계산 (0-100% 범위 보장, NaN/100% 초과 방지)
+  const rawProgress = calculateProgress(payload.current_segment, payload.total_segments);
   const current = payload.current_segment || 0;
   const total = payload.total_segments || 1;
-  const rawProgress = Math.min(Math.round((current / Math.max(1, total)) * 100), 100);
 
   const executionId = payload.execution_id || workflow.execution_id || workflow.id;
   const isWorkflowRunning = ['RUNNING', 'STARTED', 'PAUSED_FOR_HITP'].includes(payload.status || workflow.status || '');
