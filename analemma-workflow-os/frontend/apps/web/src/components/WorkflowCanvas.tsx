@@ -78,7 +78,7 @@ const WorkflowCanvasInner = () => {
   // Empty Canvas Guide visibility
   const [emptyGuideVisible, setEmptyGuideVisible] = useState(true);
 
-  // Audit Panel state (Audit only, no Timeline)
+  // Audit Panel state (Local validation only)
   const [auditPanelOpen, setAuditPanelOpen] = useState(false);
 
   // ==========================================
@@ -190,14 +190,6 @@ const WorkflowCanvasInner = () => {
     info: auditIssues.filter(i => i.level === 'info').length,
     total: auditIssues.length
   }), [auditIssues]);
-
-  // Memoized audit refresh handler
-  const handleAuditRefresh = useCallback(async () => {
-    const session = await fetchAuthSession();
-    const idToken = session.tokens?.idToken?.toString();
-    await requestAudit({ nodes, edges }, idToken);
-    toast.success('Validation refreshed');
-  }, [nodes, edges, requestAudit]);
 
   // Canvas mode detection
   const canvasMode = useCanvasMode();
@@ -710,6 +702,38 @@ const WorkflowCanvasInner = () => {
           setRollbackDialogOpen(false);
         }}
       />
+
+      {/* Local Validation Panel */}
+      <AnimatePresence>
+        {auditPanelOpen && (
+          <motion.div
+            initial={{ x: 400 }}
+            animate={{ x: 0 }}
+            exit={{ x: 400 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="absolute right-0 top-0 bottom-0 w-96 border-l border-slate-800 bg-slate-950/50 backdrop-blur-xl z-30 flex flex-col"
+          >
+            <AuditPanel
+              issues={validation.warnings}
+              onNodeClick={(nodeId) => {
+                const node = nodes.find(n => n.id === nodeId);
+                if (node && reactFlowInstance) {
+                  reactFlowInstance.fitView({
+                    nodes: [node],
+                    duration: 400,
+                    padding: 0.5
+                  });
+                  setSelectedNode(node);
+                  setEditorOpen(true);
+                }
+              }}
+              onClose={() => setAuditPanelOpen(false)}
+              standalone
+              key="validation-panel"
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
     </>
   );
 }

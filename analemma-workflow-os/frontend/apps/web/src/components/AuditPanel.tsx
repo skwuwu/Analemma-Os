@@ -1,5 +1,4 @@
-import React, { useEffect } from 'react';
-import { useCodesignStore, AuditIssue, selectIssueSummary } from '@/lib/codesignStore';
+import React from 'react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -9,16 +8,14 @@ import {
   Info,
   CheckCircle2,
   ChevronRight,
-  RefreshCw,
   ExternalLink,
   PanelRightClose
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface AuditPanelProps {
-  issues?: AuditIssue[];
+  issues?: any[]; // 로컬 validation warnings
   onNodeClick?: (nodeId: string) => void;
-  onRefresh?: () => void;
   onClose?: () => void;
   isLoading?: boolean;
   className?: string;
@@ -55,17 +52,30 @@ const levelConfig = {
 export function AuditPanel({
   issues: externalIssues,
   onNodeClick,
-  onRefresh,
   onClose,
   isLoading = false,
   className,
   standalone = false
 }: AuditPanelProps) {
-  const storeIssues = useCodesignStore(state => state.auditIssues);
-  const issueSummary = useCodesignStore(selectIssueSummary);
+  // 외부에서 전달된 issues 사용 (로컬 validation 결과)
+  const issues = externalIssues || [];
 
-  // 외부에서 전달된 issues가 있으면 사용, 없으면 store 사용
-  const issues = externalIssues ?? storeIssues;
+  // GraphAnalysisWarning을 AuditIssue 형식으로 변환
+  const convertedIssues = issues.map(issue => ({
+    level: issue.type === 'unreachable_node' ? 'error' : 'warning' as const,
+    type: issue.type,
+    message: issue.message,
+    affectedNodes: issue.nodeIds,
+    suggestion: issue.suggestion
+  }));
+
+  // issueSummary 계산
+  const issueSummary = {
+    errors: convertedIssues.filter(i => i.level === 'error').length,
+    warnings: convertedIssues.filter(i => i.level === 'warning').length,
+    info: convertedIssues.filter(i => i.level === 'info').length,
+    total: convertedIssues.length
+  };
 
   // handleClose 함수 추가
   const handleClose = () => {
@@ -76,15 +86,8 @@ export function AuditPanel({
     }
   };
 
-  // useEffect로 패널 열릴 때 데이터 가져오기 (중복 호출 방지)
-  useEffect(() => {
-    if (standalone && issues.length === 0 && onRefresh) {
-      onRefresh();
-    }
-  }, [standalone, issues.length, onRefresh]);
-
   // 레벨별 정렬 (error > warning > info)
-  const sortedIssues = [...issues].sort((a, b) => {
+  const sortedIssues = [...convertedIssues].sort((a, b) => {
     const order = { error: 0, warning: 1, info: 2 };
     return (order[a.level] ?? 3) - (order[b.level] ?? 3);
   });
@@ -140,17 +143,6 @@ export function AuditPanel({
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {onRefresh && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 px-2"
-              onClick={onRefresh}
-              disabled={isLoading}
-            >
-              <RefreshCw className={cn("w-3.5 h-3.5", isLoading && "animate-spin")} />
-            </Button>
-          )}
           {onClose && (
             <Button
               variant="ghost"
