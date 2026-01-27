@@ -178,11 +178,13 @@ export const WelcomeDialog = ({ open, onWorkflowGenerated, onClose }: WelcomeDia
         style={{
           position: 'fixed',
           left: '260px',
+          right: '350px',
           top: '50%',
           transform: 'translateY(-50%)',
-          maxWidth: 'min(640px, calc(100vw - 260px - 350px - 4rem))',
-          width: '100%',
-          margin: '0 2rem'
+          maxWidth: '640px',
+          width: 'auto',
+          marginLeft: 'auto',
+          marginRight: 'auto'
         }}
       >
         <div className="relative p-8">

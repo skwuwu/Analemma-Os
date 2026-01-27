@@ -412,7 +412,12 @@ async def _lambda_handler_async(event, context):
         if path.endswith('/codesign') or path.endswith('/codesign/'):
             # POST /codesign - 협업 워크플로우 설계
             if http_method == 'POST':
-                return await handle_codesign_stream(owner_id, event)
+                # Collect all streaming chunks and return as single response
+                chunks = []
+                async for chunk in handle_codesign_stream(owner_id, event):
+                    chunks.append(chunk)
+                # Return all chunks concatenated
+                return _response(200, {'chunks': chunks})
             else:
                 return _response(405, {'error': f'Method {http_method} not allowed'})
                 
