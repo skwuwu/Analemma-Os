@@ -535,9 +535,8 @@ const WorkflowCanvasInner = () => {
             snapGrid={[20, 20]}
             className="bg-[#121212]"
             deleteKeyCode={null}
-            selectionOnDrag={true}
-            panOnDrag={[1, 2]}
-            selectionMode={SelectionMode.Partial}
+            panOnDrag={true}
+            panOnScroll={true}
           >
             <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={{ opacity: 0.4 }} />
           </ReactFlow>

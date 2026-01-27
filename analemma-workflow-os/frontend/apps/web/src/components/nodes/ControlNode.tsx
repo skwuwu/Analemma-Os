@@ -53,7 +53,8 @@ interface ControlNodeProps {
 }
 
 export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) => {
-  const config = CONTROL_CONFIG[data.controlType || 'default'];
+  // 방어적 코드: data가 없거나 controlType이 맵에 없을 경우 대비
+  const config = CONTROL_CONFIG[data?.controlType || 'default'] || CONTROL_CONFIG.default;
 
   // 상태에 따른 스타일
   const getStatusStyle = (status?: string) => {
@@ -69,29 +70,29 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
     }
   };
 
-  const IconComponent = config.icon;
+  const IconComponent = config?.icon || Clock;
 
   // 다중 핸들 지원: branch와 conditional 타입은 true/false 핸들
-  const hasMultipleHandles = data.controlType === 'branch' || data.controlType === 'conditional';
+  const hasMultipleHandles = data?.controlType === 'branch' || data?.controlType === 'conditional';
 
   return (
     <div
       className={cn(
         "px-3 py-3 rounded-lg border bg-card backdrop-blur-sm min-w-[140px] transition-all duration-200 relative group",
-        getStatusStyle(data.status),
+        getStatusStyle(data?.status),
         selected && "ring-2 ring-ring ring-offset-1"
       )}
       style={{
-        borderColor: `hsl(${config.color})`,
-        background: `linear-gradient(to bottom right, hsl(${config.color} / 0.2), hsl(${config.color} / 0.05))`,
-        boxShadow: `0 0 15px hsl(${config.color} / 0.3)`
+        borderColor: `hsl(${config?.color || '280 65% 60%'})`,
+        background: `linear-gradient(to bottom right, hsl(${config?.color || '280 65% 60%'} / 0.2), hsl(${config?.color || '280 65% 60%'} / 0.05))`,
+        boxShadow: `0 0 15px hsl(${config?.color || '280 65% 60%'} / 0.3)`
       }}
     >
       <Handle
         type="target"
         position={Position.Left}
         className="w-2.5 h-2.5"
-        style={{ backgroundColor: `hsl(${config.color})` }}
+        style={{ backgroundColor: `hsl(${config?.color || '280 65% 60%'})` }}
       />
 
       {onDelete && (
@@ -112,19 +113,19 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
       <div className="flex items-start gap-3 mb-2">
         <div className={cn(
           "p-2 rounded-md flex-shrink-0",
-          data.status === 'waiting' ? "animate-pulse" : ""
+          data?.status === 'waiting' ? "animate-pulse" : ""
         )}>
           <IconComponent
             className="w-4 h-4"
-            style={{ color: `hsl(${config.color})` }}
+            style={{ color: `hsl(${config?.color || '280 65% 60%'})` }}
           />
         </div>
         <div className="flex flex-col min-w-0">
           <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-            {config.label}
+            {config?.label || 'Control'}
           </span>
           <span className="text-sm font-bold truncate text-foreground">
-            {data.label}
+            {data?.label || 'Untitled'}
           </span>
         </div>
       </div>
@@ -132,7 +133,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
       {/* 제어 조건/값 표시 */}
       <div className="space-y-1.5">
         {/* 조건 표시 */}
-        {data.condition && (
+        {data?.condition && (
           <div className="flex items-center justify-between text-[10px] bg-muted/50 p-1.5 rounded">
             <span className="text-muted-foreground">Condition</span>
             <Badge variant="outline" className="text-[9px] h-4 px-1 font-mono">
@@ -142,7 +143,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
         )}
 
         {/* 반복 횟수 표시 (Loop 타입일 때) */}
-        {data.controlType === 'loop' && (data.loopCount !== undefined || data.maxIterations) && (
+        {data?.controlType === 'loop' && (data.loopCount !== undefined || data.maxIterations) && (
           <div className="flex items-center justify-between text-[10px] bg-muted/50 p-1.5 rounded">
             <span className="text-muted-foreground">Iteration</span>
             <Badge variant="secondary" className="text-[9px] h-4 px-1 font-mono bg-blue-500/10 text-blue-600">
@@ -152,7 +153,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
         )}
 
         {/* 상태 표시 */}
-        {data.status && data.status !== 'idle' && (
+        {data?.status && data.status !== 'idle' && (
           <div className="flex justify-center">
             <Badge
               variant={data.status === 'waiting' ? 'destructive' : 'default'}
@@ -178,7 +179,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
             position={Position.Right}
             id="true"
             className="w-2.5 h-2.5"
-            style={{ backgroundColor: `hsl(${config.color})`, top: '30%' }}
+            style={{ backgroundColor: `hsl(${config?.color || '280 65% 60%'})`, top: '30%' }}
           />
 
           {/* False 핸들 */}
@@ -190,7 +191,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
             position={Position.Right}
             id="false"
             className="w-2.5 h-2.5"
-            style={{ backgroundColor: `hsl(${config.color})`, top: '70%' }}
+            style={{ backgroundColor: `hsl(${config?.color || '280 65% 60%'})`, top: '70%' }}
           />
         </>
       ) : (
@@ -198,7 +199,7 @@ export const ControlNode = ({ data, id, onDelete, selected }: ControlNodeProps) 
           type="source"
           position={Position.Right}
           className="w-2.5 h-2.5"
-          style={{ backgroundColor: `hsl(${config.color})` }}
+          style={{ backgroundColor: `hsl(${config?.color || '280 65% 60%'})` }}
         />
       )}
     </div>

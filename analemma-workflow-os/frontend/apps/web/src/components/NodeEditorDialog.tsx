@@ -66,12 +66,12 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
   <motion.div
     initial={{ opacity: 0, y: 10 }}
     animate={{ opacity: 1, y: 0 }}
-    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+    className="space-y-4 border border-slate-700 rounded-2xl p-5 bg-slate-900/50"
   >
     <div className="space-y-2">
       <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Engine Identity</Label>
       <Select value={data.model} onValueChange={(val) => onChange('model', val)}>
-        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
         <SelectContent>
           {AI_MODELS.map(m => <SelectItem key={m.id} value={m.id}>{m.label}</SelectItem>)}
         </SelectContent>
@@ -83,7 +83,7 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
         value={data.prompt_content}
         onChange={(e) => onChange('prompt_content', e.target.value)}
         placeholder="에이전트의 성격과 임무를 정의하세요..."
-        className="min-h-[120px] font-mono text-xs bg-white border-slate-200 leading-relaxed shadow-inner"
+        className="min-h-[120px] font-mono text-xs bg-slate-800 border-slate-700 text-slate-100 leading-relaxed shadow-inner placeholder:text-slate-500"
       />
     </div>
     <div className="space-y-3 pt-2">
@@ -104,7 +104,7 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
         type="number"
         value={data.max_tokens}
         onChange={(e) => onChange('max_tokens', parseInt(e.target.value))}
-        className="bg-white"
+        className="bg-slate-800 border-slate-700 text-slate-100"
       />
     </div>
   </motion.div>
@@ -117,12 +117,12 @@ const OperatorSettings = ({ data, onChange }: { data: NodeData, onChange: (key: 
   <motion.div
     initial={{ opacity: 0, y: 10 }}
     animate={{ opacity: 1, y: 0 }}
-    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+    className="space-y-4 border border-slate-700 rounded-2xl p-5 bg-slate-900/50"
   >
     <div className="space-y-2">
-      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Action Registry</Label>
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Operator Blueprint</Label>
       <Select value={data.operatorType} onValueChange={(val) => onChange('operatorType', val)}>
-        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
         <SelectContent>
           {OPERATORS.map(op => <SelectItem key={op.id} value={op.id}>{op.label}</SelectItem>)}
         </SelectContent>
@@ -131,7 +131,7 @@ const OperatorSettings = ({ data, onChange }: { data: NodeData, onChange: (key: 
     <div className="space-y-2">
       <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Execution Mode</Label>
       <Select value={data.operatorVariant} onValueChange={(val) => onChange('operatorVariant', val)}>
-        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
         <SelectContent>
           <SelectItem value="official">Standard (Validated)</SelectItem>
           <SelectItem value="custom">Edge (Experimental)</SelectItem>
@@ -154,12 +154,12 @@ const TriggerSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
   <motion.div
     initial={{ opacity: 0, y: 10 }}
     animate={{ opacity: 1, y: 0 }}
-    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+    className="space-y-4 border border-slate-700 rounded-2xl p-5 bg-slate-900/50"
   >
     <div className="space-y-2">
-      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Activation Source</Label>
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Trigger Protocol</Label>
       <Select value={data.triggerType} onValueChange={(val) => onChange('triggerType', val)}>
-        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
         <SelectContent>
           {TRIGGERS.map(t => <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>)}
         </SelectContent>
@@ -194,12 +194,12 @@ const ControlSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
   <motion.div
     initial={{ opacity: 0, y: 10 }}
     animate={{ opacity: 1, y: 0 }}
-    className="space-y-4 border rounded-2xl p-5 bg-slate-50/50"
+    className="space-y-4 border border-slate-700 rounded-2xl p-5 bg-slate-900/50"
   >
     <div className="space-y-2">
-      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Flow Controller</Label>
+      <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1">Flow Control Behavior</Label>
       <Select value={data.controlType} onValueChange={(val) => onChange('controlType', val)}>
-        <SelectTrigger className="h-10 bg-white border-slate-200"><SelectValue /></SelectTrigger>
+        <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
         <SelectContent>
           {CONTROLS.map(c => <SelectItem key={c.id} value={c.id}>{c.label}</SelectItem>)}
         </SelectContent>
@@ -236,10 +236,10 @@ const ConnectionManager = ({
   return (
     <div className="space-y-6 pt-4">
       <div className="flex items-center gap-3 border-b pb-3">
-        <div className="p-1.5 bg-slate-100 rounded-lg">
+        <div className="p-1.5 bg-slate-800 rounded-lg">
           <Plug className="w-4 h-4 text-slate-500" />
         </div>
-        <h4 className="font-bold text-sm tracking-tight text-slate-700">Link Infrastructure</h4>
+        <h4 className="font-bold text-sm tracking-tight text-slate-300">Link Infrastructure</h4>
       </div>
 
       <div className="grid grid-cols-2 gap-6">
@@ -252,7 +252,7 @@ const ConnectionManager = ({
           {incoming.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {incoming.map((conn: any) => (
-                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-100 border-none group/badge">
+                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-800 border-slate-700 text-slate-300 group/badge">
                   <span className="truncate max-w-[80px] text-[10px] font-medium">{conn.sourceLabel}</span>
                   <Button
                     variant="ghost"
@@ -278,7 +278,7 @@ const ConnectionManager = ({
           {outgoing.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {outgoing.map((conn: any) => (
-                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-100 border-none group/badge">
+                <Badge key={conn.id} variant="secondary" className="pl-2 pr-1 h-6 bg-slate-800 border-slate-700 text-slate-300 group/badge">
                   <span className="truncate max-w-[80px] text-[10px] font-medium">{conn.targetLabel}</span>
                   <Button
                     variant="ghost"
@@ -298,9 +298,9 @@ const ConnectionManager = ({
 
       {/* Create New Link */}
       {onCreate && available.length > 0 && (
-        <div className="flex gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-100">
+        <div className="flex gap-2 p-3 bg-slate-800/50 rounded-2xl border border-slate-700">
           <Select value={selectedTarget} onValueChange={setSelectedTarget}>
-            <SelectTrigger className="h-9 text-xs bg-white border-slate-200">
+            <SelectTrigger className="h-9 text-xs bg-slate-800 border-slate-700 text-slate-100">
               <SelectValue placeholder="Propagate to..." />
             </SelectTrigger>
             <SelectContent>
@@ -394,15 +394,15 @@ export const NodeEditorDialog = ({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="sm:max-w-[520px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden border-none shadow-2xl rounded-3xl">
+      <DialogContent className="sm:max-w-[520px] max-h-[90vh] flex flex-col p-0 gap-0 overflow-hidden bg-slate-950 border-slate-800 shadow-2xl rounded-3xl">
         <div className="absolute top-0 left-0 w-full h-1.5 bg-gradient-to-r from-primary/80 to-indigo-500/80" />
 
         <DialogHeader className="p-7 pb-4">
           <div className="flex items-center justify-between">
             <div className="space-y-1">
-              <DialogTitle className="flex items-center gap-3 text-xl font-bold tracking-tight">
+              <DialogTitle className="flex items-center gap-3 text-xl font-bold tracking-tight text-slate-100">
                 Block Configuration
-                <Badge variant="outline" className="h-5 text-[9px] font-bold uppercase tracking-widest border-slate-200 bg-slate-50 text-slate-500">
+                <Badge variant="outline" className="h-5 text-[9px] font-bold uppercase tracking-widest border-slate-700 bg-slate-800 text-slate-400">
                   {nodeType}
                 </Badge>
               </DialogTitle>
@@ -413,7 +413,7 @@ export const NodeEditorDialog = ({
           </div>
         </DialogHeader>
 
-        <ScrollArea className="flex-1 max-h-[60vh] custom-scrollbar">
+        <ScrollArea className="flex-1 max-h-[70vh] custom-scrollbar">
           <div className="px-7 py-2 space-y-8">
             {/* Common Fields */}
             <div className="space-y-2.5">
@@ -423,7 +423,7 @@ export const NodeEditorDialog = ({
                 value={formData.label}
                 onChange={(e) => updateField('label', e.target.value)}
                 placeholder="e.g. Master Intelligence Unit"
-                className="h-11 bg-white border-slate-200 font-medium placeholder:text-slate-300"
+                className="h-11 bg-slate-800 border-slate-700 text-slate-100 font-medium placeholder:text-slate-500"
               />
             </div>
 
@@ -431,7 +431,7 @@ export const NodeEditorDialog = ({
               <div className="absolute -left-7 top-0 bottom-0 w-1 bg-primary/20 rounded-r-full" />
               <div className="space-y-2 mb-4 flex items-center gap-2">
                 <Settings2 className="w-4 h-4 text-primary" />
-                <h3 className="text-xs font-bold text-slate-700">Internal Logic Settings</h3>
+                <h3 className="text-xs font-bold text-slate-300">Internal Logic Settings</h3>
               </div>
 
               {/* Switch settings UI based on type */}
@@ -454,7 +454,7 @@ export const NodeEditorDialog = ({
           <div className="h-8" /> {/* Scroll margin */}
         </ScrollArea>
 
-        <DialogFooter className="p-6 border-t bg-slate-50/80 flex-row justify-between items-center sm:justify-between">
+        <DialogFooter className="p-6 border-t border-slate-800 bg-slate-900/80 flex-row justify-between items-center sm:justify-between">
           <div className="flex items-center">
             {onDelete && (
               <Button
