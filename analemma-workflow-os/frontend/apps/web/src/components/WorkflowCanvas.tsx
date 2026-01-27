@@ -32,6 +32,8 @@ import { GroupNameDialog } from './GroupNameDialog';
 import { RollbackDialog } from './RollbackDialog';
 import { SuggestionOverlay } from './SuggestionOverlay';
 import { EmptyCanvasGuide } from './EmptyCanvasGuide';
+import { AuditPanel } from './AuditPanel';
+import { ContextualSideRail, RailTab } from './ContextualSideRail';
 
 import { Button } from './ui/button';
 import {
@@ -76,6 +78,10 @@ const WorkflowCanvasInner = () => {
   
   // Empty Canvas Guide visibility
   const [emptyGuideVisible, setEmptyGuideVisible] = useState(true);
+
+  // Audit Panel state
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [activePanelTab, setActivePanelTab] = useState<RailTab>('audit');
 
   // ==========================================
   // 2. NODE/EDGE TYPES (useMemo)
@@ -178,6 +184,14 @@ const WorkflowCanvasInner = () => {
     recentChanges,
     addMessage,
   } = useCodesignStore();
+
+  // Calculate issue summary for ContextualSideRail
+  const issueSummary = useMemo(() => ({
+    errors: auditIssues.filter(i => i.level === 'error').length,
+    warnings: auditIssues.filter(i => i.level === 'warning').length,
+    info: auditIssues.filter(i => i.level === 'info').length,
+    total: auditIssues.length
+  }), [auditIssues]);
 
   // Canvas mode detection
   const canvasMode = useCanvasMode();
@@ -634,6 +648,59 @@ const WorkflowCanvasInner = () => {
 
         <SuggestionOverlay />
       </div>
+
+      {/* Contextual Side Rail for Audit */}
+      <ContextualSideRail
+        activeTab={activePanelTab}
+        onTabChange={setActivePanelTab}
+        issueCount={issueSummary.total}
+        hasErrors={issueSummary.errors > 0}
+        isExecuting={false}
+        panelOpen={rightPanelOpen}
+        onTogglePanel={() => setRightPanelOpen(!rightPanelOpen)}
+      />
+
+      {/* Audit Panel Sidebar */}
+      <AnimatePresence>
+        {rightPanelOpen && (
+          <motion.div
+            initial={{ x: 400 }}
+            animate={{ x: 0 }}
+            exit={{ x: 400 }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="absolute right-0 top-0 bottom-0 w-96 border-l border-slate-800 bg-slate-950/50 backdrop-blur-xl z-30 flex flex-col"
+          >
+            <div className="p-6 pb-2">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-base font-semibold text-slate-100">
+                  {activePanelTab === 'audit' && 'Workflow Validation'}
+                </h3>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => setRightPanelOpen(false)}
+                  className="h-8 w-8 text-slate-400 hover:text-slate-100"
+                >
+                  <PanelRightClose className="w-4 h-4" />
+                </Button>
+              </div>
+            </div>
+            
+            {activePanelTab === 'audit' && (
+              <AuditPanel 
+                standalone 
+                className="flex-1 overflow-hidden"
+                onRefresh={async () => {
+                  const session = await fetchAuthSession();
+                  const idToken = session.tokens?.idToken?.toString();
+                  await requestAudit({ nodes, edges }, idToken);
+                  toast.success('Validation refreshed');
+                }}
+              />
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <NodeEditorDialog
         node={selectedNode as any}

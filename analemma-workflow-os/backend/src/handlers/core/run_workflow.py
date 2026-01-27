@@ -51,7 +51,7 @@ except ImportError as e:
     import logging
     logger = logging.getLogger(__name__)
     logger.critical("Critical security dependency missing: %s", str(e))
-    raise RuntimeError("Critical Security Dependency Missing") from src.e
+    raise RuntimeError("Critical Security Dependency Missing") from e
 
 # 구조화된 로거 초기화
 logger = get_logger(__name__)

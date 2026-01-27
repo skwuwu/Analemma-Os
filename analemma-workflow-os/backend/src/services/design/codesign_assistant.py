@@ -1187,14 +1187,14 @@ async def _stream_gemini_codesign(
         # [1단계] Self-Correction: 검증 실패한 노드 재생성 요청
         # ────────────────────────────────────────────────
         if pending_corrections and len(pending_corrections) <= max_self_correction_attempts:
-            correction_results = yield from _attempt_self_correction(
+            async for chunk in _attempt_self_correction(
                 service=service,
                 gemini_system=gemini_system,
                 pending_corrections=pending_corrections,
                 context=context,
                 connection_ids=connection_ids
-            )
-            # correction_results는 수정된 노드들
+            ):
+                yield chunk
         
         # 응답이 전혀 없는 경우 (Safety Filter로 인한 완전 차단 가능성)
         if not received_any_response and chunk_count == 0:
@@ -1276,13 +1276,13 @@ def _validate_node_basics(node_data: Dict[str, Any]) -> List[str]:
     return errors
 
 
-def _attempt_self_correction(
+async def _attempt_self_correction(
     service: Any,
     gemini_system: str,
     pending_corrections: List[Dict[str, Any]],
     context: 'CodesignContext',
     connection_ids: List[str] = None
-) -> Generator[str, None, List[Dict[str, Any]]]:
+) -> AsyncGenerator[str, None]:
     """
     [1단계] Self-Correction: 검증 실패한 노드를 Gemini에게 수정 요청
     
@@ -1295,9 +1295,6 @@ def _attempt_self_correction(
         
     Yields:
         수정된 노드 JSON
-        
-    Returns:
-        수정된 노드 목록
     """
     corrected_nodes = []
     
@@ -1410,7 +1407,7 @@ def _attempt_self_correction(
             }
             yield json.dumps(fail_msg) + "\n"
     
-    return corrected_nodes
+    # async generator에서는 return 값을 사용할 수 없으므로 제거
 
 
 async def _stream_bedrock_codesign(

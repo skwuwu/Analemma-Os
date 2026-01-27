@@ -43,10 +43,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 // Components
 import { TaskBentoGrid } from '@/components/TaskBentoGrid';
 import { OutcomeManagerModal } from '@/components/OutcomeManagerModal';
-import { ContextualSideRail } from '@/components/ContextualSideRail';
-import type { RailTab } from '@/components/ContextualSideRail';
+import { TimelineSideRail } from '@/components/TimelineSideRail';
 import { CheckpointTimeline } from '@/components/CheckpointTimeline';
-import { AuditPanel } from '@/components/AuditPanel';
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Progress } from '@/components/ui/progress';
 
@@ -107,9 +105,8 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   const [outcomeModalOpen, setOutcomeModalOpen] = useState(false);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | undefined>(undefined);
   
-  // Right Panel System (from WorkflowCanvas)
+  // Right Panel System (Timeline only)
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [activePanelTab, setActivePanelTab] = useState<RailTab>('timeline');
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
   const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
@@ -130,7 +127,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   // Checkpoints and Time Machine hooks
   const checkpoints = useCheckpoints({
     executionId: currentExecutionId || undefined,
-    enabled: !!currentExecutionId && rightPanelOpen && activePanelTab === 'timeline',
+    enabled: !!currentExecutionId && rightPanelOpen,
     refetchInterval: 5000,
   });
 
@@ -335,12 +332,8 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
         </ResizablePanel>
       </ResizablePanelGroup>
 
-      {/* Contextual Side Rail */}
-      <ContextualSideRail
-        activeTab={activePanelTab}
-        onTabChange={setActivePanelTab}
-        issueCount={0}
-        hasErrors={false}
+      {/* Timeline Side Rail (Timeline only) */}
+      <TimelineSideRail
         isExecuting={!!currentExecutionId}
         panelOpen={rightPanelOpen}
         onTogglePanel={() => setRightPanelOpen(!rightPanelOpen)}
@@ -359,44 +352,35 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
             <div className="p-6 pb-2">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-sm font-black uppercase tracking-widest text-slate-100">
-                  {activePanelTab === 'timeline' && 'Execution Timeline'}
-                  {activePanelTab === 'audit' && 'Validation Results'}
+                  Execution Timeline
                 </h3>
                 <Button variant="ghost" size="icon" onClick={() => setRightPanelOpen(false)} className="h-8 w-8 text-slate-500 hover:text-white">
                   <PanelRightClose className="w-4 h-4" />
                 </Button>
               </div>
+            </div>
 
-              <div className="flex-1 overflow-hidden">
-                {activePanelTab === 'timeline' && (
-                  <div className="h-[calc(100vh-180px)] overflow-y-auto custom-scrollbar">
-                    {currentExecutionId ? (
-                      <CheckpointTimeline
-                        items={checkpoints.timeline}
-                        loading={checkpoints.isLoading}
-                        selectedId={timeMachine.selectedCheckpointId}
-                        compareId={timeMachine.compareCheckpointId}
-                        onRollback={handleRollbackClick}
-                        onCompare={(item) => {
-                          if (timeMachine.selectedCheckpointId && timeMachine.selectedCheckpointId !== item.checkpoint_id) {
-                            timeMachine.compare(timeMachine.selectedCheckpointId, item.checkpoint_id);
-                          }
-                        }}
-                        onPreview={(item) => checkpoints.getDetail(item.checkpoint_id)}
-                        compact
-                      />
-                    ) : (
-                      <div className="flex flex-col items-center justify-center py-20 opacity-20 text-center">
-                        <History className="w-12 h-12 mb-4" />
-                        <p className="text-[10px] font-black uppercase">No active operations</p>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {activePanelTab === 'audit' && (
-                  <div className="h-[calc(100vh-180px)] overflow-y-auto">
-                    <AuditPanel standalone />
+            <div className="flex-1 overflow-hidden">
+              <div className="h-[calc(100vh-180px)] overflow-y-auto custom-scrollbar px-6">
+                {currentExecutionId ? (
+                  <CheckpointTimeline
+                    items={checkpoints.timeline}
+                    loading={checkpoints.isLoading}
+                    selectedId={timeMachine.selectedCheckpointId}
+                    compareId={timeMachine.compareCheckpointId}
+                    onRollback={handleRollbackClick}
+                    onCompare={(item) => {
+                      if (timeMachine.selectedCheckpointId && timeMachine.selectedCheckpointId !== item.checkpoint_id) {
+                        timeMachine.compare(timeMachine.selectedCheckpointId, item.checkpoint_id);
+                      }
+                    }}
+                    onPreview={(item) => checkpoints.getDetail(item.checkpoint_id)}
+                    compact
+                  />
+                ) : (
+                  <div className="flex flex-col items-center justify-center py-20 opacity-20 text-center">
+                    <History className="w-12 h-12 mb-4" />
+                    <p className="text-[10px] font-black uppercase">No active operations</p>
                   </div>
                 )}
               </div>
