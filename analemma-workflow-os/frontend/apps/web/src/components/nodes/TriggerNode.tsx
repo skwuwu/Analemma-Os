@@ -1,33 +1,10 @@
 import { Handle, Position } from '@xyflow/react';
-import { Clock, Webhook, Zap, X, Play } from 'lucide-react';
+import { X, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-
-// 트리거 설정 객체 (초록색 테마 유지)
-const TRIGGER_CONFIG = {
-  time: {
-    icon: Clock,
-    label: 'Schedule',
-    color: '142 76% 36%' // Green
-  },
-  request: {
-    icon: Webhook,
-    label: 'Webhook',
-    color: '217 91% 60%' // Blue
-  },
-  event: {
-    icon: Zap,
-    label: 'Event',
-    color: '45 93% 47%' // Yellow/Orange
-  },
-  default: {
-    icon: Zap,
-    label: 'Trigger',
-    color: '142 76% 36%' // Default Green
-  }
-} as const;
+import { TRIGGER_CONFIG, type TriggerType } from '@/lib/nodeConstants';
 
 interface TriggerNodeProps {
   data: {
