@@ -168,11 +168,18 @@ export const resolveCoDesignEndpoint = (endpoint: string = 'codesign'): { url: s
   const httpApi = getEnv('VITE_LFU_HTTPAPI_URL') || '';
   const defaultApiBase = getEnv('VITE_API_BASE_URL') || '';
 
+  // Map endpoints that require /workflows/ prefix
+  const workflowEndpoints: Record<string, string> = {
+    'audit': 'workflows/audit',
+    'simulate': 'workflows/simulate',
+  };
+  const resolvedEndpoint = workflowEndpoints[endpoint] || endpoint;
+
   if (httpApi) {
-    return { url: httpApi.endsWith(`/${endpoint}`) ? httpApi : `${httpApi.replace(/\/$/, '')}/${endpoint}`, requiresAuth: true };
+    return { url: httpApi.endsWith(`/${resolvedEndpoint}`) ? httpApi : `${httpApi.replace(/\/$/, '')}/${resolvedEndpoint}`, requiresAuth: true };
   }
   if (defaultApiBase) {
-    return { url: `${defaultApiBase.replace(/\/$/, '')}/${endpoint}`, requiresAuth: true };
+    return { url: `${defaultApiBase.replace(/\/$/, '')}/${resolvedEndpoint}`, requiresAuth: true };
   }
   throw new Error('Co-design endpoint not configured (VITE_LFU_HTTPAPI_URL or VITE_API_BASE_URL required)');
 };
