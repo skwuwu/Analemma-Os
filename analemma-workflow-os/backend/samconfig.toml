@@ -1,10 +1,10 @@
 # SAM CLI Configuration File
-# 이 파일에 정의된 파라미터는 매 배포 시 자동으로 적용됩니다.
-# CORS 설정이 초기화되는 문제를 방지합니다.
+# Parameters defined here are applied automatically on every deployment.
+# This prevents CORS settings from being reset.
 #
-# ⚠️ 주의: GitHub Actions 배포 시에는 이 파일이 사용되지 않습니다.
-#    CI/CD 배포는 .github/workflows/backend-deploy.yml에서 파라미터를 직접 전달합니다.
-#    이 파일은 로컬 개발 환경에서 `sam deploy`를 직접 실행할 때 사용됩니다.
+# WARNING: This file is NOT used during GitHub Actions deployments.
+#    CI/CD deployments pass parameters directly in .github/workflows/backend-deploy.yml
+#    This file is only used when running `sam deploy` locally.
 
 version = 0.1
 
@@ -17,14 +17,14 @@ capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
 confirm_changeset = true
 resolve_s3 = true
 
-# ✅ CORS 허용 오리진 (GitHub Actions에서도 동일한 값 사용)
-# CloudFront 프로덕션 + 로컬 개발 환경
+# CORS allowed origins (same values used in GitHub Actions)
+# CloudFront production + local development
 parameter_overrides = """
   StageName=dev \
   AllowedOrigins=https://d22tnxagg6c5pz.cloudfront.net,http://localhost:3000,http://localhost:5173
 """
 
-# 프로덕션 환경 예시 (주석 해제 후 사용)
+# Production environment example (uncomment to use)
 # [prod]
 # [prod.deploy.parameters]
 # stack_name = "backend-prod"

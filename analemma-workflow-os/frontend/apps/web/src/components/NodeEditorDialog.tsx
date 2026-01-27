@@ -14,11 +14,13 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useState, useMemo, useCallback } from 'react';
-import { ArrowRight, ArrowLeft, Trash2, Plug, Settings2, Info, AlertCircle } from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { useState, useMemo, useCallback, useEffect } from 'react';
+import { ArrowRight, ArrowLeft, Trash2, Plug, Settings2, Info, AlertCircle, Wrench, Search, Loader2, Brain, FolderOpen } from 'lucide-react';
 import { BLOCK_CATEGORIES } from './BlockLibrary';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { listSkills, type Skill, type ToolDefinition } from '@/lib/skillsApi';
 
 // --- TYPES & CONSTANTS ---
 
@@ -28,6 +30,7 @@ interface NodeData {
   temperature?: number;
   model?: string;
   max_tokens?: number;
+  tools?: ToolDefinition[];  // AI Model tools
   operatorType?: string;
   strategy?: string;
   url?: string;
@@ -81,7 +84,192 @@ const SAFE_TRANSFORM_STRATEGIES = [
 // --- SUB-COMPONENTS ---
 
 /**
- * AI 모델 설정 컴포넌트
+ * Tools/Skills Selection Component
+ */
+const ToolsSelector = ({
+  selectedTools,
+  onToolsChange
+}: {
+  selectedTools: ToolDefinition[],
+  onToolsChange: (tools: ToolDefinition[]) => void
+}) => {
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+
+  useEffect(() => {
+    const fetchSkills = async () => {
+      setIsLoading(true);
+      try {
+        const response = await listSkills();
+        setSkills(response.items || []);
+      } catch (error) {
+        console.error('Failed to fetch skills:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchSkills();
+  }, []);
+
+  const filteredSkills = useMemo(() => {
+    if (!searchQuery) return skills;
+    const query = searchQuery.toLowerCase();
+    return skills.filter(s =>
+      s.name.toLowerCase().includes(query) ||
+      s.description?.toLowerCase().includes(query) ||
+      s.category?.toLowerCase().includes(query)
+    );
+  }, [skills, searchQuery]);
+
+  const isToolSelected = (skill: Skill) => {
+    return selectedTools.some(t => t.skill_id === skill.skill_id);
+  };
+
+  const toggleSkill = (skill: Skill) => {
+    if (isToolSelected(skill)) {
+      onToolsChange(selectedTools.filter(t => t.skill_id !== skill.skill_id));
+    } else {
+      // Convert skill to tool definition
+      const toolDef: ToolDefinition = {
+        name: skill.name,
+        description: skill.description || '',
+        skill_id: skill.skill_id,
+        skill_version: skill.version,
+        parameters: skill.tool_definitions?.[0]?.parameters,
+        required_api_keys: skill.required_api_keys,
+      };
+      onToolsChange([...selectedTools, toolDef]);
+    }
+  };
+
+  const toggleAllToolsFromSkill = (skill: Skill) => {
+    // Add all tool_definitions from this skill
+    if (skill.tool_definitions && skill.tool_definitions.length > 0) {
+      const existingIds = new Set(selectedTools.map(t => `${t.skill_id}-${t.name}`));
+      const newTools = skill.tool_definitions
+        .filter(td => !existingIds.has(`${skill.skill_id}-${td.name}`))
+        .map(td => ({
+          ...td,
+          skill_id: skill.skill_id,
+          skill_version: skill.version,
+        }));
+      onToolsChange([...selectedTools, ...newTools]);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 pl-1 flex items-center gap-2">
+          <Wrench className="w-3.5 h-3.5" />
+          Tools & Skills
+        </Label>
+        <Badge variant="secondary" className="text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/20">
+          {selectedTools.length} selected
+        </Badge>
+      </div>
+
+      {/* Search */}
+      <div className="relative">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+        <Input
+          placeholder="Search skills..."
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          className="pl-9 h-9 bg-slate-800 border-slate-700 text-slate-100 text-sm"
+        />
+      </div>
+
+      {/* Skills List */}
+      <ScrollArea className="h-[200px] rounded-lg border border-slate-700 bg-slate-800/50">
+        {isLoading ? (
+          <div className="flex items-center justify-center h-full">
+            <Loader2 className="w-5 h-5 animate-spin text-slate-500" />
+          </div>
+        ) : filteredSkills.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-slate-500 text-sm p-4">
+            <Wrench className="w-8 h-8 mb-2 opacity-50" />
+            <p>No skills found</p>
+            <p className="text-[10px] text-slate-600">Create skills in the Skills section</p>
+          </div>
+        ) : (
+          <div className="p-2 space-y-1">
+            {filteredSkills.map(skill => (
+              <div
+                key={skill.skill_id}
+                className={cn(
+                  "flex items-start gap-3 p-2.5 rounded-lg cursor-pointer transition-all",
+                  isToolSelected(skill)
+                    ? "bg-amber-500/10 border border-amber-500/30"
+                    : "hover:bg-slate-700/50 border border-transparent"
+                )}
+                onClick={() => toggleSkill(skill)}
+              >
+                <Checkbox
+                  checked={isToolSelected(skill)}
+                  onCheckedChange={() => toggleSkill(skill)}
+                  className="mt-0.5 border-slate-600 data-[state=checked]:bg-amber-500 data-[state=checked]:border-amber-500"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    {skill.skill_type === 'subgraph_based' ? (
+                      <FolderOpen className="w-3.5 h-3.5 text-violet-400" />
+                    ) : (
+                      <Brain className="w-3.5 h-3.5 text-blue-400" />
+                    )}
+                    <span className="text-sm font-medium text-slate-200 truncate">{skill.name}</span>
+                    {skill.tool_definitions && skill.tool_definitions.length > 1 && (
+                      <Badge variant="outline" className="text-[9px] h-4 px-1.5 border-slate-600 text-slate-400">
+                        {skill.tool_definitions.length} tools
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-[10px] text-slate-500 truncate mt-0.5">{skill.description || 'No description'}</p>
+                  {skill.category && (
+                    <Badge variant="secondary" className="text-[9px] mt-1 bg-slate-700 text-slate-400">
+                      {skill.category}
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </ScrollArea>
+
+      {/* Selected Tools Preview */}
+      {selectedTools.length > 0 && (
+        <div className="space-y-2">
+          <Label className="text-[10px] text-slate-500 pl-1">Selected Tools:</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {selectedTools.map((tool, i) => (
+              <Badge
+                key={`${tool.skill_id}-${tool.name}-${i}`}
+                variant="secondary"
+                className="text-[10px] bg-amber-500/10 text-amber-400 border-amber-500/20 pr-1 group"
+              >
+                {tool.name}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onToolsChange(selectedTools.filter((_, idx) => idx !== i));
+                  }}
+                  className="ml-1 hover:text-red-400 opacity-60 hover:opacity-100"
+                >
+                  ×
+                </button>
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * AI Model Configuration Component
  */
 const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: string, val: any) => void }) => (
   <motion.div
@@ -103,7 +291,7 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
       <Textarea
         value={data.prompt_content}
         onChange={(e) => onChange('prompt_content', e.target.value)}
-        placeholder="에이전트의 성격과 임무를 정의하세요..."
+        placeholder="Define the agent's personality and mission..."
         className="min-h-[120px] font-mono text-xs bg-slate-800 border-slate-700 text-slate-100 leading-relaxed shadow-inner placeholder:text-slate-500"
       />
     </div>
@@ -126,6 +314,14 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
         value={data.max_tokens}
         onChange={(e) => onChange('max_tokens', parseInt(e.target.value))}
         className="bg-slate-800 border-slate-700 text-slate-100"
+      />
+    </div>
+
+    {/* Tools/Skills Selection */}
+    <div className="pt-2 border-t border-slate-700">
+      <ToolsSelector
+        selectedTools={data.tools || []}
+        onToolsChange={(tools) => onChange('tools', tools)}
       />
     </div>
   </motion.div>
@@ -430,6 +626,7 @@ export const NodeEditorDialog = ({
     temperature: node?.data.temperature ?? 0.7,
     model: node?.data.model || (nodeType === 'aiModel' ? 'gpt-4' : ''),
     max_tokens: node?.data.max_tokens || node?.data.maxTokens || 2000,
+    tools: node?.data.tools || [],  // AI Model tools
     operatorType: node?.data.operatorType || (nodeType === 'operator' ? 'api_call' : ''),
     strategy: node?.data.strategy || 'list_filter',
     url: node?.data.url || '',
@@ -454,8 +651,8 @@ export const NodeEditorDialog = ({
     const updates: Partial<NodeData> = { label: formData.label };
 
     if (nodeType === 'aiModel') {
-      const { prompt_content, temperature, model, max_tokens } = formData;
-      Object.assign(updates, { prompt_content, temperature, model, max_tokens: Number(max_tokens) });
+      const { prompt_content, temperature, model, max_tokens, tools } = formData;
+      Object.assign(updates, { prompt_content, temperature, model, max_tokens: Number(max_tokens), tools: tools || [] });
     } else if (nodeType === 'operator') {
       const { operatorType, strategy, url, method } = formData;
       Object.assign(updates, { operatorType, strategy, url, method });

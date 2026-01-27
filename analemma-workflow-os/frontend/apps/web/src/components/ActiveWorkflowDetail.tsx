@@ -76,12 +76,12 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
     const timeMachine = useTimeMachine({
         executionId: selectedExecutionId,
         onRollbackSuccess: (result) => {
-            toast.success(`롤백 성공: 브랜치 ${result.branched_thread_id} 생성됨`);
+            toast.success(`Rollback successful: Branch ${result.branched_thread_id} created`);
             setRollbackDialogOpen(false);
             checkpoints.refetch();
         },
         onRollbackError: (error) => {
-            toast.error(`롤백 실패: ${error.message}`);
+            toast.error(`Rollback failed: ${error.message}`);
         },
     });
 
@@ -115,7 +115,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
             setResponseText('');
         } catch (e) {
             console.error('Resume workflow failed:', e);
-            toast.error('워크플로우 재개 실패');
+            toast.error('Failed to resume workflow');
         }
     }, [latestStatus, selectedExecutionId, responseText, resumeWorkflow, sanitizeResumePayload, setResponseText]);
 
@@ -187,11 +187,11 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                     <TabsList className="grid w-full max-w-md grid-cols-4">
                         <TabsTrigger value="timeline" className="gap-2">
                             <Activity className="w-4 h-4" />
-                            타임라인
+                            Timeline
                         </TabsTrigger>
                         <TabsTrigger value="checkpoints" className="gap-2">
                             <History className="w-4 h-4" />
-                            체크포인트
+                            Checkpoints
                             {checkpoints.timeline.length > 0 && (
                                 <span className="ml-1 text-xs bg-muted px-1.5 py-0.5 rounded-full">
                                     {checkpoints.timeline.length}
@@ -200,7 +200,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                         </TabsTrigger>
                         <TabsTrigger value="suggestions" className="gap-2">
                             <Zap className="w-4 h-4 text-yellow-500" />
-                            AI 제안
+                            AI Suggestions
                             {timeMachine.suggestions.length > 0 && (
                                 <span className="ml-1 text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded-full">
                                     {timeMachine.suggestions.length}
@@ -209,7 +209,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                         </TabsTrigger>
                         <TabsTrigger value="compare" className="gap-2">
                             <RotateCcw className="w-4 h-4" />
-                            상태 비교
+                            State Compare
                         </TabsTrigger>
                     </TabsList>
                 </div>
@@ -291,12 +291,12 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                             ) : (
                                 <div className="text-center py-12 text-muted-foreground">
                                     <RotateCcw className="w-12 h-12 mx-auto mb-4 opacity-30" />
-                                    <p className="text-lg font-medium">상태 비교</p>
+                                    <p className="text-lg font-medium">State Comparison</p>
                                     <p className="text-sm mt-2">
-                                        체크포인트 탭에서 두 개의 체크포인트를 선택하여 비교하세요.
+                                        Select two checkpoints from the Checkpoints tab to compare.
                                     </p>
                                     <p className="text-xs mt-4 text-muted-foreground/70">
-                                        첫 번째 체크포인트를 클릭하고, 두 번째 체크포인트의 🔄 버튼을 클릭하세요.
+                                        Click the first checkpoint, then click the 🔄 button on the second checkpoint.
                                     </p>
                                 </div>
                             )}
@@ -324,7 +324,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                         <CardContent>
                                             <div className="flex items-center gap-2 mb-2">
                                                 <Badge variant="secondary" className="text-[10px] h-5">
-                                                    현재로부터 {Math.max(0, (checkpoints.timeline.length > 0 ? checkpoints.timeline[checkpoints.timeline.length - 1].step : suggestion.step) - suggestion.step)}단계 전
+                                                    {Math.max(0, (checkpoints.timeline.length > 0 ? checkpoints.timeline[checkpoints.timeline.length - 1].step : suggestion.step) - suggestion.step)} steps ago
                                                 </Badge>
                                             </div>
                                             <p className="text-sm text-foreground mb-4 leading-relaxed">{suggestion.reason}</p>
@@ -338,7 +338,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                                         if (item) handleRollbackClick(item as any);
                                                     }}
                                                 >
-                                                    이 시점으로 롤백
+                                                    Rollback to Here
                                                 </Button>
                                                 <Button
                                                     size="sm"
@@ -348,7 +348,7 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                                                         setActiveTab('checkpoints');
                                                     }}
                                                 >
-                                                    체크포인트 보기
+                                                    View Checkpoint
                                                 </Button>
                                             </div>
                                         </CardContent>
@@ -357,9 +357,9 @@ export const ActiveWorkflowDetail: React.FC<ActiveWorkflowDetailProps> = ({
                             ) : (
                                 <div className="text-center py-12 text-muted-foreground bg-card rounded-xl border border-dashed">
                                     <Zap className="w-12 h-12 mx-auto mb-4 opacity-10" />
-                                    <p className="text-lg font-medium">AI 제안 없음</p>
+                                    <p className="text-lg font-medium">No AI Suggestions</p>
                                     <p className="text-sm mt-2">
-                                        현재 상황에서 추천되는 롤백 포인트가 없습니다.
+                                        No recommended rollback points for the current situation.
                                     </p>
                                 </div>
                             )}

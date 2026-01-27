@@ -112,6 +112,20 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       backendNode.temperature = node.data.temperature || 0.7;
       backendNode.max_tokens = node.data.max_tokens || node.data.maxTokens || 256;
       backendNode.writes_state_key = node.data.writes_state_key;
+      // Tool definitions for function calling
+      if (node.data.tools && Array.isArray(node.data.tools) && node.data.tools.length > 0) {
+        backendNode.tool_definitions = node.data.tools.map((tool: any) => ({
+          name: tool.name,
+          description: tool.description || '',
+          parameters: tool.parameters || {},
+          required_api_keys: tool.required_api_keys || [],
+          handler_type: tool.handler_type,
+          handler_config: tool.handler_config,
+          // Skill reference for backend resolution
+          skill_id: tool.skill_id,
+          skill_version: tool.skill_version,
+        }));
+      }
       break;
     case 'operator':
       backendNode.type = 'operator';
@@ -429,13 +443,13 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
   // 1. 그래프 분석 수행
   const analysisResult = analyzeWorkflowGraph(nodes, edges);
   
-  // 1-1. 경고가 있으면 사용자에게 알림
+  // 1-1. Display warnings to user if any
   if (analysisResult.warnings.length > 0) {
     analysisResult.warnings.forEach(warning => {
       const nodeList = warning.nodeIds.slice(0, 3).join(', ') + 
-        (warning.nodeIds.length > 3 ? ` 외 ${warning.nodeIds.length - 3}개` : '');
+        (warning.nodeIds.length > 3 ? ` +${warning.nodeIds.length - 3} more` : '');
       
-      toast.warning(`${warning.message}\n노드: ${nodeList}`, {
+      toast.warning(`${warning.message}\nNodes: ${nodeList}`, {
         description: warning.suggestion,
         duration: 5000,
       });
@@ -646,6 +660,9 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           model: node.model,
           provider: node.provider,
           writes_state_key: node.writes_state_key,
+          // Restore tool definitions
+          tools: node.tool_definitions || [],
+          toolsCount: node.tool_definitions?.length || 0,
         };
         break;
       case 'operator':

@@ -10,7 +10,8 @@ import {
   FileText,
   CheckCircle2,
   AlertCircle,
-  Loader2
+  Loader2,
+  Wrench
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -19,13 +20,27 @@ import { cn } from '@/lib/utils';
 import { useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// Tool definition type (matches skillsApi.ts)
+export interface ToolDefinition {
+  name: string;
+  description: string;
+  parameters?: Record<string, unknown>;
+  required_api_keys?: string[];
+  handler_type?: string;
+  handler_config?: Record<string, unknown>;
+  // For skill-based tools
+  skill_id?: string;
+  skill_version?: string;
+}
+
 interface AIModelNodeProps {
   data: {
     label: string;
     modelName?: string;
-    model?: string; // Added for compatibility with NodeEditorDialog
+    model?: string;
     temperature?: number;
     toolsCount?: number;
+    tools?: ToolDefinition[];  // Array of tool definitions
     status?: 'idle' | 'running' | 'failed' | 'completed';
     tokens?: number;
     latency?: number;
@@ -117,6 +132,31 @@ export const AIModelNode = ({ data, id, onDelete, selected }: AIModelNodeProps) 
           </div>
         )}
       </div>
+
+      {/* Tools/Skills Badge */}
+      {(data.tools?.length || data.toolsCount) ? (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <div className="flex items-center gap-1.5 px-2 py-1.5 mb-3 rounded-lg bg-amber-500/10 text-[10px] text-amber-400 border border-amber-500/20 cursor-help">
+              <Wrench className="w-3 h-3" />
+              <span className="font-bold">{data.tools?.length || data.toolsCount} Tools</span>
+              {data.tools && data.tools.length > 0 && (
+                <span className="text-amber-400/60 truncate ml-1">
+                  ({data.tools.slice(0, 2).map(t => t.name).join(', ')}{data.tools.length > 2 ? '...' : ''})
+                </span>
+              )}
+            </div>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[250px]">
+            <div className="space-y-1">
+              <p className="font-bold text-xs">Enabled Tools:</p>
+              {data.tools?.map((tool, i) => (
+                <p key={i} className="text-[10px] text-muted-foreground">• {tool.name}</p>
+              )) || <p className="text-[10px] text-muted-foreground">{data.toolsCount} tools configured</p>}
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      ) : null}
 
       {/* Streaming / Output Area */}
       {status === 'running' && data.streamContent && (

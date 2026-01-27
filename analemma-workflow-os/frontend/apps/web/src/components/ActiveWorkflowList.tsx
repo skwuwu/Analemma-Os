@@ -138,7 +138,7 @@ const ActiveWorkflowList: React.FC<Props> = ({
   }
 
   if (groupedActiveWorkflows.length === 0) {
-    return <EmptyState icon={Activity} title="No Active Workflows" description="실행 중인 작업이 없습니다." compact={compact} />;
+    return <EmptyState icon={Activity} title="No Active Workflows" description="No workflows are currently running." compact={compact} />;
   }
 
   return (

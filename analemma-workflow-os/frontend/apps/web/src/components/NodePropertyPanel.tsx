@@ -8,12 +8,14 @@ import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { useState, useCallback, useMemo } from 'react';
-import { ArrowRight, ArrowLeft, Trash2, Plug, Settings, Cpu, Zap, Activity, HelpCircle, X, Navigation2 } from 'lucide-react';
+import { Checkbox } from '@/components/ui/checkbox';
+import { useState, useCallback, useMemo, useEffect } from 'react';
+import { ArrowRight, ArrowLeft, Trash2, Plug, Settings, Cpu, Zap, Activity, HelpCircle, X, Navigation2, Wrench, Search, Loader2, Brain, FolderOpen } from 'lucide-react';
 import { BLOCK_CATEGORIES } from './BlockLibrary';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
+import { listSkills, type Skill, type ToolDefinition } from '@/lib/skillsApi';
 
 const AI_MODELS = BLOCK_CATEGORIES.find(cat => cat.type === 'aiModel')?.items || [];
 const OPERATORS = BLOCK_CATEGORIES.find(cat => cat.type === 'operator')?.items || [];
@@ -23,7 +25,150 @@ const CONTROLS = BLOCK_CATEGORIES.find(cat => cat.type === 'control')?.items || 
 // --- SUB-COMPONENTS ---
 
 /**
- * AI 모델 노드 특화 설정
+ * Compact Tools Selector for Property Panel
+ */
+const ToolsSelectorCompact = ({
+  selectedTools,
+  onToolsChange
+}: {
+  selectedTools: ToolDefinition[],
+  onToolsChange: (tools: ToolDefinition[]) => void
+}) => {
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    const fetchSkills = async () => {
+      setIsLoading(true);
+      try {
+        const response = await listSkills();
+        setSkills(response.items || []);
+      } catch (error) {
+        console.error('Failed to fetch skills:', error);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    fetchSkills();
+  }, []);
+
+  const isToolSelected = (skill: Skill) => {
+    return selectedTools.some(t => t.skill_id === skill.skill_id);
+  };
+
+  const toggleSkill = (skill: Skill) => {
+    if (isToolSelected(skill)) {
+      onToolsChange(selectedTools.filter(t => t.skill_id !== skill.skill_id));
+    } else {
+      const toolDef: ToolDefinition = {
+        name: skill.name,
+        description: skill.description || '',
+        skill_id: skill.skill_id,
+        skill_version: skill.version,
+        parameters: skill.tool_definitions?.[0]?.parameters,
+        required_api_keys: skill.required_api_keys,
+      };
+      onToolsChange([...selectedTools, toolDef]);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+          <Wrench className="w-3 h-3" />
+          Tools & Skills
+        </Label>
+        <Badge variant="secondary" className="text-[9px] bg-amber-100 text-amber-700 border-none">
+          {selectedTools.length} selected
+        </Badge>
+      </div>
+
+      {/* Selected Tools */}
+      {selectedTools.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {selectedTools.map((tool, i) => (
+            <Badge
+              key={`${tool.skill_id}-${tool.name}-${i}`}
+              variant="secondary"
+              className="text-[9px] bg-amber-50 text-amber-700 border border-amber-200 pr-1"
+            >
+              {tool.name}
+              <button
+                onClick={() => onToolsChange(selectedTools.filter((_, idx) => idx !== i))}
+                className="ml-1 hover:text-red-500"
+              >
+                ×
+              </button>
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {/* Expand/Collapse Button */}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => setExpanded(!expanded)}
+        className="w-full h-8 text-[10px] border-dashed"
+      >
+        {expanded ? 'Hide Skills' : 'Add Skills'}
+      </Button>
+
+      {/* Skills List */}
+      <AnimatePresence>
+        {expanded && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+          >
+            <ScrollArea className="h-[150px] rounded-lg border bg-white">
+              {isLoading ? (
+                <div className="flex items-center justify-center h-full">
+                  <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                </div>
+              ) : skills.length === 0 ? (
+                <div className="flex flex-col items-center justify-center h-full text-slate-400 text-[10px] p-3">
+                  <Wrench className="w-6 h-6 mb-1 opacity-50" />
+                  <p>No skills available</p>
+                </div>
+              ) : (
+                <div className="p-1.5 space-y-0.5">
+                  {skills.map(skill => (
+                    <div
+                      key={skill.skill_id}
+                      className={cn(
+                        "flex items-center gap-2 p-2 rounded cursor-pointer transition-colors",
+                        isToolSelected(skill) ? "bg-amber-50" : "hover:bg-slate-50"
+                      )}
+                      onClick={() => toggleSkill(skill)}
+                    >
+                      <Checkbox
+                        checked={isToolSelected(skill)}
+                        className="h-3.5 w-3.5"
+                      />
+                      {skill.skill_type === 'subgraph_based' ? (
+                        <FolderOpen className="w-3 h-3 text-violet-500" />
+                      ) : (
+                        <Brain className="w-3 h-3 text-blue-500" />
+                      )}
+                      <span className="text-[10px] font-medium truncate flex-1">{skill.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </ScrollArea>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+};
+
+/**
+ * AI Model Node Specialized Settings
  */
 const AIModelSettings = ({ data, updateField }: any) => (
   <div className="space-y-4 border rounded-xl p-4 bg-slate-50/50">
@@ -41,7 +186,7 @@ const AIModelSettings = ({ data, updateField }: any) => (
       <Textarea
         value={data.prompt_content}
         onChange={(e) => updateField('prompt_content', e.target.value)}
-        placeholder="이 에이전트의 역할과 작업 지침을 기재하세요..."
+        placeholder="Describe the agent's role and task instructions..."
         className="min-h-[120px] font-mono text-xs bg-white border-slate-200 leading-relaxed shadow-inner"
       />
     </div>
@@ -63,6 +208,14 @@ const AIModelSettings = ({ data, updateField }: any) => (
         value={data.max_tokens}
         onChange={(e) => updateField('max_tokens', e.target.value)}
         className="h-9 bg-white"
+      />
+    </div>
+
+    {/* Tools/Skills Selection */}
+    <div className="pt-3 border-t">
+      <ToolsSelectorCompact
+        selectedTools={data.tools || []}
+        onToolsChange={(tools) => updateField('tools', tools)}
       />
     </div>
   </div>
@@ -373,6 +526,7 @@ const NodeForm = ({
     temperature: node?.data.temperature ?? 0.7,
     model: node?.data.model || 'gpt-4',
     max_tokens: node?.data.max_tokens || node?.data.maxTokens || 2000,
+    tools: node?.data.tools || [],  // AI Model tools
     operatorType: node?.data.operatorType || 'email',
     operatorVariant: node?.data.operatorVariant || 'official',
     triggerType: node?.data.triggerType || (node?.data.blockId as string) || 'request',
@@ -400,6 +554,7 @@ const NodeForm = ({
         updates.temperature = formData.temperature;
         updates.model = formData.model;
         updates.max_tokens = Number(formData.max_tokens);
+        updates.tools = formData.tools || [];
         break;
       case 'operator':
         updates.operatorType = formData.operatorType;

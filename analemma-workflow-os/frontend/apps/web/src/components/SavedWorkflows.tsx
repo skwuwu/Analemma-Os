@@ -2,6 +2,7 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { FileJson, Trash2, Play, Loader2, Eye, ChevronRight, Activity, Upload, X, Image, Film, FileText, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
+import { fetchAuthSession } from '@aws-amplify/auth';
 import { CloneInstructionsDialog } from './CloneInstructionsDialog';
 import { PlanBriefingModal } from './PlanBriefingModal';
 import { usePlanBriefing } from '@/hooks/useBriefingAndCheckpoints';
@@ -113,10 +114,14 @@ export const SavedWorkflows = ({
     console.log('[SavedWorkflows] Running final validation before save...');
     
     try {
+      // Get auth token
+      const session = await fetchAuthSession();
+      const idToken = session.tokens?.idToken?.toString();
+      
       // 1. Audit 체크
       await requestAudit(
         { nodes: currentWorkflow.nodes, edges: currentWorkflow.edges },
-        undefined
+        idToken
       );
 
       // 2. 심각한 오류가 있으면 저장 차단
@@ -130,8 +135,7 @@ export const SavedWorkflows = ({
       // 3. Simulation 실행 (경로 검증)
       const simulationResult = await requestSimulation(
         { nodes: currentWorkflow.nodes, edges: currentWorkflow.edges },
-        {},
-        undefined
+        idToken
       );
 
       if (simulationResult && !simulationResult.success) {

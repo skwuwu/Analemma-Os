@@ -15,6 +15,7 @@ import {
   NodeChange,
   EdgeChange,
 } from '@xyflow/react';
+import { fetchAuthSession } from '@aws-amplify/auth';
 import { useShallow } from 'zustand/react/shallow';
 import '@xyflow/react/dist/style.css';
 
@@ -41,7 +42,9 @@ import {
   Play,
   History,
   PanelRightClose,
+  Trash2,
 } from 'lucide-react';
+import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
 import { TooltipProvider } from './ui/tooltip';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
@@ -171,16 +174,22 @@ const WorkflowCanvasInner = () => {
   // Canvas mode detection
   const canvasMode = useCanvasMode();
 
-  // Auto-validation (background linter)
-  // Pass store values directly to avoid module initialization order issues
-  const validation = useAutoValidation({
-    enabled: canvasMode.mode !== 'agentic-designer',
-    debounceMs: 1500,
-    nodes,
-    edges,
-    auditIssues,
-    requestAudit,
-  });
+  // Auto-validation using graphAnalysis
+  const validation = useMemo(() => {
+    if (nodes.length === 0) {
+      return { issueCount: 0, hasErrors: false, hasWarnings: false, warnings: [] };
+    }
+    
+    const analysisResult = analyzeWorkflowGraph(nodes, edges);
+    const warnings = analysisResult.warnings || [];
+    
+    return {
+      issueCount: warnings.length,
+      hasErrors: warnings.some(w => w.type === 'unreachable_node'),
+      hasWarnings: warnings.length > 0,
+      warnings
+    };
+  }, [nodes, edges]);
 
   // Wrap workflow actions to record changes for Co-design
   const addNodeWithTracking = useCallback((node: Node) => {
@@ -392,11 +401,19 @@ const WorkflowCanvasInner = () => {
   // Co-design: 변경사항이 있을 때 AI 제안 요청
   useEffect(() => {
     if (recentChanges.length > 0) {
-      const timeoutId = setTimeout(() => {
-        const currentNodes = useWorkflowStore.getState().nodes;
-        const currentEdges = useWorkflowStore.getState().edges;
-        requestSuggestions({ nodes: currentNodes, edges: currentEdges });
-        requestAudit({ nodes: currentNodes, edges: currentEdges });
+      const timeoutId = setTimeout(async () => {
+        try {
+          const session = await fetchAuthSession();
+          const idToken = session.tokens?.idToken?.toString();
+          
+          const currentNodes = useWorkflowStore.getState().nodes;
+          const currentEdges = useWorkflowStore.getState().edges;
+          
+          requestSuggestions({ nodes: currentNodes, edges: currentEdges }, idToken);
+          requestAudit({ nodes: currentNodes, edges: currentEdges }, idToken);
+        } catch (error) {
+          console.error('Failed to get auth token for codesign:', error);
+        }
       }, 2000); // 2초 디바운스
 
       return () => clearTimeout(timeoutId);
@@ -473,6 +490,32 @@ const WorkflowCanvasInner = () => {
 
           {/* Contextual Toolbar */}
           <div className="absolute top-4 right-4 z-10 flex gap-2">
+            {/* Clear Canvas Button */}
+            {nodes.length > 0 && (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        if (confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
+                          clearCanvas();
+                        }
+                      }}
+                      className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Clear
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="text-xs">
+                    Clear entire canvas
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )}
+            
             <AnimatePresence>
               {selectedNodes.length >= 2 && (
                 <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }}>
@@ -484,7 +527,7 @@ const WorkflowCanvasInner = () => {
               )}
             </AnimatePresence>
 
-            {/* Status Indicator (replaces manual Simulate Run) */}
+            {/* Status Indicator using graphAnalysis */}
             {nodes.length > 0 && (
               <WorkflowStatusIndicator
                 issueCount={validation.issueCount}
@@ -536,6 +579,8 @@ const WorkflowCanvasInner = () => {
             className="bg-[#121212]"
             deleteKeyCode={null}
             panOnDrag={true}
+            selectionOnDrag={true}
+            selectionKeyCode="Shift"
             zoomOnScroll={true}
             panOnScroll={false}
           >
@@ -543,12 +588,12 @@ const WorkflowCanvasInner = () => {
           </ReactFlow>
 
           {/* Shortcuts Info */}
-          <div className="absolute bottom-4 left-4 z-10">
+          <div className="absolute bottom-4 left-4 z-10 flex items-center gap-3">
             <Tooltip>
               <TooltipTrigger asChild>
                 <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-900/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-slate-800 cursor-help hover:text-slate-300 transition-colors">
                   <Keyboard className="w-3.5 h-3.5" />
-                  COMMAND_GUIDE
+                  SHORTCUTS
                 </div>
               </TooltipTrigger>
               <TooltipContent side="top" className="bg-slate-900 border-slate-800 p-3 rounded-xl shadow-2xl">
@@ -556,10 +601,14 @@ const WorkflowCanvasInner = () => {
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DEL</kbd> Delete Node</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ENT</kbd> Edit Params</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ESC</kbd> Clear Selection</div>
-                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DRG</kbd> Multi-Select</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">⇧+DRAG</kbd> Multi-Select</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DBL-CLICK</kbd> Enter Group</div>
                 </div>
               </TooltipContent>
             </Tooltip>
+            <span className="text-[10px] text-slate-600">
+              <kbd className="px-1 py-0.5 bg-slate-800/50 rounded text-slate-500">⇧</kbd>+Drag to select · Double-click group to enter
+            </span>
           </div>
         </div>
 
