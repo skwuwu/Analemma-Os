@@ -17,7 +17,7 @@ import os
 import time
 from typing import Any, Dict, Generator, List, Optional
 
-from services.llm.bedrock_client import is_mock_mode, get_mock_workflow, MOCK_UI_DELAY_MS
+from src.services.llm.bedrock_client import is_mock_mode, get_mock_workflow, MOCK_UI_DELAY_MS
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
@@ -240,7 +240,7 @@ def select_and_invoke_stream(
     Yields:
         JSONL 형식의 응답 청크
     """
-    from services.llm.bedrock_client import invoke_bedrock_stream
+    from src.services.llm.bedrock_client import invoke_bedrock_stream
     
     model = model_id or os.getenv("DEFAULT_MODEL_ID", "gemini-2.0-flash")
     

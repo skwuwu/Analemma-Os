@@ -519,10 +519,14 @@ def lambda_handler(event, context):
         if quota_reservation_id:
             payload['quota_reservation_id'] = quota_reservation_id
         
+        # Initialize workflow_config (will be populated by orchestrator selection or fallback)
+        workflow_config = None
+        
         # 테스트 설정이 있으면 Step Functions payload에 추가
         if test_config_to_inject:
             payload['test_workflow_config'] = test_config_to_inject
             logger.info("🧪 MOCK_MODE: test_workflow_config injected, will bypass DynamoDB")
+            workflow_config = test_config_to_inject  # Store for potential use
         elif workflow_config:
             # 실제 워크플로우 설정을 payload에 추가 (이미 로드됨)
             # Ensure config is serializable (Decimal conversion)

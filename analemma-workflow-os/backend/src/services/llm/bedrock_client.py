@@ -30,9 +30,10 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 # 상수 정의
 # ============================================================================
 
-# 모델 ID
+# 모델 ID (Claude requires inference profile ARNs for on-demand throughput)
+# Use cross-region inference profiles: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
 MODEL_HAIKU = os.getenv("HAIKU_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
-MODEL_SONNET = os.getenv("SONNET_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
+MODEL_SONNET = os.getenv("SONNET_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
 MODEL_GEMINI_PRO = os.getenv("GEMINI_PRO_MODEL_ID", "gemini-1.5-pro")
 MODEL_GEMINI_FLASH = os.getenv("GEMINI_FLASH_MODEL_ID", "gemini-1.5-flash")
 
@@ -190,7 +191,7 @@ def invoke_bedrock_stream(
     if "gemini" in model_to_use.lower():
         try:
             logger.info(f"Using Gemini model: {model_to_use}")
-            from services.llm.gemini_client import invoke_gemini_stream
+            from src.services.llm.gemini_client import invoke_gemini_stream
             yield from invoke_gemini_stream(system_prompt, user_request, model_to_use)
             return
         except Exception as e:
