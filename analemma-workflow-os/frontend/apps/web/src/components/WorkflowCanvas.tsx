@@ -1,4 +1,4 @@
-import { useCallback, useState, useMemo, useEffect, Fragment } from 'react';
+import { useCallback, useState, useMemo, useEffect, Fragment, lazy } from 'react';
 import {
   ReactFlow,
   Background,
@@ -17,6 +17,8 @@ import {
 } from '@xyflow/react';
 import { useShallow } from 'zustand/react/shallow';
 import '@xyflow/react/dist/style.css';
+
+// Lazy load node components to prevent bundler hoisting issues
 import { AIModelNode } from './nodes/AIModelNode';
 import { OperatorNode } from './nodes/OperatorNode';
 import { TriggerNode } from './nodes/TriggerNode';

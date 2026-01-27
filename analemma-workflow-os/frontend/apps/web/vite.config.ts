@@ -18,6 +18,13 @@ export default defineConfig(({ mode }) => ({
   build: {
     // Chunk size warning threshold (KB)
     chunkSizeWarningLimit: 500,
+    // Increase memory and optimize for large projects
+    minify: 'terser',
+    terserOptions: {
+      compress: {
+        drop_console: mode === 'production',
+      },
+    },
     // Optimize dependencies to prevent circular dependency crashes
     commonjsOptions: {
       transformMixedEsModules: true,
@@ -27,15 +34,43 @@ export default defineConfig(({ mode }) => ({
       onwarn(warning, warn) {
         // Suppress circular dependency warnings
         if (warning.code === 'CIRCULAR_DEPENDENCY') return;
+        // Suppress eval warnings
+        if (warning.code === 'EVAL') return;
         warn(warning);
       },
       output: {
-        // Vendor chunking for optimal caching
-        manualChunks: {
-          'react-vendor': ['react', 'react-dom', 'react-router-dom'],
-          'xyflow': ['@xyflow/react'],
-          'tanstack': ['@tanstack/react-query'],
-          'ui-vendor': ['lucide-react', 'sonner'],
+        // More aggressive code splitting to prevent circular deps
+        manualChunks(id) {
+          // React ecosystem
+          if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
+            return 'react-vendor';
+          }
+          // XYFlow
+          if (id.includes('node_modules/@xyflow')) {
+            return 'xyflow';
+          }
+          // TanStack Query
+          if (id.includes('node_modules/@tanstack')) {
+            return 'tanstack';
+          }
+          // UI Libraries
+          if (id.includes('node_modules/lucide-react') || id.includes('node_modules/sonner')) {
+            return 'ui-vendor';
+          }
+          // Framer Motion (heavy animation library)
+          if (id.includes('node_modules/framer-motion')) {
+            return 'framer-motion';
+          }
+          // Zustand stores (separate to avoid circular deps)
+          if (id.includes('/lib/workflowStore') || id.includes('/lib/codesignStore')) {
+            return 'stores';
+          }
+          // Workflow components (separate chunk to break circular deps)
+          if (id.includes('/components/WorkflowCanvas') || 
+              id.includes('/components/nodes/') ||
+              id.includes('/components/edges/')) {
+            return 'workflow-canvas';
+          }
         },
       },
     },
