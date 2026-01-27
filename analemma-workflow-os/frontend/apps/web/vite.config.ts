@@ -36,7 +36,15 @@ export default defineConfig(({ mode }) => ({
       },
       output: {
         manualChunks(id) {
-          // 0. d3 libraries - CRITICAL: separate to avoid circular dependency issues
+          // 0. UI component libraries - MUST be separate from app logic
+          if (id.includes('node_modules/@radix-ui')) {
+            return 'radix-ui';
+          }
+          if (id.includes('node_modules/lucide-react')) {
+            return 'lucide-icons';
+          }
+          
+          // 1. d3 libraries - CRITICAL: separate to avoid circular dependency issues
           // d3 packages have internal circular deps that cause runtime initialization errors
           if (id.includes('node_modules/d3-selection') ||
               id.includes('node_modules/d3-transition') ||
@@ -52,7 +60,7 @@ export default defineConfig(({ mode }) => ({
             return 'json-viewer';
           }
           
-          // 1. Zustand stores - must load before app code
+          // 2. Zustand stores - must load before app code
           if (id.includes('src/lib/workflowStore') || 
               id.includes('src/lib/codesignStore') ||
               id.includes('src/lib/streamingFetch') ||
@@ -60,7 +68,7 @@ export default defineConfig(({ mode }) => ({
             return 'stores';
           }
           
-          // 2. React ecosystem - core dependency
+          // 3. React ecosystem - core dependency
           if (id.includes('node_modules/react-dom')) {
             return 'react-vendor';
           }
@@ -68,19 +76,24 @@ export default defineConfig(({ mode }) => ({
             return 'react-vendor';
           }
           
-          // 3. Zustand library
+          // 4. Zustand library
           if (id.includes('node_modules/zustand')) {
             return 'zustand-vendor';
           }
           
-          // 4. XYFlow - separate heavy library (may use d3 internally)
+          // 5. XYFlow - separate heavy library (may use d3 internally)
           if (id.includes('node_modules/@xyflow')) {
             return 'xyflow';
           }
           
-          // 5. TanStack Query
+          // 6. TanStack Query
           if (id.includes('node_modules/@tanstack')) {
             return 'tanstack';
+          }
+          
+          // 7. Framer Motion
+          if (id.includes('node_modules/framer-motion')) {
+            return 'framer';
           }
           
           // Let Rollup handle remaining app code

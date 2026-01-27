@@ -64,6 +64,28 @@ import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const WorkflowCanvasInner = () => {
+  // ==========================================
+  // 1. ALL STATE DECLARATIONS FIRST (CRITICAL: Must be before any useEffect)
+  // ==========================================
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [selectedNodes, setSelectedNodes] = useState<Node[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
+  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<any, any> | null>(null);
+  
+  // Right Panel System
+  const [rightPanelOpen, setRightPanelOpen] = useState(false);
+  const [activePanelTab, setActivePanelTab] = useState<RailTab>('timeline');
+  
+  // Plan Briefing & Time Machine state
+  const [briefingOpen, setBriefingOpen] = useState(false);
+  const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
+  const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
+  const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
+
+  // ==========================================
+  // 2. NODE/EDGE TYPES (useMemo)
+  // ==========================================
   // Wrap lazy-loaded nodes with Suspense to control execution order
   // This prevents "Cannot access X before initialization" errors
   const nodeTypes: NodeTypes = useMemo(() => ({
@@ -98,6 +120,9 @@ const WorkflowCanvasInner = () => {
     smart: SmartEdge,
   }), []);
 
+  // ==========================================
+  // 3. STORE SUBSCRIPTIONS
+  // ==========================================
   // 1. Store optimization: Subscribe to nodes/edges with shallow comparison
   const { nodes, edges, subgraphs, navigationPath } = useWorkflowStore(
     useShallow((state) => ({
@@ -250,22 +275,9 @@ const WorkflowCanvasInner = () => {
     });
   }, [onEdgesChange, recordChange]);
 
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
-  const [selectedNodes, setSelectedNodes] = useState<Node[]>([]);
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
-  const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<any, any> | null>(null);
-
-  // Right Panel System
-  const [rightPanelOpen, setRightPanelOpen] = useState(false);
-  const [activePanelTab, setActivePanelTab] = useState<RailTab>('timeline');
-
-  // Plan Briefing & Time Machine state
-  const [briefingOpen, setBriefingOpen] = useState(false);
-  const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
-  const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
-  const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
-
+  // ==========================================
+  // 4. HOOKS FOR BRIEFING AND CHECKPOINTS
+  // ==========================================
   // Hooks for briefing and checkpoints
   const planBriefing = usePlanBriefing({
     onSuccess: () => {
