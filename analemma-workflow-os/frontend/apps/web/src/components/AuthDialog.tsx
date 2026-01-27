@@ -19,34 +19,34 @@ import { SignUpData } from '@/types/auth';
 import { resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { toast } from 'sonner';
 
-// --- Schemas (Cognito 정책에 맞춰 비밀번호 강도 강화) ---
+// --- Schemas (Password strength rules aligned with Cognito policy) ---
 const passwordRules = z
   .string()
-  .min(8, '비밀번호는 8자 이상이어야 합니다.')
-  .regex(/[0-9]/, '숫자를 포함해야 합니다.')
-  .regex(/[A-Z]/, '대문자를 포함해야 합니다.')
-  .regex(/[a-z]/, '소문자를 포함해야 합니다.')
-  .regex(/[^A-Za-z0-9]/, '특수문자를 포함해야 합니다.');
+  .min(8, 'Password must be at least 8 characters.')
+  .regex(/[0-9]/, 'Must include a number.')
+  .regex(/[A-Z]/, 'Must include an uppercase letter.')
+  .regex(/[a-z]/, 'Must include a lowercase letter.')
+  .regex(/[^A-Za-z0-9]/, 'Must include a special character.');
 
 const signInSchema = z.object({
-  email: z.string().email('유효한 이메일 주소를 입력해주세요.'),
-  password: z.string().min(1, '비밀번호를 입력해주세요.'),
+  email: z.string().email('Please enter a valid email address.'),
+  password: z.string().min(1, 'Please enter your password.'),
 });
 
 const signUpSchema = z.object({
-  name: z.string().min(2, '이름은 2자 이상이어야 합니다.'),
-  email: z.string().email('유효한 이메일 주소를 입력해주세요.'),
-  nickname: z.string().min(2, '닉네임은 2자 이상이어야 합니다.'),
+  name: z.string().min(2, 'Name must be at least 2 characters.'),
+  email: z.string().email('Please enter a valid email address.'),
+  nickname: z.string().min(2, 'Nickname must be at least 2 characters.'),
   password: passwordRules,
 });
 
 const resetPasswordSchema = z.object({
-  email: z.string().email('유효한 이메일 주소를 입력해주세요.'),
+  email: z.string().email('Please enter a valid email address.'),
 });
 
 const confirmResetSchema = z.object({
-  email: z.string().email('유효한 이메일 주소를 입력해주세요.'),
-  code: z.string().min(6, '인증 코드는 6자리입니다.'),
+  email: z.string().email('Please enter a valid email address.'),
+  code: z.string().min(6, 'Verification code must be 6 digits.'),
   newPassword: passwordRules,
 });
 
@@ -122,14 +122,14 @@ export const AuthDialog = ({
   const onResetSubmit = async (data: ResetPasswordFormValues) => {
     try {
       await resetPassword({ username: data.email });
-      toast.success('인증 코드가 이메일로 전송되었습니다.');
+      toast.success('Verification code has been sent to your email.');
       
-      // [UX 개선] 입력한 이메일을 다음 단계 폼에 자동으로 입력
+      // [UX Improvement] Auto-fill email in next step form
       setConfirmValue('email', data.email);
       setIsResetConfirmMode(true); 
     } catch (error: any) {
       console.error('Reset password error:', error);
-      toast.error(error.message || '인증 코드 발송에 실패했습니다.');
+      toast.error(error.message || 'Failed to send verification code.');
     }
   };
 
@@ -140,19 +140,19 @@ export const AuthDialog = ({
         confirmationCode: data.code,
         newPassword: data.newPassword,
       });
-      toast.success('비밀번호가 변경되었습니다. 로그인해주세요.');
+      toast.success('Password has been changed. Please sign in.');
       
-      // 상태 초기화 및 로그인 탭으로 이동
+      // Reset state and navigate to sign in tab
       setIsResetConfirmMode(false);
       resetConfirmForm();
       setActiveTab('signin');
     } catch (error: any) {
       console.error('Confirm reset password error:', error);
-      toast.error(error.message || '비밀번호 재설정에 실패했습니다.');
+      toast.error(error.message || 'Failed to reset password.');
     }
   };
 
-  // 탭 변경 시 리셋 모드 해제
+  // Clear reset mode when switching tabs
   const handleTabChange = (value: string) => {
     setActiveTab(value);
     if (value !== 'reset') setIsResetConfirmMode(false);
@@ -163,16 +163,16 @@ export const AuthDialog = ({
       <DialogContent className="sm:max-w-md">
         <Tabs value={activeTab} onValueChange={handleTabChange}>
           <TabsList className="grid w-full grid-cols-3">
-            <TabsTrigger value="signin">로그인</TabsTrigger>
-            <TabsTrigger value="signup">회원가입</TabsTrigger>
-            <TabsTrigger value="reset">PW 찾기</TabsTrigger>
+            <TabsTrigger value="signin">Sign In</TabsTrigger>
+            <TabsTrigger value="signup">Sign Up</TabsTrigger>
+            <TabsTrigger value="reset">Reset PW</TabsTrigger>
           </TabsList>
 
           {/* --- Sign In Tab --- */}
           <TabsContent value="signin" className="space-y-4">
             <DialogHeader>
-              <DialogTitle>로그인</DialogTitle>
-              <DialogDescription>서비스 이용을 위해 로그인하세요.</DialogDescription>
+              <DialogTitle>Sign In</DialogTitle>
+              <DialogDescription>Sign in to access the service.</DialogDescription>
             </DialogHeader>
             
             <Button
@@ -183,7 +183,7 @@ export const AuthDialog = ({
             >
                {/* SVG Icon Simplified for brevity */}
               <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24"><path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" /><path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" /><path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" /><path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" /></svg>
-              Google 계정으로 계속하기
+              Continue with Google
             </Button>
 
             <div className="relative">
@@ -193,18 +193,18 @@ export const AuthDialog = ({
 
             <form onSubmit={handleSubmitSignIn(onSignInSubmit)} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="signin-email">이메일</Label>
+                <Label htmlFor="signin-email">Email</Label>
                 <Input id="signin-email" type="email" disabled={isLoading} {...registerSignIn('email')} />
                 {errorsSignIn.email && <p className="text-sm text-red-500">{errorsSignIn.email.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="signin-password">비밀번호</Label>
+                <Label htmlFor="signin-password">Password</Label>
                 <Input id="signin-password" type="password" disabled={isLoading} {...registerSignIn('password')} />
                 {errorsSignIn.password && <p className="text-sm text-red-500">{errorsSignIn.password.message}</p>}
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
                 {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                로그인
+                Sign In
               </Button>
             </form>
           </TabsContent>
@@ -212,33 +212,33 @@ export const AuthDialog = ({
           {/* --- Sign Up Tab --- */}
           <TabsContent value="signup" className="space-y-4">
             <DialogHeader>
-              <DialogTitle>회원가입</DialogTitle>
-              <DialogDescription>새로운 계정을 생성합니다.</DialogDescription>
+              <DialogTitle>Sign Up</DialogTitle>
+              <DialogDescription>Create a new account.</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmitSignUp(onSignUpSubmit)} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="signup-name">이름</Label>
+                <Label htmlFor="signup-name">Name</Label>
                 <Input id="signup-name" disabled={isLoading} {...registerSignUp('name')} />
                 {errorsSignUp.name && <p className="text-xs text-red-500">{errorsSignUp.name.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="signup-nickname">닉네임</Label>
+                <Label htmlFor="signup-nickname">Nickname</Label>
                 <Input id="signup-nickname" disabled={isLoading} {...registerSignUp('nickname')} />
                 {errorsSignUp.nickname && <p className="text-xs text-red-500">{errorsSignUp.nickname.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="signup-email">이메일</Label>
+                <Label htmlFor="signup-email">Email</Label>
                 <Input id="signup-email" type="email" disabled={isLoading} {...registerSignUp('email')} />
                 {errorsSignUp.email && <p className="text-xs text-red-500">{errorsSignUp.email.message}</p>}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="signup-password">비밀번호</Label>
+                <Label htmlFor="signup-password">Password</Label>
                 <Input id="signup-password" type="password" disabled={isLoading} {...registerSignUp('password')} />
                 {errorsSignUp.password && <p className="text-xs text-red-500">{errorsSignUp.password.message}</p>}
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
                 {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                가입하기
+                Sign Up
               </Button>
             </form>
           </TabsContent>
@@ -246,58 +246,58 @@ export const AuthDialog = ({
           {/* --- Reset Password Tab (Switchable View) --- */}
           <TabsContent value="reset" className="space-y-4">
             {!isResetConfirmMode ? (
-              // Step 1: 이메일 입력
+              // Step 1: Enter email
               <>
                 <DialogHeader>
-                  <DialogTitle>비밀번호 찾기</DialogTitle>
-                  <DialogDescription>가입한 이메일로 인증 코드를 발송합니다.</DialogDescription>
+                  <DialogTitle>Reset Password</DialogTitle>
+                  <DialogDescription>We'll send a verification code to your registered email.</DialogDescription>
                 </DialogHeader>
                 <form onSubmit={handleSubmitReset(onResetSubmit)} className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="reset-email">이메일</Label>
+                    <Label htmlFor="reset-email">Email</Label>
                     <Input id="reset-email" type="email" disabled={isLoading} {...registerReset('email')} />
                     {errorsReset.email && <p className="text-xs text-red-500">{errorsReset.email.message}</p>}
                   </div>
                   <Button type="submit" className="w-full" disabled={isLoading}>
                     {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    인증 코드 보내기
+                    Send Verification Code
                   </Button>
                 </form>
               </>
             ) : (
-              // Step 2: 인증 코드 및 새 비밀번호 입력 (Confirm)
+              // Step 2: Enter verification code and new password (Confirm)
               <>
                 <DialogHeader>
-                  <DialogTitle>비밀번호 재설정</DialogTitle>
-                  <DialogDescription>이메일로 전송된 코드와 새 비밀번호를 입력하세요.</DialogDescription>
+                  <DialogTitle>Confirm Password Reset</DialogTitle>
+                  <DialogDescription>Enter the code sent to your email and your new password.</DialogDescription>
                 </DialogHeader>
                 <form onSubmit={handleSubmitConfirm(onConfirmSubmit)} className="space-y-4">
                   <div className="space-y-2">
-                    <Label htmlFor="confirm-email">이메일</Label>
+                    <Label htmlFor="confirm-email">Email</Label>
                     <Input 
                         id="confirm-email" 
                         type="email" 
-                        disabled={true} // 이메일은 수정 불가 (UX)
+                        disabled={true} // Email is read-only (UX)
                         className="bg-muted"
                         {...registerConfirm('email')} 
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="confirm-code">인증 코드 (6자리)</Label>
+                    <Label htmlFor="confirm-code">Verification Code (6 digits)</Label>
                     <Input id="confirm-code" placeholder="123456" disabled={isLoading} {...registerConfirm('code')} />
                     {errorsConfirm.code && <p className="text-xs text-red-500">{errorsConfirm.code.message}</p>}
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="confirm-password">새 비밀번호</Label>
+                    <Label htmlFor="confirm-password">New Password</Label>
                     <Input id="confirm-password" type="password" disabled={isLoading} {...registerConfirm('newPassword')} />
                     {errorsConfirm.newPassword && <p className="text-xs text-red-500">{errorsConfirm.newPassword.message}</p>}
                   </div>
                   <Button type="submit" className="w-full" disabled={isLoading}>
                     {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    비밀번호 변경하기
+                    Change Password
                   </Button>
                   
-                  {/* 뒤로 가기 버튼 */}
+                  {/* Back button */}
                   <Button
                     type="button"
                     variant="ghost"
@@ -307,7 +307,7 @@ export const AuthDialog = ({
                     disabled={isLoading}
                   >
                     <ArrowLeft className="mr-2 h-4 w-4" />
-                    이메일 다시 입력하기
+                    Re-enter Email
                   </Button>
                 </form>
               </>

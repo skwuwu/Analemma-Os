@@ -16,11 +16,21 @@ export default defineConfig(({ mode }) => ({
     },
   },
   build: {
-    // 청크 크기 경고 임계값 (KB)
+    // Chunk size warning threshold (KB)
     chunkSizeWarningLimit: 500,
+    // Optimize dependencies to prevent circular dependency crashes
+    commonjsOptions: {
+      transformMixedEsModules: true,
+    },
     rollupOptions: {
+      // Prevent circular dependency errors during build
+      onwarn(warning, warn) {
+        // Suppress circular dependency warnings
+        if (warning.code === 'CIRCULAR_DEPENDENCY') return;
+        warn(warning);
+      },
       output: {
-        // 벤더 청킹으로 캐싱 효율 극대화
+        // Vendor chunking for optimal caching
         manualChunks: {
           'react-vendor': ['react', 'react-dom', 'react-router-dom'],
           'xyflow': ['@xyflow/react'],
