@@ -227,6 +227,16 @@ export async function streamDesignAssistant(body: unknown, opts: StreamOptions =
 export async function streamCoDesignAssistant(endpoint: string, body: unknown, opts: StreamOptions = {}) {
   const { onMessage, onDone, onError, authToken, timeout = DEFAULT_TIMEOUT_MS } = opts;
   const resolved = opts.url ? { url: opts.url, requiresAuth: false } : resolveCoDesignEndpoint(endpoint);
+  
+  // 디버깅: 요청 URL 및 설정 로그
+  console.log('[CoDesign] Request Details:', {
+    endpoint,
+    resolvedUrl: resolved.url,
+    requiresAuth: resolved.requiresAuth,
+    hasAuthToken: !!authToken,
+    body: JSON.stringify(body).substring(0, 200) + '...'
+  });
+  
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -246,8 +256,11 @@ export async function streamCoDesignAssistant(endpoint: string, body: unknown, o
 
   let res: Response;
   try {
+    console.log('[CoDesign] Sending fetch request to:', resolved.url);
     res = await fetch(resolved.url, fetchOptions);
+    console.log('[CoDesign] Response received:', { status: res.status, ok: res.ok });
   } catch (err) {
+    console.error('[CoDesign] Fetch error:', err);
     const e = err instanceof Error ? err : new Error(String(err));
     onError && onError(e);
     throw e;

@@ -98,9 +98,13 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
     setUserScrolledUp(false);
 
     try {
+      console.log('[WorkflowChat] Starting codesign request...');
       const session = await fetchAuthSession();
       const token = session.tokens?.accessToken?.toString();
+      console.log('[WorkflowChat] Auth token obtained:', !!token);
+      
       const { nodes, edges } = useWorkflowStore.getState();
+      console.log('[WorkflowChat] Workflow state:', { nodeCount: nodes.length, edgeCount: edges.length });
 
       const isDesignerMode = canvasMode.mode === 'agentic-designer';
       if (isDesignerMode) {
@@ -115,8 +119,15 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
         session_id: isDesignerMode ? `session_${Date.now()}` : undefined
       };
 
+      console.log('[WorkflowChat] Payload prepared:', {
+        mode: bodyPayload.mode,
+        userRequest: userMessage.substring(0, 50),
+        recentChangesCount: bodyPayload.recent_changes.length
+      });
+
       abortCtrlRef.current = new AbortController();
 
+      console.log('[WorkflowChat] Calling streamCoDesignAssistant...');
       await streamCoDesignAssistant('codesign', bodyPayload, {
         authToken: token,
         signal: abortCtrlRef.current.signal,
