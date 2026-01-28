@@ -573,15 +573,16 @@ async def _generate_initial_workflow_stream(user_request: str, owner_id: str, se
             return
         
         # 동적 모델 선택 (Agentic Designer 모드)
-        if get_model_for_canvas_mode is None:
-            logger.warning("get_model_for_canvas_mode not available, using default model")
-            selected_model_id = "gemini-1.5-flash"
-        else:
-            selected_model_id = get_model_for_canvas_mode(
+        try:
+            from src.common.model_router import get_model_for_canvas_mode as get_model
+            selected_model_id = get_model(
                 canvas_mode="agentic-designer",
                 current_workflow={"nodes": [], "edges": []},
                 user_request=user_request
             )
+        except ImportError as e:
+            logger.warning(f"get_model_for_canvas_mode not available: {e}, using default model")
+            selected_model_id = "gemini-1.5-flash"
         
         # OpenAI 모델은 지원하지 않으므로 Gemini로 fallback
         if "gpt" in selected_model_id.lower() or "openai" in selected_model_id.lower():

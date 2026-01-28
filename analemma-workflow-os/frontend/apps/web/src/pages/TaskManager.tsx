@@ -137,7 +137,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   });
   
   // API 훅
-  const { resumeWorkflow, stopExecution, isStopping, isResuming } = useWorkflowApi();
+  const { resumeWorkflow, stopExecution, isStopping, isResuming, dismissNotification, isDismissing } = useWorkflowApi();
   
   // ExecutionTimeline 훅
   const { executionTimelines, fetchExecutionTimeline } = useExecutionTimeline(notifications, API_BASE);
@@ -222,7 +222,9 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   // Task 선택 핸들러
   const handleTaskClick = useCallback((task: TaskSummary) => {
     taskManager.selectTask(task.task_id);
-  }, [taskManager]);
+    // Fetch execution timeline when task is selected
+    fetchExecutionTimeline(task.task_id);
+  }, [taskManager, fetchExecutionTimeline]);
 
   const handleArtifactClick = useCallback((artifactId: string) => {
     setSelectedArtifactId(artifactId);
@@ -475,6 +477,29 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                               >
                                 <Square className="w-4 h-4 mr-2" />
                                 Stop
+                              </Button>
+                            )}
+                            {/* Dismiss Button (실패/취소) */}
+                            {(taskManager.selectedTask.status === 'failed' || taskManager.selectedTask.status === 'cancelled') && (
+                              <Button 
+                                size="sm" 
+                                variant="outline"
+                                onClick={async () => {
+                                  if (taskManager.selectedTask) {
+                                    try {
+                                      await dismissNotification(taskManager.selectedTask.task_id);
+                                      toast.success('Notification dismissed');
+                                      // Refresh task list to reflect the change
+                                      taskManager.refetch();
+                                    } catch (error) {
+                                      // Error handled by mutation
+                                    }
+                                  }
+                                }}
+                                disabled={isDismissing}
+                              >
+                                <Bell className="w-4 h-4 mr-2" />
+                                Dismiss
                               </Button>
                             )}
                         </div>

@@ -167,6 +167,41 @@ export const useWorkflowStore = create<WorkflowState>()(
           toast.error('This connection already exists.');
           return;
         }
+
+        // 3. Check if this connection creates a cycle (back-edge detection)
+        const wouldCreateCycle = () => {
+          // Simulate adding the new edge
+          const tempEdges = [...state.edges, {
+            id: 'temp',
+            source: connection.source!,
+            target: connection.target!
+          }];
+
+          // DFS cycle detection
+          const visited = new Set<string>();
+          const recStack = new Set<string>();
+
+          const hasCycle = (nodeId: string): boolean => {
+            visited.add(nodeId);
+            recStack.add(nodeId);
+
+            const outgoing = tempEdges.filter(e => e.source === nodeId);
+            for (const edge of outgoing) {
+              if (!visited.has(edge.target)) {
+                if (hasCycle(edge.target)) return true;
+              } else if (recStack.has(edge.target)) {
+                return true; // Cycle detected
+              }
+            }
+
+            recStack.delete(nodeId);
+            return false;
+          };
+
+          return hasCycle(connection.source!);
+        };
+
+        const createsBackEdge = wouldCreateCycle();
         
         // 검증 통과: 새 엣지 추가
         set((state) => ({
@@ -175,10 +210,20 @@ export const useWorkflowStore = create<WorkflowState>()(
               ...connection,
               animated: true,
               style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 },
+              data: {
+                ...connection.data,
+                isBackEdge: createsBackEdge,
+                edgeType: createsBackEdge ? 'while' : 'edge' // Default to 'while' for loop back-edges
+              }
             },
             state.edges
           ),
         }));
+
+        // Notify user if back-edge was created
+        if (createsBackEdge) {
+          toast.success('순환 구조가 생성되었습니다. for_each 반복을 위한 back-edge로 설정되었습니다.');
+        }
       },
 
       // 선택된 노드들을 그룹(서브그래프)으로 묶기

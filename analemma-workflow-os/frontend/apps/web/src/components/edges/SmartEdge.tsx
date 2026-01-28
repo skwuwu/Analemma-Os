@@ -66,6 +66,8 @@ interface SmartEdgeData extends Record<string, unknown> {
   edgeType?: BackendEdgeType; // 백엔드 엣지 타입
   condition?: string;       // 조건식 (if, while용)
   max_iterations?: number;  // while 최대 반복 횟수
+  isBackEdge?: boolean;     // 순환 구조의 back-edge 여부
+  isInCycle?: boolean;      // 순환 구조에 포함되어 있는지 여부
 }
 
 export const SmartEdge = ({
@@ -126,14 +128,22 @@ export const SmartEdge = ({
     targetX, targetY, targetPosition,
   });
 
+  // Check if this edge is a back-edge (part of a cycle/loop)
+  const isBackEdge = edgeData?.isBackEdge === true;
+  const isInCycle = edgeData?.isInCycle === true;
+
   // 2. 타입에 따른 스타일 적용
   const edgeStyle = {
     ...(style as Record<string, unknown>),
-    stroke: edgeData?.active ? '#3b82f6' : typeConfig.color,
-    strokeWidth: edgeData?.active ? 2.5 : 2,
+    stroke: edgeData?.active ? '#3b82f6' : 
+            isBackEdge ? 'hsl(38 92% 50%)' : // Orange for back-edges (loop feedback)
+            typeConfig.color,
+    strokeWidth: edgeData?.active ? 2.5 : isBackEdge ? 2.5 : 2,
     animation: edgeData?.active ? 'dashdraw 0.5s linear infinite' : 
+               isBackEdge ? 'dashdraw 2s linear infinite' : // Animated back-edges
                currentType === 'while' ? 'dashdraw 2s linear infinite' : 'none',
     strokeDasharray: edgeData?.active ? '5' : 
+                     isBackEdge ? '8 4' : // Dashed back-edges
                      currentType === 'while' ? '8 4' : 
                      currentType === 'if' ? '4 2' : '0',
   };
@@ -158,7 +168,7 @@ export const SmartEdge = ({
             position: 'absolute',
             transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
             pointerEvents: 'all',
-            zIndex: 10,
+            zIndex: isBackEdge ? 15 : 10, // Higher z-index for back-edges to prevent overlap issues
           }}
           className="nodrag nopan"
         >
@@ -168,11 +178,14 @@ export const SmartEdge = ({
               <DropdownMenuTrigger asChild>
                 <button
                   className="flex items-center gap-1 px-2 py-1 rounded-md bg-background border shadow-sm hover:bg-muted transition-colors text-xs"
-                  style={{ borderColor: typeConfig.color }}
+                  style={{ 
+                    borderColor: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color,
+                    backgroundColor: isBackEdge ? 'hsla(38 92% 50% / 0.1)' : undefined
+                  }}
                 >
-                  <IconComponent className="w-3 h-3" style={{ color: typeConfig.color }} />
-                  <span className="font-medium" style={{ color: typeConfig.color }}>
-                    {typeConfig.label}
+                  <IconComponent className="w-3 h-3" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }} />
+                  <span className="font-medium" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }}>
+                    {isBackEdge ? 'Loop Back' : typeConfig.label}
                   </span>
                   <ChevronDown className="w-3 h-3 text-muted-foreground" />
                 </button>
@@ -251,11 +264,20 @@ export const SmartEdge = ({
               {/* D. 전달 데이터 툴팁 */}
               <TooltipContent className="max-w-[300px] p-2">
                 <div className="space-y-1">
+                  {isBackEdge && (
+                    <div className="mb-2 p-2 bg-orange-500/10 border border-orange-500/30 rounded">
+                      <p className="text-xs font-bold text-orange-500">🔄 순환 구조 (Back-Edge)</p>
+                      <p className="text-[10px] text-muted-foreground mt-1">
+                        이 엣지는 for_each 반복을 위한 피드백 경로입니다.
+                      </p>
+                    </div>
+                  )}
                   <h4 className="font-medium leading-none text-xs text-muted-foreground mb-2">
-                    {currentType === 'while' && 'While Loop 설정'}
-                    {currentType === 'if' && '조건부 분기'}
-                    {currentType === 'edge' && 'State Update'}
-                    {currentType === 'hitp' && '사람 승인 대기'}
+                    {isBackEdge && 'Loop Feedback Edge'}
+                    {!isBackEdge && currentType === 'while' && 'While Loop 설정'}
+                    {!isBackEdge && currentType === 'if' && '조건부 분기'}
+                    {!isBackEdge && currentType === 'edge' && 'State Update'}
+                    {!isBackEdge && currentType === 'hitp' && '사람 승인 대기'}
                   </h4>
                   {edgeData?.condition && (
                     <p className="text-xs"><strong>조건:</strong> {edgeData.condition as string}</p>
