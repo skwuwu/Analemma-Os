@@ -127,8 +127,42 @@ export const SavedWorkflows = ({
       // 2. 심각한 오류가 있으면 저장 차단
       const criticalIssues = auditIssues.filter(issue => issue.level === 'error');
       if (criticalIssues.length > 0) {
+        // 🔍 상세 에러 정보 출력
+        const workflowWithSubgraphs = {
+          ...currentWorkflow,
+          subgraphs: subgraphs || {},
+        };
+        const config: BackendWorkflow = convertWorkflowToBackendFormat(workflowWithSubgraphs);
+        
+        console.error('❌ [SavedWorkflows] Cannot save - Critical validation issues:', {
+          issueCount: criticalIssues.length,
+          issues: criticalIssues.map(issue => ({
+            level: issue.level,
+            message: issue.message,
+            nodeId: issue.nodeId,
+            category: issue.category
+          })),
+          attemptedConfig: {
+            name: workflowName || currentWorkflow.name || 'untitled',
+            nodeCount: config.nodes?.length || 0,
+            edgeCount: config.edges?.length || 0,
+            nodes: config.nodes?.map((n: any) => ({
+              id: n.id,
+              type: n.type,
+              label: n.label,
+              hasConfig: !!n.config,
+              configKeys: n.config ? Object.keys(n.config) : []
+            })),
+            edges: config.edges?.map((e: any) => ({
+              source: e.source,
+              target: e.target,
+              type: e.type
+            })),
+            fullConfig: config
+          }
+        });
+        
         toast.error(`Cannot save: ${criticalIssues.length} critical issue(s) found. Please fix them first.`);
-        console.error('[SavedWorkflows] Critical issues:', criticalIssues);
         return;
       }
 

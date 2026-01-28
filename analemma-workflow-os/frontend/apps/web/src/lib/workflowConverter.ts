@@ -97,10 +97,14 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
     case 'aiModel':
       backendNode.type = 'llm_chat';
       backendNode.label = node.data?.label || 'AI Model';
+      // prompt_content 기본값: 비어있으면 자동으로 기본 프롬프트 설정
+      const promptContent = node.data.prompt_content || node.data.prompt || '';
+      const finalPromptContent = promptContent.trim() || 'Please perform the task based on the current workflow state and context.';
+      
       backendNode.config = {
         provider: node.data.provider || 'openai',
         model: node.data.model || 'gpt-4',
-        prompt_content: node.data.prompt_content || node.data.prompt || '',
+        prompt_content: finalPromptContent,
         system_prompt: node.data.system_prompt,
         temperature: node.data.temperature || 0.7,
         max_tokens: node.data.max_tokens || node.data.maxTokens || 256,
@@ -987,6 +991,37 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
   });
 
   const allBackendEdges = [...backendEdges, ...validatedAdditionalEdges];
+
+  // 10. 끝점 노드 처리: outgoing edge가 없는 노드들에 자동으로 end 노드 연결
+  const nodeIdsWithOutgoingEdges = new Set(allBackendEdges.map(e => e.source));
+  const deadEndNodes = backendNodes.filter(node => !nodeIdsWithOutgoingEdges.has(node.id));
+  
+  // end 노드가 없으면 자동 생성하고 끝점 노드들과 연결
+  if (deadEndNodes.length > 0) {
+    const endNodeId = '__auto_end';
+    const hasEndNode = backendNodes.some(n => n.type === 'end' || n.id === endNodeId);
+    
+    if (!hasEndNode) {
+      // end 노드 추가
+      backendNodes.push({
+        id: endNodeId,
+        type: 'end',
+        label: 'End',
+        config: {},
+      });
+      
+      // 각 끝점 노드에서 end 노드로 엣지 연결
+      deadEndNodes.forEach(deadEndNode => {
+        allBackendEdges.push({
+          type: 'edge',
+          source: deadEndNode.id,
+          target: endNodeId,
+        });
+      });
+      
+      console.log(`✅ [Converter] Auto-generated end node and connected ${deadEndNodes.length} dead-end node(s)`);
+    }
+  }
 
   // secrets 배열 변환 (프론트엔드에 secrets가 있는 경우)
   const backendSecrets = workflow.secrets?.map((secret: any) => ({
