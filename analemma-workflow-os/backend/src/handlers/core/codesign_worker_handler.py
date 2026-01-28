@@ -27,7 +27,7 @@ try:
         send_to_connection,
         get_websocket_endpoint
     )
-    from src.common.dynamodb_utils import get_dynamodb_resource
+    from src.common.aws_clients import get_dynamodb_resource
 except ImportError as e:
     logger.error(f"Failed to import dependencies: {e}")
 

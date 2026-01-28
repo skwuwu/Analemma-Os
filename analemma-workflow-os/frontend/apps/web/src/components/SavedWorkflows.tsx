@@ -156,10 +156,22 @@ export const SavedWorkflows = ({
     };
 
     const config: BackendWorkflow = convertWorkflowToBackendFormat(workflowWithSubgraphs);
+    
+    // 🐛 디버깅: 변환된 워크플로우 확인
+    console.log('[SaveWorkflow] Converted workflow config:', JSON.stringify(config, null, 2));
+    
     const name = (workflowName && workflowName.trim()) ? workflowName.trim() : (currentWorkflow.name || config.name || 'untitled');
     config.name = name;
     const is_scheduled = false;
     const next_run_time = null;
+
+    console.log('📤 [SaveWorkflow] Attempting to save workflow...', {
+      workflowId: currentWorkflow.id,
+      workflowName: name,
+      nodeCount: config.nodes?.length || 0,
+      edgeCount: config.edges?.length || 0,
+      hasSubgraphs: Object.keys(config.subgraphs || {}).length > 0,
+    });
 
     try {
       let serverId: string | null = null;
@@ -187,8 +199,30 @@ export const SavedWorkflows = ({
         setShowCloneDialog(true);
       }
     } catch (e) {
-      console.error('Save failed:', e);
-      toast.error('Failed to save workflow');
+      console.error('❌ [SaveWorkflow] Save failed!', {
+        error: e,
+        errorMessage: e instanceof Error ? e.message : String(e),
+        errorStack: e instanceof Error ? e.stack : undefined,
+        attemptedConfig: {
+          name: name,
+          nodeCount: config.nodes?.length || 0,
+          edgeCount: config.edges?.length || 0,
+          nodes: config.nodes?.map((n: any) => ({
+            id: n.id,
+            type: n.type,
+            label: n.label,
+            hasConfig: !!n.config,
+            configKeys: n.config ? Object.keys(n.config) : []
+          })),
+          edges: config.edges?.map((e: any) => ({
+            source: e.source,
+            target: e.target,
+            type: e.type
+          })),
+          fullConfig: config
+        }
+      });
+      toast.error(`Failed to save workflow: ${e instanceof Error ? e.message : 'Unknown error'}`);
       return;
     }
     setWorkflowName('');

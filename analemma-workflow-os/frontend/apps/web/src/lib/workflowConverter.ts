@@ -55,30 +55,17 @@ export interface BackendNode {
     | 'operator_official' // operator_official flag setter
     | 'route_condition' // control(conditional) → route_condition
     | 'trigger';       // trigger → trigger (백엔드에서 정규화됨)
-  provider?: 'openai' | 'bedrock' | 'anthropic' | 'google';
-  model?: string;
-  prompt_content?: string;
-  system_prompt?: string;
-  temperature?: number;
-  max_tokens?: number;
-  writes_state_key?: string;
-  sets?: { [key: string]: any };
+  label?: string;
+  action?: string;
+  hitp?: boolean;  // Human-in-the-loop flag
   config?: { [key: string]: any };  // nested config object for complex nodes
   position?: { x: number; y: number };
-  hitp?: boolean;  // Human-in-the-loop flag
   // Parallel support
   branches?: Array<{ branch_id?: string; nodes?: BackendNode[]; sub_workflow?: { nodes: BackendNode[] } }>;
-  // For-each support
-  items_path?: string;
-  input_list_key?: string;
-  sub_workflow?: { nodes: BackendNode[] };
-  item_key?: string;
-  output_key?: string;
-  max_iterations?: number;
+  resource_policy?: { [key: string]: any };
   // Subgraph support
   subgraph_ref?: string;
   subgraph_inline?: { nodes: BackendNode[]; edges: BackendEdge[] };
-  [key: string]: any;
 }
 
 export interface BackendEdge {
@@ -109,16 +96,19 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
   switch (node.type) {
     case 'aiModel':
       backendNode.type = 'llm_chat';
-      backendNode.provider = node.data.provider || 'openai';
-      backendNode.model = node.data.model || 'gpt-4';
-      backendNode.prompt_content = node.data.prompt_content || node.data.prompt || '';
-      backendNode.system_prompt = node.data.system_prompt;
-      backendNode.temperature = node.data.temperature || 0.7;
-      backendNode.max_tokens = node.data.max_tokens || node.data.maxTokens || 256;
-      backendNode.writes_state_key = node.data.writes_state_key;
+      backendNode.label = node.data?.label || 'AI Model';
+      backendNode.config = {
+        provider: node.data.provider || 'openai',
+        model: node.data.model || 'gpt-4',
+        prompt_content: node.data.prompt_content || node.data.prompt || '',
+        system_prompt: node.data.system_prompt,
+        temperature: node.data.temperature || 0.7,
+        max_tokens: node.data.max_tokens || node.data.maxTokens || 256,
+        writes_state_key: node.data.writes_state_key,
+      };
       // Tool definitions for function calling
       if (node.data.tools && Array.isArray(node.data.tools) && node.data.tools.length > 0) {
-        backendNode.tool_definitions = node.data.tools.map((tool: any) => ({
+        backendNode.config.tool_definitions = node.data.tools.map((tool: any) => ({
           name: tool.name,
           description: tool.description || '',
           parameters: tool.parameters || {},
@@ -133,10 +123,14 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       break;
     case 'operator':
       backendNode.type = 'operator';
-      backendNode.sets = node.data.sets || {};
+      backendNode.label = node.data?.label || 'Operator';
+      backendNode.config = {
+        sets: node.data.sets || {},
+      };
       // api_call, db_query, safe_operator는 operatorType으로 분기
       if (node.data.operatorType === 'api_call') {
         backendNode.type = 'api_call';
+        backendNode.label = node.data?.label || 'API Call';
         backendNode.config = {
           url: node.data.url || '',
           method: node.data.method || 'GET',
@@ -147,12 +141,14 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
         };
       } else if (node.data.operatorType === 'database' || node.data.operatorType === 'db_query') {
         backendNode.type = 'db_query';
+        backendNode.label = node.data?.label || 'Database Query';
         backendNode.config = {
           query: node.data.query || '',
           connection_string: node.data.connection_string || node.data.connectionString,
         };
       } else if (node.data.operatorType === 'safe_operator' || node.data.operatorType === 'operator_official') {
         backendNode.type = 'safe_operator';
+        backendNode.label = node.data?.label || 'Safe Operator';
         backendNode.config = {
           strategy: node.data.strategy || 'list_filter',
           input_key: node.data.input_key,
@@ -163,7 +159,8 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       break;
     case 'trigger':
       backendNode.type = 'operator';
-      backendNode.sets = {
+      backendNode.label = node.data?.label || 'Trigger';
+      backendNode.config = {
         _frontend_type: 'trigger',
         trigger_type: node.data.triggerType || 'request',
         triggerHour: node.data.triggerHour,
@@ -177,6 +174,7 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       if (controlType === 'for_each') {
         // for_each: 리스트 병렬 반복 (ThreadPoolExecutor)
         backendNode.type = 'for_each';
+        backendNode.label = node.data?.label || 'For Each';
         backendNode.config = {
           items_path: node.data.items_path || node.data.itemsPath || 'state.items',
           item_key: node.data.item_key || node.data.itemKey || 'item',
@@ -187,6 +185,7 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       } else if (controlType === 'loop') {
         // loop: 조건 기반 순차 반복 (convergence 지원)
         backendNode.type = 'loop';
+        backendNode.label = node.data?.label || 'Loop';
         backendNode.config = {
           nodes: node.data.sub_workflow?.nodes || [],
           condition: node.data.condition || node.data.whileCondition || 'false',
@@ -198,6 +197,7 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       } else if (controlType === 'parallel') {
         // parallel: 병렬 브랜치 실행
         backendNode.type = 'parallel_group';
+        backendNode.label = node.data?.label || 'Parallel';
         backendNode.config = {
           branches: node.data.branches || [],
         };
@@ -205,10 +205,12 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
         // aggregator: 병렬/반복 결과 집계 (토큰 사용량 포함)
         // aggregator_runner는 state에서 자동으로 병합 (설정 불필요)
         backendNode.type = 'aggregator';
+        backendNode.label = node.data?.label || 'Aggregator';
         backendNode.config = {};
       } else if (controlType === 'conditional') {
         // conditional: route_condition 노드로 변환
         backendNode.type = 'route_condition';
+        backendNode.label = node.data?.label || 'Route Condition';
         backendNode.config = {
           conditions: node.data.conditions || [],
           default_node: node.data.default_node || node.data.defaultNode,
@@ -221,7 +223,8 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       } else {
         // 기타 control (while 등): operator로 저장하고 엣지로 처리
         backendNode.type = 'operator';
-        backendNode.sets = {
+        backendNode.label = node.data?.label || 'Control';
+        backendNode.config = {
           _frontend_type: 'control',
           control_type: controlType,
           whileCondition: node.data.whileCondition,
@@ -232,6 +235,7 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
     case 'group':
       // group: 서브그래프
       backendNode.type = 'subgraph';
+      backendNode.label = node.data?.label || 'Subgraph';
       backendNode.subgraph_ref = node.data.subgraph_ref || node.data.subgraphRef || node.data.groupId;
       backendNode.subgraph_inline = node.data.subgraph_inline || node.data.subgraphInline;
       break;
@@ -241,7 +245,10 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       return null;
     default:
       backendNode.type = 'operator';
-      backendNode.sets = node.data?.sets || {};
+      backendNode.label = node.data?.label || 'Operator';
+      backendNode.config = {
+        sets: node.data?.sets || {}
+      };
   }
 
   // Persist position if available so frontend layout is preserved
@@ -404,6 +411,7 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
       loopNodes.push({
         id: `__loop_condition_evaluator_${cycle.id}`,
         type: 'llm',
+        label: 'Loop Condition Evaluator',
         config: {
           model: 'gemini-2.0-flash-exp',
           system_message: `You are a condition evaluator. Evaluate the following condition based on the current workflow state and return ONLY a JSON object.\n\nCondition to evaluate: "${naturalCondition}"\n\nAnalyze the current state and determine if this condition is satisfied.\n\nReturn format: {"should_exit": true/false, "reason": "brief explanation"}`,
@@ -417,6 +425,7 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
       loopNodes.push({
         id: `__loop_flag_setter_${cycle.id}`,
         type: 'operator_official',
+        label: 'Loop Flag Setter',
         config: {
           strategy: 'deep_get',
           input_key: '__loop_condition_result.should_exit',
@@ -428,6 +437,7 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
     return {
       id: `loop_${cycle.id}`,
       type: 'loop',
+      label: 'Loop',
       config: {
         nodes: loopNodes,
         condition: typeof condition === 'string' ? condition : JSON.stringify(condition),
@@ -464,6 +474,7 @@ const convertParallelGroupToNode = (parallelGroup: ParallelGroup, nodes: any[], 
   return {
     id: parallelGroup.id,
     type: 'parallel_group',
+    label: 'Parallel Group',
     branches,  // 최상위 필드로 이동
     config: {
       convergence_node: parallelGroup.convergenceNodeId,
@@ -532,6 +543,7 @@ const convertConditionalBranchToEdges = (
     routerNode = {
       id: `__router_evaluator_${parallelGroup.id}`,
       type: 'llm',
+      label: 'Branch Router',
       config: {
         model: 'gemini-2.0-flash-exp',
         system_message: `You are a branch router. Evaluate the following conditions based on the current workflow state and return the matching branch.
@@ -628,6 +640,7 @@ function convertControlBlockToBackend(
       resultNodes.push({
         id: `__router_evaluator_${blockId}`,
         type: 'llm',
+        label: 'Branch Router',
         config: {
           model: 'gemini-2.0-flash-exp',
           system_message: `You are a branch router. Evaluate the following conditions based on the current workflow state and return the matching branch.
@@ -723,6 +736,7 @@ If none match, return: {"selected_branch": "default", "reason": "no conditions m
       resultNodes.push({
         id: `__loop_condition_evaluator_${blockId}`,
         type: 'llm',
+        label: 'Loop Condition Evaluator',
         config: {
           model: 'gemini-2.0-flash-exp',
           system_message: `Evaluate the following loop exit condition based on the current workflow state:
@@ -740,6 +754,7 @@ Return format: {"should_exit": true/false, "reason": "brief explanation"}`,
       resultNodes.push({
         id: `__loop_flag_setter_${blockId}`,
         type: 'safe_operator',
+        label: 'Loop Flag Setter',
         config: {
           strategy: 'set_value',
           input_key: '__loop_condition_result',
@@ -753,6 +768,7 @@ Return format: {"should_exit": true/false, "reason": "brief explanation"}`,
     const loopNode: BackendNode = {
       id: `loop_${blockId}`,
       type: 'loop',
+      label: 'Loop',
       config: {
         condition: naturalCondition ? '__loop_should_exit == true' : 'false',
         max_iterations: maxIterations,
@@ -1054,12 +1070,12 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       case 'llm_chat':
         frontendType = 'aiModel';
         label = 'AI Model';
-        // Config 우선, 없으면 최상위 필드 사용
+        // 모든 속성은 config에서만 읽기
         const llmConfig = node.config || {};
-        const promptContent = llmConfig.prompt_content || node.prompt_content || '';
-        const systemPrompt = llmConfig.system_prompt || node.system_prompt || '';
-        const temperature = llmConfig.temperature ?? node.temperature ?? 0.7;
-        const maxTokens = llmConfig.max_tokens ?? node.max_tokens ?? 1024;
+        const promptContent = llmConfig.prompt_content || '';
+        const systemPrompt = llmConfig.system_prompt || '';
+        const temperature = llmConfig.temperature ?? 0.7;
+        const maxTokens = llmConfig.max_tokens ?? 1024;
         
         nodeData = {
           label,
@@ -1069,40 +1085,41 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           temperature: temperature,
           max_tokens: maxTokens,
           maxTokens: maxTokens,
-          model: node.model || llmConfig.model || 'gpt-3.5-turbo',
-          provider: node.provider || llmConfig.provider || 'openai',
-          writes_state_key: node.writes_state_key || llmConfig.writes_state_key,
+          model: llmConfig.model || 'gpt-3.5-turbo',
+          provider: llmConfig.provider || 'openai',
+          writes_state_key: llmConfig.writes_state_key,
           // Restore tool definitions
-          tools: node.tool_definitions || llmConfig.tool_definitions || [],
-          toolsCount: (node.tool_definitions || llmConfig.tool_definitions || []).length,
+          tools: llmConfig.tool_definitions || [],
+          toolsCount: (llmConfig.tool_definitions || []).length,
         };
         break;
       case 'operator':
-        // sets 내용을 확인하여 프론트엔드 타입 복원
-        if (node.sets?._frontend_type === 'trigger') {
+        // config.sets 내용을 확인하여 프론트엔드 타입 복원
+        const operatorConfig = node.config || {};
+        if (operatorConfig._frontend_type === 'trigger') {
           frontendType = 'trigger';
           label = 'Trigger';
           nodeData = {
             label,
-            triggerType: node.sets.trigger_type,
-            triggerHour: node.sets.triggerHour,
-            triggerMinute: node.sets.triggerMinute,
+            triggerType: operatorConfig.trigger_type,
+            triggerHour: operatorConfig.triggerHour,
+            triggerMinute: operatorConfig.triggerMinute,
           };
-        } else if (node.sets?._frontend_type === 'control') {
+        } else if (operatorConfig._frontend_type === 'control') {
           frontendType = 'control';
           label = 'Control';
           nodeData = {
             label,
-            controlType: node.sets.control_type,
-            whileCondition: node.sets.whileCondition,
-            max_iterations: node.sets.max_iterations,
+            controlType: operatorConfig.control_type,
+            whileCondition: operatorConfig.whileCondition,
+            max_iterations: operatorConfig.max_iterations,
           };
         } else {
           frontendType = 'operator';
           label = 'Operator';
           nodeData = {
             label,
-            sets: node.sets,
+            sets: operatorConfig.sets || {},
           };
         }
         break;
@@ -1110,13 +1127,14 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         // 백엔드에서 type이 trigger로 저장된 경우 (save_workflow.py의 정규화 로직)
         frontendType = 'trigger';
         label = 'Trigger';
+        const triggerConfig = node.config || {};
         nodeData = {
           label,
-          triggerType: node.sets?.trigger_type || 'request',
-          triggerHour: node.sets?.triggerHour,
-          triggerMinute: node.sets?.triggerMinute,
-          // sets의 다른 속성들도 보존
-          ...node.sets
+          triggerType: triggerConfig.trigger_type || 'request',
+          triggerHour: triggerConfig.triggerHour,
+          triggerMinute: triggerConfig.triggerMinute,
+          // config의 다른 속성들도 보존
+          ...triggerConfig
         };
         break;
       case 'loop':
@@ -1138,8 +1156,8 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'control';
         label = 'For Each';
         const forEachConfig = node.config || {};
-        const itemsPath = forEachConfig.items_path || node.items_path || '';
-        const subWorkflow = forEachConfig.sub_workflow || node.sub_workflow;
+        const itemsPath = forEachConfig.items_path || '';
+        const subWorkflow = forEachConfig.sub_workflow;
         
         if (!itemsPath) {
           console.warn(`[WorkflowConverter] for_each node ${node.id} missing items_path`);
@@ -1153,9 +1171,9 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           controlType: 'for_each',
           items_path: itemsPath,
           itemsPath: itemsPath,
-          item_key: forEachConfig.item_key || node.item_key || 'item',
-          output_key: forEachConfig.output_key || node.output_key || 'for_each_results',
-          max_iterations: forEachConfig.max_iterations || node.max_iterations || 20,
+          item_key: forEachConfig.item_key || 'item',
+          output_key: forEachConfig.output_key || 'for_each_results',
+          max_iterations: forEachConfig.max_iterations || 20,
           sub_workflow: subWorkflow,
         };
         break;
@@ -1165,7 +1183,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'control';
         label = 'Parallel';
         const parallelConfig = node.config || {};
-        // branches는 config.branches 우선, fallback으로 최상위 branches
+        // branches는 config.branches 또는 최상위 branches 필드에서 (최상위는 백엔드가 허용함)
         const branches = parallelConfig.branches || node.branches || [];
         
         nodeData = {
@@ -1213,7 +1231,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'operator';
         label = 'API Call';
         const apiConfig = node.config || {};
-        const apiUrl = apiConfig.url || node.url || '';
+        const apiUrl = apiConfig.url || '';
         
         if (!apiUrl) {
           console.warn(`[WorkflowConverter] api_call node ${node.id} missing url`);
@@ -1223,11 +1241,11 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           label,
           operatorType: 'api_call',
           url: apiUrl,
-          method: apiConfig.method || node.method || 'GET',
-          headers: apiConfig.headers || node.headers || {},
-          params: apiConfig.params || node.params || {},
-          json: apiConfig.json || node.json,
-          timeout: apiConfig.timeout || node.timeout || 10,
+          method: apiConfig.method || 'GET',
+          headers: apiConfig.headers || {},
+          params: apiConfig.params || {},
+          json: apiConfig.json,
+          timeout: apiConfig.timeout || 10,
         };
         break;
       case 'db_query':
@@ -1235,7 +1253,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'operator';
         label = 'Database Query';
         const dbConfig = node.config || {};
-        const query = dbConfig.query || node.query || '';
+        const query = dbConfig.query || '';
         
         if (!query) {
           console.warn(`[WorkflowConverter] db_query node ${node.id} missing query`);
@@ -1245,7 +1263,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           label,
           operatorType: 'database',
           query: query,
-          connection_string: dbConfig.connection_string || node.connection_string,
+          connection_string: dbConfig.connection_string,
         };
         break;
       default:
@@ -1256,7 +1274,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         nodeData = { 
           label, 
           rawBackendType: node.type,
-          ...(node.config || node.sets || {}) 
+          ...(node.config || {}) 
         };
     }
 

@@ -210,6 +210,16 @@ export const useWorkflowApi = () => {
       if (is_scheduled !== undefined) payload.is_scheduled = is_scheduled;
       if (next_run_time !== undefined) payload.next_run_time = next_run_time;
 
+      console.log('🚀 [API] Sending save workflow request:', {
+        workflowId: workflowId || 'NEW',
+        method: workflowId && normalize.isValidId(workflowId) ? 'PUT' : 'POST',
+        payloadSummary: {
+          name: payload.name,
+          nodeCount: config.nodes?.length || 0,
+          edgeCount: config.edges?.length || 0,
+        }
+      });
+
       let response: Response;
       if (workflowId && normalize.isValidId(workflowId)) {
         response = await makeAuthenticatedRequest(`${ENDPOINTS.WORKFLOWS}/${encodeURIComponent(workflowId)}`, {
@@ -228,14 +238,30 @@ export const useWorkflowApi = () => {
           body: JSON.stringify(payload),
         });
       }
+
+      // 응답 상태 로깅
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ [API] Save workflow failed:', {
+          status: response.status,
+          statusText: response.statusText,
+          responseBody: errorText,
+          sentPayload: payload
+        });
+      } else {
+        console.log('✅ [API] Save workflow succeeded');
+      }
+
       return await parseApiResponse(response);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['workflows'] });
       toast({ title: 'Workflow saved successfully' });
     },
-    onError: (_error: unknown) => {
-      toast({ title: 'Failed to save workflow', variant: 'destructive' });
+    onError: (error: unknown) => {
+      console.error('❌ [API] Save workflow mutation error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to save workflow';
+      toast({ title: errorMessage, variant: 'destructive' });
     },
   });
 

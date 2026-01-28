@@ -949,7 +949,7 @@ def lambda_handler_sync(event, context):
             logger.error("EXECUTIONS_TABLE not configured")
             return _response(500, {'error': 'Server configuration error'})
         
-        from src.common.dynamodb_utils import get_dynamodb_resource
+        from src.common.aws_clients import get_dynamodb_resource
         dynamodb = get_dynamodb_resource()
         executions_table = dynamodb.Table(executions_table_name)
         
