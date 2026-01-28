@@ -1623,11 +1623,17 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     
                     gemini_model = model_mapping.get(model, GeminiModel.GEMINI_1_5_FLASH)
                     
+                    # Extract thinking mode config
+                    enable_thinking = actual_config.get("enable_thinking", False)
+                    thinking_budget_tokens = actual_config.get("thinking_budget_tokens", 4096)
+                    
                     gemini_config = GeminiConfig(
                         model=gemini_model,
                         max_output_tokens=max_tokens,
                         temperature=temperature,
-                        system_instruction=system_prompt
+                        system_instruction=system_prompt,
+                        enable_thinking=enable_thinking,
+                        thinking_budget_tokens=thinking_budget_tokens
                     )
                     
                     # Prepare multimodal content if S3 URIs present
@@ -1673,7 +1679,9 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             system_instruction=system_prompt,
                             max_output_tokens=max_tokens,
                             temperature=temperature,
-                            response_schema=response_schema  # [Fix] Enable JSON mode for Vision
+                            response_schema=response_schema,  # [Fix] Enable JSON mode for Vision
+                            enable_thinking=enable_thinking,
+                            thinking_budget_tokens=thinking_budget_tokens
                         )
                     else:
                         # Standard text-only invocation
@@ -1687,7 +1695,9 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             system_instruction=system_prompt,
                             max_output_tokens=max_tokens,
                             temperature=temperature,
-                            response_schema=response_schema  # [Fix] Enable JSON mode when schema provided
+                            response_schema=response_schema,  # [Fix] Enable JSON mode when schema provided
+                            enable_thinking=enable_thinking,
+                            thinking_budget_tokens=thinking_budget_tokens
                         )
                     
                     # Extract text from Gemini response structure
@@ -1943,6 +1953,16 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             
             # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
             raw_output = {out_key: output_value, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # Thinking Mode Output: Extract thinking process and add to state
+            # ═══════════════════════════════════════════════════════════════════════
+            if isinstance(resp, dict) and "metadata" in resp:
+                thinking_data = resp["metadata"].get("thinking")
+                if thinking_data:
+                    # Add thinking output to state with dedicated key
+                    raw_output[f"{node_id}_thinking"] = thinking_data
+                    logger.info(f"🧠 [Thinking Mode] Added {len(thinking_data)} thinking steps to state key: {node_id}_thinking")
             
             # Quality Kernel 결과 추가
             if kernel_quality_result:

@@ -233,6 +233,36 @@ const AIModelSettings = ({ data, updateField }: any) => (
         onToolsChange={(tools) => updateField('tools', tools)}
       />
     </div>
+
+    {/* Gemini Thinking Mode Toggle */}
+    {(data.model?.includes('gemini') || data.model === 'gemini') && (
+      <div className="pt-3 border-t space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">🧠 Thinking Mode</Label>
+            <p className="text-[9px] text-slate-500">Enable Chain-of-Thought reasoning</p>
+          </div>
+          <Checkbox
+            checked={data.enable_thinking || false}
+            onCheckedChange={(checked) => updateField('enable_thinking', checked)}
+          />
+        </div>
+        {data.enable_thinking && (
+          <div className="space-y-2 animate-in slide-in-from-top-2">
+            <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Token Budget</Label>
+            <Input
+              type="number"
+              value={data.thinking_budget_tokens || 4096}
+              onChange={(e) => updateField('thinking_budget_tokens', parseInt(e.target.value))}
+              min={1024}
+              max={32768}
+              className="h-9 bg-white"
+            />
+            <p className="text-[9px] text-slate-500">Max tokens for reasoning (1024-32768)</p>
+          </div>
+        )}
+      </div>
+    )}
   </div>
 );
 
@@ -577,6 +607,8 @@ const NodeForm = ({
     model: node?.data.model || 'gpt-4',
     max_tokens: node?.data.max_tokens || node?.data.maxTokens || 2000,
     tools: node?.data.tools || [],  // AI Model tools
+    enable_thinking: node?.data.enable_thinking || false,
+    thinking_budget_tokens: node?.data.thinking_budget_tokens || 4096,
     operatorType: node?.data.operatorType || 'email',
     operatorVariant: node?.data.operatorVariant || 'official',
     triggerType: node?.data.triggerType || (node?.data.blockId as string) || 'request',
@@ -605,6 +637,8 @@ const NodeForm = ({
         updates.model = formData.model;
         updates.max_tokens = Number(formData.max_tokens);
         updates.tools = formData.tools || [];
+        updates.enable_thinking = formData.enable_thinking || false;
+        updates.thinking_budget_tokens = Number(formData.thinking_budget_tokens || 4096);
         break;
       case 'operator':
         updates.operatorType = formData.operatorType;

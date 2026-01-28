@@ -31,6 +31,8 @@ interface NodeData {
   model?: string;
   max_tokens?: number;
   tools?: ToolDefinition[];  // AI Model tools
+  enable_thinking?: boolean;  // Gemini thinking mode
+  thinking_budget_tokens?: number;  // Thinking token budget
   operatorType?: string;
   strategy?: string;
   url?: string;
@@ -339,6 +341,37 @@ const AIModelSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
         onToolsChange={(tools) => onChange('tools', tools)}
       />
     </div>
+
+    {/* Gemini Thinking Mode Toggle */}
+    {(data.model?.includes('gemini') || data.model === 'gemini') && (
+      <div className="pt-4 border-t border-slate-700 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="space-y-0.5">
+            <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">🧠 Thinking Mode</Label>
+            <p className="text-[9px] text-slate-500">Enable Chain-of-Thought reasoning for Gemini models</p>
+          </div>
+          <Checkbox
+            checked={data.enable_thinking || false}
+            onCheckedChange={(checked) => onChange('enable_thinking', checked)}
+            className="border-slate-600"
+          />
+        </div>
+        {data.enable_thinking && (
+          <div className="space-y-2 animate-in slide-in-from-top-2">
+            <Label className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Thinking Budget (Tokens)</Label>
+            <Input
+              type="number"
+              value={data.thinking_budget_tokens || 4096}
+              onChange={(e) => onChange('thinking_budget_tokens', parseInt(e.target.value))}
+              min={1024}
+              max={32768}
+              className="bg-slate-800 border-slate-700 text-slate-100"
+            />
+            <p className="text-[9px] text-slate-500">Max tokens for internal reasoning (1024-32768). Default: 4096</p>
+          </div>
+        )}
+      </div>
+    )}
   </motion.div>
 );
 
@@ -626,6 +659,8 @@ export const NodeEditorDialog = ({
     model: node?.data.model || (nodeType === 'aiModel' ? 'gpt-4' : ''),
     max_tokens: node?.data.max_tokens || node?.data.maxTokens || 2000,
     tools: node?.data.tools || [],  // AI Model tools
+    enable_thinking: node?.data.enable_thinking || false,
+    thinking_budget_tokens: node?.data.thinking_budget_tokens || 4096,
     operatorType: node?.data.operatorType || (nodeType === 'operator' ? 'api_call' : ''),
     strategy: node?.data.strategy || 'list_filter',
     url: node?.data.url || '',
@@ -650,8 +685,16 @@ export const NodeEditorDialog = ({
     const updates: Partial<NodeData> = { label: formData.label };
 
     if (nodeType === 'aiModel') {
-      const { prompt_content, temperature, model, max_tokens, tools } = formData;
-      Object.assign(updates, { prompt_content, temperature, model, max_tokens: Number(max_tokens), tools: tools || [] });
+      const { prompt_content, temperature, model, max_tokens, tools, enable_thinking, thinking_budget_tokens } = formData;
+      Object.assign(updates, { 
+        prompt_content, 
+        temperature, 
+        model, 
+        max_tokens: Number(max_tokens), 
+        tools: tools || [],
+        enable_thinking: enable_thinking || false,
+        thinking_budget_tokens: Number(thinking_budget_tokens || 4096)
+      });
     } else if (nodeType === 'operator') {
       const { operatorType, strategy, url, method } = formData;
       Object.assign(updates, { operatorType, strategy, url, method });

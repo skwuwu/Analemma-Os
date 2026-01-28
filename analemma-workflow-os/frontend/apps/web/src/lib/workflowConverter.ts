@@ -109,6 +109,8 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
         temperature: node.data.temperature || 0.7,
         max_tokens: node.data.max_tokens || node.data.maxTokens || 256,
         writes_state_key: node.data.writes_state_key,
+        enable_thinking: node.data.enable_thinking || false,
+        thinking_budget_tokens: node.data.thinking_budget_tokens || 4096,
       };
       // Tool definitions for function calling
       if (node.data.tools && Array.isArray(node.data.tools) && node.data.tools.length > 0) {

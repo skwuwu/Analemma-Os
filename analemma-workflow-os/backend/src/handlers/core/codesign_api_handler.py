@@ -615,10 +615,17 @@ async def _generate_initial_workflow_stream(user_request: str, owner_id: str, se
                 elif "2.0" in selected_model_id.lower():
                     gemini_model = GeminiModel.GEMINI_2_0_FLASH
                 
-                config = GeminiConfig(model=gemini_model, temperature=0.1, max_output_tokens=4096)
+                # Thinking Mode 활성화 (복잡한 워크플로우 생성 작업)
+                config = GeminiConfig(
+                    model=gemini_model,
+                    temperature=0.1,
+                    max_output_tokens=4096,
+                    enable_thinking=True,
+                    thinking_budget_tokens=8192  # 높은 품질의 워크플로우 생성을 위해
+                )
                 service = GeminiService(config=config)
                 
-                logger.info(f"Using Gemini via gemini_service for Agentic Designer")
+                logger.info(f"Using Gemini with Thinking Mode for Agentic Designer (model={gemini_model})")
                 for chunk in service.invoke_model_stream(
                     user_prompt=enhanced_prompt,
                     system_instruction=system_prompt

@@ -833,10 +833,12 @@ class GeminiService:
         response_schema: Optional[Dict[str, Any]] = None,
         max_output_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        context_to_cache: Optional[str] = None
+        context_to_cache: Optional[str] = None,
+        enable_thinking: Optional[bool] = None,
+        thinking_budget_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Synchronous Gemini model call (including Token Tracking + Context Caching)
+        Synchronous Gemini model call (including Token Tracking + Context Caching + Thinking Mode)
         
         Args:
             user_prompt: User prompt
@@ -845,9 +847,11 @@ class GeminiService:
             max_output_tokens: Maximum output tokens
             temperature: Sampling temperature
             context_to_cache: Large context to cache (optional)
+            enable_thinking: Enable Thinking Mode (Chain of Thought visualization)
+            thinking_budget_tokens: Token budget to allocate for thinking process
         
         Returns:
-            Gemini response dictionary (includes token_usage in metadata)
+            Gemini response dictionary (includes token_usage and thinking in metadata)
         """
         if is_mock_mode():
             logger.info("MOCK_MODE: Returning synthetic Gemini response")
@@ -893,6 +897,23 @@ class GeminiService:
             # Convert standard JSON Schema to Vertex AI format (uppercase types)
             generation_config["response_schema"] = _convert_json_schema_to_vertex(response_schema)
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # Thinking Mode setup (Gemini 2.0+ thinking_config)
+        # ═══════════════════════════════════════════════════════════════════════
+        use_thinking = enable_thinking if enable_thinking is not None else self.config.enable_thinking
+        thinking_budget = thinking_budget_tokens or self.config.thinking_budget_tokens or 4096
+        
+        if use_thinking and _supports_thinking(self.config.model.value):
+            # Use Gemini 2.0's thinking_config
+            # https://ai.google.dev/gemini-api/docs/thinking
+            generation_config["thinking_config"] = {
+                "thinking_budget": thinking_budget,
+                "include_thoughts": True  # Expose thinking process
+            }
+            logger.info(f"Thinking Mode enabled with budget: {thinking_budget} tokens")
+        elif use_thinking:
+            logger.warning(f"Thinking Mode requested but not supported by model {self.config.model.value}. Skipping thinking_config.")
+        
         # Get safety settings to prevent false positives on technical content
         safety_settings = _get_safety_settings()
         
@@ -930,13 +951,40 @@ class GeminiService:
             # Track token usage
             token_usage = self._track_token_usage(response, full_input, cached_tokens)
             
+            # ═══════════════════════════════════════════════════════════════════════
+            # Extract Thinking Mode output (if enabled)
+            # ═══════════════════════════════════════════════════════════════════════
+            thinking_output = []
+            if use_thinking and hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                
+                # Handle Gemini 2.0+ thinking response structure
+                if hasattr(candidate, 'thinking_content'):
+                    for thought in candidate.thinking_content:
+                        thinking_output.append({
+                            "thought": getattr(thought, 'text', str(thought)),
+                            "phase": getattr(thought, 'phase', 'reasoning')
+                        })
+                
+                # Alternative structure: when parts contain thought type
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'thought') and part.thought:
+                            thinking_output.append({
+                                "thought": part.text if hasattr(part, 'text') else str(part),
+                                "phase": "reasoning"
+                            })
+                
+                if thinking_output:
+                    logger.info(f"Extracted {len(thinking_output)} thinking steps from response")
+            
             # Log cost
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info(
                 f"Gemini invocation: model={self.config.model.value}, "
                 f"input={token_usage.input_tokens}, output={token_usage.output_tokens}, "
                 f"cached={token_usage.cached_tokens}, cost=${token_usage.estimated_cost_usd:.6f}, "
-                f"latency={elapsed_ms:.0f}ms"
+                f"latency={elapsed_ms:.0f}ms, thinking_steps={len(thinking_output)}"
             )
             
             # Include metadata in response
@@ -944,7 +992,8 @@ class GeminiService:
             parsed["metadata"] = {
                 "token_usage": token_usage.to_dict(),
                 "latency_ms": elapsed_ms,
-                "model": self.config.model.value
+                "model": self.config.model.value,
+                "thinking": thinking_output if thinking_output else None
             }
             return parsed
             
@@ -1567,10 +1616,12 @@ Refer to all past conversations and changes to generate consistent responses.
         system_instruction: Optional[str] = None,
         max_output_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
-        response_schema: Optional[Dict[str, Any]] = None
+        response_schema: Optional[Dict[str, Any]] = None,
+        enable_thinking: Optional[bool] = None,
+        thinking_budget_tokens: Optional[int] = None
     ) -> Dict[str, Any]:
         """
-        Gemini Vision call including multiple image inputs
+        Gemini Vision call including multiple image inputs (with Thinking Mode support)
         
         Can analyze up to 16 images simultaneously (Gemini model limitation).
         
@@ -1582,9 +1633,11 @@ Refer to all past conversations and changes to generate consistent responses.
             max_output_tokens: Maximum output tokens
             temperature: Sampling temperature
             response_schema: JSON Schema for structured output (Vertex AI format)
+            enable_thinking: Enable Thinking Mode (Chain of Thought visualization)
+            thinking_budget_tokens: Token budget to allocate for thinking process
             
         Returns:
-            Gemini response dictionary
+            Gemini response dictionary (includes thinking in metadata if enabled)
         """
         if is_mock_mode():
             logger.info(f"MOCK_MODE: Returning synthetic Vision response for {len(image_sources)} images")
@@ -1643,6 +1696,21 @@ Refer to all past conversations and changes to generate consistent responses.
             generation_config["response_mime_type"] = "application/json"
             generation_config["response_schema"] = _convert_json_schema_to_vertex(response_schema)
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # Thinking Mode setup (Gemini 2.0+ thinking_config)
+        # ═══════════════════════════════════════════════════════════════════════
+        use_thinking = enable_thinking if enable_thinking is not None else self.config.enable_thinking
+        thinking_budget = thinking_budget_tokens or self.config.thinking_budget_tokens or 4096
+        
+        if use_thinking and _supports_thinking(self.config.model.value):
+            generation_config["thinking_config"] = {
+                "thinking_budget": thinking_budget,
+                "include_thoughts": True
+            }
+            logger.info(f"Thinking Mode enabled for Vision with budget: {thinking_budget} tokens")
+        elif use_thinking:
+            logger.warning(f"Thinking Mode requested but not supported by model {self.config.model.value}. Skipping thinking_config.")
+        
         # Get safety settings to prevent false positives on technical content
         safety_settings = _get_safety_settings()
         
@@ -1664,13 +1732,40 @@ Refer to all past conversations and changes to generate consistent responses.
             # Track token usage
             token_usage = self._track_token_usage(response, user_prompt, cached_tokens=0)
             
+            # ═══════════════════════════════════════════════════════════════════════
+            # Extract Thinking Mode output (if enabled)
+            # ═══════════════════════════════════════════════════════════════════════
+            thinking_output = []
+            if use_thinking and hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                
+                # Handle Gemini 2.0+ thinking response structure
+                if hasattr(candidate, 'thinking_content'):
+                    for thought in candidate.thinking_content:
+                        thinking_output.append({
+                            "thought": getattr(thought, 'text', str(thought)),
+                            "phase": getattr(thought, 'phase', 'reasoning')
+                        })
+                
+                # Alternative structure: when parts contain thought type
+                if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'thought') and part.thought:
+                            thinking_output.append({
+                                "thought": part.text if hasattr(part, 'text') else str(part),
+                                "phase": "reasoning"
+                            })
+                
+                if thinking_output:
+                    logger.info(f"Extracted {len(thinking_output)} thinking steps from Vision response")
+            
             elapsed_ms = (time.time() - start_time) * 1000
             logger.info(
                 f"Gemini Vision: model={self.config.model.value}, "
                 f"images={len(image_parts)}, "
                 f"output_tokens={token_usage.output_tokens}, "
                 f"cost=${token_usage.estimated_cost_usd:.6f}, "
-                f"latency={elapsed_ms:.0f}ms"
+                f"latency={elapsed_ms:.0f}ms, thinking_steps={len(thinking_output)}"
             )
             
             parsed = self._parse_response(response)
@@ -1678,7 +1773,8 @@ Refer to all past conversations and changes to generate consistent responses.
                 "token_usage": token_usage.to_dict(),
                 "latency_ms": elapsed_ms,
                 "model": self.config.model.value,
-                "image_count": len(image_parts)
+                "image_count": len(image_parts),
+                "thinking": thinking_output if thinking_output else None
             }
             return parsed
             
@@ -2190,17 +2286,17 @@ def get_gemini_flash_service() -> GeminiService:
 
 def get_gemini_codesign_service() -> GeminiService:
     """
-    Gemini 2.5 Flash service optimized for Co-design Assistant
+    Gemini 3 Flash service optimized for Co-design Assistant
     
     Features:
-    - Gemini 2.5 Flash: Stable, high-performance model
-    - Best multimodal understanding capabilities
+    - Gemini 3 Flash: Latest generation with advanced reasoning
+    - Speed/cost optimized for real-time collaboration
     - Context Caching: structure_tools + graph_dsl cached (75% cost reduction)
     - Thinking Mode ready: Chain of Thought visualization
     - Real-time streaming: Low latency for interactive design
     """
     return GeminiService(GeminiConfig(
-        model=GeminiModel.GEMINI_2_5_FLASH,  # Codesign uses Gemini 2.5 Flash (stable, available)
+        model=GeminiModel.GEMINI_3_FLASH,  # Codesign uses Gemini 3 Flash (latest generation)
         max_output_tokens=4096,
         temperature=0.8,
         enable_thinking=True,

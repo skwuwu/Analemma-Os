@@ -117,7 +117,8 @@ GCP_SERVICE_ACCOUNT_KEY = os.environ.get("GCP_SERVICE_ACCOUNT_KEY", "")  # JSON 
 HAIKU_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
 # Gemini Native 설정
-GEMINI_FLASH_MODEL = "gemini-3-flash"  # 지능형 학습 로직 최적화
+GEMINI_PRO_MODEL = "gemini-3-pro-preview"  # 고품질 지침 추출 (gemini-3-pro)
+GEMINI_FLASH_MODEL = "gemini-3-flash"  # 레거시 호환
 GEMINI_2_FLASH_MODEL = "gemini-2.0-flash"  # 레거시 호환
 USE_GEMINI_NATIVE = os.environ.get("USE_GEMINI_NATIVE", "true").lower() == "true"
 
@@ -419,7 +420,7 @@ def _get_or_create_instruction_cache(
             from vertexai.generative_models import Content, Part
 
             cache = caching.CachedContent.create(
-                model_name=GEMINI_2_FLASH_MODEL,
+                model_name=GEMINI_PRO_MODEL,  # gemini-3-pro로 캐싱
                 system_instruction=system_instruction,
                 ttl=f"{CONTEXT_CACHE_TTL_SECONDS}s",
             )
@@ -925,16 +926,34 @@ def _distill_with_gemini(
     existing_instructions: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Gemini 3 Flash를 사용한 세만틱 증류
+    Gemini 3 Pro를 사용한 세만틱 증류
     
     특징:
     - Structured Output으로 JSON 파싱 에러 제거
     - 의도 추론 (왜 이렇게 고쳤는가)
     - 오타 vs 의도적 변경 구분
     - 의미적 차이 점수로 동적 가중치 조절
+    - Gemini 3 Pro: 고품질 분석 및 추론
     """
-    gemini = _get_gemini_client()
-    if not gemini:
+    try:
+        from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
+        
+        # GeminiService를 사용한 고품질 증류 (Gemini 3 Pro)
+        config = GeminiConfig(
+            model=GeminiModel.GEMINI_3_PRO,
+            temperature=0.3,
+            max_output_tokens=1000,
+            enable_thinking=False  # 지침 추출은 빠른 처리 우선
+        )
+        service = GeminiService(config=config)
+    except ImportError:
+        logger.warning("GeminiService not available, falling back to legacy Vertex AI client")
+        gemini = _get_gemini_client()
+        if not gemini:
+            return None
+        service = None
+    except Exception as e:
+        logger.error(f"Failed to initialize GeminiService: {e}")
         return None
     
     # 세만틱 증류 시스템 지침
@@ -984,37 +1003,49 @@ def _distill_with_gemini(
 위 두 텍스트를 비교 분석하여 향후 AI 응답 개선을 위한 지침을 추출해주세요."""
     
     try:
-        # Gemini 모델 선택 (2.0 Flash 우선, 없으면 1.5 Flash)
-        model_name = GEMINI_2_FLASH_MODEL
-        try:
-            model = gemini.GenerativeModel(
-                model_name=model_name,
+        # GeminiService 사용 (gemini-3-pro)
+        if service:
+            logger.info("Using GeminiService with gemini-3-pro for instruction distillation")
+            response = service.invoke_model(
+                user_prompt=user_prompt,
                 system_instruction=system_instruction,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": GEMINI_DISTILLATION_SCHEMA,
-                    "max_output_tokens": 1000,
-                    "temperature": 0.3,  # 일관된 추출을 위해 낮은 온도
-                }
+                response_schema=GEMINI_DISTILLATION_SCHEMA
             )
-        except Exception:
-            # Fallback to 1.5 Flash
-            model_name = GEMINI_FLASH_MODEL
-            model = gemini.GenerativeModel(
-                model_name=model_name,
-                system_instruction=system_instruction,
-                generation_config={
-                    "response_mime_type": "application/json",
-                    "response_schema": GEMINI_DISTILLATION_SCHEMA,
-                    "max_output_tokens": 1000,
-                    "temperature": 0.3,
-                }
-            )
-        
-        response = model.generate_content(user_prompt)
-        
-        # Structured Output 직접 파싱 (에러 가능성 0%)
-        result = json.loads(response.text)
+            
+            # GeminiService는 parsed 결과 직접 반환
+            result = response.get("parsed", {})
+            model_name = "gemini-3-pro-preview"
+        else:
+            # Legacy Vertex AI 클라이언트 사용 (fallback)
+            logger.info("Using legacy Vertex AI client for instruction distillation")
+            model_name = GEMINI_PRO_MODEL
+            try:
+                model = gemini.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction,
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": GEMINI_DISTILLATION_SCHEMA,
+                        "max_output_tokens": 1000,
+                        "temperature": 0.3,
+                    }
+                )
+            except Exception:
+                # Fallback to 3 Flash
+                model_name = GEMINI_FLASH_MODEL
+                model = gemini.GenerativeModel(
+                    model_name=model_name,
+                    system_instruction=system_instruction,
+                    generation_config={
+                        "response_mime_type": "application/json",
+                        "response_schema": GEMINI_DISTILLATION_SCHEMA,
+                        "max_output_tokens": 1000,
+                        "temperature": 0.3,
+                    }
+                )
+            
+            response = model.generate_content(user_prompt)
+            result = json.loads(response.text)
         
         # instructions 배열에서 text만 추출
         instructions = []
