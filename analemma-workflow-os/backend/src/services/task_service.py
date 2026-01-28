@@ -276,7 +276,13 @@ class TaskService:
             
             items = response.get('Items', [])
             if not items:
-                # GSI에서 못찾은 경우 이벤트 스토어에서 조회 시도
+                # [FIX] Notification 테이블에 없으면 Executions 테이블에서 직접 조회
+                logger.info(f"Task {task_id[:8]}... not found in notifications, checking executions table")
+                execution_task = await self._get_task_from_executions_table(task_id, owner_id, include_technical_logs)
+                if execution_task:
+                    return execution_task
+                
+                # 마지막으로 이벤트 스토어에서 조회 시도
                 return await self._get_task_from_event_store(task_id, owner_id, include_technical_logs)
             
             # 가장 최신 항목 사용
@@ -470,6 +476,58 @@ class TaskService:
             if 'ResourceNotFoundException' in str(e):
                 return None
             logger.error(f"Failed to get task from event store: {e}")
+            return None
+
+    async def _get_task_from_executions_table(
+        self,
+        task_id: str,
+        owner_id: str,
+        include_technical_logs: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Executions 테이블에서 직접 태스크 정보 조회
+        
+        진행 중인 작업이 notification 테이블에 없는 경우 사용
+        """
+        try:
+            logger.info(f"[ExecutionsTable] Querying for task_id={task_id[:8]}..., owner_id={owner_id[:8]}...")
+            
+            # Executions 테이블에서 조회 (PK: ownerId, SK: executionArn)
+            # task_id는 보통 execution ARN의 마지막 부분이므로 full ARN 구성 필요
+            get_func = partial(
+                self.execution_table.query,
+                KeyConditionExpression="ownerId = :oid",
+                FilterExpression="contains(executionArn, :tid)",
+                ExpressionAttributeValues={
+                    ":oid": owner_id,
+                    ":tid": task_id
+                },
+                Limit=10  # 여러 개 가져와서 확인
+            )
+            
+            response = await asyncio.get_event_loop().run_in_executor(None, get_func)
+            items = response.get('Items', [])
+            
+            logger.info(f"[ExecutionsTable] Found {len(items)} items for task_id={task_id[:8]}...")
+            
+            if not items:
+                logger.warning(f"Task {task_id[:8]}... not found in executions table for owner {owner_id[:8]}...")
+                return None
+            
+            # 가장 최신 항목 사용 (startDate 기준)
+            execution = max(items, key=lambda x: x.get('startDate', ''))
+            logger.info(f"Found task {task_id[:8]}... in executions table, status={execution.get('status')}")
+            
+            # Execution을 Task 형식으로 변환
+            task = self._convert_execution_to_task(execution, detailed=True)
+            
+            if include_technical_logs and task:
+                task['technical_logs'] = self._extract_technical_logs_from_execution(execution)
+            
+            return task
+            
+        except ClientError as e:
+            logger.error(f"Failed to get task from executions table: {e}")
             return None
 
     def _convert_execution_to_task(
