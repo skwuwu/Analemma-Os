@@ -600,37 +600,35 @@
       "Default": "PublishSucceededEvent"
     },
     "PrepareSequentialBranch": {
-      "Type": "Pass",
+      "Type": "Task",
       "Comment": "[SEQUENTIAL_BRANCH] Replace partition_map with inner_partition_map for sequential branch execution",
+      "Resource": "arn:aws:states:::lambda:invoke",
       "Parameters": {
-        "workflow_config.$": "$.state_data.workflow_config",
-        "current_state.$": "$.execution_result.final_state",
-        "state_s3_path.$": "$.execution_result.final_state_s3_path",
-        "partition_map.$": "$.execution_result.inner_partition_map",
-        "partition_map_s3_path": "",
-        "segment_manifest.$": "$.state_data.segment_manifest",
-        "segment_manifest_s3_path.$": "$.state_data.segment_manifest_s3_path",
-        "total_segments.$": "$.execution_result.inner_segment_count",
-        "ownerId.$": "$.state_data.ownerId",
-        "segment_to_run": 0,
-        "idempotency_key.$": "$.state_data.idempotency_key",
-        "quota_reservation_id.$": "$.state_data.quota_reservation_id",
-        "workflowId.$": "$.state_data.workflowId",
-        "max_concurrency.$": "$.state_data.max_concurrency",
-        "distributed_mode.$": "$.state_data.distributed_mode",
-        "state_durations.$": "$.state_data.state_durations",
-        "last_update_time.$": "$.state_data.last_update_time",
-        "start_time.$": "$.state_data.start_time",
-        "state_history.$": "$.state_data.state_history",
-        "max_loop_iterations.$": "$.state_data.max_loop_iterations",
-        "max_branch_iterations.$": "$.state_data.max_branch_iterations",
-        "loop_counter.$": "$.state_data.loop_counter",
-        "llm_segments.$": "$.state_data.llm_segments",
-        "hitp_segments.$": "$.state_data.hitp_segments",
-        "sequential_branch_id.$": "$.execution_result.branch_id"
+        "FunctionName": "${SafeOperatorArn}",
+        "Payload": {
+          "operation": "prepare_sequential_branch",
+          "state_data.$": "$.state_data",
+          "execution_result.$": "$.execution_result"
+        }
       },
-      "ResultPath": "$.state_data",
-      "Next": "ExecuteSegment"
+      "ResultSelector": {
+        "state_data.$": "$.Payload"
+      },
+      "ResultPath": "$",
+      "Next": "ExecuteSegment",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ]
     },
     "ProcessParallelSegments": {
       "Type": "Map",

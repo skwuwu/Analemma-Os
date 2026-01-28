@@ -1,0 +1,233 @@
+{
+    "Comment": "LLM Integration Test Simulator - MOCK_MODE=false로 실제 LLM 호출 검증",
+    "StartAt": "CheckScenarios",
+    "States": {
+        "CheckScenarios": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.scenarios",
+                    "IsPresent": true,
+                    "Next": "InitializeSimulator"
+                }
+            ],
+            "Default": "SetDefaultScenarios"
+        },
+        "SetDefaultScenarios": {
+            "Type": "Pass",
+            "Parameters": {
+                "scenarios": [
+                    "STAGE1_BASIC",
+                    "STAGE2_FLOW_CONTROL",
+                    "STAGE3_VISION_BASIC",
+                    "STAGE4_VISION_MAP",
+                    "STAGE5_HYPER_STRESS",
+                    "STAGE6_DISTRIBUTED_MAP_REDUCE",
+                    "STAGE7_PARALLEL_MULTI_LLM",
+                    "STAGE8_SLOP_DETECTION"
+                ]
+            },
+            "Next": "InitializeSimulator"
+        },
+        "InitializeSimulator": {
+            "Type": "Pass",
+            "Parameters": {
+                "simulator_execution_id.$": "$$.Execution.Name",
+                "start_time.$": "$$.State.EnteredTime",
+                "scenarios.$": "$.scenarios"
+            },
+            "Next": "ParallelExecution"
+        },
+        "ParallelExecution": {
+            "Type": "Map",
+            "ItemsPath": "$.scenarios",
+            "MaxConcurrency": 1,
+            "Parameters": {
+                "scenario.$": "$$.Map.Item.Value",
+                "simulator_execution_id.$": "$.simulator_execution_id"
+            },
+            "ItemProcessor": {
+                "ProcessorConfig": {
+                    "Mode": "INLINE"
+                },
+                "StartAt": "PrepareTest",
+                "States": {
+                    "PrepareTest": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "TimeoutSeconds": 30,
+                        "Parameters": {
+                            "FunctionName": "arn:aws:lambda:ap-northeast-2:482421580372:function:PrepareLLMTest-dev",
+                            "Payload": {
+                                "scenario.$": "$.scenario",
+                                "simulator_execution_id.$": "$.simulator_execution_id"
+                            }
+                        },
+                        "ResultSelector": {
+                            "targetArn.$": "$.Payload.targetArn",
+                            "name.$": "$.Payload.name",
+                            "input.$": "$.Payload.input",
+                            "scenario.$": "$.Payload.scenario"
+                        },
+                        "ResultPath": "$.prep_result",
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException",
+                                    "Lambda.AWSLambdaException",
+                                    "Lambda.SdkClientException",
+                                    "Lambda.TooManyRequestsException"
+                                ],
+                                "IntervalSeconds": 5,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2.0
+                            }
+                        ],
+                        "Catch": [
+                            {
+                                "ErrorEquals": [
+                                    "States.ALL"
+                                ],
+                                "ResultPath": "$.prep_error",
+                                "Next": "HandlePrepError"
+                            }
+                        ],
+                        "Next": "RunLLMTest"
+                    },
+                    "HandlePrepError": {
+                        "Type": "Pass",
+                        "Parameters": {
+                            "scenario.$": "$.scenario",
+                            "test_result": {
+                                "status": "FAILED",
+                                "error": "PrepareTest failed"
+                            }
+                        },
+                        "Next": "VerifyResult"
+                    },
+                    "RunLLMTest": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::states:startExecution.sync:2",
+                        "TimeoutSeconds": 600,
+                        "Parameters": {
+                            "StateMachineArn.$": "$.prep_result.targetArn",
+                            "Name.$": "$.prep_result.name",
+                            "Input.$": "$.prep_result.input"
+                        },
+                        "ResultSelector": {
+                            "status.$": "$.Status",
+                            "output.$": "$.Output"
+                        },
+                        "ResultPath": "$.test_result",
+                        "Catch": [
+                            {
+                                "ErrorEquals": [
+                                    "States.ALL"
+                                ],
+                                "ResultPath": "$.test_error",
+                                "Next": "HandleTestError"
+                            }
+                        ],
+                        "Next": "VerifyResult"
+                    },
+                    "HandleTestError": {
+                        "Type": "Pass",
+                        "Parameters": {
+                            "scenario.$": "$.scenario",
+                            "test_result": {
+                                "status": "FAILED",
+                                "error.$": "$.test_error"
+                            }
+                        },
+                        "Next": "VerifyResult"
+                    },
+                    "VerifyResult": {
+                        "Type": "Task",
+                        "Resource": "arn:aws:states:::lambda:invoke",
+                        "Parameters": {
+                            "FunctionName": "arn:aws:lambda:ap-northeast-2:482421580372:function:backend-workflow-dev-VerifyLLMTestFunction-uaJCtifd9wDx",
+                            "Payload": {
+                                "scenario.$": "$.scenario",
+                                "scenario_key.$": "$.scenario",
+                                "test_result.$": "$.test_result",
+                                "final_state.$": "$.test_result.output.final_state",
+                                "test_config": {
+                                    "include_task_abstraction_verification": true,
+                                    "verify_provider": true
+                                }
+                            }
+                        },
+                        "ResultSelector": {
+                            "verification.$": "$.Payload"
+                        },
+                        "ResultPath": "$.verification_result",
+                        "Retry": [
+                            {
+                                "ErrorEquals": [
+                                    "Lambda.ServiceException"
+                                ],
+                                "IntervalSeconds": 2,
+                                "MaxAttempts": 3,
+                                "BackoffRate": 2.0
+                            }
+                        ],
+                        "End": true
+                    }
+                }
+            },
+            "ResultPath": "$.test_results",
+            "Next": "GenerateReport"
+        },
+        "GenerateReport": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "TimeoutSeconds": 60,
+            "Parameters": {
+                "FunctionName": "arn:aws:lambda:ap-northeast-2:482421580372:function:AggregateLLMResults-dev",
+                "Payload": {
+                    "test_results.$": "$.test_results",
+                    "simulator_execution_id.$": "$.simulator_execution_id",
+                    "start_time.$": "$.start_time"
+                }
+            },
+            "ResultSelector": {
+                "report.$": "$.Payload"
+            },
+            "ResultPath": "$.report_result",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2.0
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.report_error",
+                    "Next": "SimulatorComplete"
+                }
+            ],
+            "Next": "SimulatorComplete"
+        },
+        "SimulatorComplete": {
+            "Type": "Pass",
+            "Parameters": {
+                "status": "COMPLETED",
+                "simulator_execution_id.$": "$.simulator_execution_id",
+                "start_time.$": "$.start_time",
+                "test_results.$": "$.test_results",
+                "report.$": "$.report_result.report",
+                "mock_mode": "false"
+            },
+            "End": true
+        }
+    }
+}

@@ -2745,6 +2745,37 @@ class SegmentRunnerService:
                 
                 return _finalize_response(response_payload, force_offload=True)
 
+            # [Guard] [Critical Fix] HITP edge 우선 체크 (단일 브랜치 최적화 전)
+            # HITP edge가 있으면 무조건 PAUSED_FOR_HITP로 처리
+            hitp_edge_types = {"hitp", "human_in_the_loop", "pause"}
+            has_hitp_edge = False
+            
+            for branch in branches:
+                if isinstance(branch, dict):
+                    branch_nodes = branch.get('nodes', [])
+                    for node in branch_nodes:
+                        if isinstance(node, dict):
+                            # 노드의 incoming edges 체크
+                            in_edges = node.get('in_edges', [])
+                            if any(e.get('type') in hitp_edge_types for e in in_edges if isinstance(e, dict)):
+                                has_hitp_edge = True
+                                break
+                    if has_hitp_edge:
+                        break
+            
+            if has_hitp_edge:
+                logger.info(f"[Kernel] 🚨 HITP edge detected in segment {segment_id}. Pausing for human approval.")
+                return _finalize_with_offload({
+                    "status": "PAUSED_FOR_HITP",
+                    "final_state": mask_pii_in_state(initial_state),
+                    "final_state_s3_path": None,
+                    "next_segment_to_run": segment_id + 1,
+                    "new_history_logs": [],
+                    "error_info": None,
+                    "branches": branches,  # HITP 이후 실행할 브랜치 정보 유지
+                    "segment_type": "hitp_pause"
+                })
+            
             # [Guard] [Critical Fix] 단일 브랜치 + 내부 partition_map 케이스 처리
             # 이 경우 실제 병렬 실행이 필요 없으므로 브랜치 내부의 첫 번째 세그먼트 직접 실행
             if len(branches) == 1:

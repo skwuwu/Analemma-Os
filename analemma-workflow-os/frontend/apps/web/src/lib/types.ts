@@ -483,7 +483,7 @@ export interface ReasoningPathResponse {
 }
 
 // =============================================================================
-// HITL Correction Types (지침 증류용)
+// HITL Correction Types (for instruction distillation)
 // =============================================================================
 
 export interface CorrectionDelta {

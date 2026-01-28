@@ -1,6 +1,6 @@
 /**
- * 지능형 지침 증류기 - 수정 확인 HUD
- * 보수적 접근: 5초 후 passive logging (null 처리)
+ * Intelligent Instruction Distiller - Correction Confirmation HUD
+ * Conservative approach: passive logging after 5 seconds (null handling)
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
@@ -105,7 +105,7 @@ export function CorrectionConfirmationHUD({
             <Brain className="w-4 h-4 text-blue-600" />
           </div>
           <h3 id="hud-title" className="text-sm font-bold text-gray-800">
-            지침 학습 제안
+            Instruction Learning Proposal
           </h3>
         </div>
         <div className="flex items-center gap-2">
@@ -121,7 +121,7 @@ export function CorrectionConfirmationHUD({
           <button
             onClick={() => handleAction(null)}
             className="text-gray-400 hover:text-gray-600 transition-colors"
-            aria-label="닫기"
+            aria-label="Close"
           >
             <X className="w-4 h-4" />
           </button>
@@ -129,7 +129,7 @@ export function CorrectionConfirmationHUD({
       </div>
 
       <p className="text-xs text-gray-600 mb-3 leading-relaxed">
-        에이전트가 사용자의 교정 사항을 발견했습니다. 향후 동일한 패턴으로 학습시킬까요?
+        Agent detected your correction. Would you like to train it with the same pattern in the future?
       </p>
 
       {/* 수정 내용 비교 뷰 */}
@@ -144,13 +144,13 @@ export function CorrectionConfirmationHUD({
           className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-blue-600 text-white text-xs font-bold rounded-lg hover:bg-blue-700 transition-all active:scale-95 shadow-lg shadow-blue-500/20"
         >
           <Check className="w-3.5 h-3.5" />
-          영구 학습하기
+          Learn Permanently
         </button>
         <button
           onClick={() => handleAction(false)}
           className="px-4 py-2.5 bg-gray-100 text-gray-600 text-xs font-semibold rounded-lg hover:bg-gray-200 transition-all active:scale-95"
         >
-          일회성
+          One-time Only
         </button>
       </div>
 

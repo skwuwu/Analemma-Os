@@ -1,8 +1,8 @@
 /**
- * 지능형 지침 증류기 - 수정 로그 수집 훅 (v2.0)
+ * Intelligent Instruction Distiller - Correction Log Collection Hook (v2.0)
  * =====================================================
  * 
- * 사용자의 수정 패턴을 수집하여 AI 지침을 개선하는 핵심 데이터 수집기
+ * Core data collector that improves AI instructions by collecting user correction patterns
  * 
  * v2.0 Changes:
  * - 오프라인 로그 보존 (IndexedDB)
