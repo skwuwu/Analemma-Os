@@ -3172,10 +3172,43 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
 
 
 def route_draft_quality(state: Dict[str, Any]) -> str:
+    """Legacy router for draft quality routing."""
     draft = state.get("gemini_draft")
     if not isinstance(draft, dict) or not draft.get("is_complete"):
         return "reviser"
     return "send_email"
+
+
+def dynamic_router(state: Dict[str, Any]) -> str:
+    """
+    범용 동적 라우터 - LLM이 평가한 결과를 기반으로 분기 결정
+    
+    While 루프의 자연어 조건 평가와 동일한 패턴을 사용:
+    1. Frontend에서 자연어 조건들을 입력
+    2. 숨겨진 LLM 평가 노드가 자동으로 추가됨
+    3. LLM이 조건들을 평가하고 선택할 브랜치를 반환
+    4. 이 router가 LLM 결과를 읽어서 매칭되는 브랜치로 라우팅
+    
+    Expected state structure (automatically injected by frontend):
+    {
+        "__router_result": {
+            "selected_branch": "branch_0",  # or "branch_1", "branch_2", etc.
+            "reason": "Quality score is above 90%"
+        }
+    }
+    
+    Returns:
+        str: Branch identifier (e.g., "branch_0", "branch_1", "default")
+    """
+    router_result = state.get("__router_result", {})
+    
+    if isinstance(router_result, dict):
+        selected = router_result.get("selected_branch", "default")
+        logger.info(f"🔀 [Dynamic Router] Selected branch: {selected}")
+        return selected
+    
+    logger.warning("⚠️ [Dynamic Router] No valid router result, using default")
+    return "default"
 
 
 def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -3621,6 +3654,7 @@ register_node("db_query", db_query_runner)
 register_node("for_each", for_each_runner)
 register_node("loop", loop_runner)  # Convergence support (v3.8)
 register_node("route_draft_quality", route_draft_quality)
+register_node("dynamic_router", dynamic_router)  # LLM-based dynamic routing
 register_node("parallel_group", parallel_group_runner)
 register_node("parallel", parallel_group_runner)  # Alias for backward compat
 register_node("aggregator", aggregator_runner)

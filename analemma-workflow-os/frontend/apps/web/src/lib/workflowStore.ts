@@ -204,25 +204,127 @@ export const useWorkflowStore = create<WorkflowState>()(
         const createsBackEdge = wouldCreateCycle();
         
         // 검증 통과: 새 엣지 추가
+        const newEdge = {
+          ...connection,
+          animated: true,
+          style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 },
+          data: {
+            ...connection.data,
+            isBackEdge: createsBackEdge,
+            edgeType: createsBackEdge ? 'while' : 'edge' // Default to 'while' for loop back-edges
+          }
+        };
+
         set((state) => ({
-          edges: addEdge(
-            {
-              ...connection,
-              animated: true,
-              style: { stroke: 'hsl(263 70% 60%)', strokeWidth: 2 },
-              data: {
-                ...connection.data,
-                isBackEdge: createsBackEdge,
-                edgeType: createsBackEdge ? 'while' : 'edge' // Default to 'while' for loop back-edges
-              }
-            },
-            state.edges
-          ),
+          edges: addEdge(newEdge, state.edges),
         }));
 
-        // Notify user if back-edge was created
+        // 🔄 Back-edge (Loop) 감지 시 While Control Block 제안
         if (createsBackEdge) {
-          toast.success('Circular structure created. Set as back-edge for for_each iteration.');
+          const sourceNode = state.nodes.find(n => n.id === connection.source);
+          const targetNode = state.nodes.find(n => n.id === connection.target);
+          
+          if (sourceNode && targetNode) {
+            toast.info('🔄 Loop detected! Would you like to create a While Control Block for better visualization?', {
+              duration: 10000,
+              action: {
+                label: 'Create Loop Block',
+                onClick: () => {
+                  // While Loop Control Block 생성
+                  const controlBlockPosition = {
+                    x: (sourceNode.position.x + targetNode.position.x) / 2,
+                    y: sourceNode.position.y + 80
+                  };
+
+                  const controlBlockNode = {
+                    id: `loop_block_${Date.now()}`,
+                    type: 'control_block',
+                    position: controlBlockPosition,
+                    data: {
+                      label: 'Loop Control',
+                      blockType: 'while',
+                      branches: [],
+                      max_iterations: 10,
+                      natural_condition: '',
+                      back_edge_source: targetNode.id
+                    }
+                  };
+
+                  // 원래 back-edge 제거하고 Control Block을 통한 엣지로 교체
+                  const newSourceToBlock = {
+                    id: `${connection.source}-${controlBlockNode.id}`,
+                    source: connection.source!,
+                    target: controlBlockNode.id,
+                    type: 'smart',
+                    animated: true
+                  };
+
+                  const newBlockToTarget = {
+                    id: `${controlBlockNode.id}-${connection.target}`,
+                    source: controlBlockNode.id,
+                    target: connection.target!,
+                    type: 'smart',
+                    animated: true,
+                    data: {
+                      loopType: 'while',
+                      isBackEdge: true
+                    }
+                  };
+
+                  set((state) => ({
+                    nodes: [...state.nodes, controlBlockNode],
+                    edges: [
+                      ...state.edges.filter(e => 
+                        !(e.source === connection.source && e.target === connection.target)
+                      ),
+                      newSourceToBlock,
+                      newBlockToTarget
+                    ]
+                  }));
+
+                  toast.success('While Loop Control Block created!');
+                }
+              },
+              cancel: {
+                label: 'Keep as is',
+                onClick: () => {
+                  toast.info('Keeping as back-edge. You can convert to Control Block later.');
+                }
+              }
+            });
+          }
+        }
+
+        // 🔀 분기 패턴 감지 및 Conditional Control Block 제안
+        const suggestion = detectAndSuggestControlBlock(
+          connection.source!,
+          state.nodes,
+          [...state.edges, newEdge]
+        );
+
+        if (suggestion && !createsBackEdge) {  // Loop 제안과 중복 방지
+          // Control Block 제안 토스트
+          toast.info(suggestion.message, {
+            duration: 10000,
+            action: {
+              label: 'Create Block',
+              onClick: () => {
+                // Control Block 노드 추가
+                set((state) => ({
+                  nodes: [...state.nodes, suggestion.controlBlockNode],
+                  edges: [
+                    ...state.edges.filter(e => !suggestion.originalEdges.includes(e)),
+                    ...suggestion.newEdges
+                  ]
+                }));
+                toast.success('Control Block created!');
+              }
+            },
+            cancel: {
+              label: 'Keep as is',
+              onClick: () => {}
+            }
+          });
         }
       },
 

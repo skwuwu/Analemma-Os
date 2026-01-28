@@ -27,12 +27,12 @@ export interface NodeCreationParams {
 export const createWorkflowNode = (params: NodeCreationParams): Node => {
     const { type, position = { x: 0, y: 0 }, data = {}, blockId } = params;
 
-    // 타입별 기본 데이터 병합
+    // 타입별 기본 데이터 초기화 (data에 없는 경우만 fallback)
     const defaultData: Record<string, any> = {
         label: data.label || 'New Block',
     };
 
-    // 노드별 특성 파라미터 초기화
+    // 노드별 특성 파라미터 초기화 (data 값 우선, 없으면 기본값)
     if (type === 'aiModel') {
         defaultData.provider = data.provider || 'openai';
         defaultData.model = data.model || 'gpt-4';
@@ -44,6 +44,16 @@ export const createWorkflowNode = (params: NodeCreationParams): Node => {
         defaultData.triggerType = data.triggerType || 'request';
     } else if (type === 'control') {
         defaultData.controlType = data.controlType || 'loop';
+    } else if (type === 'control_block') {
+        defaultData.blockType = data.blockType || 'conditional';
+        defaultData.branches = data.branches || [
+            { id: 'branch_0', label: 'Branch 1' },
+            { id: 'branch_1', label: 'Branch 2' },
+        ];
+        if (data.blockType === 'while') {
+            defaultData.max_iterations = data.max_iterations || 10;
+            defaultData.natural_condition = data.natural_condition || '';
+        }
     }
 
     return {
@@ -51,9 +61,9 @@ export const createWorkflowNode = (params: NodeCreationParams): Node => {
         type,
         position,
         data: {
-            ...defaultData,
-            ...data,
-            blockId,
+            ...defaultData, // 기본값 먼저
+            ...data,        // data로 덮어쓰기 (Library에서 전달된 값 우선)
+            blockId,        // blockId는 마지막에 추가
         },
     };
 };

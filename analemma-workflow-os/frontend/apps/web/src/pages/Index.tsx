@@ -10,6 +10,7 @@ const SavedWorkflows = lazy(() => import('@/components/SavedWorkflows.tsx').then
 const WorkflowChat = lazy(() => import('@/components/WorkflowChat').then(m => ({ default: m.WorkflowChat })));
 
 import { ActiveWorkflowIndicator } from '@/components/ActiveWorkflowIndicator.tsx';
+import { SavedNotificationsIndicator } from '@/components/SavedNotificationsIndicator.tsx';
 import { Button } from '@/components/ui/button.tsx';
 import { Badge } from '@/components/ui/badge';
 import { LogOut, Activity } from 'lucide-react';
@@ -135,6 +136,7 @@ const Index = ({ signOut }: IndexProps) => {
           {/* 알림 및 로그아웃 버튼 */}
           <div className="flex items-center gap-2">
             <ActiveWorkflowIndicator />
+            <SavedNotificationsIndicator />
             
             <Button
               variant="outline"
@@ -144,9 +146,6 @@ const Index = ({ signOut }: IndexProps) => {
             >
               <Activity className="w-4 h-4" />
               Task Manager
-              {notifications && notifications.filter(n => !n.read).length > 0 && (
-                <Badge className="ml-2">{notifications.filter(n => !n.read).length}</Badge>
-              )}
             </Button>
             {/* Notifications dialog removed; monitor shows notifications */}
             <DropdownMenu>

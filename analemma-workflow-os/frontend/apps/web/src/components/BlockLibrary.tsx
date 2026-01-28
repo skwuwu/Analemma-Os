@@ -54,10 +54,7 @@ export const BLOCK_CATEGORIES: { title: string; type: BlockType; items: Omit<Blo
     type: 'control',
     items: [
       { id: 'for_each', label: 'For Each Loop', icon: Repeat, description: 'Iterate over a list of items and execute sub-workflow for each', defaultData: { controlType: 'for_each', items_path: 'state.items', item_key: 'item', output_key: 'results', max_iterations: 20 } },
-      { id: 'parallel', label: 'Parallel Branches', icon: GitFork, description: 'Execute multiple branches concurrently', defaultData: { controlType: 'parallel', branches: [] } },
-      { id: 'conditional', label: 'Conditional Router', icon: Split, description: 'Route workflow based on Python expressions (if-elif-else logic)', defaultData: { controlType: 'conditional', conditions: [], default_node: null, evaluation_mode: 'first_match' } },
-      { id: 'aggregator', label: 'Aggregator', icon: Merge, description: 'Merge and aggregate results from parallel branches or iterations (includes token usage)', defaultData: { controlType: 'aggregator', strategy: 'auto', sources: [], output_key: 'aggregated_result' } },
-      { id: 'while', label: 'While Loop', icon: Clock, description: 'Repeat workflow steps while a condition is true', defaultData: { controlType: 'loop', condition: 'count < 5' } },
+      { id: 'aggregator', label: 'Aggregator', icon: Merge, description: 'Merge and aggregate results from parallel branches or iterations (auto-aggregation, no config needed)', defaultData: { controlType: 'aggregator' } },
       { id: 'confirmation', label: 'User Intervention', icon: MessageSquare, description: 'Pause workflow execution for human approval or input', defaultData: { controlType: 'human', condition: 'approval_required' } },
     ]
   }

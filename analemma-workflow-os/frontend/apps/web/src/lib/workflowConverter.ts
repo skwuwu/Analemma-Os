@@ -41,6 +41,7 @@ export interface BackendNode {
   type: 
     // 사용자가 프론트엔드에서 생성하는 타입들 (코드가 자동 변환)
     | 'operator'       // operator, trigger, control(human) → operator
+    | 'llm'            // LLM 평가 노드 (자동 생성)
     | 'llm_chat'       // aiModel → llm_chat
     | 'loop'           // cycle (back-edge) → loop
     | 'for_each'       // control(loop/for_each) → for_each
@@ -50,6 +51,7 @@ export interface BackendNode {
     | 'api_call'       // operator(api_call) → api_call
     | 'db_query'       // operator(db_query) → db_query
     | 'safe_operator'  // operator(safe_operator) → safe_operator
+    | 'operator_official' // operator_official flag setter
     | 'route_condition' // control(conditional) → route_condition
     | 'trigger';       // trigger → trigger (백엔드에서 정규화됨)
   provider?: 'openai' | 'bedrock' | 'anthropic' | 'google';
@@ -200,14 +202,9 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
         };
       } else if (controlType === 'aggregator') {
         // aggregator: 병렬/반복 결과 집계 (토큰 사용량 포함)
+        // aggregator_runner는 state에서 자동으로 병합 (설정 불필요)
         backendNode.type = 'aggregator';
-        backendNode.config = {
-          // aggregator_runner는 state에서 자동으로 branch_token_details, for_each_result 등을 스캔
-          // 추가 설정이 필요한 경우 여기에 포함
-          strategy: node.data.strategy || 'auto', // merge, concat, sum 등
-          sources: node.data.sources || [], // 특정 소스 지정 (선택사항)
-          output_key: node.data.output_key || 'aggregated_result',
-        };
+        backendNode.config = {};
       } else if (controlType === 'conditional') {
         // conditional: route_condition 노드로 변환
         backendNode.type = 'route_condition';
@@ -237,6 +234,10 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       backendNode.subgraph_ref = node.data.subgraph_ref || node.data.subgraphRef || node.data.groupId;
       backendNode.subgraph_inline = node.data.subgraph_inline || node.data.subgraphInline;
       break;
+    case 'control_block':
+      // Control Block: UI 전용 노드, 백엔드 변환 시 제외됨
+      // Control Block은 엣지로 변환되어 conditional_edge/parallel_group/loop로 처리됨
+      return null;
     default:
       backendNode.type = 'operator';
       backendNode.sets = node.data?.sets || {};
@@ -333,45 +334,107 @@ export const convertEdgeToBackendFormat = (edge: any, nodes: any[]): BackendEdge
   return backendEdge;
 };
 
-// 그래프 분석 기반으로 사이클(back-edge)을 loop 노드로 변환
-// 주의: Cycle은 for_each가 아닌 loop 노드로 표현됨
-// - loop: 조건이 참인 동안 서브 노드들을 순차 반복 (condition-based)
-// - for_each: 리스트의 각 항목에 대해 sub_workflow 병렬 실행 (list-based)
+// 그래프 분석 기반으로 사이클(back-edge)을 loop 또는 for_each 노드로 변환
+// back-edge의 edgeType에 따라 구분:
+// - edgeType === 'for_each': 리스트의 각 항목에 대해 서브워크플로우 병렬 실행 (데이터 병렬화)
+// - edgeType === 'while' (또는 기본값): 조건이 참인 동안 서브 노드들을 순차 반복 (조건 기반)
 const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): BackendNode => {
   const backEdge = cycle.backEdge;
+  const edgeType = backEdge.data?.edgeType as string | undefined;
   
-  // 조건 찾기: back-edge나 source 노드에서 조건 추출
-  const sourceNode = nodes.find((n: any) => n.id === backEdge.source);
-  const condition = 
-    backEdge.data?.condition ||
-    sourceNode?.data?.whileCondition ||
-    sourceNode?.data?.condition ||
-    'false'; // 기본값: false (조건이 true가 되면 탈출)
+  // back-edge 타입에 따라 노드 타입 결정
+  const isForEach = edgeType === 'for_each';
   
-  // max_iterations 찾기
-  const maxIterations = 
-    backEdge.data?.max_iterations ||
-    sourceNode?.data?.max_iterations ||
-    sourceNode?.data?.maxIterations ||
-    5; // loop_runner 기본값
+  if (isForEach) {
+    // For Each 노드 생성 (병렬 처리)
+    const itemsPath = backEdge.data?.items_path || 'state.items';
+    const itemKey = backEdge.data?.item_key || 'item';
+    const maxIterations = backEdge.data?.max_iterations || 100;
+    
+    // 사이클 내부의 노드들을 서브 노드로 변환
+    const loopNodeIds = cycle.loopNodes || cycle.path;
+    const subNodes = nodes
+      .filter((n: any) => loopNodeIds.includes(n.id))
+      .map((node: any) => convertNodeToBackendFormat(node))
+      .filter((n: any) => n !== null);
 
-  // 사이클 내부의 노드들을 서브 노드로 변환
-  const loopNodeIds = cycle.loopNodes || cycle.path;
-  const loopNodes = nodes
-    .filter((n: any) => loopNodeIds.includes(n.id))
-    .map((node: any) => convertNodeToBackendFormat(node))
-    .filter((n: any) => n !== null);
+    return {
+      id: `for_each_${cycle.id}`,
+      type: 'for_each',
+      config: {
+        items_path: itemsPath,
+        item_key: itemKey,
+        max_iterations: maxIterations,
+        sub_workflow: {
+          nodes: subNodes,
+        },
+      },
+    };
+  } else {
+    // While Loop 노드 생성 (순차 처리)
+    const sourceNode = nodes.find((n: any) => n.id === backEdge.source);
+    const naturalCondition = backEdge.data?.natural_condition;
+    const evalMode = backEdge.data?.eval_mode;
+    
+    // 자연어 조건이 있으면 LLM 평가 기반, 없으면 표현식 기반
+    const condition = 
+      (evalMode === 'natural_language' && naturalCondition) 
+        ? 'state.__loop_should_exit == true'  // 숨겨진 평가 노드가 설정하는 플래그
+        : (backEdge.data?.condition ||
+           sourceNode?.data?.whileCondition ||
+           sourceNode?.data?.condition ||
+           'false'); // 기본값: false (조건이 true가 되면 탈출)
+    
+    const maxIterations = 
+      backEdge.data?.max_iterations ||
+      sourceNode?.data?.max_iterations ||
+      sourceNode?.data?.maxIterations ||
+      5; // loop_runner 기본값
 
-  return {
-    id: `loop_${cycle.id}`,
-    type: 'loop',
-    config: {
-      nodes: loopNodes,
-      condition: typeof condition === 'string' ? condition : JSON.stringify(condition),
-      max_iterations: maxIterations,
-      loop_var: 'loop_index', // loop_runner 기본값
-    },
-  };
+    // 사이클 내부의 노드들을 서브 노드로 변환
+    const loopNodeIds = cycle.loopNodes || cycle.path;
+    const loopNodes = nodes
+      .filter((n: any) => loopNodeIds.includes(n.id))
+      .map((node: any) => convertNodeToBackendFormat(node))
+      .filter((n: any) => n !== null);
+    
+    // 🤖 자연어 조건이 있으면 숨겨진 LLM 평가 노드 자동 추가
+    if (evalMode === 'natural_language' && naturalCondition) {
+      loopNodes.push({
+        id: `__loop_condition_evaluator_${cycle.id}`,
+        type: 'llm',
+        config: {
+          model: 'gemini-2.0-flash-exp',
+          system_message: `You are a condition evaluator. Evaluate the following condition based on the current workflow state and return ONLY a JSON object.\n\nCondition to evaluate: "${naturalCondition}"\n\nAnalyze the current state and determine if this condition is satisfied.\n\nReturn format: {"should_exit": true/false, "reason": "brief explanation"}`,
+          output_key: '__loop_condition_result',
+          response_format: 'json',
+          temperature: 0.1,
+        },
+      });
+      
+      // 평가 결과를 플래그로 변환하는 operator_official 노드 추가
+      loopNodes.push({
+        id: `__loop_flag_setter_${cycle.id}`,
+        type: 'operator_official',
+        config: {
+          strategy: 'deep_get',
+          input_key: '__loop_condition_result.should_exit',
+          output_key: '__loop_should_exit',
+        },
+      });
+    }
+
+    return {
+      id: `loop_${cycle.id}`,
+      type: 'loop',
+      config: {
+        nodes: loopNodes,
+        condition: typeof condition === 'string' ? condition : JSON.stringify(condition),
+        max_iterations: maxIterations,
+        loop_var: 'loop_index', // loop_runner 기본값
+      },
+    };
+  }
 };
 
 // 그래프 분석 기반으로 병렬/조건부 분기를 노드로 변환
@@ -415,34 +478,300 @@ const convertConditionalBranchToEdges = (
   parallelGroup: ParallelGroup, 
   nodes: any[], 
   edges: any[]
-): BackendEdge[] => {
+): { edges: BackendEdge[], routerNode?: BackendNode } => {
   if (parallelGroup.branchType !== 'conditional') {
-    return [];
+    return { edges: [] };
   }
 
   const sourceNodeId = parallelGroup.sourceNodeId;
-  const conditionalEdges: BackendEdge[] = [];
-
-  // 각 브랜치별로 conditional_edge 생성
+  
+  // 자연어 조건이 있는지 확인
+  const hasNaturalLanguageConditions = parallelGroup.branchEdges.some(
+    edge => edge?.data?.natural_condition
+  );
+  
+  // Mapping 생성: branch_X → target node
+  const mapping: Record<string, string> = {};
+  const naturalConditions: Array<{ condition: string; branch: string }> = [];
+  
   parallelGroup.branches.forEach((branchNodeIds, index) => {
     if (branchNodeIds.length === 0) return;
-
-    const targetNodeId = branchNodeIds[0]; // 브랜치의 첫 번째 노드
+    
+    const targetNodeId = branchNodeIds[0];
+    const branchKey = `branch_${index}`;
+    mapping[branchKey] = targetNodeId;
+    
     const branchEdge = parallelGroup.branchEdges[index];
-    const condition = branchEdge?.data?.condition as string | undefined;
+    const naturalCondition = branchEdge?.data?.natural_condition as string | undefined;
+    
+    if (naturalCondition) {
+      naturalConditions.push({
+        condition: naturalCondition,
+        branch: branchKey
+      });
+    }
+  });
+  
+  // Default branch 추가
+  if (parallelGroup.branches.length > 0) {
+    const lastBranch = parallelGroup.branches[parallelGroup.branches.length - 1];
+    if (lastBranch.length > 0) {
+      mapping['default'] = lastBranch[0];
+    }
+  }
+  
+  // 자연어 조건이 있으면 LLM 평가 노드 추가 (While 패턴과 동일!)
+  let routerNode: BackendNode | undefined;
+  
+  if (hasNaturalLanguageConditions && naturalConditions.length > 0) {
+    const conditionsText = naturalConditions
+      .map((c, i) => `${i + 1}. "${c.condition}" → return "${c.branch}"`)
+      .join('\n');
+    
+    routerNode = {
+      id: `__router_evaluator_${parallelGroup.id}`,
+      type: 'llm',
+      config: {
+        model: 'gemini-2.0-flash-exp',
+        system_message: `You are a branch router. Evaluate the following conditions based on the current workflow state and return the matching branch.
 
-    conditionalEdges.push({
+Branch Conditions:
+${conditionsText}
+
+Analyze the current state and determine which condition is satisfied.
+
+Return format: {"selected_branch": "branch_X", "reason": "brief explanation"}
+
+If none match, return: {"selected_branch": "default", "reason": "no conditions matched"}`,
+        output_key: '__router_result',
+        response_format: 'json',
+        temperature: 0.1,
+      },
+    };
+  }
+  
+  // Single conditional_edge with mapping
+  const conditionalEdge: BackendEdge = {
+    type: 'conditional_edge',
+    source: sourceNodeId,
+    target: Object.values(mapping)[0] || '', // First target as fallback
+    router_func: hasNaturalLanguageConditions ? 'dynamic_router' : 'route_draft_quality',
+    mapping: mapping,
+  };
+
+  return { 
+    edges: [conditionalEdge],
+    routerNode: routerNode
+  };
+};
+
+/**
+ * Control Block 노드를 백엔드 형식으로 변환
+ * 
+ * Control Block은 UI 전용 노드로, 백엔드 실행 시에는:
+ * - conditional → conditional_edge + router node
+ * - parallel → parallel_group branches
+ * - for_each → for_each node
+ * - while → loop node (back-edge)
+ */
+function convertControlBlockToBackend(
+  controlBlockNode: any,
+  nodes: any[],
+  edges: any[]
+): { nodes: BackendNode[], edges: BackendEdge[] } {
+  const blockType = controlBlockNode.data.blockType;
+  const blockId = controlBlockNode.id;
+  
+  // Control Block로 들어오는 엣지 찾기
+  const incomingEdge = edges.find((e: any) => e.target === blockId);
+  const sourceNodeId = incomingEdge?.source || blockId;
+  
+  // Control Block에서 나가는 엣지들
+  const outgoingEdges = edges.filter((e: any) => e.source === blockId);
+  
+  if (blockType === 'conditional') {
+    // Conditional Branch → conditional_edge + LLM router
+    const branches = controlBlockNode.data.branches || [];
+    const mapping: { [key: string]: string } = {};
+    const naturalConditions: { branch: string; condition: string }[] = [];
+    
+    // 엣지와 branch 설정을 매칭하여 mapping 생성
+    branches.forEach((branch: any) => {
+      const branchEdge = outgoingEdges.find((e: any) => e.sourceHandle === branch.id);
+      if (branchEdge) {
+        mapping[branch.id] = branchEdge.target;
+        
+        if (branch.natural_condition) {
+          naturalConditions.push({
+            branch: branch.id,
+            condition: branch.natural_condition
+          });
+        }
+      }
+    });
+    
+    // Default branch
+    if (branches.length > 0 && !mapping['default']) {
+      mapping['default'] = mapping[branches[0].id];
+    }
+    
+    // LLM router 노드 생성 (natural conditions가 있는 경우)
+    const resultNodes: BackendNode[] = [];
+    const hasNaturalConditions = naturalConditions.length > 0;
+    
+    if (hasNaturalConditions) {
+      const conditionsText = naturalConditions
+        .map((c, i) => `${i + 1}. "${c.condition}" → return "${c.branch}"`)
+        .join('\n');
+      
+      resultNodes.push({
+        id: `__router_evaluator_${blockId}`,
+        type: 'llm',
+        config: {
+          model: 'gemini-2.0-flash-exp',
+          system_message: `You are a branch router. Evaluate the following conditions based on the current workflow state and return the matching branch.
+
+Branch Conditions:
+${conditionsText}
+
+Analyze the current state and determine which condition is satisfied.
+
+Return format: {"selected_branch": "branch_X", "reason": "brief explanation"}
+
+If none match, return: {"selected_branch": "default", "reason": "no conditions matched"}`,
+          output_key: '__router_result',
+          response_format: 'json',
+          temperature: 0.1,
+        },
+      });
+    }
+    
+    // Conditional edge
+    const resultEdges: BackendEdge[] = [{
       type: 'conditional_edge',
       source: sourceNodeId,
-      target: targetNodeId,
-      condition: condition || `branch_${index}`,
-      // mapping은 라우터 함수 사용 시 필요
-      // router_func가 없으면 condition 값으로 직접 분기
+      target: Object.values(mapping)[0] || '',
+      router_func: hasNaturalConditions ? 'dynamic_router' : 'route_draft_quality',
+      mapping: mapping,
+    }];
+    
+    return { nodes: resultNodes, edges: resultEdges };
+  }
+  
+  if (blockType === 'parallel') {
+    // Parallel Execution → parallel_group node
+    const branches = controlBlockNode.data.branches || [];
+    const branchNodes: BackendNode[][] = [];
+    
+    outgoingEdges.forEach((edge: any) => {
+      const targetNode = nodes.find((n: any) => n.id === edge.target);
+      if (targetNode) {
+        const converted = convertNodeToBackendFormat(targetNode);
+        if (converted) {
+          branchNodes.push([converted]);
+        }
+      }
     });
-  });
+    
+    const parallelNode: BackendNode = {
+      id: `parallel_${blockId}`,
+      type: 'parallel_group',
+      config: {
+        branches: branchNodes.map((nodeList, idx) => ({
+          branch_id: `branch_${idx}`,
+          sub_workflow: { nodes: nodeList }
+        }))
+      }
+    };
+    
+    return { nodes: [parallelNode], edges: [] };
+  }
+  
+  if (blockType === 'for_each') {
+    // For Each Loop → for_each node
+    const branch = controlBlockNode.data.branches[0];
+    const targetEdge = outgoingEdges[0];
+    const targetNode = targetEdge ? nodes.find((n: any) => n.id === targetEdge.target) : null;
+    
+    const forEachNode: BackendNode = {
+      id: `for_each_${blockId}`,
+      type: 'for_each',
+      config: {
+        items_path: branch?.items_path || 'state.items',
+        item_key: 'item',
+        output_key: 'for_each_results',
+        max_iterations: 20,
+        sub_workflow: targetNode ? { nodes: [convertNodeToBackendFormat(targetNode)!] } : { nodes: [] }
+      }
+    };
+    
+    return { nodes: [forEachNode], edges: [] };
+  }
+  
+  if (blockType === 'while') {
+    // While Loop → loop node with back-edge
+    const maxIterations = controlBlockNode.data.max_iterations || 10;
+    const naturalCondition = controlBlockNode.data.natural_condition as string | undefined;
+    const backEdgeTarget = controlBlockNode.data.back_edge_source;
+    
+    // While은 loop 노드 + LLM evaluator로 변환
+    const resultNodes: BackendNode[] = [];
+    
+    if (naturalCondition) {
+      // LLM evaluator 노드 추가
+      resultNodes.push({
+        id: `__loop_condition_evaluator_${blockId}`,
+        type: 'llm',
+        config: {
+          model: 'gemini-2.0-flash-exp',
+          system_message: `Evaluate the following loop exit condition based on the current workflow state:
 
-  return conditionalEdges;
-};
+Exit Condition: "${naturalCondition}"
+
+Return format: {"should_exit": true/false, "reason": "brief explanation"}`,
+          output_key: '__loop_condition_result',
+          response_format: 'json',
+          temperature: 0.1,
+        },
+      });
+      
+      // Flag setter 노드 추가
+      resultNodes.push({
+        id: `__loop_flag_setter_${blockId}`,
+        type: 'safe_operator',
+        config: {
+          strategy: 'set_value',
+          input_key: '__loop_condition_result',
+          params: { path: 'should_exit', output_key: '__loop_should_exit' },
+          output_key: '__loop_should_exit',
+        },
+      });
+    }
+    
+    // Loop 노드
+    const loopNode: BackendNode = {
+      id: `loop_${blockId}`,
+      type: 'loop',
+      config: {
+        condition: naturalCondition ? '__loop_should_exit == true' : 'false',
+        max_iterations: maxIterations,
+        nodes: resultNodes,
+      }
+    };
+    
+    // Back-edge
+    const backEdge: BackendEdge = backEdgeTarget ? {
+      type: 'edge',
+      source: blockId,
+      target: backEdgeTarget,
+      data: { loopType: 'while' }
+    } : { type: 'edge', source: blockId, target: sourceNodeId };
+    
+    return { nodes: [loopNode], edges: [backEdge] };
+  }
+  
+  return { nodes: [], edges: [] };
+}
 
 // 전체 워크플로우를 백엔드 형식으로 변환 (그래프 분석 적용)
 export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow => {
@@ -491,6 +820,10 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
         excludedNodeIds.add(node.id);
       }
     }
+    // control_block 노드도 제외 (엣지로 변환됨)
+    if (node.type === 'control_block') {
+      excludedNodeIds.add(node.id);
+    }
   });
   
   // 3. 제외되지 않은 노드들 변환
@@ -511,16 +844,32 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
     convertParallelGroupToNode(pg, nodes, edges)
   ).filter(n => n !== null);
   
-  // 6. 조건부 분기 → conditional_edge 생성
-  const conditionalEdges = analysisResult.parallelGroups
+  // 6. 조건부 분기 → conditional_edge + router 노드 생성
+  const conditionalResults = analysisResult.parallelGroups
     .filter(pg => pg.branchType === 'conditional')
-    .flatMap(pg => convertConditionalBranchToEdges(pg, nodes, edges));
+    .map(pg => convertConditionalBranchToEdges(pg, nodes, edges));
   
-  // 7. 모든 백엔드 노드 합치기
+  const conditionalEdges = conditionalResults.flatMap(r => r.edges);
+  const routerNodes = conditionalResults
+    .map(r => r.routerNode)
+    .filter((n): n is BackendNode => n !== undefined);
+  
+  // 7. Control Block 노드들 변환 (UI 기반 제어 구조)
+  const controlBlockNodes = nodes.filter((n: any) => n.type === 'control_block');
+  const controlBlockResults = controlBlockNodes.map((node: any) => 
+    convertControlBlockToBackend(node, nodes, edges)
+  );
+  
+  const controlBlockBackendNodes = controlBlockResults.flatMap(r => r.nodes);
+  const controlBlockEdges = controlBlockResults.flatMap(r => r.edges);
+  
+  // 8. 모든 백엔드 노드 합치기 (router 노드 + control block 노드 포함!)
   const backendNodes = [
     ...regularBackendNodes,
     ...loopNodes,
     ...parallelGroupNodes,
+    ...routerNodes,  // 🤖 자동 생성된 LLM 라우터 노드 추가
+    ...controlBlockBackendNodes,  // 🎛️ Control Block에서 변환된 노드들
   ];
   
   // 8. 엣지 변환 (사이클 back-edge, 병렬 분기 엣지 필터링)
@@ -580,8 +929,8 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
     })
     .filter((e: any) => e !== null);
 
-  // 9. 조건부 엣지 추가
-  const allBackendEdges = [...backendEdges, ...conditionalEdges];
+  // 9. 조건부 엣지 + Control Block 엣지 추가
+  const allBackendEdges = [...backendEdges, ...conditionalEdges, ...controlBlockEdges];
 
   // secrets 배열 변환 (프론트엔드에 secrets가 있는 경우)
   const backendSecrets = workflow.secrets?.map((secret: any) => ({
@@ -763,13 +1112,9 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         // aggregator → control(aggregator)
         frontendType = 'control';
         label = 'Aggregator';
-        const aggregatorConfig = node.config || {};
         nodeData = {
           label,
           controlType: 'aggregator',
-          strategy: aggregatorConfig.strategy || 'auto',
-          sources: aggregatorConfig.sources || [],
-          output_key: aggregatorConfig.output_key || 'aggregated_result',
         };
         break;
       case 'subgraph':
@@ -841,25 +1186,172 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
     };
   }) || [];
 
-  const frontendEdges = backendWorkflow.edges?.map((edge: BackendEdge, index: number) => ({
-    id: `edge-${index}`,
-    source: edge.source,
-    target: edge.target,
-    type: 'smoothstep',
-    animated: true,
-    style: {
-      stroke: edge.type === 'if' ? 'hsl(142 76% 36%)' : edge.type === 'hitp' ? 'hsl(38 92% 50%)' : 'hsl(263 70% 60%)',
-      strokeWidth: 2
-    },
-    data: {
-      condition: edge.condition,
-      edgeType: edge.type, // 백엔드 엣지 타입을 프론트엔드에서 사용할 수 있도록 저장
-    },
-  })) || [];
+  // 🔄 [역변환 1] HITL 엣지를 control/human 노드 + 일반 엣지로 복원
+  const hitlEdges = backendWorkflow.edges?.filter((edge: BackendEdge) => 
+    edge.type === 'hitp' || edge.type === 'human_in_the_loop'
+  ) || [];
+
+  const hitlNodes = hitlEdges.map((hitlEdge: BackendEdge, index: number) => {
+    const hitlNodeId = `hitl_${hitlEdge.source}_${hitlEdge.target}`;
+    return {
+      id: hitlNodeId,
+      type: 'control',
+      position: { x: 300 + index * 50, y: 300 + index * 50 },
+      data: {
+        label: 'Human Review',
+        controlType: 'human',
+        description: 'Human approval required',
+      },
+      _isHitlNode: true,
+      _originalSource: hitlEdge.source,
+      _originalTarget: hitlEdge.target,
+    };
+  });
+
+  // 🔄 [역변환 2] conditional_edge를 control/branch 노드 + 엣지로 복원
+  const conditionalEdges = backendWorkflow.edges?.filter((edge: BackendEdge) => 
+    edge.type === 'conditional_edge'
+  ) || [];
+
+  // conditional_edge를 source별로 그룹화 (한 노드에서 여러 조건 분기)
+  const conditionalEdgesBySource = conditionalEdges.reduce((acc: any, edge: BackendEdge) => {
+    if (!acc[edge.source]) {
+      acc[edge.source] = [];
+    }
+    acc[edge.source].push(edge);
+    return acc;
+  }, {});
+
+  const branchNodes = Object.entries(conditionalEdgesBySource).map(([source, edges]: [string, any], index: number) => {
+    const branchNodeId = `branch_${source}`;
+    const firstEdge = edges[0];
+    
+    // mapping 생성: 각 조건 → target 노드
+    const mapping: Record<string, string> = {};
+    edges.forEach((edge: BackendEdge) => {
+      const conditionKey = edge.condition || edge.mapping || 'default';
+      mapping[String(conditionKey)] = edge.target;
+    });
+
+    return {
+      id: branchNodeId,
+      type: 'control',
+      position: { x: 500 + index * 50, y: 300 + index * 50 },
+      data: {
+        label: 'Conditional Branch',
+        controlType: 'branch',
+        router_func: firstEdge.router_func || 'route_by_condition',
+        mapping: firstEdge.mapping || mapping,
+        condition: firstEdge.condition,
+      },
+      _isBranchNode: true,
+      _originalSource: source,
+      _targets: edges.map((e: BackendEdge) => e.target),
+    };
+  });
+
+  // 모든 노드 합치기 (원본 + HITL 노드 + Branch 노드)
+  const allFrontendNodes = [...frontendNodes, ...hitlNodes, ...branchNodes];
+
+  // 엣지 재구성
+  const frontendEdges = backendWorkflow.edges?.flatMap((edge: BackendEdge, index: number) => {
+    // 1. HITL 엣지인 경우: 2개의 일반 엣지로 분할
+    if (edge.type === 'hitp' || edge.type === 'human_in_the_loop') {
+      const hitlNodeId = `hitl_${edge.source}_${edge.target}`;
+      return [
+        // source → HITL 노드
+        {
+          id: `edge-${index}-in`,
+          source: edge.source,
+          target: hitlNodeId,
+          type: 'smoothstep',
+          animated: true,
+          style: {
+            stroke: 'hsl(38 92% 50%)', // HITL orange
+            strokeWidth: 2
+          },
+          data: {
+            edgeType: 'normal',
+          },
+        },
+        // HITL 노드 → target
+        {
+          id: `edge-${index}-out`,
+          source: hitlNodeId,
+          target: edge.target,
+          type: 'smoothstep',
+          animated: true,
+          style: {
+            stroke: 'hsl(38 92% 50%)', // HITL orange
+            strokeWidth: 2
+          },
+          data: {
+            edgeType: 'hitp',
+          },
+        },
+      ];
+    }
+
+    // 2. conditional_edge인 경우: 2개의 일반 엣지로 분할
+    if (edge.type === 'conditional_edge') {
+      const branchNodeId = `branch_${edge.source}`;
+      return [
+        // source → Branch 노드
+        {
+          id: `edge-${index}-in`,
+          source: edge.source,
+          target: branchNodeId,
+          type: 'smoothstep',
+          animated: true,
+          style: {
+            stroke: 'hsl(142 76% 36%)', // Conditional green
+            strokeWidth: 2
+          },
+          data: {
+            edgeType: 'normal',
+          },
+        },
+        // Branch 노드 → target
+        {
+          id: `edge-${index}-out`,
+          source: branchNodeId,
+          target: edge.target,
+          type: 'smoothstep',
+          animated: true,
+          style: {
+            stroke: 'hsl(142 76% 36%)', // Conditional green
+            strokeWidth: 2
+          },
+          data: {
+            condition: edge.condition,
+            edgeType: 'conditional_edge',
+            mapping: edge.mapping,
+          },
+        },
+      ];
+    }
+
+    // 3. 일반 엣지
+    return {
+      id: `edge-${index}`,
+      source: edge.source,
+      target: edge.target,
+      type: 'smoothstep',
+      animated: true,
+      style: {
+        stroke: edge.type === 'if' ? 'hsl(142 76% 36%)' : 'hsl(263 70% 60%)',
+        strokeWidth: 2
+      },
+      data: {
+        condition: edge.condition,
+        edgeType: edge.type,
+      },
+    };
+  }) || [];
 
   const result: any = {
     name: backendWorkflow.name,
-    nodes: frontendNodes,
+    nodes: allFrontendNodes,
     edges: frontendEdges,
   };
 

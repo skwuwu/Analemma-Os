@@ -23,6 +23,7 @@ const AIModelNode = lazy(() => import('./nodes/AIModelNode').then(m => ({ defaul
 const OperatorNode = lazy(() => import('./nodes/OperatorNode').then(m => ({ default: m.OperatorNode })));
 const TriggerNode = lazy(() => import('./nodes/TriggerNode').then(m => ({ default: m.TriggerNode })));
 const ControlNode = lazy(() => import('./nodes/ControlNode').then(m => ({ default: m.ControlNode })));
+const ControlBlockNode = lazy(() => import('./nodes/ControlBlockNode').then(m => ({ default: m.ControlBlockNode })));
 const GroupNode = lazy(() => import('./nodes/GroupNode').then(m => ({ default: m.GroupNode })));
 import { SmartEdge } from './edges/SmartEdge';
 
@@ -105,6 +106,11 @@ const WorkflowCanvasInner = () => {
     control: (props: any) => (
       <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
         <ControlNode {...props} />
+      </Suspense>
+    ),
+    control_block: (props: any) => (
+      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
+        <ControlBlockNode {...props} />
       </Suspense>
     ),
     group: (props: any) => (

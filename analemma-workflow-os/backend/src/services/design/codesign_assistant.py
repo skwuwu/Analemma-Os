@@ -134,16 +134,14 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 # ──────────────────────────────────────────────────────────────
 
 NODE_TYPE_SPECS = """
-[사용 가능한 노드 타입]
+[사용 가능한 노드 타입 (Backend Primitives)]
 1. "operator": Python 코드 실행 노드
    - config.code: 실행할 Python 코드 (문자열)
    - config.sets: 간단한 키-값 설정 (객체, 선택사항)
 
 2. "llm_chat": LLM 채팅 노드
    - config.prompt_content: 프롬프트 템플릿 (문자열, 필수)
-   - config.model: 모델 ID (문자열, 선택사항)
-   - config.max_tokens: 최대 토큰 수 (숫자, 선택사항)
-   - config.temperature: 온도 설정 (숫자, 선택사항)
+   - config.model: 모델 ID (문자열, 선택사항, 기본값: "gpt-4o")
    - config.system_prompt: 시스템 프롬프트 (문자열, 선택사항)
 
 3. "api_call": HTTP API 호출 노드
@@ -156,47 +154,51 @@ NODE_TYPE_SPECS = """
    - config.query: SQL 쿼리 (문자열, 필수)
    - config.connection_string: DB 연결 문자열 (문자열, 필수)
 
-5. "for_each": 반복 처리 노드
+5. "for_each": 병렬 리스트 처리 (Control Block: For Each)
    - config.items_path: 반복할 리스트 경로 (문자열, 필수, 예: "state.users")
-   - config.item_key: 각 아이템을 저장할 상태 키 (문자열, 선택사항, 기본값: "item")
-   - config.output_key: 결과 배열 저장 키 (문자열, 선택사항, 기본값: "for_each_results")
+   - config.item_key: 각 아이템을 저장할 상태 키 (문자열, 선택사항)
+   - config.output_key: 결과 배열 저장 키 (문자열, 선택사항)
+   - config.items: (대안) 고정 리스트 입력
    - config.sub_workflow.nodes: 각 아이템에 대해 실행할 노드 배열 (배열, 필수)
    - config.max_iterations: 최대 반복 횟수 (숫자, 선택사항, 기본값: 20)
 
-6. "route_draft_quality": 품질 라우팅 노드
-   - config.threshold: 품질 임계값 (숫자, 필수)
+6. "loop": 조건부 반복/While 루프 (Control Block: While)
+   - config.condition: 루프 지속 조건 (문자열/JS 표현식, 예: "state.count < 5", 필수)
+   - config.nodes: 루프 내부에서 실행할 노드 배열 (배열, 필수)
+   - config.max_iterations: 최대 반복 횟수 (숫자, 선택사항, 기본값: 20)
+   - config.loop_var: 루프 인덱스 변수명 (문자열, 선택사항)
 
-7. "parallel": 병렬 실행 노드
+7. "parallel_group": 병렬 브랜치 실행 (Control Block: Parallel)
    - config.branches: 브랜치 정의 배열 (배열, 필수)
-   - 각 브랜치: {"branch_id": "브랜치명", "nodes": [노드 정의들]} 또는 {"branch_id": "브랜치명", "sub_workflow": {"nodes": [노드 정의들]}}
+   - 각 브랜치: {"branch_id": "브랜치명", "nodes": [노드들...]}
 
-8. "route_condition": 조건부 라우팅 노드
+8. "route_condition": 조건부 분기 (Control Block: Conditional)
    - config.conditions: 조건 정의 배열 (배열, 필수)
-   - 각 조건: {"expression": "$.field == 'value'", "target": "대상_노드_id"}
-   - config.default_node: 조건 미충족 시 기본 대상 노드 (문자열, 선택사항)
+   - 각 조건: {"expression": "JS 조건식", "target": "대상_노드_id"}
+   - config.default_node: 기본값 노드 ID (조건 불일치 시)
 
-9. "group": 서브그래프 노드
+9. "subgraph": 서브그래프/그룹
    - config.subgraph_id: 서브그래프 ID (문자열)
+   - config.subgraph_inline: 인라인 정의 ({"nodes": [], "edges": []})
 
-8. "vision": 이미지/비디오 분석 노드 (Gemini Vision)
-   - config.image_inputs: 분석할 이미지 소스 리스트 (배열, 문자열은 S3 URI/URL)
-   - config.video_inputs: 분석할 비디오 소스 리스트 (배열, S3 URI/URL)
-   - config.prompt_content: 분석 프롬프트 (문자열)
-   - config.output_key: 결과 저장 키 (문자열)
+10. "vision": 이미지/비디오 분석
+    - config.image_inputs: 이미지 소스 리스트
+    - config.prompt_content: 분석 프롬프트
 
-9. "video_chunker": 비디오 분할 노드 (긴 비디오 처리용)
-   - config.video_uri: 원본 비디오 S3 URI (문자열)
-   - config.segment_length_min: 분할 길이(분) (숫자)
-   - config.output_key: 청크 리스트 저장 키 (문자열)
+11. "video_chunker": 비디오 분할
+    - config.video_uri: 비디오 URI
+    - config.segment_length_min: 분할 길이(분)
 
-10. "nested_for_each": 중첩 루프 처리 노드 (Map-in-Map)
-    - config.input_list_key: 외부 리스트 키 (문자열)
-    - config.nested_config: 내부 루프 설정 (객체) - {input_list_key, sub_node_config}
+12. "skill_executor": 스킬 실행
+    - config.skill_ref: 스킬 ID
+    - config.tool_call: 실행할 툴 이름
 
-11. "skill_executor": 스킬 실행 노드
-    - config.skill_ref: 스킬 ID (문자열)
-    - config.tool_call: 실행할 툴 이름 (문자열)
-    - config.input_mapping: 입력 매핑 (객체)
+13. "nested_for_each": 중첩 루프 처리
+    - config.input_list_key: 외부 리스트 키
+    - config.nested_config: 내부 루프 설정
+
+14. "route_draft_quality": 품질 라우팅
+    - config.threshold: 임계값
 """
 
 CODESIGN_SYSTEM_PROMPT = """
@@ -860,12 +862,40 @@ async def stream_codesign_response(
             # ──────────────────────────────────────────────────────
             # Gemini Native 스트리밍 (초장기 컨텍스트 활용)
             # ──────────────────────────────────────────────────────
-            async for chunk in _stream_gemini_codesign(
-                user_request=user_request,
-                context=context,
-                connection_ids=connection_ids
-            ):
-                yield chunk
+            try:
+                async for chunk in _stream_gemini_codesign(
+                    user_request=user_request,
+                    context=context,
+                    connection_ids=connection_ids
+                ):
+                    yield chunk
+            except Exception as gemini_e:
+                # Gemini 실패 시 로그 남기고 Bedrock 폴백
+                logger.warning(f"Gemini codesign failed, falling back to Bedrock: {gemini_e}")
+                
+                # 사용자에게 폴백 알림
+                fallback_alert = {
+                    "type": "audit",
+                    "data": {
+                        "level": "warning",
+                        "message": "Gemini 서비스 일시적 장애로 인해 Claude(Bedrock) 모델로 전환합니다.",
+                        "error_code": "GEMINI_FALLBACK",
+                        "details": str(gemini_e)[:200]
+                    }
+                }
+                yield json.dumps(fallback_alert) + "\n"
+                if connection_ids:
+                    _broadcast_to_connections(connection_ids, fallback_alert)
+                
+                # Bedrock (Claude) Fallback 실행
+                async for chunk in _stream_bedrock_codesign(
+                    user_request=user_request,
+                    context=context,
+                    connection_ids=connection_ids,
+                    model_id=None  # Default to configured Bedrock model
+                ):
+                    yield chunk
+
         else:
             # ──────────────────────────────────────────────────────
             # Bedrock (Claude) Fallback

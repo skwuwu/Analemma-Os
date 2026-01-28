@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { useState, useCallback } from 'react';
 
 // 백엔드 엣지 타입 정의
-export type BackendEdgeType = 'edge' | 'if' | 'while' | 'hitp' | 'conditional_edge' | 'pause';
+export type BackendEdgeType = 'edge' | 'if' | 'while' | 'for_each' | 'hitp' | 'conditional_edge' | 'pause';
 
 // 엣지 타입별 설정
 const EDGE_TYPE_CONFIG: Record<BackendEdgeType, { 
@@ -16,6 +16,7 @@ const EDGE_TYPE_CONFIG: Record<BackendEdgeType, {
   color: string;
   description: string;
   needsCondition?: boolean;
+  needsIterationConfig?: boolean; // for_each에 필요한 설정
 }> = {
   edge: { 
     label: 'Normal', 
@@ -34,8 +35,15 @@ const EDGE_TYPE_CONFIG: Record<BackendEdgeType, {
     label: 'While Loop', 
     icon: RefreshCw, 
     color: 'hsl(38 92% 50%)',
-    description: '조건이 참인 동안 반복',
+    description: '조건이 True일 때 루프 종료 (각 반복 끝에 평가)',
     needsCondition: true
+  },
+  for_each: { 
+    label: 'For Each Loop', 
+    icon: RefreshCw, 
+    color: 'hsl(280 70% 50%)',
+    description: '리스트의 각 항목에 대해 서브워크플로우를 반복 실행 (예: state.users를 순회)',
+    needsIterationConfig: true
   },
   hitp: { 
     label: 'Human Approval', 
@@ -65,7 +73,11 @@ interface SmartEdgeData extends Record<string, unknown> {
   stateDelta?: string;      // Summary of state data being passed (JSON string)
   edgeType?: BackendEdgeType; // Backend edge type
   condition?: string;       // Conditional expression (for if, while)
-  max_iterations?: number;  // Maximum iterations for while
+  natural_condition?: string; // Natural language condition (LLM auto-evaluated)
+  eval_mode?: 'expression' | 'natural_language'; // Evaluation mode for while loops
+  max_iterations?: number;  // Maximum iterations for while/for_each
+  items_path?: string;      // List path for for_each (e.g., "state.items")
+  item_key?: string;        // Item variable name for for_each (e.g., "item")
   isBackEdge?: boolean;     // Whether this is a back-edge in circular structure
   isInCycle?: boolean;      // Whether this edge is part of a cycle
 }
@@ -85,6 +97,18 @@ export const SmartEdge = ({
   const { setEdges } = useReactFlow();
   const [isEditing, setIsEditing] = useState(false);
   const [conditionInput, setConditionInput] = useState('');
+  const [isEditingLoop, setIsEditingLoop] = useState(false);
+  const [loopConfig, setLoopConfig] = useState<{
+    items_path?: string;
+    item_key?: string;
+    max_iterations?: number;
+    eval_mode?: 'expression' | 'natural_language';
+    natural_condition?: string;
+  }>({
+    items_path: '',
+    item_key: 'item',
+    max_iterations: 100,
+  });
 
   // 타입 단언으로 data를 SmartEdgeData로 처리
   const edgeData = data as SmartEdgeData | undefined;
@@ -121,6 +145,28 @@ export const SmartEdge = ({
     );
     setIsEditing(false);
   }, [id, conditionInput, setEdges]);
+
+  // for_each 루프 설정 저장 핸들러
+  const handleLoopConfigSave = useCallback(() => {
+    setEdges((edges) =>
+      edges.map((edge) =>
+        edge.id === id
+          ? { 
+              ...edge, 
+              data: { 
+                ...edge.data, 
+                items_path: loopConfig.items_path,
+                item_key: loopConfig.item_key,
+                max_iterations: loopConfig.max_iterations,
+                eval_mode: loopConfig.eval_mode,
+                natural_condition: loopConfig.natural_condition,
+              } 
+            }
+          : edge
+      )
+    );
+    setIsEditingLoop(false);
+  }, [id, loopConfig, setEdges]);
 
   // 1. 베지에 곡선 경로 계산
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -217,23 +263,67 @@ export const SmartEdge = ({
             {/* B. 조건 입력 (if, while, conditional_edge 타입일 때) */}
             {typeConfig.needsCondition && (
               isEditing ? (
-                <div className="flex gap-1">
-                  <Input
-                    value={conditionInput}
-                    onChange={(e) => setConditionInput(e.target.value)}
-                    placeholder="예: state.count < 10"
-                    className="h-6 text-xs w-32"
-                    autoFocus
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleConditionSave();
-                      if (e.key === 'Escape') setIsEditing(false);
-                    }}
-                  />
+                <div className="flex flex-col gap-1 p-2 bg-background border rounded-md shadow-md min-w-[200px]">
+                  {/* While 전용: 평가 모드 선택 */}
+                  {currentType === 'while' && (
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[9px] text-muted-foreground font-bold">Evaluation Mode</label>
+                      <select 
+                        value={loopConfig.eval_mode || 'expression'}
+                        onChange={(e) => {
+                          setLoopConfig({ ...loopConfig, eval_mode: e.target.value as 'expression' | 'natural_language' });
+                        }}
+                        className="h-6 text-xs border rounded px-1"
+                      >
+                        <option value="expression">Expression (code)</option>
+                        <option value="natural_language">Natural Language (LLM)</option>
+                      </select>
+                    </div>
+                  )}
+                  
+                  {/* Expression 모드 또는 if/conditional_edge */}
+                  {(currentType !== 'while' || loopConfig.eval_mode === 'expression' || !loopConfig.eval_mode) && (
+                    <>
+                      <label className="text-[9px] text-muted-foreground font-bold">
+                        {currentType === 'while' ? 'Exit Condition (True = stop)' : 'Condition Expression'}
+                      </label>
+                      <Input
+                        value={conditionInput}
+                        onChange={(e) => setConditionInput(e.target.value)}
+                        placeholder={currentType === 'while' ? "state.count >= 10" : "state.status == 'ready'"}
+                        className="h-6 text-xs w-full"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleConditionSave();
+                          if (e.key === 'Escape') setIsEditing(false);
+                        }}
+                      />
+                      {currentType === 'while' && (
+                        <div className="text-[8px] text-amber-400 px-1">Evaluated at end of each iteration</div>
+                      )}
+                    </>
+                  )}
+                  
+                  {/* Natural Language 모드 (while 전용) */}
+                  {currentType === 'while' && loopConfig.eval_mode === 'natural_language' && (
+                    <>
+                      <label className="text-[9px] text-muted-foreground font-bold">Natural Language Condition</label>
+                      <textarea
+                        value={loopConfig.natural_condition || ''}
+                        onChange={(e) => setLoopConfig({ ...loopConfig, natural_condition: e.target.value })}
+                        placeholder="Example: Is the generated content detailed enough and high quality?"
+                        className="text-xs w-full border rounded p-2 min-h-[60px]"
+                        autoFocus
+                      />
+                      <div className="text-[8px] text-blue-400 px-1">🤖 LLM will evaluate this condition automatically</div>
+                    </>
+                  )}
+                  
                   <button
                     onClick={handleConditionSave}
                     className="px-2 h-6 text-xs bg-primary text-primary-foreground rounded"
                   >
-                    저장
+                    Save
                   </button>
                 </div>
               ) : (
@@ -245,7 +335,68 @@ export const SmartEdge = ({
                     setIsEditing(true);
                   }}
                 >
-                  {edgeData?.condition || edgeData?.label || '조건 입력 클릭'}
+                  {edgeData?.natural_condition ? '🤖 ' + (edgeData.natural_condition.slice(0, 20) + '...') : (edgeData?.condition || edgeData?.label || 'Set condition')}
+                </Badge>
+              )
+            )}
+
+            {/* B-2. For Each 루프 설정 (for_each 타입일 때) */}
+            {typeConfig.needsIterationConfig && (
+              isEditingLoop ? (
+                <div className="flex flex-col gap-1 p-2 bg-background border rounded-md shadow-md min-w-[240px]">
+                  <label className="text-[9px] text-muted-foreground font-bold">리스트 경로 (State Path)</label>
+                  <Input
+                    value={loopConfig.items_path}
+                    onChange={(e) => setLoopConfig(prev => ({ ...prev, items_path: e.target.value }))}
+                    placeholder="예: state.users"
+                    className="h-6 text-xs w-full"
+                    autoFocus
+                  />
+                  <div className="text-[8px] text-blue-400 px-1">state.users → [user1, user2, ...]</div>
+                  
+                  <div className="flex gap-1 mt-1">
+                    <div className="flex-1">
+                      <label className="text-[9px] text-muted-foreground font-bold">항목 변수명</label>
+                      <Input
+                        value={loopConfig.item_key}
+                        onChange={(e) => setLoopConfig(prev => ({ ...prev, item_key: e.target.value }))}
+                        placeholder="item"
+                        className="h-6 text-xs"
+                      />
+                      <div className="text-[8px] text-blue-400 px-1">state.item으로 접근</div>
+                    </div>
+                    <div className="w-20">
+                      <label className="text-[9px] text-muted-foreground font-bold">최대 반복</label>
+                      <Input
+                        type="number"
+                        value={loopConfig.max_iterations}
+                        onChange={(e) => setLoopConfig(prev => ({ ...prev, max_iterations: parseInt(e.target.value) || 100 }))}
+                        className="h-6 text-xs"
+                      />
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={handleLoopConfigSave}
+                    className="px-2 h-6 text-xs bg-primary text-primary-foreground rounded mt-1"
+                  >
+                    저장
+                  </button>
+                </div>
+              ) : (
+                <Badge
+                  variant="outline"
+                  className="bg-background text-[10px] px-1.5 py-0 h-5 border-muted-foreground/30 shadow-sm whitespace-nowrap cursor-pointer hover:bg-muted"
+                  onClick={() => {
+                    setLoopConfig({
+                      items_path: (edgeData?.items_path as string) || '',
+                      item_key: (edgeData?.item_key as string) || 'item',
+                      max_iterations: (edgeData?.max_iterations as number) || 100,
+                    });
+                    setIsEditingLoop(true);
+                  }}
+                >
+                  {edgeData?.items_path || '리스트 경로 입력'}
                 </Badge>
               )
             )}

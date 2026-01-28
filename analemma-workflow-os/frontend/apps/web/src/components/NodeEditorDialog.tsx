@@ -486,23 +486,7 @@ const ControlSettings = ({ data, onChange }: { data: NodeData, onChange: (key: s
     {data.controlType === 'aggregator' && (
       <div className="space-y-4 pt-2 animate-in slide-in-from-top-2">
         <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20 text-[11px] text-blue-300 leading-relaxed">
-          병렬 브랜치나 반복 작업의 결과를 병합하고 토큰 사용량을 집계합니다.
-        </div>
-        <div className="space-y-2">
-          <Label className="text-[10px] text-slate-400 pl-1 font-bold">Aggregation Strategy</Label>
-          <Select value={data.strategy || 'auto'} onValueChange={(val) => onChange('strategy', val)}>
-            <SelectTrigger className="h-10 bg-slate-800 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="auto">Auto (자동 감지)</SelectItem>
-              <SelectItem value="merge">Merge (병합)</SelectItem>
-              <SelectItem value="concat">Concat (연결)</SelectItem>
-              <SelectItem value="sum">Sum (합산)</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-2">
-          <Label className="text-[10px] text-slate-400 pl-1 font-bold">Output Key</Label>
-          <Input value={data.output_key || 'aggregated_result'} onChange={(e) => onChange('output_key', e.target.value)} placeholder="aggregated_result" className="bg-white" />
+          병렬 브랜치나 반복 작업의 결과를 자동으로 병합하고 토큰 사용량을 집계합니다. 별도 설정이 필요하지 않습니다.
         </div>
       </div>
     )}

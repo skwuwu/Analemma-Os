@@ -69,6 +69,13 @@ class NodeConfig(BaseModel):
     items: Optional[List[Any]] = None
     item_key: Optional[str] = None
     
+    # loop (while/cycle)
+    nodes: Optional[List[Dict[str, Any]]] = None  # 순환 루프 내의 노드들
+    condition: Optional[str] = None  # 루프 탈출/지속 조건
+    loop_var: Optional[str] = None  # 루프 인덱스 변수명
+    convergence_key: Optional[str] = None  # 수렴 체크 키
+    target_score: Optional[float] = None  # 목표 수렴 점수
+
     # route_draft_quality
     threshold: Optional[float] = None
     
@@ -129,6 +136,7 @@ class WorkflowNode(BaseModel):
         "operator",        # 범용 연산자
         "llm_chat",        # LLM 채팅 (aiModel → llm_chat로 변환됨)
         "for_each",        # 리스트 반복 (control.loop → for_each로 변환됨)
+        "loop",            # 조건부 반복 (control.loop → loop로 변환됨)
         "parallel_group",  # 병렬 브랜치 (control.parallel → parallel_group으로 변환됨)
         "subgraph",        # 서브그래프/그룹 (group → subgraph로 변환됨)
         "api_call",        # API 호출
