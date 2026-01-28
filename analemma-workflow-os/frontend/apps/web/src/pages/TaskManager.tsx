@@ -161,7 +161,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
       setIsLoadingExecutions(true);
       const response = await fetchExecutions(token);
       
-      // Filter only completed status
+      // Filter only completed status (codesign no longer saved to execution table)
       const completedItems = response.executions.filter((exec: ExecutionSummary) => 
         ['SUCCEEDED', 'FAILED', 'TIMED_OUT', 'ABORTED'].includes(exec.status || '')
       );

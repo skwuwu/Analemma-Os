@@ -941,28 +941,7 @@ def lambda_handler_sync(event, context):
         
         # Task ID 생성 (UUID)
         task_id = str(uuid.uuid4())
-        logger.info(f"Created task {task_id} for owner {owner_id[:8]}...")
-        
-        # ExecutionsTable에 초기 상태 저장
-        executions_table_name = os.environ.get('EXECUTIONS_TABLE')
-        if not executions_table_name:
-            logger.error("EXECUTIONS_TABLE not configured")
-            return _response(500, {'error': 'Server configuration error'})
-        
-        from src.common.aws_clients import get_dynamodb_resource
-        dynamodb = get_dynamodb_resource()
-        executions_table = dynamodb.Table(executions_table_name)
-        
-        execution_arn = f'arn:aws:states:us-east-1:000000000000:execution:codesign:{task_id}'
-        
-        executions_table.put_item(Item={
-            'ownerId': owner_id,
-            'executionArn': execution_arn,
-            'status': 'PENDING',
-            'startDate': datetime.now().isoformat(),
-            'workflowId': 'codesign',
-            'message': 'CoDesign 요청 대기 중...'
-        })
+        logger.info(f"Created codesign task {task_id} for owner {owner_id[:8]}... (no DB tracking, WebSocket only)")
         
         # Worker Lambda 비동기 호출
         worker_function_name = os.environ.get('CODESIGN_WORKER_FUNCTION')
@@ -990,7 +969,7 @@ def lambda_handler_sync(event, context):
         return _response(202, {
             'task_id': task_id,
             'status': 'processing',
-            'message': '워크플로우 생성 중입니다. WebSocket으로 결과를 전달받거나 /tasks/{task_id}로 상태를 확인하세요.',
+            'message': '워크플로우 생성 중입니다. WebSocket으로 결과를 전달받습니다.',
             'websocket_subscribe': {
                 'action': 'subscribe',
                 'execution_id': task_id
