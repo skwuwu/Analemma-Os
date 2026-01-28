@@ -972,11 +972,15 @@ Resources:
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
         Command: ["src.handlers.core.codesign_api_handler.lambda_handler_sync"]
-      Timeout: 120
+      Timeout: 10  # API Gateway 엔드포인트는 즉시 응답 (task_id 반환)
       Environment:
         Variables:
           OPENAI_API_KEY: !Ref OpenAiApiKey
           BEDROCK_REGION: !Ref AWS::Region
+          COGNITO_ISSUER_URL: !Ref CognitoIssuerUrl
+          COGNITO_AUDIENCE: !Ref CognitoAudience
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          CODESIGN_WORKER_FUNCTION: !Ref CodesignWorkerFunction
       Policies:
         - Statement:
           - Effect: Allow
@@ -996,6 +1000,12 @@ Resources:
             Action:
               - cloudwatch:PutMetricData
             Resource: "*"
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action: lambda:InvokeFunction
+            Resource: !GetAtt CodesignWorkerFunction.Arn
       Events:
         CodesignStreamEvent:
           Type: HttpApi
@@ -1029,6 +1039,55 @@ Resources:
             Method: POST
             Auth:
               Authorizer: CognitoAuthorizer
+
+  # --- Codesign Worker Function (비동기 처리용, 타임아웃 회피) ---
+  CodesignWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "codesign-worker-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.codesign_worker_handler.lambda_handler"]
+      Timeout: 900  # 15분 - 실제 처리 시간
+      MemorySize: 2048
+      Environment:
+        Variables:
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          BEDROCK_REGION: !Ref AWS::Region
+          EXECUTIONS_TABLE: !Ref ExecutionsTableV3
+          WEBSOCKET_ENDPOINT_URL: !Sub "https://${WebsocketApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+          WEBSOCKET_CONNECTIONS_TABLE: !Ref WebsocketConnectionsTableV3
+          WEBSOCKET_OWNER_ID_GSI: OwnerIdConnectionIndex
+      Policies:
+        - Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: 
+              - !Ref OpenAISecret
+              - !Ref GeminiSecret
+              - !Ref AnthropicSecret
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:backend-workflow-${StageName}-vertex_ai_config-*"
+              - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:backend-workflow-${StageName}-gcp_service_account-*"
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+              - bedrock:InvokeModelWithResponseStream
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - cloudwatch:PutMetricData
+            Resource: "*"
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ExecutionsTableV3
+        - DynamoDBReadPolicy:
+            TableName: !Ref WebsocketConnectionsTableV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:PostToConnection
+            Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebsocketApi}/*/@connections/*"
 
   # --- Plan Briefing & Time Machine API Functions ---
   PlanBriefingFunction:

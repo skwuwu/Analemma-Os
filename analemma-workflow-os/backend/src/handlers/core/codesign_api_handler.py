@@ -910,61 +910,99 @@ _FALLBACK_WARNING_THRESHOLD = 3
 
 def lambda_handler_sync(event, context):
     """
-    동기 Lambda 핸들러 래퍼 (최적화된 이벤트 루프 관리).
+    CoDesign API 핸들러 - 비동기 처리 패턴 (API Gateway 타임아웃 회피)
     
-    [v2.0 개선사항]
-    - 전역 이벤트 루프 재사용으로 컨테이너 재활용 시 오버헤드 제거
-    - 매 호출마다 new_event_loop() 생성/삭제 비용 절감
-    - 고부하 상황에서 리소스 누수(Resource Exhaustion) 방지
+    [v3.0 아키텍처 변경]
+    - 즉시 task_id 반환 (2-3초 이내)
+    - Worker Lambda를 비동기 호출하여 실제 처리
+    - WebSocket으로 결과 전달 또는 polling 지원
     
-    [v2.1 안전성 강화]
-    - 폴백 실행 횟수 모니터링 및 경고
-    - 루프 상태 사전 검증으로 폴백 방지
+    Flow:
+    1. 요청 검증 및 task_id 생성
+    2. ExecutionsTable에 초기 상태 저장
+    3. CodesignWorkerFunction 비동기 호출
+    4. 즉시 202 Accepted 응답 (task_id 포함)
     """
-    global _fallback_execution_count
+    import boto3
+    from datetime import datetime
     
-    # 사전 검증: 실행 중인 루프가 있는지 먼저 확인
     try:
-        running_loop = asyncio.get_running_loop()
-        # 이미 실행 중인 루프가 있으면 폴백 경로로 진입할 것임을 사전 감지
-        logger.warning(
-            f"⚠️ Running loop detected before execution - "
-            f"this should not happen in Lambda. Loop: {running_loop}"
+        # 요청 파싱
+        body = json.loads(event.get('body', '{}'))
+        workflow_data = body.get('workflow', {})
+        user_message = body.get('message', '')
+        
+        # Owner ID 추출
+        try:
+            owner_id = extract_owner_id_from_event(event)
+        except Exception as e:
+            logger.error(f"Failed to extract owner_id: {e}")
+            return _response(401, {'error': 'Unauthorized'})
+        
+        # Task ID 생성 (UUID)
+        task_id = str(uuid.uuid4())
+        logger.info(f"Created task {task_id} for owner {owner_id[:8]}...")
+        
+        # ExecutionsTable에 초기 상태 저장
+        executions_table_name = os.environ.get('EXECUTIONS_TABLE')
+        if not executions_table_name:
+            logger.error("EXECUTIONS_TABLE not configured")
+            return _response(500, {'error': 'Server configuration error'})
+        
+        from src.common.dynamodb_utils import get_dynamodb_resource
+        dynamodb = get_dynamodb_resource()
+        executions_table = dynamodb.Table(executions_table_name)
+        
+        execution_arn = f'arn:aws:states:us-east-1:000000000000:execution:codesign:{task_id}'
+        
+        executions_table.put_item(Item={
+            'ownerId': owner_id,
+            'executionArn': execution_arn,
+            'status': 'PENDING',
+            'startDate': datetime.now().isoformat(),
+            'workflowId': 'codesign',
+            'message': 'CoDesign 요청 대기 중...'
+        })
+        
+        # Worker Lambda 비동기 호출
+        worker_function_name = os.environ.get('CODESIGN_WORKER_FUNCTION')
+        if not worker_function_name:
+            logger.error("CODESIGN_WORKER_FUNCTION not configured")
+            return _response(500, {'error': 'Server configuration error'})
+        
+        lambda_client = boto3.client('lambda')
+        worker_payload = {
+            'task_id': task_id,
+            'owner_id': owner_id,
+            'workflow_data': workflow_data,
+            'user_message': user_message
+        }
+        
+        lambda_client.invoke(
+            FunctionName=worker_function_name,
+            InvocationType='Event',  # 비동기 호출
+            Payload=json.dumps(worker_payload)
         )
-    except RuntimeError:
-        # 정상 경로: 실행 중인 루프 없음
-        pass
-    
-    loop = get_or_create_event_loop()
-    
-    try:
-        return loop.run_until_complete(_lambda_handler_async(event, context))
-    except RuntimeError as e:
-        # 이미 실행 중인 루프가 있는 경우 (중첩 호출) - 폴백 경로
-        if "This event loop is already running" in str(e):
-            _fallback_execution_count += 1
-            
-            # 폴백 실행 횟수가 임계값을 넘으면 강력 경고
-            if _fallback_execution_count >= _FALLBACK_WARNING_THRESHOLD:
-                logger.error(
-                    f"🚨 CRITICAL: ThreadPoolExecutor fallback executed {_fallback_execution_count} times! "
-                    f"This indicates an event loop lifecycle issue that MUST be fixed before production. "
-                    f"Risk: Latency spikes, OOM errors under high load."
-                )
-            else:
-                logger.warning(
-                    f"⚠️ ThreadPoolExecutor fallback triggered (count: {_fallback_execution_count}). "
-                    f"Event loop was unexpectedly running."
-                )
-            
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(
-                    asyncio.run, 
-                    lambda_handler(event, context)
-                )
-                return future.result(timeout=300)  # 5분 타임아웃
-        raise
+        
+        logger.info(f"Worker invoked for task {task_id}")
+        
+        # 즉시 응답 반환 (202 Accepted)
+        return _response(202, {
+            'task_id': task_id,
+            'status': 'processing',
+            'message': '워크플로우 생성 중입니다. WebSocket으로 결과를 전달받거나 /tasks/{task_id}로 상태를 확인하세요.',
+            'websocket_subscribe': {
+                'action': 'subscribe',
+                'execution_id': task_id
+            }
+        })
+        
+    except json.JSONDecodeError:
+        logger.error("Invalid JSON in request body")
+        return _response(400, {'error': 'Invalid JSON'})
+    except Exception as e:
+        logger.exception(f"Handler failed: {e}")
+        return _response(500, {'error': str(e)})
 
 
 # ============================================================================

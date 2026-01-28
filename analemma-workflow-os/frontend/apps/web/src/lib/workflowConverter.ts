@@ -46,6 +46,7 @@ export interface BackendNode {
     | 'loop'           // cycle (back-edge) → loop
     | 'for_each'       // control(loop/for_each) → for_each
     | 'parallel_group' // control(parallel) → parallel_group
+    | 'parallel'       // parallel (alias for parallel_group)
     | 'aggregator'     // control(aggregator) → aggregator (token aggregation)
     | 'subgraph'       // group → subgraph
     | 'api_call'       // operator(api_call) → api_call
@@ -873,6 +874,9 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
   ];
   
   // 8. 엣지 변환 (사이클 back-edge, 병렬 분기 엣지 필터링)
+  // 유효한 백엔드 노드 ID 집합 생성 (참조 무결성 검증용)
+  const validBackendNodeIds = new Set(backendNodes.map(n => n.id));
+
   const backendEdges = edges
     .filter((edge: any) => {
       // back-edge는 제외 (loop 노드 내부로 흡수됨)
@@ -900,6 +904,13 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
         if (incomingEdge) {
           actualSource = incomingEdge.source;
         }
+
+        // [수정] 참조 무결성 검증: actualSource/Target이 실제 백엔드 노드인지 확인
+        if (!validBackendNodeIds.has(actualSource) || !validBackendNodeIds.has(actualTarget)) {
+          console.warn(`Skipping HITP edge: missing node reference ${actualSource} -> ${actualTarget}`);
+          return null;
+        }
+
         return {
           type: 'hitp',
           source: actualSource,
@@ -914,6 +925,13 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
         if (incomingEdge) {
           actualSource = incomingEdge.source;
         }
+
+        // [수정] 참조 무결성 검증
+        if (!validBackendNodeIds.has(actualSource) || !validBackendNodeIds.has(actualTarget)) {
+          console.warn(`Skipping conditional edge: missing node reference ${actualSource} -> ${actualTarget}`);
+          return null;
+        }
+
         return {
           type: 'conditional_edge',
           source: actualSource,
@@ -923,14 +941,36 @@ export const convertWorkflowToBackendFormat = (workflow: any): BackendWorkflow =
           condition: sourceNode.data.condition || edge.data?.condition,
         };
       }
-      
+
+      // [수정] 일반 엣지도 검증
+      if (!validBackendNodeIds.has(actualSource) || !validBackendNodeIds.has(actualTarget)) {
+        console.warn(`Skipping regular edge: missing node reference ${actualSource} -> ${actualTarget}`);
+        return null;
+      }
+
       // 일반 엣지 변환
       return convertEdgeToBackendFormat(edge, nodes);
     })
     .filter((e: any) => e !== null);
 
-  // 9. 조건부 엣지 + Control Block 엣지 추가
-  const allBackendEdges = [...backendEdges, ...conditionalEdges, ...controlBlockEdges];
+  // 9. 조건부 엣지 + Control Block 엣지 추가 (참조 무결성 재검증)
+  const additionalEdges = [...conditionalEdges, ...controlBlockEdges];
+  const validatedAdditionalEdges = additionalEdges.filter((edge: any) => {
+    if (!edge || !edge.source || !edge.target) return false;
+
+    // Control Block에서 생성된 엣지들도 유효한 노드 참조인지 확인
+    const hasValidSource = validBackendNodeIds.has(edge.source);
+    const hasValidTarget = validBackendNodeIds.has(edge.target);
+
+    if (!hasValidSource || !hasValidTarget) {
+      console.warn(`Skipping additional edge: missing node reference ${edge.source} -> ${edge.target}`);
+      return false;
+    }
+
+    return true;
+  });
+
+  const allBackendEdges = [...backendEdges, ...validatedAdditionalEdges];
 
   // secrets 배열 변환 (프론트엔드에 secrets가 있는 경우)
   const backendSecrets = workflow.secrets?.map((secret: any) => ({
@@ -1004,25 +1044,37 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
     let frontendType = 'operator';
     let label = 'Block';
     let nodeData: any = {};
+    
+    // 타입 검증 및 로깅
+    if (!node.type) {
+      console.warn(`[WorkflowConverter] Node ${node.id} has no type, defaulting to 'operator'`);
+    }
 
     switch (node.type) {
       case 'llm_chat':
         frontendType = 'aiModel';
         label = 'AI Model';
+        // Config 우선, 없으면 최상위 필드 사용
+        const llmConfig = node.config || {};
+        const promptContent = llmConfig.prompt_content || node.prompt_content || '';
+        const systemPrompt = llmConfig.system_prompt || node.system_prompt || '';
+        const temperature = llmConfig.temperature ?? node.temperature ?? 0.7;
+        const maxTokens = llmConfig.max_tokens ?? node.max_tokens ?? 1024;
+        
         nodeData = {
           label,
-          prompt_content: node.prompt_content,
-          prompt: node.prompt_content,
-          system_prompt: node.system_prompt,
-          temperature: node.temperature,
-          max_tokens: node.max_tokens,
-          maxTokens: node.max_tokens,
-          model: node.model,
-          provider: node.provider,
-          writes_state_key: node.writes_state_key,
+          prompt_content: promptContent,
+          prompt: promptContent,
+          system_prompt: systemPrompt,
+          temperature: temperature,
+          max_tokens: maxTokens,
+          maxTokens: maxTokens,
+          model: node.model || llmConfig.model || 'gpt-3.5-turbo',
+          provider: node.provider || llmConfig.provider || 'openai',
+          writes_state_key: node.writes_state_key || llmConfig.writes_state_key,
           // Restore tool definitions
-          tools: node.tool_definitions || [],
-          toolsCount: node.tool_definitions?.length || 0,
+          tools: node.tool_definitions || llmConfig.tool_definitions || [],
+          toolsCount: (node.tool_definitions || llmConfig.tool_definitions || []).length,
         };
         break;
       case 'operator':
@@ -1086,26 +1138,40 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'control';
         label = 'For Each';
         const forEachConfig = node.config || {};
+        const itemsPath = forEachConfig.items_path || node.items_path || '';
+        const subWorkflow = forEachConfig.sub_workflow || node.sub_workflow;
+        
+        if (!itemsPath) {
+          console.warn(`[WorkflowConverter] for_each node ${node.id} missing items_path`);
+        }
+        if (!subWorkflow) {
+          console.warn(`[WorkflowConverter] for_each node ${node.id} missing sub_workflow`);
+        }
+        
         nodeData = {
           label,
           controlType: 'for_each',
-          items_path: forEachConfig.items_path || node.items_path,
-          itemsPath: forEachConfig.items_path || node.items_path,
+          items_path: itemsPath,
+          itemsPath: itemsPath,
           item_key: forEachConfig.item_key || node.item_key || 'item',
           output_key: forEachConfig.output_key || node.output_key || 'for_each_results',
           max_iterations: forEachConfig.max_iterations || node.max_iterations || 20,
-          sub_workflow: forEachConfig.sub_workflow || node.sub_workflow,
+          sub_workflow: subWorkflow,
         };
         break;
       case 'parallel_group':
+      case 'parallel':
         // parallel_group → control(parallel)
         frontendType = 'control';
         label = 'Parallel';
         const parallelConfig = node.config || {};
+        // branches는 config.branches 우선, fallback으로 최상위 branches
+        const branches = parallelConfig.branches || node.branches || [];
+        
         nodeData = {
           label,
           controlType: 'parallel',
-          branches: parallelConfig.branches || node.branches || [],
+          branches: branches,
         };
         break;
       case 'aggregator':
@@ -1147,10 +1213,16 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'operator';
         label = 'API Call';
         const apiConfig = node.config || {};
+        const apiUrl = apiConfig.url || node.url || '';
+        
+        if (!apiUrl) {
+          console.warn(`[WorkflowConverter] api_call node ${node.id} missing url`);
+        }
+        
         nodeData = {
           label,
           operatorType: 'api_call',
-          url: apiConfig.url || node.url || '',
+          url: apiUrl,
           method: apiConfig.method || node.method || 'GET',
           headers: apiConfig.headers || node.headers || {},
           params: apiConfig.params || node.params || {},
@@ -1163,25 +1235,41 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'operator';
         label = 'Database Query';
         const dbConfig = node.config || {};
+        const query = dbConfig.query || node.query || '';
+        
+        if (!query) {
+          console.warn(`[WorkflowConverter] db_query node ${node.id} missing query`);
+        }
+        
         nodeData = {
           label,
           operatorType: 'database',
-          query: dbConfig.query || node.query || '',
+          query: query,
           connection_string: dbConfig.connection_string || node.connection_string,
         };
         break;
       default:
         // 기타 런타임 전용 타입(vision, skill_executor 등)은 일반 operator로 표시
+        console.warn(`[WorkflowConverter] Unknown node type '${node.type}' for node ${node.id}, treating as operator`);
         frontendType = 'operator';
         label = node.type || 'Block';
-        nodeData = { label, ...(node.config || node.sets || {}) };
+        nodeData = { 
+          label, 
+          rawBackendType: node.type,
+          ...(node.config || node.sets || {}) 
+        };
     }
 
+    // Position fallback: 백엔드 규칙과 일치 (x=150 고정, y=50+index*100)
+    const position = node.position || {
+      x: 150,
+      y: 50 + index * 100
+    };
+    
     return {
       id: node.id,
       type: frontendType,
-      // Preserve stored position when available, otherwise fall back to grid placement
-      position: node.position || { x: (index % 3) * 200 + 100, y: Math.floor(index / 3) * 150 + 100 },
+      position,
       data: nodeData,
     };
   }) || [];
