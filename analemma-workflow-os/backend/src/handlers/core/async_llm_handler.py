@@ -44,7 +44,13 @@ def _dispatch_worker(payload: Dict[str, Any], context: Any) -> Dict[str, Any]:
     if not task_token:
         raise KeyError("TaskToken missing from src.asynchronous request")
 
+    # 🚀 [Light Config] Support S3 hydration for workflow_config
     workflow_config = payload.get("workflow_config")
+    workflow_config_s3_path = payload.get("workflow_config_s3_path")
+    
+    # If workflow_config is not inline but S3 path exists, we'll let segment_runner hydrate it
+    # Just pass the S3 path through - segment_runner handles hydration
+    
     segment_to_run = int(payload.get("segment_to_run", 0))
     user_api_keys = payload.get("user_api_keys")
     owner_id = _extract_owner_id(payload, workflow_config)
@@ -75,11 +81,17 @@ def _dispatch_worker(payload: Dict[str, Any], context: Any) -> Dict[str, Any]:
     worker_event: Dict[str, Any] = {
         "mode": "worker",
         "task_token": task_token,
-        "workflow_config": workflow_config,
         "segment_to_run": segment_to_run,
         "ownerId": owner_id,
-        "workflow_id": workflow_id,
     }
+    
+    # 🚀 [Light Config] Pass workflow_config or S3 path
+    if workflow_config:
+        worker_event["workflow_config"] = workflow_config
+    if workflow_config_s3_path:
+        worker_event["workflow_config_s3_path"] = workflow_config_s3_path
+    
+    worker_event["workflow_id"] = workflow_id
 
     if state_s3_path:
         worker_event["state_s3_path"] = state_s3_path
@@ -115,9 +127,14 @@ def _dispatch_worker(payload: Dict[str, Any], context: Any) -> Dict[str, Any]:
         # 동기 처리로 폴백 (기존 segment_runner 직접 호출)
         try:
             segment_event: Dict[str, Any] = {
-                "workflow_config": workflow_config,
                 "segment_to_run": segment_to_run,
             }
+            
+            # 🚀 [Light Config] Pass workflow_config or S3 path - segment_runner handles hydration
+            if workflow_config:
+                segment_event["workflow_config"] = workflow_config
+            if workflow_config_s3_path:
+                segment_event["workflow_config_s3_path"] = workflow_config_s3_path
             
             if owner_id:
                 segment_event["ownerId"] = owner_id
@@ -241,6 +258,7 @@ def _execute_worker(payload: Dict[str, Any], context: Any = None) -> Dict[str, A
         raise KeyError("task_token missing from src.worker event")
 
     workflow_config = payload.get("workflow_config")
+    workflow_config_s3_path = payload.get("workflow_config_s3_path")  # 🚀 [Light Config]
     segment_to_run = int(payload.get("segment_to_run", 0))
     owner_id = payload.get("ownerId") or payload.get("owner_id")
     workflow_id = payload.get("workflow_id") or _extract_workflow_id(payload, workflow_config)
@@ -248,9 +266,14 @@ def _execute_worker(payload: Dict[str, Any], context: Any = None) -> Dict[str, A
     logger.info(f"Fargate worker starting: workflow_id={workflow_id}, segment={segment_to_run}, owner={owner_id}")
 
     segment_event: Dict[str, Any] = {
-        "workflow_config": workflow_config,
         "segment_to_run": segment_to_run,
     }
+    
+    # 🚀 [Light Config] Pass workflow_config or S3 path - segment_runner handles hydration
+    if workflow_config:
+        segment_event["workflow_config"] = workflow_config
+    if workflow_config_s3_path:
+        segment_event["workflow_config_s3_path"] = workflow_config_s3_path
 
     if owner_id:
         segment_event["ownerId"] = owner_id

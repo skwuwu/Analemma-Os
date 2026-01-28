@@ -184,7 +184,8 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   // Load completed executions on component mount (once)
   useEffect(() => {
     loadCompletedExecutions();
-  }, [loadCompletedExecutions]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // ✅ 마운트 시 한 번만 실행
   
   // ExecutionTimeline hook
   const { executionTimelines, fetchExecutionTimeline } = useExecutionTimeline(notifications, API_BASE);
@@ -196,16 +197,21 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     refetchInterval: 5000,
   });
 
+  // Rollback 콜백을 useCallback으로 메모이제이션
+  const handleRollbackSuccess = useCallback((result: any) => {
+    toast.success(`Rollback successful: New branch ${result.branched_thread_id} created`);
+    setRollbackDialogOpen(false);
+    checkpoints.refetch();
+  }, [checkpoints.refetch]);
+
+  const handleRollbackError = useCallback((error: Error) => {
+    toast.error(`Rollback failed: ${error.message}`);
+  }, []);
+
   const timeMachine = useTimeMachine({
     executionId: taskManager.selectedTask?.task_id || '',
-    onRollbackSuccess: (result) => {
-      toast.success(`Rollback successful: New branch ${result.branched_thread_id} created`);
-      setRollbackDialogOpen(false);
-      checkpoints.refetch();
-    },
-    onRollbackError: (error) => {
-      toast.error(`Rollback failed: ${error.message}`);
-    },
+    onRollbackSuccess: handleRollbackSuccess,
+    onRollbackError: handleRollbackError,
   });
   
   // Workflow Graph Data (for technical tab)
@@ -273,7 +279,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     console.log('[TaskManager] Selected task ID:', taskManager.selectedTaskId);
     // Fetch execution timeline when task is selected
     fetchExecutionTimeline(task.task_id);
-  }, [taskManager, fetchExecutionTimeline]);
+  }, [taskManager.selectTask, taskManager.selectedTaskId, fetchExecutionTimeline]); // ✅ 필요한 메서드만 의존성으로 지정
 
   const handleArtifactClick = useCallback((artifactId: string) => {
     setSelectedArtifactId(artifactId);
@@ -286,13 +292,14 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   }, []);
   
   // Gemini summary generation function
+  const selectedTaskId = taskManager.selectedTask?.task_id;
   const fetchSummary = useCallback(async (type: 'business' | 'technical' | 'full') => {
-    if (!taskManager.selectedTask) return;
+    if (!selectedTaskId) return;
     
     setSummaryLoading(true);
     try {
       const response = await fetch(
-        `${API_BASE}/tasks/${taskManager.selectedTask.task_id}?action=summarize&type=${type}`,
+        `${API_BASE}/tasks/${selectedTaskId}?action=summarize&type=${type}`,
         { 
           headers: { 
             'Content-Type': 'application/json',
@@ -320,7 +327,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     } finally {
       setSummaryLoading(false);
     }
-  }, [taskManager.selectedTask, API_BASE]);
+  }, [selectedTaskId, API_BASE]); // ✅ task_id만 의존성으로 지정
   
   const handleResumeWorkflow = useCallback(async () => {
     if (!taskManager.selectedTask || !responseText.trim()) {
@@ -344,7 +351,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     } catch (error) {
       toast.error('Failed to resume workflow');
     }
-  }, [taskManager, responseText, resumeWorkflow]);
+  }, [taskManager.selectedTask, taskManager.refreshList, responseText, resumeWorkflow]); // ✅ 필요한 메서드만 의존성으로 지정
   
   // Statistics
   const stats = useMemo(() => ({

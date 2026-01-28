@@ -2,15 +2,16 @@
 GeminiService - Google Gemini via Vertex AI SDK
 
 Workflow design service leveraging Gemini's strengths:
-- Support for ultra-long context of 1M+ tokens
+- Support for ultra-long context of 2M+ tokens (Gemini 3)
 - Structured JSON output (Response Schema)
 - Inference capability for Loop/Map/Parallel structures
 - Real-time streaming responses
 - Context Caching (cost optimization)
 - Token Counter (resource monitoring)
 - Exponential Backoff (Rate Limit handling)
+- Gemini 3 Pro/Flash support with thinking capabilities
 
-Using Vertex AI SDK for GCP authentication-based Gemini API calls
+Using Vertex AI SDK (v1.71+) with Gemini 3 model support
 GitHub Secrets: GCP_PROJECT_ID, GCP_LOCATION, GCP_SERVICE_ACCOUNT_KEY
 """
 
@@ -80,8 +81,14 @@ class TokenUsage:
 
 # Model-specific pricing (USD per 1M tokens, as of January 2026)
 MODEL_PRICING = {
+    # Gemini 3 (latest)
+    "gemini-3-pro": {"input": 1.50, "output": 6.00, "cached_input": 0.375},
+    "gemini-3-flash": {"input": 0.20, "output": 0.80, "cached_input": 0.05},
+    
+    # Gemini 2.5
+    "gemini-2.5-pro": {"input": 1.25, "output": 5.00, "cached_input": 0.3125},
+    "gemini-2.5-flash": {"input": 0.15, "output": 0.60, "cached_input": 0.0375},
     "gemini-2.0-flash": {"input": 0.10, "output": 0.40, "cached_input": 0.025},
-    "gemini-2.0-flash-thinking-exp": {"input": 0.10, "output": 0.40, "cached_input": 0.025},  # Same as flash
     "gemini-1.5-pro": {"input": 1.25, "output": 5.00, "cached_input": 0.3125},
     "gemini-1.5-flash": {"input": 0.075, "output": 0.30, "cached_input": 0.01875},
     "gemini-1.5-flash-8b": {"input": 0.0375, "output": 0.15, "cached_input": 0.01},
@@ -188,11 +195,17 @@ MAX_IMAGES_PER_REQUEST = 16  # Vertex AI limit
 
 class GeminiModel(Enum):
     """Available Gemini models"""
-    # Pro: Complex reasoning, structural analysis, large-scale context
-    GEMINI_2_0_FLASH = "gemini-2.0-flash"
-    GEMINI_2_0_FLASH_THINKING_EXP = "gemini-2.0-flash-thinking-exp"  # Thinking Mode 지원 최상위 모델
+    # Gemini 3: Latest generation with advanced reasoning
+    GEMINI_3_PRO = "gemini-3-pro"  # 1M context, adaptive thinking
+    GEMINI_3_FLASH = "gemini-3-flash"  # Near-zero thinking level, best multimodal
+    
+    # Gemini 2.5: Thinking capabilities
+    GEMINI_2_5_PRO = "gemini-2.5-pro"  # Adaptive thinking, 1M context
+    GEMINI_2_5_FLASH = "gemini-2.5-flash"  # Controllable thinking budgets
+    GEMINI_2_0_FLASH = "gemini-2.0-flash"  # Cost-effective general purpose
+    
+    # Gemini 1.5: Legacy but stable
     GEMINI_1_5_PRO = "gemini-1.5-pro"
-    # Flash: Fast responses, real-time collaboration, cost efficiency
     GEMINI_1_5_FLASH = "gemini-1.5-flash"
     GEMINI_1_5_FLASH_8B = "gemini-1.5-flash-8b"
 
@@ -243,9 +256,12 @@ def _supports_thinking(model_name: str) -> bool:
     """
     Check if the given Gemini model supports thinking mode.
     
-    Based on Google AI documentation, only certain models support thinking_config:
-    - gemini-2.0-flash-thinking-exp (explicit thinking model - HIGHEST priority)
-    - gemini-1.5-pro (some versions may support)
+    Based on Vertex AI documentation, models with thinking/adaptive capabilities:
+    - gemini-3-pro (adaptive thinking, 1M context)
+    - gemini-3-flash (near-zero thinking level option)
+    - gemini-2.5-flash (controllable thinking budgets)
+    - gemini-2.5-pro (adaptive thinking capabilities)
+    - gemini-1.5-pro (legacy)
     
     Models that do NOT support thinking:
     - gemini-2.0-flash
@@ -253,8 +269,11 @@ def _supports_thinking(model_name: str) -> bool:
     - gemini-1.5-flash-8b
     """
     thinking_supported_models = {
-        "gemini-2.0-flash-thinking-exp",  # Highest priority for thinking
-        "gemini-1.5-pro"
+        "gemini-3-pro",       # Gemini 3 - adaptive thinking
+        "gemini-3-flash",     # Gemini 3 - near-zero thinking
+        "gemini-2.5-flash",   # Vertex AI - controllable thinking budgets
+        "gemini-2.5-pro",     # Vertex AI - adaptive thinking
+        "gemini-1.5-pro"      # Legacy
     }
     return model_name in thinking_supported_models
 
@@ -515,6 +534,8 @@ def get_gemini_client():
     """
     Vertex AI GenerativeModel client Lazy Initialization
     
+    Vertex AI SDK v1.71+ supports Gemini 3 models
+    
     Returns:
         vertexai.generative_models module (for GenerativeModel creation)
         
@@ -541,9 +562,9 @@ def get_gemini_client():
         try:
             from vertexai import generative_models
             _gemini_client = generative_models
-            logger.info("GeminiService: Vertex AI client initialized successfully")
+            logger.info("GeminiService: Vertex AI client initialized successfully (Gemini 3 support enabled)")
         except ImportError:
-            logger.error("google-cloud-aiplatform package not installed. Run: pip install google-cloud-aiplatform")
+            logger.error("google-cloud-aiplatform package not installed. Run: pip install google-cloud-aiplatform>=1.71.0")
             return None
         except Exception as e:
             logger.error(f"Failed to initialize Vertex AI client: {e}")
@@ -2166,16 +2187,17 @@ def get_gemini_flash_service() -> GeminiService:
 
 def get_gemini_codesign_service() -> GeminiService:
     """
-    Gemini Flash service optimized for Co-design Assistant
+    Gemini 3 Flash service optimized for Co-design Assistant
     
     Features:
+    - Gemini 3 Flash: Latest generation with near-zero thinking level
+    - Best multimodal understanding capabilities
     - Context Caching: structure_tools + graph_dsl cached (75% cost reduction)
     - Thinking Mode ready: Chain of Thought visualization
     - Real-time streaming: Low latency for interactive design
-    - Uses gemini-2.0-flash-thinking-exp: Highest tier thinking-capable model
     """
     return GeminiService(GeminiConfig(
-        model=GeminiModel.GEMINI_2_0_FLASH_THINKING_EXP,  # Thinking 지원 최상위 모델
+        model=GeminiModel.GEMINI_3_FLASH,  # Codesign uses Gemini 3 Flash (fast, interactive)
         max_output_tokens=4096,
         temperature=0.8,
         enable_thinking=True,
@@ -2191,11 +2213,16 @@ def invoke_gemini_for_structure(
     structure_tools: Optional[List[Dict[str, Any]]] = None
 ) -> Generator[str, None, None]:
     """
-    Gemini Pro call for structured workflow generation
+    Gemini 3 Pro call for structured workflow generation
     
     Automatically infers and generates Loop, Map, Parallel structures
     """
-    service = get_gemini_pro_service()
+    # Structure Tools use Gemini 3 Pro for high-quality structured output
+    service = GeminiService(GeminiConfig(
+        model=GeminiModel.GEMINI_3_PRO,
+        max_output_tokens=4096,
+        temperature=0.3
+    ))
     
     # Load structure tool definitions
     if structure_tools is None:

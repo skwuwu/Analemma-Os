@@ -79,8 +79,8 @@ Your job is to analyze a workflow configuration and predict:
 4. Potential risks or side effects
 
 Be specific and actionable. The user should understand exactly what will happen.
-Always respond in the same language as the user's workflow names and descriptions.
-If the workflow is in Korean, respond in Korean. If in English, respond in English."""
+**IMPORTANT: Always respond in English, regardless of the workflow language.**
+"""
 
     # 노드 타입별 기본 소요 시간 (초)
     DEFAULT_DURATIONS = {
@@ -149,9 +149,9 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
             user_context
         )
         
-        # Gemini 설정
+        # Gemini 설정 - Plan Briefing uses Gemini 3 Pro for high-quality analysis
         config = GeminiConfig(
-            model=GeminiModel.GEMINI_2_0_FLASH,
+            model=GeminiModel.GEMINI_3_PRO,
             max_output_tokens=4096,
             temperature=0.3,  # 일관된 분석을 위해 낮은 temperature
             response_mime_type="application/json",
@@ -275,12 +275,12 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
             duration = self.DEFAULT_DURATIONS.get(node_type, self.DEFAULT_DURATIONS['default'])
             has_side_effect = node_type in self.SIDE_EFFECT_TYPES
             
-            # 위험 수준 결정
+            # Determine risk level
             risk_level = RiskLevel.LOW
             risk_description = None
             if has_side_effect:
                 risk_level = RiskLevel.MEDIUM
-                risk_description = f"{node_type} 노드가 외부 시스템에 영향을 미칩니다"
+                risk_description = f"{node_type} node affects external systems"
                 if node_type in {"payment", "email"}:
                     risk_level = RiskLevel.HIGH
                     has_confirmation_required = True
@@ -307,11 +307,11 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
             steps.append(step)
             total_duration += duration
         
-        # 경고 생성
+        # Generate warnings
         if max_risk == RiskLevel.HIGH:
-            warnings.append("⚠️ 이 워크플로우는 되돌릴 수 없는 작업을 포함합니다")
+            warnings.append("⚠️ This workflow contains irreversible operations")
         
-        # 요약 생성
+        # Generate summary
         summary = self._generate_summary(workflow_name, len(steps), total_duration, max_risk)
         
         return PlanBriefing(
@@ -321,11 +321,11 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
             total_steps=len(steps),
             estimated_total_duration_seconds=total_duration,
             steps=steps,
-            draft_results=[],  # 규칙 기반에서는 결과물 예측 제한
+            draft_results=[],  # Limited result prediction in rule-based mode
             overall_risk_level=max_risk,
             warnings=warnings,
             requires_confirmation=has_confirmation_required,
-            confirmation_message="외부에 영향을 미치는 작업이 포함되어 있습니다. 계속하시겠습니까?" if has_confirmation_required else None,
+            confirmation_message="This workflow contains operations that affect external systems. Do you want to continue?" if has_confirmation_required else None,
             confidence_score=0.6  # 규칙 기반은 낮은 신뢰도
         )
 
@@ -334,12 +334,12 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
         nodes: List[Dict],
         edges: List[Dict]
     ) -> List[str]:
-        """토폴로지 정렬로 실행 순서 결정"""
+        """Determine execution order using topological sorting"""
         from collections import defaultdict, deque
         
         node_ids = [n.get('id') for n in nodes if n.get('id')]
         
-        # 진입 차수 계산
+        # Calculate in-degree
         in_degree = defaultdict(int)
         adjacency = defaultdict(list)
         
@@ -353,7 +353,7 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
                 adjacency[source].append(target)
                 in_degree[target] += 1
         
-        # 진입 차수가 0인 노드부터 시작
+        # Start with nodes that have zero in-degree
         queue = deque([n for n in node_ids if in_degree[n] == 0])
         order = []
         
@@ -369,22 +369,22 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
         return order
 
     def _generate_action_description(self, node: Dict) -> str:
-        """노드에 대한 동작 설명 생성"""
+        """Generate action description for a node"""
         node_type = node.get('type', 'default')
         node_data = node.get('data', {})
         label = node_data.get('label', node.get('label', ''))
         
         descriptions = {
-            "llm": f"AI가 '{label}'을(를) 처리합니다",
-            "hitp": f"사용자 입력을 기다립니다: {label}",
-            "api_call": f"외부 API를 호출합니다: {label}",
-            "email": f"이메일을 발송합니다: {label}",
-            "condition": f"조건을 확인합니다: {label}",
-            "transform": f"데이터를 변환합니다: {label}",
-            "aggregator": f"결과를 집계합니다: {label}",
+            "llm": f"AI will process '{label}'",
+            "hitp": f"Waiting for user input: {label}",
+            "api_call": f"Calling external API: {label}",
+            "email": f"Sending email: {label}",
+            "condition": f"Checking condition: {label}",
+            "transform": f"Transforming data: {label}",
+            "aggregator": f"Aggregating results: {label}",
         }
         
-        return descriptions.get(node_type, f"{label} 노드를 실행합니다")
+        return descriptions.get(node_type, f"Executing {label} node")
 
     def _generate_summary(
         self,
@@ -393,14 +393,14 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
         total_duration: int,
         risk_level: RiskLevel
     ) -> str:
-        """브리핑 요약 생성"""
+        """Generate briefing summary"""
         risk_text = {
             RiskLevel.LOW: "",
-            RiskLevel.MEDIUM: " 일부 외부 연동이 포함됩니다.",
-            RiskLevel.HIGH: " ⚠️ 되돌릴 수 없는 작업이 포함됩니다."
+            RiskLevel.MEDIUM: " Some external integrations are included.",
+            RiskLevel.HIGH: " ⚠️ Irreversible operations are included."
         }
         
-        return f"'{workflow_name}' 워크플로우는 {step_count}단계로 구성되며, 약 {total_duration}초가 소요됩니다.{risk_text[risk_level]}"
+        return f"'{workflow_name}' will execute {step_count} steps (approximately {total_duration}s).{risk_text.get(risk_level, '')}"
 
     def _build_briefing_from_analysis(
         self,
@@ -459,7 +459,7 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
         )
 
     def _mask_sensitive_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """민감 정보 마스킹"""
+        """Mask sensitive information"""
         sensitive_keys = {'password', 'secret', 'api_key', 'token', 'credential', 'ssn', 'credit_card'}
         
         def mask_recursive(obj):
@@ -481,12 +481,12 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
         user_id: str
     ) -> bool:
         """
-        실행 승인 토큰 검증
+        Validate execution approval token
         
-        Redis/DynamoDB에서 토큰을 조회하여 검증합니다.
+        Verify token by querying from Redis/DynamoDB.
         """
         try:
-            # 토큰 저장소 연동 구현
+            # Token storage integration implementation
             token_service = ConfirmationTokenService()
             is_valid = await token_service.validate_token(
                 token=token,
@@ -542,21 +542,21 @@ If the workflow is in Korean, respond in Korean. If in English, respond in Engli
 
 class ConfirmationTokenService:
     """
-    실행 승인 토큰 관리 서비스
+    Execution approval token management service
     
-    Redis 또는 DynamoDB를 사용하여 토큰을 저장하고 검증합니다.
+    Use Redis or DynamoDB to store and verify tokens.
     """
     
     def __init__(self):
         self.use_redis = os.environ.get('REDIS_URL') is not None
-        # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+        # 🚨 [Critical Fix] Match default value with template.yaml
         self.token_table = os.environ.get('CONFIRMATION_TOKENS_TABLE', 'ConfirmationTokensTable')
         self._redis_client = None
         self._dynamodb_table = None
     
     @property
     def redis_client(self):
-        """Redis 클라이언트 지연 초기화"""
+        """Lazy initialization of Redis client"""
         if self._redis_client is None and self.use_redis:
             try:
                 import redis.asyncio as redis
@@ -569,7 +569,7 @@ class ConfirmationTokenService:
     
     @property
     def dynamodb_table(self):
-        """DynamoDB 테이블 지연 초기화"""
+        """Lazy initialization of DynamoDB table"""
         if self._dynamodb_table is None and not self.use_redis:
             try:
                 import boto3
@@ -639,16 +639,16 @@ class ConfirmationTokenService:
         
         try:
             if self.use_redis and self.redis_client:
-                # Redis에서 조회
+                # Retrieve from Redis
                 token_data = await self.redis_client.hgetall(f"confirmation_token:{token}")
                 if not token_data:
                     return False
                 
-                # 바이트를 문자열로 변환 (Redis 특성)
+                # Convert bytes to string (Redis characteristic)
                 token_data = {k.decode(): v.decode() for k, v in token_data.items()}
                 
             else:
-                # DynamoDB에서 조회
+                # Retrieve from DynamoDB
                 if not self.dynamodb_table:
                     return False
                 
@@ -657,7 +657,7 @@ class ConfirmationTokenService:
                 if not token_data:
                     return False
             
-            # 토큰 검증
+            # Token verification
             current_time = int(time.time())
             
             return (
@@ -672,13 +672,13 @@ class ConfirmationTokenService:
             return False
     
     async def invalidate_token(self, token: str) -> bool:
-        """토큰 무효화 (사용 후)"""
+        """Invalidate token (after use)"""
         try:
             if self.use_redis and self.redis_client:
-                # Redis에서 삭제
+                # Delete from Redis
                 await self.redis_client.delete(f"confirmation_token:{token}")
             else:
-                # DynamoDB에서 is_used 플래그 설정
+                # Set is_used flag in DynamoDB
                 if self.dynamodb_table:
                     self.dynamodb_table.update_item(
                         Key={'token': token},

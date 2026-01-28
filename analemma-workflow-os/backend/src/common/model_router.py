@@ -619,7 +619,71 @@ The goal is to provide complete and useful responses within the limited tokens."
 # ============================================================
 AVAILABLE_MODELS = {
     # ──────────────────────────────────────────────────────────
-    # Gemini Tier - 구조적 추론 및 장기 컨텍스트 특화
+    # Gemini 3 Tier - 최신 세대 (2M context, adaptive thinking)
+    # ──────────────────────────────────────────────────────────
+    "gemini-3-pro": ModelConfig(
+        model_id="gemini-3-pro",
+        max_tokens=8192,
+        cost_per_1k_tokens=1.50,  # Premium pricing for advanced reasoning
+        tier=ModelTier.PREMIUM,
+        provider=ModelProvider.GEMINI,
+        supports_long_context=True,
+        supports_structured_output=True,
+        supports_context_caching=True,
+        supports_thinking=True,             # Adaptive thinking capabilities
+        cached_cost_per_1k_tokens=0.375,    # 75% discount with caching
+        expected_ttft_ms=250,               # Advanced reasoning takes time
+        expected_tps=100,                   # High quality output
+    ),
+    "gemini-3-flash": ModelConfig(
+        model_id="gemini-3-flash",
+        max_tokens=8192,
+        cost_per_1k_tokens=0.20,  # Fast and affordable
+        tier=ModelTier.PREMIUM,
+        provider=ModelProvider.GEMINI,
+        supports_long_context=True,
+        supports_structured_output=True,
+        supports_context_caching=True,
+        supports_thinking=True,             # Near-zero thinking level option
+        cached_cost_per_1k_tokens=0.05,     # 75% discount with caching
+        expected_ttft_ms=120,               # Fastest Gemini 3
+        expected_tps=180,                   # Excellent throughput
+    ),
+    
+    # ──────────────────────────────────────────────────────────
+    # Gemini 2.5 Tier - Thinking 기능 지원
+    # ──────────────────────────────────────────────────────────
+    "gemini-2.5-pro": ModelConfig(
+        model_id="gemini-2.5-pro",
+        max_tokens=8192,
+        cost_per_1k_tokens=1.25,
+        tier=ModelTier.PREMIUM,
+        provider=ModelProvider.GEMINI,
+        supports_long_context=True,
+        supports_structured_output=True,
+        supports_context_caching=True,
+        supports_thinking=True,             # Adaptive thinking
+        cached_cost_per_1k_tokens=0.3125,
+        expected_ttft_ms=280,
+        expected_tps=90,
+    ),
+    "gemini-2.5-flash": ModelConfig(
+        model_id="gemini-2.5-flash",
+        max_tokens=8192,
+        cost_per_1k_tokens=0.15,  # Vertex AI pricing
+        tier=ModelTier.PREMIUM,
+        provider=ModelProvider.GEMINI,
+        supports_long_context=True,
+        supports_structured_output=True,
+        supports_context_caching=True,
+        supports_thinking=True,             # Controllable thinking budgets
+        cached_cost_per_1k_tokens=0.0375,   # 75% discount with caching
+        expected_ttft_ms=200,               # Slightly slower due to thinking
+        expected_tps=120,                   # High throughput maintained
+    ),
+    
+    # ──────────────────────────────────────────────────────────
+    # Gemini 2.0/1.5 Tier - 구조적 추론 및 장기 컨텍스트 특화
     # ──────────────────────────────────────────────────────────
     "gemini-2.0-flash": ModelConfig(
         model_id="gemini-2.0-flash",
@@ -633,20 +697,6 @@ AVAILABLE_MODELS = {
         cached_cost_per_1k_tokens=0.01875,  # 75% discount with caching
         expected_ttft_ms=150,               # Very fast response
         expected_tps=150,                   # High throughput
-    ),
-    "gemini-2.0-flash-thinking-exp": ModelConfig(
-        model_id="gemini-2.0-flash-thinking-exp",
-        max_tokens=8192,
-        cost_per_1k_tokens=0.075,  # Same as flash
-        tier=ModelTier.PREMIUM,
-        provider=ModelProvider.GEMINI,
-        supports_long_context=True,
-        supports_structured_output=True,
-        supports_context_caching=True,
-        supports_thinking=True,             # Thinking Mode 지원
-        cached_cost_per_1k_tokens=0.01875,  # 75% discount with caching
-        expected_ttft_ms=200,               # Slightly slower due to thinking
-        expected_tps=120,                   # High throughput maintained
     ),
     "gemini-1.5-pro": ModelConfig(
         model_id="gemini-1.5-pro",
@@ -1196,7 +1246,8 @@ def select_optimal_model(
     # ──────────────────────────────────────────────────────────
     if canvas_mode in ["agentic-designer", "co-design"]:
         # 디자인 모드에서는 Thinking Mode가 유용하므로 thinking 지원 모델 우선 선택
-        thinking_models = ["gemini-2.0-flash-thinking-exp", "gemini-1.5-pro"]
+        # Agentic Designer uses Gemini 3 Pro, Co-design can use Gemini 3 Flash
+        thinking_models = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-1.5-pro"]
         
         for model_name in thinking_models:
             if model_name in AVAILABLE_MODELS:

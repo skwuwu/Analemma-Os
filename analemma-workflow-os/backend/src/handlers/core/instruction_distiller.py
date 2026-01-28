@@ -117,8 +117,8 @@ GCP_SERVICE_ACCOUNT_KEY = os.environ.get("GCP_SERVICE_ACCOUNT_KEY", "")  # JSON 
 HAIKU_MODEL_ID = "anthropic.claude-3-haiku-20240307-v1:0"
 
 # Gemini Native 설정
-GEMINI_FLASH_MODEL = "gemini-1.5-flash"  # 비용 효율적
-GEMINI_2_FLASH_MODEL = "gemini-2.0-flash"  # 고성능
+GEMINI_FLASH_MODEL = "gemini-3-flash"  # 지능형 학습 로직 최적화
+GEMINI_2_FLASH_MODEL = "gemini-2.0-flash"  # 레거시 호환
 USE_GEMINI_NATIVE = os.environ.get("USE_GEMINI_NATIVE", "true").lower() == "true"
 
 # 지침 가중치 설정
@@ -925,7 +925,7 @@ def _distill_with_gemini(
     existing_instructions: Optional[List[str]] = None
 ) -> Optional[Dict[str, Any]]:
     """
-    Gemini 1.5/2.0 Flash를 사용한 세만틱 증류
+    Gemini 3 Flash를 사용한 세만틱 증류
     
     특징:
     - Structured Output으로 JSON 파싱 에러 제거

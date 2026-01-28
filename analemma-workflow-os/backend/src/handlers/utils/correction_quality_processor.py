@@ -95,8 +95,8 @@ def _get_gemini_model():
             api_key = os.environ.get('GEMINI_API_KEY') or os.environ.get('GOOGLE_API_KEY')
             if api_key:
                 genai.configure(api_key=api_key)
-                _gemini_model = genai.GenerativeModel('gemini-1.5-flash')
-                logger.info("Gemini 1.5 Flash model initialized")
+                _gemini_model = genai.GenerativeModel('gemini-3-flash')  # Quality analysis uses Gemini 3 Flash
+                logger.info("Gemini 3 Flash model initialized for quality analysis")
             else:
                 logger.warning("No Gemini API key found, semantic analysis disabled")
         except Exception as e:
@@ -105,7 +105,7 @@ def _get_gemini_model():
 
 async def _analyze_with_gemini(original: str, corrected: str) -> Optional[Dict[str, Any]]:
     """
-    [v2.1] Gemini 1.5 Flash로 세만틱 분석 수행.
+    [v2.1] Gemini 3 Flash로 세만틱 분석 수행.
     
     점수가 애매할 때만 호출되어 비용 최적화.
     

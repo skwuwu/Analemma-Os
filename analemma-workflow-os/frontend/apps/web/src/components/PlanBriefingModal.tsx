@@ -58,25 +58,25 @@ interface PlanBriefingModalProps {
 const getRiskTheme = (level: RiskLevel) => {
   const themes = {
     low: {
-      color: 'text-emerald-500',
-      border: 'border-emerald-500/20',
-      bg: 'bg-emerald-50/50 dark:bg-emerald-500/5',
+      color: 'text-emerald-500 dark:text-emerald-400',
+      border: 'border-emerald-500/20 dark:border-emerald-500/30',
+      bg: 'bg-emerald-50/50 dark:bg-emerald-500/10',
       indicator: 'bg-emerald-500',
-      label: '낮음 (Low Risk)'
+      label: 'Low Risk'
     },
     medium: {
-      color: 'text-amber-500',
-      border: 'border-amber-500/20',
-      bg: 'bg-amber-50/50 dark:bg-amber-500/5',
+      color: 'text-amber-500 dark:text-amber-400',
+      border: 'border-amber-500/20 dark:border-amber-500/30',
+      bg: 'bg-amber-50/50 dark:bg-amber-500/10',
       indicator: 'bg-amber-500',
-      label: '주의 (Medium Risk)'
+      label: 'Medium Risk'
     },
     high: {
-      color: 'text-rose-500',
-      border: 'border-rose-500/20',
-      bg: 'bg-rose-50/50 dark:bg-rose-500/5',
+      color: 'text-rose-500 dark:text-rose-400',
+      border: 'border-rose-500/20 dark:border-rose-500/30',
+      bg: 'bg-rose-50/50 dark:bg-rose-500/10',
       indicator: 'bg-rose-500',
-      label: '위험 (High Risk)'
+      label: 'High Risk'
     },
   };
   return themes[level] || themes.low;
@@ -117,7 +117,7 @@ const StepCard = React.memo(({ step }: { step: PlanStep }) => {
       animate={{ opacity: 1, y: 0 }}
       className="mb-3"
     >
-      <Card className={cn("overflow-hidden border-slate-200 dark:border-slate-800 border-l-4 transition-all hover:shadow-md", `border-l-${step.risk_level === 'low' ? 'emerald' : step.risk_level === 'medium' ? 'amber' : 'rose'}-500`)}>
+      <Card className={cn("overflow-hidden border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 border-l-4 transition-all hover:shadow-md", `border-l-${step.risk_level === 'low' ? 'emerald' : step.risk_level === 'medium' ? 'amber' : 'rose'}-500`)}>
         <CardHeader className="py-4 px-5 bg-slate-50/30 dark:bg-slate-900/10">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
@@ -144,9 +144,9 @@ const StepCard = React.memo(({ step }: { step: PlanStep }) => {
 
           <div className="flex flex-wrap gap-2">
             {step.has_external_side_effect && (
-              <Badge variant="outline" className="text-[10px] font-bold bg-orange-50 text-orange-600 border-orange-200 gap-1.5 py-1 px-2 uppercase tracking-tighter">
+              <Badge variant="outline" className="text-[10px] font-bold bg-orange-50 dark:bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-200 dark:border-orange-500/30 gap-1.5 py-1 px-2 uppercase tracking-tighter">
                 <ExternalLink className="w-3 h-3" />
-                비가역적 작업 (Irreversible)
+                Irreversible
               </Badge>
             )}
 
@@ -188,8 +188,8 @@ const DraftResultCard = React.memo(({ draft }: { draft: DraftResult }) => {
   const { icon: Icon, label, color } = typeConfig[draft.result_type] || typeConfig.default;
 
   return (
-    <Card className="mb-3 overflow-hidden border-slate-200 dark:border-slate-800 transition-all hover:border-slate-300">
-      <CardHeader className="py-3 px-5 bg-slate-50/50 dark:bg-slate-900/10 border-b border-slate-100 dark:border-slate-800">
+    <Card className="mb-3 overflow-hidden bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 transition-all hover:border-slate-300 dark:hover:border-slate-600">
+      <CardHeader className="py-3 px-5 bg-slate-50/50 dark:bg-slate-800/50 border-b border-slate-100 dark:border-slate-700">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className={cn("p-1.5 rounded-lg bg-white dark:bg-slate-900 shadow-sm border border-slate-100 dark:border-slate-800", color)}>
@@ -238,10 +238,10 @@ const DraftResultCard = React.memo(({ draft }: { draft: DraftResult }) => {
         )}
 
         {draft.requires_review && (
-          <div className="flex items-center gap-2 p-3 rounded-xl bg-blue-50/50 dark:bg-blue-500/5 border border-blue-100 dark:border-blue-500/20">
-            <Shield className="w-4 h-4 text-blue-500 shrink-0" />
-            <span className="text-[11px] text-blue-700 dark:text-blue-400 font-black">
-              실행 후 에이전트가 중단되며, 사용자의 최종 검토와 승인이 필요합니다.
+          <div className="flex items-center gap-2 p-3 rounded-xl bg-blue-50/50 dark:bg-blue-500/10 border border-blue-100 dark:border-blue-500/30">
+            <Shield className="w-4 h-4 text-blue-500 dark:text-blue-400 shrink-0" />
+            <span className="text-[11px] text-blue-700 dark:text-blue-300 font-black">
+              Agent will pause after execution. User review and final approval required.
             </span>
           </div>
         )}
@@ -341,8 +341,8 @@ export const PlanBriefingModal: React.FC<PlanBriefingModalProps> = ({
             <div className="p-8 space-y-8">
               {/* Executive Summary */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <Card className="md:col-span-2 rounded-3xl border-slate-100 dark:border-slate-800 shadow-sm bg-slate-50/20">
-                  <CardHeader className="py-4 px-6 border-b border-slate-100 dark:border-slate-800">
+                <Card className="md:col-span-2 rounded-3xl border-slate-100 dark:border-slate-700 shadow-sm bg-slate-50/20 dark:bg-slate-900">
+                  <CardHeader className="py-4 px-6 border-b border-slate-100 dark:border-slate-700">
                     <CardTitle className="text-[11px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
                       <Info className="w-3.5 h-3.5" /> Assessment Summary
                     </CardTitle>
@@ -354,7 +354,7 @@ export const PlanBriefingModal: React.FC<PlanBriefingModalProps> = ({
                   </CardContent>
                 </Card>
 
-                <Card className="rounded-3xl border-slate-100 dark:border-slate-800 shadow-sm bg-blue-600 dark:bg-blue-600 text-white overflow-hidden relative">
+                <Card className="rounded-3xl border-slate-100 dark:border-slate-700 shadow-sm bg-blue-600 dark:bg-blue-700 text-white overflow-hidden relative">
                   <div className="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -mr-12 -mt-12 blur-2xl" />
                   <CardHeader className="py-4 px-6 border-b border-white/10">
                     <CardTitle className="text-[11px] font-black uppercase tracking-widest text-white/60 flex items-center gap-1.5 text-center">
@@ -409,8 +409,8 @@ export const PlanBriefingModal: React.FC<PlanBriefingModalProps> = ({
               </AnimatePresence>
 
               <Accordion type="single" collapsible className="w-full space-y-4">
-                {/* 실행 단계 */}
-                <AccordionItem value="steps" className="border rounded-2xl overflow-hidden px-4 hover:bg-slate-50 transition-colors">
+                {/* Execution Steps */}
+                <AccordionItem value="steps" className="border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-2xl overflow-hidden px-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
                   <AccordionTrigger className="hover:no-underline py-5">
                     <div className="flex items-center gap-3">
                       <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-lg">
@@ -431,9 +431,9 @@ export const PlanBriefingModal: React.FC<PlanBriefingModalProps> = ({
                   </AccordionContent>
                 </AccordionItem>
 
-                {/* 예상 결과물 */}
+                {/* Predicted Results */}
                 {briefing.draft_results.length > 0 && (
-                  <AccordionItem value="results" className="border rounded-2xl overflow-hidden px-4 hover:bg-slate-50 transition-colors">
+                  <AccordionItem value="results" className="border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 rounded-2xl overflow-hidden px-4 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors">
                     <AccordionTrigger className="hover:no-underline py-5">
                       <div className="flex items-center gap-3">
                         <div className="p-2 bg-slate-100 dark:bg-slate-800 rounded-lg">
@@ -486,13 +486,13 @@ export const PlanBriefingModal: React.FC<PlanBriefingModalProps> = ({
               </div>
             </div>
           ) : (
-            <div className="flex flex-col items-center justify-center h-full text-slate-400 p-12 text-center">
-              <div className="w-16 h-16 rounded-3xl bg-slate-50 flex items-center justify-center mb-6">
+            <div className="flex flex-col items-center justify-center h-full text-slate-400 dark:text-slate-500 p-12 text-center">
+              <div className="w-16 h-16 rounded-3xl bg-slate-50 dark:bg-slate-800 flex items-center justify-center mb-6">
                 <AlertTriangle className="w-8 h-8 opacity-20" />
               </div>
-              <h4 className="font-bold text-slate-500 mb-2">Simulation Failed</h4>
-              <p className="text-xs text-slate-400 leading-relaxed max-w-[200px]">
-                워크플로우 상태 분석 단계에서 오류가 발생했습니다. 잠시 후 다시 시도해주세요.
+              <h4 className="font-bold text-slate-500 dark:text-slate-400 mb-2">Simulation Failed</h4>
+              <p className="text-xs text-slate-400 dark:text-slate-500 leading-relaxed max-w-[200px]">
+                An error occurred during workflow state analysis. Please try again in a moment.
               </p>
             </div>
           )}

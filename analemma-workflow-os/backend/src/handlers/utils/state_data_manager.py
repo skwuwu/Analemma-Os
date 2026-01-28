@@ -244,8 +244,8 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
     
     # Update state data with execution result
     updated_state_data = {
-        'workflow_config': state_data.get('workflow_config'),
-        'current_state': execution_result.get('final_state', state_data.get('current_state')),
+        'light_config': state_data.get('light_config'),
+        'workflow_config_s3_path': state_data.get('workflow_config_s3_path'),
         'state_s3_path': execution_result.get('final_state_s3_path', state_data.get('state_s3_path')),
         'state_history': execution_result.get('new_history_logs', state_data.get('state_history', [])),
         'ownerId': state_data.get('ownerId'),
@@ -262,6 +262,7 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
         'segment_manifest_s3_path': state_data.get('segment_manifest_s3_path'),
         
         'distributed_mode': state_data.get('distributed_mode'),
+        'distributed_strategy': state_data.get('distributed_strategy'),
         'max_concurrency': state_data.get('max_concurrency'),
         
         # 🚨 [Critical] Statistics Fields for Scenario J

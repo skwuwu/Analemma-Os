@@ -320,12 +320,13 @@ export function useTaskManager(options: UseTaskManagerOptions = {}) {
     optionsRef.current = options;
   });
 
-  // prop 변경 시 내부 상태 동기화
+  // prop 변경 시 내부 상태 동기화 (무한 루프 방지)
   useEffect(() => {
     if (options.selectedTaskId !== undefined && options.selectedTaskId !== selectedId) {
       setSelectedId(options.selectedTaskId);
     }
-  }, [options.selectedTaskId, selectedId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.selectedTaskId]); // ✅ selectedId 제거하여 무한 루프 방지
 
   // 리스트 조회
   const taskList = useTaskList({

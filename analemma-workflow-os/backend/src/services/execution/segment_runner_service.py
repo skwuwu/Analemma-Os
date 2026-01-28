@@ -2016,6 +2016,28 @@ class SegmentRunnerService:
                     logger.error(f"[InitializeStateData Offload] Failed to restore event from S3: {e}")
                     raise RuntimeError(f"Failed to restore InitializeStateData from S3: {e}")
         
+        # [Strategy 2] Hydrate workflow_config and current_state from S3 paths
+        # InitializeStateData always offloads these to S3, so we must hydrate on demand
+        workflow_config_s3_path = event.get('workflow_config_s3_path')
+        if workflow_config_s3_path and not event.get('workflow_config'):
+            try:
+                logger.info(f"[Hydration] Loading workflow_config from S3: {workflow_config_s3_path}")
+                event['workflow_config'] = self.state_manager.download_state_from_s3(workflow_config_s3_path)
+                logger.info(f"[Hydration] workflow_config loaded ({len(str(event['workflow_config']))} chars)")
+            except Exception as e:
+                logger.error(f"[Hydration] Failed to load workflow_config from S3: {e}")
+                raise RuntimeError(f"Failed to hydrate workflow_config from S3: {e}")
+        
+        state_s3_path = event.get('state_s3_path')
+        if state_s3_path and not event.get('current_state'):
+            try:
+                logger.info(f"[Hydration] Loading current_state from S3: {state_s3_path}")
+                event['current_state'] = self.state_manager.download_state_from_s3(state_s3_path)
+                logger.info(f"[Hydration] current_state loaded ({len(str(event['current_state']))} chars)")
+            except Exception as e:
+                logger.error(f"[Hydration] Failed to load current_state from S3: {e}")
+                raise RuntimeError(f"Failed to hydrate current_state from S3: {e}")
+        
         # �🛡️ [v3.6] Entropy Shield: 입력을 받자마자 StateBag으로 변환하여 하위 로직 전체를 보호
         # event.get('current_state')가 None이어도 ensure_state_bag이 빈 StateBag으로 승격시킴
         from src.common.statebag import ensure_state_bag

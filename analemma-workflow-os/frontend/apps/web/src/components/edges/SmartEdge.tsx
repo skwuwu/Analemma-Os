@@ -115,8 +115,32 @@ export const SmartEdge = ({
   const currentType: BackendEdgeType = (edgeData?.edgeType as BackendEdgeType) || 'edge';
   const typeConfig = EDGE_TYPE_CONFIG[currentType];
 
+  // Check if this edge is connected to a loop structure
+  const isLoopEdge = useMemo(() => {
+    if (edgeData?.isBackEdge) return true;
+    
+    // Check if this edge enters or exits a loop (connected to back-edge target/source)
+    const allEdges = getEdges();
+    const backEdges = allEdges.filter(e => e.data?.isBackEdge);
+    
+    for (const backEdge of backEdges) {
+      // Loop entry edge: points to the same target as back-edge
+      if (edge.target === backEdge.target) return true;
+      // Loop exit edge: starts from the same source as back-edge
+      if (edge.source === backEdge.source) return true;
+    }
+    
+    return false;
+  }, [edge.source, edge.target, edgeData?.isBackEdge, getEdges]);
+
   // 엣지 타입 변경 핸들러
   const handleTypeChange = useCallback((newType: BackendEdgeType) => {
+    // Loop와 연결된 엣지는 타입 변경 불가 (루프 구조 유지를 위해)
+    if (isLoopEdge) {
+      toast.error('Loop structure edges cannot be changed. Control flow should be handled before entering the loop.');
+      return;
+    }
+
     setEdges((edges) =>
       edges.map((edge) =>
         edge.id === id
@@ -132,7 +156,7 @@ export const SmartEdge = ({
           : edge
       )
     );
-  }, [id, setEdges]);
+  }, [id, isLoopEdge, setEdges]);
 
   // 조건 저장 핸들러
   const handleConditionSave = useCallback(() => {
@@ -238,25 +262,31 @@ export const SmartEdge = ({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="center" className="w-48">
                 <DropdownMenuLabel className="text-xs text-muted-foreground">
-                  Edge Type
+                  {isLoopEdge ? 'Loop Structure Edge (Fixed)' : 'Edge Type'}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
-                {Object.entries(EDGE_TYPE_CONFIG).map(([type, config]) => {
-                  const Icon = config.icon;
-                  return (
-                    <DropdownMenuItem
-                      key={type}
-                      onClick={() => handleTypeChange(type as BackendEdgeType)}
-                      className="flex items-center gap-2 cursor-pointer"
-                    >
-                      <Icon className="w-4 h-4" style={{ color: config.color }} />
-                      <div className="flex flex-col">
-                        <span className="font-medium">{config.label}</span>
-                        <span className="text-[10px] text-muted-foreground">{config.description}</span>
-                      </div>
-                    </DropdownMenuItem>
-                  );
-                })}
+                {isLoopEdge ? (
+                  <div className="px-2 py-2 text-xs text-muted-foreground">
+                    Loop structure edges (entry/exit/back) are fixed. Control flow should be handled in edges before the loop.
+                  </div>
+                ) : (
+                  Object.entries(EDGE_TYPE_CONFIG).map(([type, config]) => {
+                    const Icon = config.icon;
+                    return (
+                      <DropdownMenuItem
+                        key={type}
+                        onClick={() => handleTypeChange(type as BackendEdgeType)}
+                        className="flex items-center gap-2 cursor-pointer"
+                      >
+                        <Icon className="w-4 h-4" style={{ color: config.color }} />
+                        <div className="flex flex-col">
+                          <span className="font-medium">{config.label}</span>
+                          <span className="text-[10px] text-muted-foreground">{config.description}</span>
+                        </div>
+                      </DropdownMenuItem>
+                    );
+                  })
+                )}
               </DropdownMenuContent>
             </DropdownMenu>
 
