@@ -132,16 +132,18 @@
     "InitializeStateBag": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🎒 [Smart StateBag] Create initial state_data with S3 pointers and partition_map",
+      "Comment": "🎒 [v3.12] Smart StateBag - returns {state_data: {bag: ...}, next_action}",
       "Parameters": {
         "FunctionName": "${InitializeStateDataArn}",
         "Payload.$": "$"
       },
       "ResultSelector": {
-        "bag.$": "$.Payload.state_data",
+        "state_data": {
+          "bag.$": "$.Payload.state_data.bag"
+        },
         "next_action.$": "$.Payload.next_action"
       },
-      "ResultPath": "$.state_data",
+      "ResultPath": "$",
       "Retry": [
         {
           "ErrorEquals": [
@@ -464,19 +466,18 @@
     "ExecuteSegment": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🎯 [v3.5 Fix] state_data wrapper preserved for Lambda compatibility",
+      "Comment": "🎯 [v3.12] Lambda hydrates state_data (may contain S3 pointers)",
       "Parameters": {
         "FunctionName": "${ExecuteSegmentArn}",
         "Payload": {
-          "state_data": {
-            "bag.$": "$.state_data.bag"
-          }
+          "state_data.$": "$.state_data"
         }
       },
       "ResultSelector": {
-        "result.$": "$.Payload"
+        "state_data.$": "$.Payload.state_data",
+        "next_action.$": "$.Payload.next_action"
       },
-      "ResultPath": "$.execution_result",
+      "ResultPath": "$",
       "Retry": [
         {
           "ErrorEquals": [
@@ -514,16 +515,16 @@
           "Next": "NotifyAndFail"
         }
       ],
-      "Next": "SyncStateData"
+      "Next": "EvaluateNextAction"
     },
     "SyncStateData": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🔄 [Central State Manager] Single point of state mutation with S3 offloading",
+      "Comment": "🔄 [v3.12 Legacy] Only used for external merge requests - ExecuteSegment now handles sync internally",
       "Parameters": {
         "FunctionName": "${StateDataManagerArn}",
         "Payload": {
-          "action": "sync",
+          "action": "merge_only",
           "state_data.$": "$.state_data.bag",
           "execution_result.$": "$.execution_result.result"
         }

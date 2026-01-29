@@ -568,13 +568,16 @@ def lambda_handler(event, context):
         logger.warning("⚠️ Universal Sync Core not available, using legacy initialization")
         
         # 🔑 [Critical] Wrap in 'bag' structure for v3 ASL compatibility
-        # Even in fallback path, maintain {state_data: {bag: {...}}} structure
+        # Must match USC return structure: {state_data: {bag: {...}}, next_action: ...}
         payload['segment_to_run'] = 0
         payload['loop_counter'] = 0
         payload['state_history'] = []
         payload['last_update_time'] = current_time
         
-        response_data = {'bag': payload}
+        response_data = {
+            'state_data': {'bag': payload},
+            'next_action': 'STARTED'
+        }
     
     # 최종 크기 검증 (USC가 이미 처리했지만 로깅용)
     response_json = json.dumps(response_data, default=str, ensure_ascii=False)

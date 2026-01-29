@@ -63,6 +63,15 @@ from src.common.state_hydrator import (
 
 logger = logging.getLogger(__name__)
 
+# [v3.12] Shared Kernel Library: StateBag as Single Source of Truth
+# ExecuteSegment now returns StateBag format directly using universal_sync_core
+try:
+    from src.handlers.utils.universal_sync_core import universal_sync_core
+    UNIVERSAL_SYNC_CORE_AVAILABLE = True
+except ImportError:
+    UNIVERSAL_SYNC_CORE_AVAILABLE = False
+    logger.warning("⚠️ universal_sync_core not available - falling back to legacy mode")
+
 # ============================================================================
 # 🔍 [v3.5] None Reference Tracing: Environment-controlled debug logging
 # ============================================================================
@@ -2408,8 +2417,18 @@ class SegmentRunnerService:
         
         def _finalize_response(res: Dict[str, Any], force_offload: bool = False) -> Dict[str, Any]:
             """
-            🛡️ [Guard] [v3.11] StateBag Dehydration Wrapper
-            Uses StateHydrator to offload large fields to S3, returning only pointers and metadata.
+            🛡️ [Guard] [v3.12] StateBag Unified Response Wrapper
+            
+            Uses universal_sync_core to return a proper StateBag format:
+            {
+                "state_data": { ...merged state... },
+                "next_action": "CONTINUE" | "COMPLETE" | "FAILED" | ...
+            }
+            
+            This ensures:
+            1. Single Source of Truth: ExecuteSegment returns StateBag directly
+            2. No separate SyncStateData call needed for state mutation
+            3. ASL always receives consistent {state_data, next_action} format
             """
             # 1. Validation & Safety Defaults
             if not isinstance(res, dict):
@@ -2423,13 +2442,12 @@ class SegmentRunnerService:
             res.setdefault('total_segments', _total_segments)
             res.setdefault('segment_id', _segment_id)
             
-            # 2. Extract Metadata for Persistence & ASL
-            # We must rescue these values BEFORE dehydration hides them in S3 pointers
+            # 2. Extract execution result metadata
             original_final_state = res.get('final_state', {})
-            if not isinstance(original_final_state, dict): original_final_state = {}
+            if not isinstance(original_final_state, dict): 
+                original_final_state = {}
             
-            # Standard standard metadata injection (into final_state)
-            # This ensures next lambda gets them even if we offload
+            # Inject guardrail metadata
             gv = original_final_state.get('guardrail_verified', False)
             bca = original_final_state.get('batch_count_actual', 1)
             sm = original_final_state.get('scheduling_metadata', {})
@@ -2439,30 +2457,82 @@ class SegmentRunnerService:
                 'batch_count_actual': bca,
                 'scheduling_metadata': sm,
                 'state_size_threshold': self.threshold,
-                # Legacy aliases
-                '__scheduling_metadata': sm,
-                '__guardrail_verified': gv,
-                '__batch_count_actual': bca
             })
-            res['final_state'] = original_final_state # update ref
+            res['final_state'] = original_final_state
             
-            # 3. Use StateHydrator to Dehydrate
-            # This handles size checks and S3 offloading automatically
+            # 3. 🎯 [v3.12] Use universal_sync_core for StateBag packaging
+            # This is the "Great Seal" - wrapping execution result into StateBag
+            if UNIVERSAL_SYNC_CORE_AVAILABLE:
+                # Build base_state from current event's state
+                base_state = event.get('state_data', {})
+                if isinstance(base_state, dict) and 'bag' in base_state:
+                    base_state = base_state.get('bag', {})
+                if not isinstance(base_state, dict):
+                    base_state = {}
+                
+                # Map status to next_action context
+                status = res.get('status', 'CONTINUE')
+                action_context = {
+                    'action': 'sync',
+                    'segment_id': _segment_id,
+                    'force_offload': force_offload,
+                    'is_parallel_branch': is_parallel_branch,
+                }
+                
+                # Build execution_result for USC
+                execution_result = {
+                    'final_state': original_final_state,
+                    'new_history_logs': res.get('new_history_logs', []),
+                    'status': status,
+                    'segment_id': _segment_id,
+                    'segment_type': res.get('segment_type', 'normal'),
+                    'next_segment_to_run': res.get('next_segment_to_run'),
+                    'error_info': res.get('error_info'),
+                    'branches': res.get('branches'),
+                    'execution_time': res.get('execution_time'),
+                    'kernel_actions': res.get('kernel_actions'),
+                    'total_segments': _total_segments,
+                    # Token metadata for guardrails
+                    'total_tokens': res.get('total_tokens') or original_final_state.get('total_tokens'),
+                    'total_input_tokens': res.get('total_input_tokens') or original_final_state.get('total_input_tokens'),
+                    'total_output_tokens': res.get('total_output_tokens') or original_final_state.get('total_output_tokens'),
+                }
+                
+                # Call universal_sync_core - The Great Seal
+                usc_result = universal_sync_core(
+                    base_state=base_state,
+                    new_result={'execution_result': execution_result},
+                    context=action_context
+                )
+                
+                # 🎯 [v3.12] Wrap in {state_data: {bag: ...}} format for ASL consistency
+                # ASL expects: $.state_data.bag for all state references
+                wrapped_result = {
+                    'state_data': {
+                        'bag': usc_result.get('state_data', {})
+                    },
+                    'next_action': usc_result.get('next_action', 'CONTINUE')
+                }
+                
+                logger.info(f"[v3.12] 🎯 ExecuteSegment returning StateBag format: "
+                           f"next_action={wrapped_result.get('next_action')}, "
+                           f"state_size={len(json.dumps(wrapped_result.get('state_data', {}), default=str))//1024}KB")
+                
+                return wrapped_result
+            
+            # 4. Fallback: Legacy mode (if universal_sync_core not available)
+            logger.warning("[v3.12] ⚠️ Fallback to legacy mode - universal_sync_core not available")
+            
+            # Use StateHydrator to Dehydrate (legacy behavior)
             bag = SmartStateBag(res, hydrator=self.hydrator)
             
-            # Determine fields to force offload
             force_fields = set()
-            
-            # [Strict Mode] Always offload final_state to enforce "No Data at Root"
             force_fields.add('final_state')
             
             if force_offload or is_parallel_branch:
-                # Force offload large objects for aggregators or parallel branches
-                # force_fields.add('final_state') <- Already added above
                 force_fields.add('branches')
                 force_fields.add('execution_batches')
                 if is_parallel_branch:
-                    # Strip config from parallel branches to save space
                     force_fields.add('workflow_config')
                     force_fields.add('partition_map')
 
@@ -2480,9 +2550,7 @@ class SegmentRunnerService:
                 return_delta=False
             )
             
-            # 4. Restore Critical Metadata to Top Level (ASL Visibility)
-            # Even if final_state is offloaded, these must be visible to Step Functions
-            # Copy from original_final_state (before dehydration)
+            # Restore Critical Metadata to Top Level
             keys_to_preserve = [
                 'total_tokens', 'total_input_tokens', 'total_output_tokens',
                 'guardrail_verified', 'batch_count_actual', 'scheduling_metadata',
@@ -2493,26 +2561,23 @@ class SegmentRunnerService:
                 if k in original_final_state and k not in payload:
                     payload[k] = original_final_state[k]
             
-            # Also ensure keys that were in 'res' but might be hidden if wrapped in something else (not likely with dehydrate)
-            # dehydrate keeps control plane fields.
-            
-            # 5. Generate S3 Path Aliases for ASL Compatibility
-            # If payload has { "final_state": { "bucket": "...", "key": "...", "__s3_pointer__": True } }
-            # Add "final_state_s3_path" = "s3://bucket/key"
+            # Generate S3 Path Aliases for ASL Compatibility
             for field in ['final_state', 'current_state', 'workflow_config', 'partition_map', 'segment_manifest', 'branches']:
                 val = payload.get(field)
                 if isinstance(val, dict) and (val.get('__s3_pointer__') or val.get('bucket')):
-                    # Check for S3Pointer signature
                     bucket = val.get('bucket')
                     key = val.get('key')
                     if bucket and key:
                         payload[f"{field}_s3_path"] = f"s3://{bucket}/{key}"
             
-            # Explicit alias for state_s3_path
             if payload.get('final_state_s3_path'):
                 payload['state_s3_path'] = payload['final_state_s3_path']
 
-            return payload
+            # Wrap in StateBag format for consistency
+            return {
+                'state_data': payload,
+                'next_action': res.get('status', 'CONTINUE')
+            }
         
         # ====================================================================
         # [Guard] [2단계] Pre-Execution Check: 동시성 및 예산 체크
