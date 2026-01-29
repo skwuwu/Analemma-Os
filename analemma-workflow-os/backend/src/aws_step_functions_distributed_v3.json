@@ -670,7 +670,7 @@
         "branch_index.$": "$$.Map.Item.Index"
       },
       "ResultSelector": {
-        "branches.$": "$[*].{branch_index: branch_index, status: status, s3_path: result_s3_path}"
+        "branches.$": "$"
       },
       "ItemProcessor": {
         "ProcessorConfig": {

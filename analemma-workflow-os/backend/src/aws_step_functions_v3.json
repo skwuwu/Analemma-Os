@@ -286,7 +286,7 @@
         }
       },
       "ResultSelector": {
-        "segment_results.$": "$[*].{segment_id: segment_id, status: status, s3_path: output_s3_path}"
+        "segment_results.$": "$"
       },
       "ResultPath": "$.execution_result",
       "Catch": [
@@ -344,7 +344,7 @@
         }
       },
       "ResultSelector": {
-        "segment_results.$": "$[*].{segment_id: segment_id, status: status, s3_path: final_state}"
+        "segment_results.$": "$"
       },
       "ResultPath": "$.execution_result",
       "Catch": [
@@ -583,7 +583,7 @@
         "state_data.$": "$.state_data.bag"
       },
       "ResultSelector": {
-        "branches.$": "$[*].{branch_id: branch_id, status: status, s3_path: final_state_s3_path}"
+        "branches.$": "$"
       },
       "Iterator": {
         "StartAt": "InitBranchState",

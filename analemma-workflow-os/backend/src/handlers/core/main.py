@@ -1633,8 +1633,11 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             if provider == "google":
                 provider = "gemini"
             
-            # Initialize text variable to prevent UnboundLocalError
+            # Initialize variables to prevent UnboundLocalError
             text = ""
+            usage = {}  # Initialize usage stats dict
+            resp = None  # Initialize response object
+            multimodal_parts = []  # Initialize for exception handler safety
             
             if provider == "gemini":
                 # Use Gemini Service (Native SDK)
@@ -1729,7 +1732,6 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         )
                     
                     # Extract text from Gemini response structure
-                    text = ""
                     if "content" in resp and isinstance(resp["content"], list) and resp["content"]:
                         text = resp["content"][0].get("text", "")
                     elif "text" in resp:
@@ -1985,7 +1987,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             # ═══════════════════════════════════════════════════════════════════════
             # Thinking Mode Output: Extract thinking process and add to state
             # ═══════════════════════════════════════════════════════════════════════
-            if isinstance(resp, dict) and "metadata" in resp:
+            if resp and isinstance(resp, dict) and "metadata" in resp:
                 thinking_data = resp["metadata"].get("thinking")
                 if thinking_data:
                     # Add thinking output to state with dedicated key

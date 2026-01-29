@@ -338,10 +338,12 @@ def lambda_handler(event, context):
             # stored which caused resume to miss required fields like workflow_config.
             # 🚨 [Critical Fix] state_data에서도 fallback으로 값을 가져옴
             state_data = payload.get('state_data') or {}
+            # Build context_info with None safety checks
+            workflow_config_source = payload.get('workflow_config') or state_data.get('workflow_config') or {}
             context_info = {
-                'workflow_config': payload.get('workflow_config') or state_data.get('workflow_config'),
+                'workflow_config': workflow_config_source if isinstance(workflow_config_source, dict) else None,
                 'workflowId': payload.get('workflowId') or state_data.get('workflowId'),
-                'workflow_name': (payload.get('workflow_config') or state_data.get('workflow_config') or {}).get('name'),
+                'workflow_name': workflow_config_source.get('name') if isinstance(workflow_config_source, dict) else None,
                 'segment_to_run': payload.get('segment_to_run') if payload.get('segment_to_run') is not None else state_data.get('segment_to_run'),
                 'total_segments': payload.get('total_segments') or state_data.get('total_segments'),
                 'partition_map': payload.get('partition_map') or state_data.get('partition_map'),
@@ -405,7 +407,7 @@ def lambda_handler(event, context):
             # --- 🆕 MOCK_MODE: 자동 Resume (시뮬레이터 E2E 테스트용) ---
             # MOCK_MODE가 활성화된 경우 사람의 승인을 모킹하여 자동으로 워크플로우 재개
             # MOCK_MODE는 payload 직접, state_data 내부, 또는 환경변수에서 찾을 수 있음
-            state_data = payload.get('state_data') or {}
+            # Reuse state_data defined earlier to avoid variable shadowing
             mock_mode_value = (
                 payload.get('MOCK_MODE') or 
                 state_data.get('MOCK_MODE') or 

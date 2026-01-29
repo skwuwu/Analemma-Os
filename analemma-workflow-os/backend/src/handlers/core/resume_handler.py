@@ -264,13 +264,21 @@ def lambda_handler(event, context):
             # ProcessAsyncResult에서 States.JsonMerge로 current_state와 병합됨
         }
         
+        # Initialize state_data early to prevent UnboundLocalError
+        state_data = {}
+        
         # TaskToken 항목에서 추가 컨텍스트 정보 복구 (사용 가능한 경우)
         if item and isinstance(item, dict):
             # stored context may be under different keys depending on the writer
-            stored_context = item.get('context') or item.get('state_data') or {}
+            stored_context = item.get('context') or item.get('state_data')
+            
+            # None safety: ensure stored_context is a dict before proceeding
+            if stored_context is None:
+                logger.warning("resume_handler: stored_context is None, initializing as empty dict")
+                stored_context = {}
 
             # If stored_context was serialized as a JSON string, try to parse it
-            if isinstance(stored_context, str):
+            elif isinstance(stored_context, str):
                 try:
                     stored_context = json.loads(stored_context)
                 except (json.JSONDecodeError, ValueError):
@@ -291,17 +299,18 @@ def lambda_handler(event, context):
                 resume_output['execution_name'] = stored_context['execution_name']
 
             # Build canonical state_data for downstream merge
+            # stored_context is guaranteed to be a dict at this point
             state_data = {
-                'workflow_config': stored_context.get('workflow_config') if isinstance(stored_context.get('workflow_config'), dict) else None,
-                'partition_map': stored_context.get('partition_map') if isinstance(stored_context.get('partition_map'), dict) else None,
-                'total_segments': stored_context.get('total_segments') or body.get('total_segments'),
+                'workflow_config': stored_context.get('workflow_config') if stored_context and isinstance(stored_context.get('workflow_config'), dict) else None,
+                'partition_map': stored_context.get('partition_map') if stored_context and isinstance(stored_context.get('partition_map'), dict) else None,
+                'total_segments': (stored_context.get('total_segments') if stored_context else None) or body.get('total_segments'),
                 'ownerId': item.get('ownerId') or owner_id,
-                'workflowId': stored_context.get('workflowId') or body.get('workflowId') or None,
-                'segment_to_run': stored_context.get('segment_to_run') if stored_context.get('segment_to_run') is not None else body.get('segment_to_run'),
-                'current_state': stored_context.get('current_state') if stored_context.get('current_state') is not None else None,
-                'state_s3_path': stored_context.get('state_s3_path') if stored_context.get('state_s3_path') is not None else None,
-                'idempotency_key': stored_context.get('idempotency_key') if stored_context.get('idempotency_key') is not None else None,
-                'state_history': stored_context.get('state_history') or (body.get('state_history') or [])
+                'workflowId': (stored_context.get('workflowId') if stored_context else None) or body.get('workflowId') or None,
+                'segment_to_run': (stored_context.get('segment_to_run') if stored_context and stored_context.get('segment_to_run') is not None else None) or body.get('segment_to_run'),
+                'current_state': stored_context.get('current_state') if stored_context and stored_context.get('current_state') is not None else None,
+                'state_s3_path': stored_context.get('state_s3_path') if stored_context and stored_context.get('state_s3_path') is not None else None,
+                'idempotency_key': stored_context.get('idempotency_key') if stored_context and stored_context.get('idempotency_key') is not None else None,
+                'state_history': (stored_context.get('state_history') if stored_context else None) or body.get('state_history') or []
             }
 
             # Hard validation: workflow_config is required for safe resumption
