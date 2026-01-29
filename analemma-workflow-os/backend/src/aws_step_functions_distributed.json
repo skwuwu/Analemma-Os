@@ -154,31 +154,31 @@
         }
       },
       "ResultSelector": {
-        "workflow_config.$": "$.Payload.workflow_config",
-        "current_state.$": "$.Payload.current_state",
-        "input.$": "$.Payload.input",
-        "state_s3_path.$": "$.Payload.state_s3_path",
-        "state_history.$": "$.Payload.state_history",
-        "ownerId.$": "$.Payload.ownerId",
-        "workflowId.$": "$.Payload.workflowId",
-        "segment_to_run.$": "$.Payload.segment_to_run",
-        "idempotency_key.$": "$.Payload.idempotency_key",
-        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
-        "total_segments.$": "$.Payload.total_segments",
-        "partition_map.$": "$.Payload.partition_map",
-        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
-        "segment_manifest.$": "$.Payload.segment_manifest",
-        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
-        "distributed_mode.$": "$.Payload.distributed_mode",
-        "state_durations.$": "$.Payload.state_durations",
-        "last_update_time.$": "$.Payload.last_update_time",
-        "start_time.$": "$.Payload.start_time",
-        "max_concurrency.$": "$.Payload.max_concurrency",
-        "loop_counter.$": "$.Payload.loop_counter",
-        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
-        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
-        "llm_segments.$": "$.Payload.llm_segments",
-        "hitp_segments.$": "$.Payload.hitp_segments"
+        "workflow_config": "$.Payload.workflow_config",
+        "current_state": "$.Payload.current_state",
+        "input": "$.Payload.input",
+        "state_s3_path": "$.Payload.state_s3_path",
+        "state_history": "$.Payload.state_history",
+        "ownerId": "$.Payload.ownerId",
+        "workflowId": "$.Payload.workflowId",
+        "segment_to_run": "$.Payload.segment_to_run",
+        "idempotency_key": "$.Payload.idempotency_key",
+        "quota_reservation_id": "$.Payload.quota_reservation_id",
+        "total_segments": "$.Payload.total_segments",
+        "partition_map": "$.Payload.partition_map",
+        "partition_map_s3_path": "$.Payload.partition_map_s3_path",
+        "segment_manifest": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode": "$.Payload.distributed_mode",
+        "state_durations": "$.Payload.state_durations",
+        "last_update_time": "$.Payload.last_update_time",
+        "start_time": "$.Payload.start_time",
+        "max_concurrency": "$.Payload.max_concurrency",
+        "loop_counter": "$.Payload.loop_counter",
+        "max_loop_iterations": "$.Payload.max_loop_iterations",
+        "max_branch_iterations": "$.Payload.max_branch_iterations",
+        "llm_segments": "$.Payload.llm_segments",
+        "hitp_segments": "$.Payload.hitp_segments"
       },
       "ResultPath": "$.state_data",
       "Catch": [
@@ -252,10 +252,10 @@
         }
       },
       "ResultSelector": {
-        "chunks_bucket.$": "$.Payload.chunks_bucket",
-        "chunks_key.$": "$.Payload.chunks_key",
-        "total_chunks.$": "$.Payload.total_chunks",
-        "use_s3_reader.$": "$.Payload.use_s3_reader"
+        "chunks_bucket": "$.Payload.chunks_bucket",
+        "chunks_key": "$.Payload.chunks_key",
+        "total_chunks": "$.Payload.total_chunks",
+        "use_s3_reader": "$.Payload.use_s3_reader"
       },
       "ResultPath": "$.distributed_config",
       "Next": "NotifyDistributedWorkflowStarted"
@@ -334,10 +334,10 @@
               }
             },
             "ResultSelector": {
-              "previous_state.$": "$.Payload.previous_state",
-              "latest_segment_id.$": "$.Payload.latest_segment_id",
-              "state_loaded.$": "$.Payload.state_loaded",
-              "total_segments.$": "$.Payload.total_segments"
+              "previous_state": "$.Payload.previous_state",
+              "latest_segment_id": "$.Payload.latest_segment_id",
+              "state_loaded": "$.Payload.state_loaded",
+              "total_segments": "$.Payload.total_segments"
             },
             "ResultPath": "$.state_continuity",
             "Next": "ProcessSegmentChunk"
@@ -375,10 +375,10 @@
               }
             },
             "ResultSelector": {
-              "chunk_result.$": "$.Payload",
-              "chunk_id.$": "$.Payload.chunk_id",
-              "final_state.$": "$.Payload.final_state",
-              "paused_segment_id.$": "$.Payload.paused_segment_id"
+              "chunk_result": "$.Payload",
+              "chunk_id": "$.Payload.chunk_id",
+              "final_state": "$.Payload.final_state",
+              "paused_segment_id": "$.Payload.paused_segment_id"
             },
             "ResultPath": "$.processing_result",
             "Next": "SaveLatestStatePointer"
@@ -465,10 +465,10 @@
               }
             },
             "ResultSelector": {
-              "chunk_result.$": "$.Payload",
-              "chunk_id.$": "$.Payload.chunk_id",
-              "final_state.$": "$.Payload.final_state",
-              "paused_segment_id.$": "$.Payload.paused_segment_id"
+              "chunk_result": "$.Payload",
+              "chunk_id": "$.Payload.chunk_id",
+              "final_state": "$.Payload.final_state",
+              "paused_segment_id": "$.Payload.paused_segment_id"
             },
             "ResultPath": "$.resume_result",
             "Next": "SaveResumedStatePointer"
@@ -627,14 +627,14 @@
         }
       },
       "ResultSelector": {
-        "status.$": "$.Payload.status",
-        "final_state.$": "$.Payload.final_state",
-        "final_state_s3_path.$": "$.Payload.final_state_s3_path",
-        "next_segment_to_run.$": "$.Payload.next_segment_to_run",
-        "new_history_logs.$": "$.Payload.new_history_logs",
-        "error_info.$": "$.Payload.error_info",
-        "branches.$": "$.Payload.branches",
-        "segment_type.$": "$.Payload.segment_type"
+        "status": "$.Payload.status",
+        "final_state": "$.Payload.final_state",
+        "final_state_s3_path": "$.Payload.final_state_s3_path",
+        "next_segment_to_run": "$.Payload.next_segment_to_run",
+        "new_history_logs": "$.Payload.new_history_logs",
+        "error_info": "$.Payload.error_info",
+        "branches": "$.Payload.branches",
+        "segment_type": "$.Payload.segment_type"
       },
       "ResultPath": "$.execution_result",
       "Retry": [
@@ -746,7 +746,7 @@
               }
             },
             "ResultSelector": {
-              "Payload.$": "$.Payload"
+              "Payload": "$.Payload"
             },
             "End": true
           }
@@ -776,31 +776,31 @@
         }
       },
       "ResultSelector": {
-        "status.$": "$.Payload.status",
-        "final_state.$": "$.Payload.final_state",
-        "final_state_s3_path.$": "$.Payload.final_state_s3_path",
-        "next_segment_to_run.$": "$.Payload.next_segment_to_run",
-        "new_history_logs.$": "$.Payload.new_history_logs",
-        "workflow_config.$": "$.Payload.workflow_config",
-        "current_state.$": "$.Payload.current_state",
-        "state_s3_path.$": "$.Payload.state_s3_path",
-        "ownerId.$": "$.Payload.ownerId",
-        "workflowId.$": "$.Payload.workflowId",
-        "idempotency_key.$": "$.Payload.idempotency_key",
-        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
-        "total_segments.$": "$.Payload.total_segments",
-        "partition_map.$": "$.Payload.partition_map",
-        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
-        "segment_manifest.$": "$.Payload.segment_manifest",
-        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
-        "distributed_mode.$": "$.Payload.distributed_mode",
-        "max_concurrency.$": "$.Payload.max_concurrency",
-        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
-        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
-        "loop_counter.$": "$.Payload.loop_counter",
-        "llm_segments.$": "$.Payload.llm_segments",
-        "hitp_segments.$": "$.Payload.hitp_segments",
-        "state_durations.$": "$.Payload.state_durations"
+        "status": "$.Payload.status",
+        "final_state": "$.Payload.final_state",
+        "final_state_s3_path": "$.Payload.final_state_s3_path",
+        "next_segment_to_run": "$.Payload.next_segment_to_run",
+        "new_history_logs": "$.Payload.new_history_logs",
+        "workflow_config": "$.Payload.workflow_config",
+        "current_state": "$.Payload.current_state",
+        "state_s3_path": "$.Payload.state_s3_path",
+        "ownerId": "$.Payload.ownerId",
+        "workflowId": "$.Payload.workflowId",
+        "idempotency_key": "$.Payload.idempotency_key",
+        "quota_reservation_id": "$.Payload.quota_reservation_id",
+        "total_segments": "$.Payload.total_segments",
+        "partition_map": "$.Payload.partition_map",
+        "partition_map_s3_path": "$.Payload.partition_map_s3_path",
+        "segment_manifest": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode": "$.Payload.distributed_mode",
+        "max_concurrency": "$.Payload.max_concurrency",
+        "max_loop_iterations": "$.Payload.max_loop_iterations",
+        "max_branch_iterations": "$.Payload.max_branch_iterations",
+        "loop_counter": "$.Payload.loop_counter",
+        "llm_segments": "$.Payload.llm_segments",
+        "hitp_segments": "$.Payload.hitp_segments",
+        "state_durations": "$.Payload.state_durations"
       },
       "ResultPath": "$.execution_result",
       "Next": "UpdateStateData"
@@ -820,30 +820,30 @@
         }
       },
       "ResultSelector": {
-        "workflow_config.$": "$.Payload.workflow_config",
-        "current_state.$": "$.Payload.current_state",
-        "state_s3_path.$": "$.Payload.state_s3_path",
-        "state_history.$": "$.Payload.state_history",
-        "ownerId.$": "$.Payload.ownerId",
-        "workflowId.$": "$.Payload.workflowId",
-        "segment_to_run.$": "$.Payload.segment_to_run",
-        "idempotency_key.$": "$.Payload.idempotency_key",
-        "quota_reservation_id.$": "$.Payload.quota_reservation_id",
-        "total_segments.$": "$.Payload.total_segments",
-        "partition_map.$": "$.Payload.partition_map",
-        "partition_map_s3_path.$": "$.Payload.partition_map_s3_path",
-        "segment_manifest.$": "$.Payload.segment_manifest",
-        "segment_manifest_s3_path.$": "$.Payload.segment_manifest_s3_path",
-        "distributed_mode.$": "$.Payload.distributed_mode",
-        "max_concurrency.$": "$.Payload.max_concurrency",
-        "state_durations.$": "$.Payload.state_durations",
-        "last_update_time.$": "$.Payload.last_update_time",
-        "start_time.$": "$.Payload.start_time",
-        "loop_counter.$": "$.Payload.loop_counter",
-        "max_loop_iterations.$": "$.Payload.max_loop_iterations",
-        "max_branch_iterations.$": "$.Payload.max_branch_iterations",
-        "llm_segments.$": "$.Payload.llm_segments",
-        "hitp_segments.$": "$.Payload.hitp_segments"
+        "workflow_config": "$.Payload.workflow_config",
+        "current_state": "$.Payload.current_state",
+        "state_s3_path": "$.Payload.state_s3_path",
+        "state_history": "$.Payload.state_history",
+        "ownerId": "$.Payload.ownerId",
+        "workflowId": "$.Payload.workflowId",
+        "segment_to_run": "$.Payload.segment_to_run",
+        "idempotency_key": "$.Payload.idempotency_key",
+        "quota_reservation_id": "$.Payload.quota_reservation_id",
+        "total_segments": "$.Payload.total_segments",
+        "partition_map": "$.Payload.partition_map",
+        "partition_map_s3_path": "$.Payload.partition_map_s3_path",
+        "segment_manifest": "$.Payload.segment_manifest",
+        "segment_manifest_s3_path": "$.Payload.segment_manifest_s3_path",
+        "distributed_mode": "$.Payload.distributed_mode",
+        "max_concurrency": "$.Payload.max_concurrency",
+        "state_durations": "$.Payload.state_durations",
+        "last_update_time": "$.Payload.last_update_time",
+        "start_time": "$.Payload.start_time",
+        "loop_counter": "$.Payload.loop_counter",
+        "max_loop_iterations": "$.Payload.max_loop_iterations",
+        "max_branch_iterations": "$.Payload.max_branch_iterations",
+        "llm_segments": "$.Payload.llm_segments",
+        "hitp_segments": "$.Payload.hitp_segments"
       },
       "ResultPath": "$.state_data",
       "Next": "CheckForNextSegment"

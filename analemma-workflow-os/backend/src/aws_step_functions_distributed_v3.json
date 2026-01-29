@@ -8,153 +8,196 @@
       "Choices": [
         {
           "And": [
-            { "Variable": "$.MOCK_MODE", "StringEquals": "true" },
-            { "Variable": "$.test_workflow_config", "IsPresent": true }
+            {
+              "Variable": "$.MOCK_MODE",
+              "StringEquals": "true"
+            },
+            {
+              "Variable": "$.test_workflow_config",
+              "IsPresent": true
+            }
           ],
           "Next": "InitializeStateBag"
         }
       ],
       "Default": "VerifyIdempotencyKey"
     },
-
     "VerifyIdempotencyKey": {
       "Type": "Task",
       "Resource": "arn:aws:states:::dynamodb:getItem",
       "Parameters": {
         "TableName": "${IdempotencyTable}",
-        "Key": { "idempotency_key": { "S.$": "$.idempotency_key" } },
+        "Key": {
+          "idempotency_key": {
+            "S.$": "$.idempotency_key"
+          }
+        },
         "ProjectionExpression": "executionArn, #st",
-        "ExpressionAttributeNames": { "#st": "status" }
+        "ExpressionAttributeNames": {
+          "#st": "status"
+        }
       },
       "ResultPath": "$.dynamodb_result",
-      "Retry": [{
-        "ErrorEquals": ["DynamoDB.ServiceException", "DynamoDB.ThrottlingException"],
-        "IntervalSeconds": 2,
-        "MaxAttempts": 3,
-        "BackoffRate": 2.0
-      }],
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.idempotency_error",
-        "Next": "HandleIdempotencyError"
-      }],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "DynamoDB.ServiceException",
+            "DynamoDB.ThrottlingException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.idempotency_error",
+          "Next": "HandleIdempotencyError"
+        }
+      ],
       "Next": "EvaluateIdempotency"
     },
-
     "HandleIdempotencyError": {
       "Type": "Choice",
       "Choices": [
-        { "Variable": "$.ALLOW_UNSAFE_EXECUTION", "BooleanEquals": true, "Next": "InitializeStateBag" }
+        {
+          "Variable": "$.ALLOW_UNSAFE_EXECUTION",
+          "BooleanEquals": true,
+          "Next": "InitializeStateBag"
+        }
       ],
       "Default": "FailIdempotencyUnavailable"
     },
-
     "FailIdempotencyUnavailable": {
       "Type": "Fail",
       "Error": "IdempotencyCheckFailed",
       "Cause": "Unable to verify execution uniqueness"
     },
-
     "EvaluateIdempotency": {
       "Type": "Choice",
       "Choices": [
         {
           "And": [
-            { "Variable": "$.dynamodb_result.Item", "IsPresent": true },
-            { "Variable": "$.dynamodb_result.Item.status.S", "StringEquals": "RUNNING" }
+            {
+              "Variable": "$.dynamodb_result.Item",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.dynamodb_result.Item.status.S",
+              "StringEquals": "RUNNING"
+            }
           ],
           "Next": "FailDuplicateExecution"
         },
         {
           "And": [
-            { "Variable": "$.dynamodb_result.Item", "IsPresent": true },
-            { "Variable": "$.dynamodb_result.Item.status.S", "StringEquals": "SUCCEEDED" }
+            {
+              "Variable": "$.dynamodb_result.Item",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.dynamodb_result.Item.status.S",
+              "StringEquals": "SUCCEEDED"
+            }
           ],
           "Next": "SucceedDuplicateExecution"
         }
       ],
       "Default": "InitializeStateBag"
     },
-
     "FailDuplicateExecution": {
       "Type": "Fail",
       "Error": "DuplicateExecution",
       "Cause": "An execution with the same idempotency key is already running"
     },
-
     "SucceedDuplicateExecution": {
       "Type": "Succeed"
     },
-
     "InitializeStateBag": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Comment": "🎒 Smart StateBag 초기화 - S3 포인터 기반 상태 관리",
       "Parameters": {
         "FunctionName": "${InitializeStateDataArn}",
-        "Payload.$": "$"
+        "Payload": "$"
       },
       "ResultSelector": {
-        "state_data.$": "$.Payload"
+        "state_data": "$.Payload"
       },
       "ResultPath": "$",
-      "Retry": [{
-        "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
-        "IntervalSeconds": 2,
-        "MaxAttempts": 3,
-        "BackoffRate": 2.0,
-        "JitterStrategy": "FULL"
-      }],
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.init_error",
-        "Next": "NotifyAndFailInit"
-      }],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.init_error",
+          "Next": "NotifyAndFailInit"
+        }
+      ],
       "Next": "SelectExecutionMode"
     },
-
     "NotifyAndFailInit": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
       "Parameters": {
-        "Entries": [{
-          "EventBusName": "${WorkflowEventBusArn}",
-          "Source": "analemma.orchestrator",
-          "DetailType": "WorkflowLifecycleEvent",
-          "Detail": {
-            "event_type": "INIT_FAILED",
-            "execution_id.$": "$$.Execution.Id",
-            "ownerId.$": "$.ownerId",
-            "workflowId.$": "$.workflowId",
-            "error.$": "$.init_error",
-            "timestamp.$": "$$.State.EnteredTime"
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "analemma.orchestrator",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "event_type": "INIT_FAILED",
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.ownerId",
+              "workflowId.$": "$.workflowId",
+              "error.$": "$.init_error",
+              "timestamp.$": "$$.State.EnteredTime"
+            }
           }
-        }]
+        ]
       },
       "Next": "FailInitialization"
     },
-
     "FailInitialization": {
       "Type": "Fail",
       "Error": "InitializationFailed",
       "Cause": "Failed to initialize Smart StateBag"
     },
-
     "SelectExecutionMode": {
       "Type": "Choice",
       "Comment": "🚀 세그먼트 수/동시성 기반 실행 모드 선택",
       "Choices": [
         {
           "Or": [
-            { "Variable": "$.state_data.total_segments", "NumericGreaterThan": 300 },
-            { "Variable": "$.state_data.max_concurrency", "NumericGreaterThan": 50 }
+            {
+              "Variable": "$.state_data.total_segments",
+              "NumericGreaterThan": 300
+            },
+            {
+              "Variable": "$.state_data.max_concurrency",
+              "NumericGreaterThan": 50
+            }
           ],
           "Next": "PrepareDistributedExecution"
         }
       ],
       "Default": "NotifyWorkflowStarted"
     },
-
     "PrepareDistributedExecution": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -170,39 +213,39 @@
         }
       },
       "ResultSelector": {
-        "chunks_bucket.$": "$.Payload.chunks_bucket",
-        "chunks_key.$": "$.Payload.chunks_key",
-        "total_chunks.$": "$.Payload.total_chunks",
-        "result_prefix.$": "$.Payload.result_prefix"
+        "chunks_bucket": "$.Payload.chunks_bucket",
+        "chunks_key": "$.Payload.chunks_key",
+        "total_chunks": "$.Payload.total_chunks",
+        "result_prefix": "$.Payload.result_prefix"
       },
       "ResultPath": "$.distributed_config",
       "Next": "NotifyDistributedStarted"
     },
-
     "NotifyDistributedStarted": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
       "Parameters": {
-        "Entries": [{
-          "EventBusName": "${WorkflowEventBusArn}",
-          "Source": "analemma.orchestrator",
-          "DetailType": "WorkflowLifecycleEvent",
-          "Detail": {
-            "event_type": "DISTRIBUTED_STARTED",
-            "execution_id.$": "$$.Execution.Id",
-            "ownerId.$": "$.state_data.ownerId",
-            "workflowId.$": "$.state_data.workflowId",
-            "total_segments.$": "$.state_data.total_segments",
-            "total_chunks.$": "$.distributed_config.total_chunks",
-            "max_concurrency.$": "$.state_data.max_concurrency",
-            "timestamp.$": "$$.State.EnteredTime"
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "analemma.orchestrator",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "event_type": "DISTRIBUTED_STARTED",
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "total_segments.$": "$.state_data.total_segments",
+              "total_chunks.$": "$.distributed_config.total_chunks",
+              "max_concurrency.$": "$.state_data.max_concurrency",
+              "timestamp.$": "$$.State.EnteredTime"
+            }
           }
-        }]
+        ]
       },
       "ResultPath": null,
       "Next": "CreatePreSnapshot"
     },
-
     "CreatePreSnapshot": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -217,13 +260,12 @@
         }
       },
       "ResultSelector": {
-        "snapshot_s3_path.$": "$.Payload.snapshot_s3_path",
-        "snapshot_id.$": "$.Payload.snapshot_id"
+        "snapshot_s3_path": "$.Payload.snapshot_s3_path",
+        "snapshot_id": "$.Payload.snapshot_id"
       },
       "ResultPath": "$.pre_snapshot",
       "Next": "ExecuteDistributedChunks"
     },
-
     "ExecuteDistributedChunks": {
       "Type": "Map",
       "Comment": "🚀 [Race-Condition-Free] 각 청크가 독립적인 S3 경로에 결과 저장",
@@ -255,24 +297,32 @@
               }
             },
             "ResultSelector": {
-              "delta.$": "$.Payload"
+              "delta": "$.Payload"
             },
             "ResultPath": "$.chunk_result",
-            "Retry": [{
-              "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
-              "IntervalSeconds": 3,
-              "MaxAttempts": 5,
-              "BackoffRate": 2.0,
-              "JitterStrategy": "FULL"
-            }],
-            "Catch": [{
-              "ErrorEquals": ["States.ALL"],
-              "ResultPath": "$.chunk_error",
-              "Next": "HandleChunkError"
-            }],
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 5,
+                "BackoffRate": 2.0,
+                "JitterStrategy": "FULL"
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.chunk_error",
+                "Next": "HandleChunkError"
+              }
+            ],
             "Next": "EvaluateChunkResult"
           },
-
           "EvaluateChunkResult": {
             "Type": "Choice",
             "Choices": [
@@ -289,7 +339,6 @@
             ],
             "Default": "ChunkComplete"
           },
-
           "WaitForChunkCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
@@ -310,14 +359,17 @@
               }
             },
             "ResultPath": "$.callback_result",
-            "Catch": [{
-              "ErrorEquals": ["States.Timeout"],
-              "ResultPath": "$.timeout_error",
-              "Next": "HandleChunkTimeout"
-            }],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.Timeout"
+                ],
+                "ResultPath": "$.timeout_error",
+                "Next": "HandleChunkTimeout"
+              }
+            ],
             "Next": "ResumeChunkAfterCallback"
           },
-
           "ResumeChunkAfterCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
@@ -335,12 +387,11 @@
               }
             },
             "ResultSelector": {
-              "delta.$": "$.Payload"
+              "delta": "$.Payload"
             },
             "ResultPath": "$.chunk_result",
             "Next": "EvaluateChunkResult"
           },
-
           "HandleChunkTimeout": {
             "Type": "Pass",
             "Parameters": {
@@ -351,7 +402,6 @@
             "ResultPath": "$.chunk_result.delta",
             "Next": "ChunkComplete"
           },
-
           "HandleChunkError": {
             "Type": "Pass",
             "Comment": "🛡️ 청크 에러를 Partial Failure로 변환 (Aggregator에서 처리)",
@@ -364,7 +414,6 @@
             "ResultPath": "$.chunk_result.delta",
             "Next": "ChunkComplete"
           },
-
           "ChunkComplete": {
             "Type": "Pass",
             "Comment": "✅ 청크 완료 - delta_update만 반환 (독립 S3 경로에 저장됨)",
@@ -399,14 +448,17 @@
         }
       },
       "ResultPath": "$.distributed_results",
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.map_error",
-        "Next": "HandleDistributedMapError"
-      }],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.map_error",
+          "Next": "HandleDistributedMapError"
+        }
+      ],
       "Next": "AggregateDistributedResults"
     },
-
     "HandleDistributedMapError": {
       "Type": "Pass",
       "Parameters": {
@@ -415,7 +467,6 @@
       },
       "Next": "AggregateDistributedResults"
     },
-
     "AggregateDistributedResults": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -433,45 +484,48 @@
         }
       },
       "ResultSelector": {
-        "state_data.$": "$.Payload.state_data",
-        "final_status.$": "$.Payload.final_status",
-        "failed_chunks.$": "$.Payload.failed_chunks"
+        "state_data": "$.Payload.state_data",
+        "final_status": "$.Payload.final_status",
+        "failed_chunks": "$.Payload.failed_chunks"
       },
       "ResultPath": "$",
       "Next": "EvaluateDistributedResult"
     },
-
     "EvaluateDistributedResult": {
       "Type": "Choice",
       "Choices": [
-        { "Variable": "$.final_status", "StringEquals": "FAILED", "Next": "NotifyAndFail" }
+        {
+          "Variable": "$.final_status",
+          "StringEquals": "FAILED",
+          "Next": "NotifyAndFail"
+        }
       ],
       "Default": "NotifyWorkflowCompleted"
     },
-
     "NotifyWorkflowStarted": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
       "Comment": "🚀 일반 워크플로우 시작 알림",
       "Parameters": {
-        "Entries": [{
-          "EventBusName": "${WorkflowEventBusArn}",
-          "Source": "analemma.orchestrator",
-          "DetailType": "WorkflowLifecycleEvent",
-          "Detail": {
-            "event_type": "STARTED",
-            "execution_id.$": "$$.Execution.Id",
-            "ownerId.$": "$.state_data.ownerId",
-            "workflowId.$": "$.state_data.workflowId",
-            "total_segments.$": "$.state_data.total_segments",
-            "timestamp.$": "$$.State.EnteredTime"
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "analemma.orchestrator",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "event_type": "STARTED",
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "total_segments.$": "$.state_data.total_segments",
+              "timestamp.$": "$$.State.EnteredTime"
+            }
           }
-        }]
+        ]
       },
       "ResultPath": null,
       "Next": "ExecuteSegment"
     },
-
     "ExecuteSegment": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -483,24 +537,32 @@
         }
       },
       "ResultSelector": {
-        "result.$": "$.Payload"
+        "result": "$.Payload"
       },
       "ResultPath": "$.execution_result",
-      "Retry": [{
-        "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException"],
-        "IntervalSeconds": 5,
-        "MaxAttempts": 6,
-        "BackoffRate": 2.0,
-        "JitterStrategy": "FULL"
-      }],
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.execution_result.error",
-        "Next": "NotifyAndFail"
-      }],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.TooManyRequestsException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 6,
+          "BackoffRate": 2.0,
+          "JitterStrategy": "FULL"
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.execution_result.error",
+          "Next": "NotifyAndFail"
+        }
+      ],
       "Next": "SyncStateData"
     },
-
     "SyncStateData": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -514,53 +576,80 @@
         }
       },
       "ResultSelector": {
-        "state_data.$": "$.Payload.state_data",
-        "next_action.$": "$.Payload.next_action"
+        "state_data": "$.Payload.state_data",
+        "next_action": "$.Payload.next_action"
       },
       "ResultPath": "$",
-      "Retry": [{
-        "ErrorEquals": ["Lambda.ServiceException", "S3.ServiceException"],
-        "IntervalSeconds": 2,
-        "MaxAttempts": 4,
-        "BackoffRate": 2.0
-      }],
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.sync_error",
-        "Next": "NotifyAndFail"
-      }],
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "S3.ServiceException"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 4,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.sync_error",
+          "Next": "NotifyAndFail"
+        }
+      ],
       "Next": "EvaluateNextAction"
     },
-
     "EvaluateNextAction": {
       "Type": "Choice",
       "Comment": "🧭 다음 액션 라우팅",
       "Choices": [
-        { "Variable": "$.next_action", "StringEquals": "FAILED", "Next": "NotifyAndFail" },
-        { "Variable": "$.next_action", "StringEquals": "COMPLETE", "Next": "NotifyWorkflowCompleted" },
-        { "Variable": "$.next_action", "StringEquals": "PAUSED_FOR_HITP", "Next": "WaitForCallback" },
-        { "Variable": "$.next_action", "StringEquals": "PAUSE", "Next": "WaitForCallback" },
-        { "Variable": "$.next_action", "StringEquals": "PARALLEL_GROUP", "Next": "ProcessParallelBranches" }
+        {
+          "Variable": "$.next_action",
+          "StringEquals": "FAILED",
+          "Next": "NotifyAndFail"
+        },
+        {
+          "Variable": "$.next_action",
+          "StringEquals": "COMPLETE",
+          "Next": "NotifyWorkflowCompleted"
+        },
+        {
+          "Variable": "$.next_action",
+          "StringEquals": "PAUSED_FOR_HITP",
+          "Next": "WaitForCallback"
+        },
+        {
+          "Variable": "$.next_action",
+          "StringEquals": "PAUSE",
+          "Next": "WaitForCallback"
+        },
+        {
+          "Variable": "$.next_action",
+          "StringEquals": "PARALLEL_GROUP",
+          "Next": "ProcessParallelBranches"
+        }
       ],
       "Default": "CheckLoopLimit"
     },
-
     "CheckLoopLimit": {
       "Type": "Choice",
-      "Choices": [{
-        "Variable": "$.state_data.loop_counter",
-        "NumericGreaterThanPath": "$.state_data.max_loop_iterations",
-        "Next": "FailLoopLimitExceeded"
-      }],
+      "Choices": [
+        {
+          "Variable": "$.state_data.loop_counter",
+          "NumericGreaterThanPath": "$.state_data.max_loop_iterations",
+          "Next": "FailLoopLimitExceeded"
+        }
+      ],
       "Default": "ExecuteSegment"
     },
-
     "FailLoopLimitExceeded": {
       "Type": "Fail",
       "Error": "LoopLimitExceeded",
       "CausePath": "States.Format('Exceeded max iterations: {}', $.state_data.max_loop_iterations)"
     },
-
     "ProcessParallelBranches": {
       "Type": "Map",
       "Comment": "🌿 [P0 Optimized] 병렬 브랜치 - 결과는 포인터만 반환",
@@ -572,7 +661,7 @@
         "branch_index.$": "$$.Map.Item.Index"
       },
       "ResultSelector": {
-        "branches.$": "$[*].{branch_index: branch_index, status: status, s3_path: result_s3_path}"
+        "branches": "$[*].{branch_index: branch_index, status: status, s3_path: result_s3_path}"
       },
       "ItemProcessor": {
         "ProcessorConfig": {
@@ -593,31 +682,41 @@
               }
             },
             "ResultSelector": {
-              "delta.$": "$.Payload"
+              "delta": "$.Payload"
             },
             "ResultPath": "$.branch_result",
-            "Retry": [{
-              "ErrorEquals": ["Lambda.TooManyRequestsException"],
-              "IntervalSeconds": 3,
-              "MaxAttempts": 5,
-              "BackoffRate": 2.0
-            }],
-            "Catch": [{
-              "ErrorEquals": ["States.ALL"],
-              "ResultPath": "$.branch_error",
-              "Next": "HandleBranchError"
-            }],
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 3,
+                "MaxAttempts": 5,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.branch_error",
+                "Next": "HandleBranchError"
+              }
+            ],
             "Next": "EvaluateBranchResult"
           },
-
           "EvaluateBranchResult": {
             "Type": "Choice",
             "Choices": [
-              { "Variable": "$.branch_result.delta.status", "StringEquals": "PAUSED_FOR_HITP", "Next": "WaitForBranchCallback" }
+              {
+                "Variable": "$.branch_result.delta.status",
+                "StringEquals": "PAUSED_FOR_HITP",
+                "Next": "WaitForBranchCallback"
+              }
             ],
             "Default": "BranchComplete"
           },
-
           "WaitForBranchCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
@@ -633,7 +732,6 @@
             "ResultPath": "$.callback_result",
             "Next": "ResumeBranchAfterCallback"
           },
-
           "ResumeBranchAfterCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
@@ -648,12 +746,11 @@
               }
             },
             "ResultSelector": {
-              "delta.$": "$.Payload"
+              "delta": "$.Payload"
             },
             "ResultPath": "$.branch_result",
             "Next": "EvaluateBranchResult"
           },
-
           "HandleBranchError": {
             "Type": "Pass",
             "Parameters": {
@@ -664,7 +761,6 @@
             "ResultPath": "$.branch_result.delta",
             "Next": "BranchComplete"
           },
-
           "BranchComplete": {
             "Type": "Pass",
             "Parameters": {
@@ -677,14 +773,17 @@
         }
       },
       "ResultPath": "$.parallel_results",
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": "$.map_error",
-        "Next": "HandleParallelMapError"
-      }],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.map_error",
+          "Next": "HandleParallelMapError"
+        }
+      ],
       "Next": "AggregateParallelResults"
     },
-
     "HandleParallelMapError": {
       "Type": "Pass",
       "Parameters": {
@@ -693,7 +792,6 @@
       },
       "Next": "AggregateParallelResults"
     },
-
     "AggregateParallelResults": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -709,13 +807,12 @@
         }
       },
       "ResultSelector": {
-        "state_data.$": "$.Payload.state_data",
-        "next_action.$": "$.Payload.next_action"
+        "state_data": "$.Payload.state_data",
+        "next_action": "$.Payload.next_action"
       },
       "ResultPath": "$",
       "Next": "EvaluateNextAction"
     },
-
     "WaitForCallback": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
@@ -732,7 +829,6 @@
       "ResultPath": "$.callback_result",
       "Next": "MergeCallbackResult"
     },
-
     "MergeCallbackResult": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
@@ -745,38 +841,38 @@
         }
       },
       "ResultSelector": {
-        "state_data.$": "$.Payload.state_data",
-        "next_action.$": "$.Payload.next_action"
+        "state_data": "$.Payload.state_data",
+        "next_action": "$.Payload.next_action"
       },
       "ResultPath": "$",
       "Next": "EvaluateNextAction"
     },
-
     "NotifyWorkflowCompleted": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
       "Comment": "✅ 완료 알림",
       "Parameters": {
-        "Entries": [{
-          "EventBusName": "${WorkflowEventBusArn}",
-          "Source": "analemma.orchestrator",
-          "DetailType": "WorkflowLifecycleEvent",
-          "Detail": {
-            "event_type": "COMPLETED",
-            "execution_id.$": "$$.Execution.Id",
-            "ownerId.$": "$.state_data.ownerId",
-            "workflowId.$": "$.state_data.workflowId",
-            "final_state_s3_path.$": "$.state_data.state_s3_path",
-            "total_segments.$": "$.state_data.total_segments",
-            "loop_counter.$": "$.state_data.loop_counter",
-            "timestamp.$": "$$.State.EnteredTime"
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "analemma.orchestrator",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "event_type": "COMPLETED",
+              "execution_id.$": "$$.Execution.Id",
+              "ownerId.$": "$.state_data.ownerId",
+              "workflowId.$": "$.state_data.workflowId",
+              "final_state_s3_path.$": "$.state_data.state_s3_path",
+              "total_segments.$": "$.state_data.total_segments",
+              "loop_counter.$": "$.state_data.loop_counter",
+              "timestamp.$": "$$.State.EnteredTime"
+            }
           }
-        }]
+        ]
       },
       "ResultPath": null,
       "Next": "PrepareSuccessOutput"
     },
-
     "PrepareSuccessOutput": {
       "Type": "Pass",
       "Parameters": {
@@ -791,43 +887,46 @@
       },
       "Next": "WorkflowSucceeded"
     },
-
     "WorkflowSucceeded": {
       "Type": "Succeed"
     },
-
     "NotifyAndFail": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
       "Comment": "❌ [P2 Optimized] Lightweight failure signal - pointers only",
       "Parameters": {
-        "Entries": [{
-          "EventBusName": "${WorkflowEventBusArn}",
-          "Source": "analemma.orchestrator",
-          "DetailType": "WorkflowLifecycleEvent",
-          "Detail": {
-            "event_type": "FAILED",
-            "execution_id.$": "$$.Execution.Id",
-            "execution_name.$": "$$.Execution.Name",
-            "ownerId.$": "$$.Execution.Input.ownerId",
-            "workflowId.$": "$$.Execution.Input.workflowId",
-            "state_s3_path.$": "$.state_data.state_s3_path",
-            "pre_snapshot_path.$": "$.pre_snapshot.snapshot_s3_path",
-            "error_type.$": "$.sync_error.Error",
-            "timestamp.$": "$$.State.EnteredTime",
-            "debug_hint": "Full context in CloudWatch Logs and S3"
+        "Entries": [
+          {
+            "EventBusName": "${WorkflowEventBusArn}",
+            "Source": "analemma.orchestrator",
+            "DetailType": "WorkflowLifecycleEvent",
+            "Detail": {
+              "event_type": "FAILED",
+              "execution_id.$": "$$.Execution.Id",
+              "execution_name.$": "$$.Execution.Name",
+              "ownerId.$": "$$.Execution.Input.ownerId",
+              "workflowId.$": "$$.Execution.Input.workflowId",
+              "state_s3_path.$": "$.state_data.state_s3_path",
+              "pre_snapshot_path.$": "$.pre_snapshot.snapshot_s3_path",
+              "error_type.$": "$.sync_error.Error",
+              "timestamp.$": "$$.State.EnteredTime",
+              "debug_hint": "Full context in CloudWatch Logs and S3"
+            }
           }
-        }]
+        ]
       },
       "ResultPath": null,
-      "Catch": [{
-        "ErrorEquals": ["States.ALL"],
-        "ResultPath": null,
-        "Next": "WorkflowFailed"
-      }],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": null,
+          "Next": "WorkflowFailed"
+        }
+      ],
       "Next": "WorkflowFailed"
     },
-
     "WorkflowFailed": {
       "Type": "Fail",
       "Error": "WorkflowExecutionFailed",
