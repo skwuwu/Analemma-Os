@@ -28,6 +28,24 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     Logic delegated to:
     - src.services.execution.segment_runner_service.SegmentRunnerService
     """
+    # 🛡️ [v3.4 Critical] NULL Event Defense
+    # Step Functions may pass null event if ASL ResultPath/Payload mapping is misconfigured
+    if event is None:
+        logger.error("🚨 [CRITICAL] Received NULL event from Step Functions! Check ASL mapping.")
+        return {
+            "status": "FAILED",
+            "error": "Event is None. Check ASL ResultPath/Payload mapping.",
+            "error_type": "NullEventError",
+            "final_state": {},
+            "final_state_s3_path": None,
+            "next_segment_to_run": None,
+            "new_history_logs": [],
+            "branches": None,
+            "segment_type": "ERROR",
+            "total_segments": 1,
+            "segment_id": 0
+        }
+    
     try:
         # PII / Logging safety check
         # Limit log size

@@ -160,13 +160,15 @@
                     },
                     {
                         "id": "hitl_approval",
-                        "type": "hitl",
+                        "type": "operator_official",
                         "config": {
-                            "condition": "state.get('hitl_required', False)",
-                            "question": "파티션 분석 결과를 승인하시겠습니까?",
-                            "context_keys": ["current_partition_id", "loop_convergence_score"],
-                            "auto_approve": true,
-                            "auto_approve_delay_ms": 100
+                            "strategy": "if_else",
+                            "params": {
+                                "condition": "$.hitl_required == true",
+                                "then": {"hitl_decision": "auto_approved", "hitl_timestamp": "{{_current_time}}"},
+                                "else": null
+                            },
+                            "output_key": "hitl_result"
                         }
                     },
                     {

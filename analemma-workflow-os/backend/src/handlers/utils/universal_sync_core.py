@@ -356,9 +356,17 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
         - merge_callback: callback_result에서 사용자 응답 추출
         - merge_async: async_result에서 LLM 응답 추출
         - create_snapshot: 포인터 모드 결정
+    
+    🛡️ [v3.4] NEVER returns None - always returns dict
     """
+    # 🛡️ [v3.4 Deep Guard] None 방지
     if result is None:
+        _get_logger().debug("[Deep Guard] flatten_result received None, returning empty dict")
         return {}
+    
+    # 🛡️ context도 None일 수 있음
+    if context is None:
+        context = {'action': 'sync'}
     
     action = context.get('action', 'sync') if context else 'sync'
     
@@ -658,8 +666,23 @@ def merge_logic(
     
     Special:
         - action='init': 빈 base_state에 필수 메타데이터 강제 주입
+    
+    🛡️ [v3.4] NEVER returns None - always returns dict
     """
     logger = _get_logger()
+    
+    # 🛡️ [v3.4 Deep Guard] None 방지 - Immutable Empty Dict
+    if base_state is None:
+        logger.warning("🚨 [Deep Guard] merge_logic received None base_state!")
+        base_state = {}
+    
+    if delta is None:
+        logger.debug("[Deep Guard] merge_logic received None delta, returning base_state")
+        return base_state if base_state else {}
+    
+    if context is None:
+        context = {'action': 'sync'}
+    
     action = context.get('action', 'sync') if context else 'sync'
     
     # 탄생 (init): 필수 메타데이터 강제 주입
@@ -811,8 +834,18 @@ def optimize_and_offload(
         3. 전체 상태 오프로딩 (>100KB)
         4. 포인터 비대화 방지
         5. 최종 크기 체크 (>200KB 경고)
+    
+    🛡️ [v3.4] NEVER returns None - always returns dict
     """
     logger = _get_logger()
+    
+    # 🛡️ [v3.4 Deep Guard] None 방지
+    if state is None:
+        logger.warning("🚨 [Deep Guard] optimize_and_offload received None state!")
+        state = {}
+    
+    if context is None:
+        context = {'action': 'sync'}
     
     # state_data_manager의 기존 함수들 재사용
     from .state_data_manager import (
@@ -890,8 +923,22 @@ def universal_sync_core(
         }
     """
     logger = _get_logger()
+    
+    # 🛡️ [v3.4 Deep Guard] None 방지 - Immutable Empty Dict 전략
+    # 절대로 None이 파이프라인을 통과하지 못하게 함
+    if base_state is None:
+        logger.warning("🚨 [Deep Guard] base_state is None! Using empty dict.")
+        base_state = {}
+    
+    if new_result is None:
+        logger.warning("🚨 [Deep Guard] new_result is None! Using empty dict.")
+        new_result = {}
+    
+    if context is None:
+        context = {'action': 'sync'}
+    
     action = context.get('action', 'sync') if context else 'sync'
-    idempotency_key = base_state.get('idempotency_key', 'unknown')
+    idempotency_key = base_state.get('idempotency_key', 'unknown') if isinstance(base_state, dict) else 'unknown'
     
     # 컨텍스트에 idempotency_key 추가
     if context:

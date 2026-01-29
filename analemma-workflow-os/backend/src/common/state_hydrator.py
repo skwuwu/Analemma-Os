@@ -468,12 +468,27 @@ class StateHydrator:
             eager_load: True면 모든 포인터 즉시 로드
         
         Returns:
-            SmartStateBag: Hydrated state bag
+            SmartStateBag: Hydrated state bag (NEVER returns None)
         """
         start_time = time.time()
         
+        # 🛡️ [v3.4 Deep Guard] None/Empty Event Defense
+        # Step Functions may pass null if ASL mapping is misconfigured
+        if event is None:
+            logger.error("🚨 [Deep Guard] hydrate() received None event! Returning empty bag.")
+            return SmartStateBag({}, hydrator=self)
+        
+        if not isinstance(event, dict):
+            logger.error(f"🚨 [Deep Guard] hydrate() received non-dict event: {type(event)}! Returning empty bag.")
+            return SmartStateBag({}, hydrator=self)
+        
         # state_data 추출 (SFN 컨텍스트)
         state_data = event.get("state_data", event)
+        
+        # 🛡️ [v3.4] state_data도 None일 수 있음
+        if state_data is None:
+            logger.warning("🚨 [Deep Guard] state_data is None! Using event as fallback.")
+            state_data = event if event else {}
         
         # SmartStateBag 생성
         bag = SmartStateBag(state_data, hydrator=self)

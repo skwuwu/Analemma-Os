@@ -2,18 +2,18 @@
 State Data Manager Lambda Function
 Lambda function responsible for payload size management and S3 offloading
 
-v3.3 - Unified Pipe: 탄생부터 소멸까지 단일 파이프
+v3.3 - Unified Pipe: From Birth to Death in a Single Pipe
     
-    데이터 생애 주기 (Unified Pipe):
-        - 탄생 (Init): {} → Universal Sync → StateBag v0
-        - 성장 (Sync): StateBag vN + Result → Universal Sync → StateBag vN+1
-        - 협업 (Aggregate): StateBag vN + Branches → Universal Sync → StateBag vFinal
+    Data Lifecycle (Unified Pipe):
+        - Birth (Init): {} → Universal Sync → StateBag v0
+        - Growth (Sync): StateBag vN + Result → Universal Sync → StateBag vN+1
+        - Collaboration (Aggregate): StateBag vN + Branches → Universal Sync → StateBag vFinal
     
-    - 모든 액션 함수는 "3줄짜리 래퍼"로 변환됨
-    - 실제 로직은 universal_sync_core 단일 엔진에서 처리
-    - Copy-on-Write + Shallow Merge로 성능 최적화
-    - StateHydrator로 S3 복구 시 재시도 + 체크섬 검증
-    - P0~P2 이슈 자동 해결 (어떤 경로로 들어왔든 크면 S3로)
+    - All action functions are converted to "3-line wrappers"
+    - Actual logic is handled by the universal_sync_core single engine
+    - Performance optimized with Copy-on-Write + Shallow Merge
+    - StateHydrator for S3 recovery with retry + checksum verification
+    - P0~P2 issues auto-resolved (large data goes to S3 regardless of entry path)
 """
 
 import json
@@ -37,10 +37,10 @@ from src.common.logging_utils import get_logger
 try:
     from .universal_sync_core import universal_sync_core, get_default_hydrator
 except ImportError:
-    # Lambda 환경에서 상대 import 실패 시
+    # Fallback when relative import fails in Lambda environment
     from universal_sync_core import universal_sync_core, get_default_hydrator
 
-# 직접 Logger 생성 (lazy import 회피)
+# Direct Logger creation (avoiding lazy import)
 from aws_lambda_powertools import Logger
 import os
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -80,22 +80,22 @@ def calculate_payload_size(data: Dict[str, Any]) -> int:
 
 def quick_size_check(data: Any) -> int:
     """
-    🚀 [Perf] JSON 직렬화 없이 대략적인 크기 측정 (Bytes)
+    🚀 [Perf] Approximate size measurement without JSON serialization (Bytes)
     
-    O(N^2) 문제 방지: 매번 json.dumps() 호출 대신 근사치 먼저 계산.
-    임계치 초과 예상 시에만 정밀 계산 수행.
+    Prevents O(N^2) problem: Calculate approximation first instead of calling json.dumps() every time.
+    Perform precise calculation only when threshold is expected to be exceeded.
     
     Returns:
-        대략적인 크기 (KB)
+        Approximate size (KB)
     """
     if data is None:
         return 0
     if isinstance(data, (str, bytes)):
         return len(data) // 1024
     if isinstance(data, (int, float, bool)):
-        return 0  # 무시할 수 있는 크기
+        return 0  # Negligible size
     if isinstance(data, (list, dict)):
-        # 문자열 변환 근사치 (정밀하지 않음)
+        # String conversion approximation (not precise)
         try:
             return len(str(data)) // 1024
         except:
@@ -150,28 +150,28 @@ def store_to_s3(data: Any, key: str) -> str:
 
 def load_from_s3(s3_path: str, expected_checksum: Optional[str] = None, max_retries: int = 3) -> Any:
     """
-    📥 [P0 + P1] S3에서 데이터 로드 (재시도 + 체크섬 검증)
+    📥 [P0 + P1] Load data from S3 (with retry + checksum verification)
     
-    포인터 기반 아키텍처에서 실제 데이터를 불러올 때 사용.
+    Used to load actual data in pointer-based architecture.
     
-    v3.1 개선사항:
-        - Exponential Backoff 재시도 (최대 3회)
-        - 체크섬 검증 (데이터 무결성 보장)
-        - ③ 커널의 자존심: 데이터가 깨졌다면 에러를 내고 재시도
+    v3.1 Improvements:
+        - Exponential Backoff retry (max 3 attempts)
+        - Checksum verification (data integrity guarantee)
+        - Kernel integrity: If data is corrupted, raise error and retry
     
     Args:
-        s3_path: S3 경로 (s3://bucket/key)
-        expected_checksum: 예상 MD5 해시 (선택적)
-        max_retries: 최대 재시도 횟수
+        s3_path: S3 path (s3://bucket/key)
+        expected_checksum: Expected MD5 hash (optional)
+        max_retries: Maximum retry attempts
     
     Returns:
-        로드된 데이터 또는 None (실패 시)
+        Loaded data or None (on failure)
     """
     if not s3_path or not s3_path.startswith('s3://'):
         return None
     
     last_error = None
-    base_delay = 0.5  # 초기 대기 시간
+    base_delay = 0.5  # Initial delay
     
     for attempt in range(max_retries):
         try:
@@ -198,7 +198,7 @@ def load_from_s3(s3_path: str, expected_checksum: Optional[str] = None, max_retr
         except Exception as e:
             last_error = e
             if attempt < max_retries - 1:
-                delay = min(base_delay * (2 ** attempt), 8.0)  # 최대 8초
+                delay = min(base_delay * (2 ** attempt), 8.0)  # Max 8 seconds
                 logger.warning(f"Retry {attempt+1}/{max_retries} for {s3_path} after {delay:.2f}s: {e}")
                 time.sleep(delay)
             else:
@@ -208,35 +208,35 @@ def load_from_s3(s3_path: str, expected_checksum: Optional[str] = None, max_retr
 
 
 # ============================================
-# [P0] 중복 로그 방지 헬퍼
+# [P0] Duplicate Log Prevention Helper
 # ============================================
 def deduplicate_history_logs(existing_logs: List[Dict], new_logs: List[Dict]) -> List[Dict]:
     """
-    🛡️ [P0] 히스토리 로그 중복 제거
+    🛡️ [P0] History log deduplication
     
-    Lambda 재시도 등으로 동일한 로그가 중복 발생할 수 있음.
-    로그의 고유 ID(node_id + timestamp)를 기준으로 중복 필터링.
+    Duplicate logs can occur due to Lambda retries, etc.
+    Filter duplicates based on log unique ID (node_id + timestamp).
     
     Args:
-        existing_logs: 기존 히스토리 로그
-        new_logs: 새로 추가할 로그
+        existing_logs: Existing history logs
+        new_logs: New logs to add
     
     Returns:
-        중복 제거된 병합 로그 리스트 (시간순 정렬)
+        Deduplicated merged log list (sorted by time)
     """
     if not new_logs:
         return existing_logs
     
-    # 고유 키 생성 함수
+    # Unique key generation function
     def get_log_key(log: Dict) -> str:
-        """node_id + timestamp 기반 고유 키 생성"""
+        """Generate unique key based on node_id + timestamp"""
         if not isinstance(log, dict):
             return str(hash(str(log)))
         
         node_id = log.get('node_id', log.get('id', ''))
         timestamp = log.get('timestamp', log.get('created_at', ''))
         
-        # 둘 다 있으면 조합, 아니면 개별 필드 사용
+        # Combine if both exist, otherwise use individual field
         if node_id and timestamp:
             return f"{node_id}:{timestamp}"
         elif node_id:
@@ -244,15 +244,15 @@ def deduplicate_history_logs(existing_logs: List[Dict], new_logs: List[Dict]) ->
         elif timestamp:
             return f"ts:{timestamp}"
         else:
-            # 둘 다 없으면 전체 콘텐츠 해시
+            # If neither exists, hash entire content
             return str(hash(json.dumps(log, sort_keys=True, default=str)))
     
-    # 기존 로그의 키 세트 구성
+    # Build key set from existing logs
     seen_keys = set()
     for log in existing_logs:
         seen_keys.add(get_log_key(log))
     
-    # 중복되지 않은 새 로그만 추가
+    # Add only non-duplicate new logs
     deduplicated_new = []
     for log in new_logs:
         key = get_log_key(log)
@@ -269,9 +269,9 @@ def deduplicate_history_logs(existing_logs: List[Dict], new_logs: List[Dict]) ->
 
 
 # ============================================
-# [최적화] S3 역직렬화 비용 감소
+# [Optimization] Reduce S3 Deserialization Cost
 # ============================================
-# 자주 사용되는 제어 필드 - 오프로딩 제외 대상
+# Frequently used control fields - excluded from offloading
 CONTROL_FIELDS_NEVER_OFFLOAD = {
     'execution_id',
     'segment_to_run',
@@ -286,23 +286,23 @@ CONTROL_FIELDS_NEVER_OFFLOAD = {
     'payload_size_kb'
 }
 
-# Lambda 내부 캐시 (Cold Start 동안 유지)
+# Lambda internal cache (maintained during Cold Start)
 _s3_cache: Dict[str, Any] = {}
 _cache_timestamps: Dict[str, float] = {}
-_cache_sizes: Dict[str, int] = {}  # 🛡️ [OOM Guard] 각 항목 크기 추적
-CACHE_TTL_SECONDS = 300  # 5분
-CACHE_MAX_TOTAL_MB = 50  # 🛡️ [OOM Guard] 총 캐시 용량 제한
-CACHE_MAX_ITEM_MB = 5    # 🛡️ [OOM Guard] 개별 항목 크기 제한
+_cache_sizes: Dict[str, int] = {}  # 🛡️ [OOM Guard] Track size of each item
+CACHE_TTL_SECONDS = 300  # 5 minutes
+CACHE_MAX_TOTAL_MB = 50  # 🛡️ [OOM Guard] Total cache capacity limit
+CACHE_MAX_ITEM_MB = 5    # 🛡️ [OOM Guard] Individual item size limit
 
 
 def cached_load_from_s3(s3_path: str) -> Any:
     """
-    📥 [Optimized] TTL 기반 캐시를 사용한 S3 로드
+    📥 [Optimized] S3 load with TTL-based cache
     
-    동일한 S3 경로를 반복 요청할 때 네트워크 비용 감소.
-    Lambda 콜드 스타트 동안 캐시 유지 (5분 TTL)
+    Reduces network cost when repeatedly requesting the same S3 path.
+    Cache maintained during Lambda cold start (5-minute TTL)
     
-    🛡️ [OOM Guard] 총 캐시 용량 50MB, 개별 5MB 제한
+    🛡️ [OOM Guard] Total cache capacity 50MB, individual 5MB limit
     """
     import time
     
@@ -311,14 +311,14 @@ def cached_load_from_s3(s3_path: str) -> Any:
     
     current_time = time.time()
     
-    # 캐시 확인
+    # Check cache
     if s3_path in _s3_cache:
         cache_time = _cache_timestamps.get(s3_path, 0)
         if current_time - cache_time < CACHE_TTL_SECONDS:
             logger.debug(f"Cache hit for {s3_path}")
             return _s3_cache[s3_path]
         else:
-            # TTL 만료 - 캐시 제거
+            # TTL expired - remove cache
             del _s3_cache[s3_path]
             del _cache_timestamps[s3_path]
             if s3_path in _cache_sizes:
@@ -339,10 +339,10 @@ def cached_load_from_s3(s3_path: str) -> Any:
             logger.warning(f"[OOM Guard] Skipping cache for {s3_path}: {data_size_mb:.2f}MB > {CACHE_MAX_ITEM_MB}MB limit")
             return data
         
-        # 총 캐시 용량 계산
+        # Total cache capacity calculation
         total_cache_mb = sum(_cache_sizes.values()) / (1024 * 1024)
         
-        # 용량 초과 시 가장 오래된 항목 제거
+        # Remove oldest item when capacity exceeded
         while total_cache_mb + data_size_mb > CACHE_MAX_TOTAL_MB and _s3_cache:
             oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
             removed_size = _cache_sizes.get(oldest_key, 0)
@@ -353,7 +353,7 @@ def cached_load_from_s3(s3_path: str) -> Any:
             total_cache_mb -= removed_size / (1024 * 1024)
             logger.debug(f"[OOM Guard] Evicted {oldest_key} to free cache space")
         
-        # 캐시에 저장 (최대 20개 항목)
+        # Store in cache (max 20 items)
         if len(_s3_cache) >= 20:
             oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
             del _s3_cache[oldest_key]
@@ -412,8 +412,8 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
     """
     Optimize current state by moving large fields to S3
     
-    🚀 [v3.3 Perf] O(N^2) 방지: quick_size_check로 근사치 먼저 계산
-    🛡️ [v3.3 Guard] 이미 오프로딩된 포인터 재처리 방지
+    🚀 [v3.3 Perf] Prevent O(N^2): Calculate approximation first with quick_size_check
+    🛡️ [v3.3 Guard] Prevent reprocessing of already offloaded pointers
     """
     if not current_state:
         return current_state, False
@@ -427,7 +427,7 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
     optimized_state = current_state.copy()
     s3_offloaded = False
     
-    # 🚀 [Perf] 전체 크기가 작으면 최적화 스킵
+    # 🚀 [Perf] Skip optimization if total size is small
     if total_size_kb < 30:
         return optimized_state, False
     
@@ -440,21 +440,21 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
             
         # 🛡️ [v3.3] Skip already offloaded fields (pointer reprocessing prevention)
         if isinstance(field_data, dict):
-            # __s3_offloaded 플래그 체크
+            # Check __s3_offloaded flag
             if field_data.get('__s3_offloaded'):
                 continue
-            # s3_reference/history_archive 타입 체크 (포인터 재오프로딩 방지)
+            # Check s3_reference/history_archive type (prevent pointer re-offloading)
             if field_data.get('type') in ('s3_reference', 'history_archive', 'compressed', 'error_truncated'):
                 continue
         
-        # 🚀 [Perf] quick_size_check로 근사치 먼저 계산 (JSON 직렬화 회피)
+        # 🚀 [Perf] Calculate approximation first with quick_size_check (avoid JSON serialization)
         approx_size_kb = quick_size_check(field_data)
         
-        # 근사치가 20KB 미만이면 스킵 (안전 마진)
+        # Skip if approximation is less than 20KB (safety margin)
         if approx_size_kb < 20:
             continue
         
-        # 근사치가 임계치 근처일 때만 정밀 계산
+        # Precise calculation only when approximation is near threshold
         try:
             field_size = calculate_payload_size({field: field_data})
         except:
@@ -527,18 +527,18 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
     """
     Main function to update and compress state data
     
-    🛡️ [v3.3] 레거시 호환성 래퍼 - USC로 위임
+    🛡️ [v3.3] Legacy compatibility wrapper - delegates to USC
     
-    문제점: 이전 버전은 필드를 하드코딩하여 재구성했음
-    - 새 필드 추가 시 누락 위험 (Logic Drift)
-    - "Unified Pipe" 원칙 위배
+    Problem: Previous versions hard-coded field reconstruction
+    - Risk of field omission when adding new fields (Logic Drift)
+    - Violates "Unified Pipe" principle
     
-    해결: universal_sync_core에 위임하여 단일 파이프 유지
+    Solution: Delegate to universal_sync_core to maintain single pipe
     """
     state_data = event.get('state_data', {})
     execution_result = event.get('execution_result', {})
     
-    # 🎯 USC로 위임 - 단일 파이프 원칙
+    # 🎯 Delegate to USC - Single pipe principle
     result = universal_sync_core(
         base_state=state_data,
         new_result={'execution_result': execution_result},
@@ -547,7 +547,7 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
     
     updated_state_data = result.get('state_data', {})
     
-    # 레거시 호환성: CloudWatch 메트릭 발송
+    # Legacy compatibility: Send CloudWatch metrics
     initial_size_kb = calculate_payload_size(state_data)
     final_size_kb = updated_state_data.get('payload_size_kb', calculate_payload_size(updated_state_data))
     
@@ -569,7 +569,7 @@ def _send_cloudwatch_metrics(
     s3_offloaded: bool,
     idempotency_key: str
 ) -> None:
-    """CloudWatch 메트릭 발송"""
+    """Send CloudWatch metrics"""
     try:
         metric_data = [
             {
@@ -628,17 +628,17 @@ def _send_cloudwatch_metrics(
 
 def sync_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    🔄 [v3.2 Wrapper] 중앙 집중형 상태 동기화
+    🔄 [v3.2 Wrapper] Centralized state synchronization
     
-    모든 Lambda 실행 결과를 state_data에 머지하고 S3 오프로딩 수행.
-    ASL의 SyncStateData 상태에서 호출됩니다.
+    Merges all Lambda execution results into state_data and performs S3 offloading.
+    Called from SyncStateData state in ASL.
     
-    v3.2: 3줄짜리 래퍼 - 실제 로직은 universal_sync_core에서 처리
+    v3.2: 3-line wrapper - actual logic handled by universal_sync_core
     
     Returns:
         {"state_data": {...}, "next_action": "CONTINUE" | "COMPLETE" | ...}
     """
-    # v3.2: 3줄짜리 래퍼 패턴
+    # v3.2: 3-line wrapper pattern
     state_data = event.get('state_data', {})
     execution_result = event.get('execution_result', {})
     

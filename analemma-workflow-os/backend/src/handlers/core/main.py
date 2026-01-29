@@ -220,11 +220,11 @@ ALLOWED_NODE_TYPES = {
     "vision", "video_chunker", "skill_executor",
 }
 
-# 🔗 Edge로 처리되는 타입들 - 노드가 아닌 엣지 속성으로 정의됨
-# conditional_edge.router_func, edge.type="hitp" 등으로 처리
+# 🔗 Edge-handled types - defined as edge properties, not node types
+# Processed via conditional_edge.router_func, edge.type="hitp", etc.
 EDGE_HANDLED_TYPES = {
-    "branch", "router", "join",  # conditional_edge로 처리
-    "hitp", "pause",              # edge.type으로 처리 (HITP_EDGE_TYPES)
+    "branch", "router", "join",  # Handled via conditional_edge
+    "hitp", "pause",             # Handled via edge.type (HITP_EDGE_TYPES)
 }
 
 # 📌 UI 전용 마커 노드 - 실행되지 않음 (프론트엔드에서만 사용)
@@ -492,7 +492,7 @@ class SafeStateOutput(BaseModel):
         if forbidden_keys:
             logger.warning(
                 f"🚨 [Pydantic Model Guard] Detected reserved keys in extra fields: {forbidden_keys}. "
-                f"이 키들은 딕셔너리에서 제거되어 커널 상태를 보호합니다."
+                f"These keys will be removed from the dictionary to protect kernel state."
             )
             
             # 🛡️ [Critical Fix] None 반환이 아닌 키 삭제 (상태 오염 방지)
@@ -2713,7 +2713,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         it_updates = {}
         
         for node_def in sub_nodes:
-            # [Fix] 이전 노드의 결과를 다음 노드가 볼 수 있게 병합
+            # [Fix] Merge previous node results so next node can access them
             current_view = ChainMap(it_updates, it_state)
             node_type = node_def.get("type", "llm_chat")
             handler = NODE_REGISTRY.get(node_type)
@@ -3760,7 +3760,7 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     node_id = config.get("id", "subgraph")
     # [Fix] Support both flattened and nested config structures
     inner_config = config.get("config") or config
-    logger.info(f"📦 SubGraph 노드 실행: {node_id}")
+    logger.info(f"📦 SubGraph node executing: {node_id}")
     
     try:
         # DynamicWorkflowBuilder import
@@ -3779,7 +3779,7 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             if ref in subgraphs:
                 subgraph_def = subgraphs[ref]
             else:
-                logger.warning(f"SubGraph 참조 '{ref}'를 찾을 수 없습니다.")
+                logger.warning(f"SubGraph reference '{ref}' not found.")
                 return {"subgraph_error": f"SubGraph ref not found: {ref}"}
         elif inner_config.get("skill_ref"):
             # Skill 기반 서브그래프
@@ -3790,10 +3790,10 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 if skill and skill.get("skill_type") == "subgraph_based":
                     subgraph_def = skill.get("subgraph_config")
             except ImportError:
-                logger.warning("SkillRepository를 사용할 수 없습니다.")
+                logger.warning("SkillRepository is not available.")
         
         if not subgraph_def:
-            logger.warning(f"SubGraph 정의를 찾을 수 없습니다: {node_id}")
+            logger.warning(f"SubGraph definition not found: {node_id}")
             return {"subgraph_status": "skipped", "reason": "no_definition"}
         
         # 입력 매핑 적용
@@ -3825,11 +3825,11 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             current_history = state.get("step_history", [])
             result["step_history"] = current_history + child_output["step_history"]
         
-        logger.info(f"✅ SubGraph 노드 완료: {node_id}")
+        logger.info(f"✅ SubGraph node completed: {node_id}")
         return result
         
     except Exception as e:
-        logger.exception(f"❌ SubGraph 노드 실행 실패: {node_id}")
+        logger.exception(f"❌ SubGraph node execution failed: {node_id}")
         error_handling = config.get("error_handling", "fail")
         if error_handling == "ignore":
             return {"subgraph_status": "error_ignored", "error": str(e)}

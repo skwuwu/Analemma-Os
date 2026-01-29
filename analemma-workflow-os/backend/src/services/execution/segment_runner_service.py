@@ -2229,10 +2229,39 @@ class SegmentRunnerService:
         """
         Main execution logic for a workflow segment with StateHydrator integration.
         """
+        # 🛡️ [v3.4] NULL Event Pre-Check (before hydration)
+        if event is None:
+            logger.error("🚨 [CRITICAL] execute_segment received None event!")
+            return {
+                "status": "FAILED",
+                "error": "Event is None before hydration",
+                "error_type": "NullEventError",
+                "final_state": {},
+                "new_history_logs": [],
+                "segment_type": "ERROR",
+                "total_segments": 1,
+                "segment_id": 0
+            }
+        
         # 🛡️ [v3.11] Unified State Hydration (Input)
         # Hydrate the event (convert to SmartStateBag) using pre-initialized hydrator
         # This handles "__s3_offloaded" restoration automatically
         event = self.hydrator.hydrate(event)
+        
+        # 🛡️ [v3.4] Hydration Result Validation
+        # hydrator.hydrate() may return None if S3 load fails or input is malformed
+        if event is None or (hasattr(event, 'keys') and len(list(event.keys())) == 0):
+            logger.error("🚨 [CRITICAL] Hydration returned empty/None state!")
+            return {
+                "status": "FAILED",
+                "error": "State hydration failed - empty or None result",
+                "error_type": "HydrationFailedError",
+                "final_state": {},
+                "new_history_logs": [],
+                "segment_type": "ERROR",
+                "total_segments": 1,
+                "segment_id": 0
+            }
         
         from src.common.statebag import ensure_state_bag
         
