@@ -1,3 +1,15 @@
+"""
+Initialize State Data - 워크플로우 상태 초기화
+
+v3.3 - Unified Pipe 통합
+    "탄생(Init)부터 소멸까지 단일 파이프"
+    
+    - Universal Sync Core(action='init')를 통한 표준화된 상태 생성
+    - T=0 가드레일: Dirty Input 자동 방어 (256KB 초과 시 자동 오프로딩)
+    - 필수 메타데이터 강제 주입 (Semantic Integrity)
+    - 파티셔닝 로직은 비즈니스 로직에 집중, 저장은 USC에 위임
+"""
+
 import os
 import json
 import time
@@ -9,6 +21,19 @@ try:
     from src.common.json_utils import DecimalEncoder
 except ImportError:
     DecimalEncoder = None
+
+# v3.3: Universal Sync Core import (Unified Pipe)
+try:
+    from src.handlers.utils.universal_sync_core import universal_sync_core
+    _HAS_USC = True
+except ImportError:
+    try:
+        # Lambda 환경 대체 경로
+        from handlers.utils.universal_sync_core import universal_sync_core
+        _HAS_USC = True
+    except ImportError:
+        _HAS_USC = False
+        universal_sync_core = None
 
 # [Priority 1 Optimization] Pre-compilation: Load partition_map from DB
 # Runtime partitioning used only as fallback
@@ -721,19 +746,7 @@ def lambda_handler(event, context):
     # 🚀 Override max_concurrency with strategy-recommended value (strategy calculated earlier)
     max_concurrency = distributed_strategy.get("max_concurrency", max_concurrency)
     
-    # 🚨 [Critical Fix] S3 Offloading for InitializeStateDataFunction Response
-    # Step Functions has 256KB limit on Lambda response size
-    STREAM_INLINE_THRESHOLD_BYTES = int(os.environ.get("STREAM_INLINE_THRESHOLD_BYTES", "200000"))  # 200KB default
-    
-    # 🚀 [Hybrid Approach] Include workflow_config and current_state if small enough
-    # Calculate sizes to determine if we can include them inline
-    workflow_config_size = len(workflow_config_json.encode('utf-8'))
-    current_state_size = len(state_json.encode('utf-8')) if current_state is not None else 0
-    
-    # Thresholds for hybrid approach: include inline if < 50KB, use S3-only if > 50KB
-    HYBRID_INLINE_THRESHOLD = 50 * 1024  # 50KB
-    
-    # 🚀 [Light Config] Extract minimal metadata for Step Functions routing
+    # � [Light Config] Extract minimal metadata for Step Functions routing
     light_config = {
         "workflow_id": workflow_id,
         "execution_mode": workflow_config.get("execution_mode", "SEQUENTIAL"),
@@ -745,80 +758,96 @@ def lambda_handler(event, context):
         "max_concurrency": max_concurrency
     }
     
-    # Prepare the response data with Light Config approach
-    response_data = {
-        # Light Config: Only Step Functions routing metadata
+    # ============================================================
+    # 🎯 v3.3 Unified Pipe: Universal Sync Core를 통한 Day-Zero Sync
+    # ============================================================
+    # 
+    # 비즈니스 로직(파티셔닝)은 여기까지, 데이터 저장/최적화는 USC에 위임
+    # - P0: Dirty Input 자동 방어 (256KB 초과 시 자동 오프로딩)
+    # - 필수 메타데이터 강제 주입 (segment_to_run, loop_counter 등)
+    # - 생애 주기 전체에 걸쳐 단일 파이프 통과
+    #
+    initial_payload = {
+        # Light Config: Step Functions 라우팅용 경량 메타데이터
         "light_config": light_config,
-        # S3 paths for heavy data (always included)
+        # S3 paths (이미 업로드된 경로)
         "workflow_config_s3_path": workflow_config_s3_path_full,
         "state_s3_path": state_s3_path,
         "input": input_value,
-        "state_history": [],
         "ownerId": owner_id,
         "workflowId": workflow_id,
-        "segment_to_run": 0,
         "idempotency_key": idempotency_key,
         "quota_reservation_id": quota_reservation_id,
         
-        # 🚨 [Critical Fix] Conditional partition_map return in distributed mode
-        "total_segments": _safe_total_segments,  # 🛡️ Always Top-Level Count
+        # 파티셔닝 결과
+        "total_segments": _safe_total_segments,
         "partition_map": partition_map_for_return,
-        "partition_map_s3_path": partition_map_s3_path,  # Always exists (minimum "")
-        
-        # Set segment_manifest to None if manifest_s3_path exists (payload optimization)
+        "partition_map_s3_path": partition_map_s3_path,
         "segment_manifest": segment_manifest if manifest_s3_path == "" else None,
-        "segment_manifest_s3_path": manifest_s3_path,    # Always exists (minimum "")
+        "segment_manifest_s3_path": manifest_s3_path,
         
-        # Metadata
-        "state_durations": {},
-        "last_update_time": current_time,
-        "start_time": current_time,
-        "loop_counter": 0,
+        # 통계 및 메타데이터
         "llm_segments": llm_segments,
         "hitp_segments": hitp_segments,
+        "state_durations": {},
+        "start_time": current_time,
         
-        # Distributed Mode Flag
+        # 분산 실행 설정
         "distributed_mode": is_distributed_mode,
+        "distributed_strategy": distributed_strategy["strategy"],
         "max_concurrency": max_concurrency,
         
-        # 🚀 Hybrid Distributed Strategy
-        "distributed_strategy": distributed_strategy["strategy"],
-        # 🚨 [Critical Fix] Exclude distributed_strategy_detail from response to reduce payload
-        # It can be very large and is not needed for Step Functions routing
-        # "distributed_strategy_detail": distributed_strategy,  # REMOVED to prevent DataLimitExceeded
-        
-        # [Fix] Pass MOCK_MODE - for simulator E2E testing (HITP auto resume, etc.)
-        "MOCK_MODE": mock_mode,
-        
-        # 🚨 [Critical Fix] Loop Control Parameters - Force int to prevent SFN comparison failure
+        # 루프 제어 (Step Functions 비교용 int 강제)
         "max_loop_iterations": int(workflow_config.get("max_loop_iterations", 100)),
-        "max_branch_iterations": int(workflow_config.get("max_branch_iterations", 100))
+        "max_branch_iterations": int(workflow_config.get("max_branch_iterations", 100)),
+        
+        # 테스트 모드
+        "MOCK_MODE": mock_mode,
     }
     
-    # Calculate response size and offload if necessary
+    # 🎯 Universal Sync Core 호출 (action='init')
+    # - 빈 상태 {}에서 시작하여 표준 StateBag으로 승격
+    # - 필수 메타데이터 자동 주입 (segment_to_run=0, loop_counter=0, state_history=[])
+    # - P0~P2 자동 최적화 (256KB 초과 시 자동 오프로딩)
+    if _HAS_USC and universal_sync_core:
+        logger.info("🎯 [Day-Zero Sync] Routing through Universal Sync Core (action='init')")
+        
+        usc_result = universal_sync_core(
+            base_state={},  # 빈 상태에서 시작
+            new_result=initial_payload,
+            context={
+                'action': 'init',
+                'execution_id': idempotency_key,
+                'idempotency_key': idempotency_key
+            }
+        )
+        
+        response_data = usc_result['state_data']
+        next_action = usc_result.get('next_action', 'STARTED')
+        
+        logger.info(f"✅ [Day-Zero Sync] Complete: next_action={next_action}, size={response_data.get('payload_size_kb', 0)}KB")
+    else:
+        # USC 미사용 폴백 (기존 로직)
+        logger.warning("⚠️ Universal Sync Core not available, using legacy initialization")
+        response_data = initial_payload
+        response_data['segment_to_run'] = 0
+        response_data['loop_counter'] = 0
+        response_data['state_history'] = []
+        response_data['last_update_time'] = current_time
+    
+    # 최종 크기 검증 (USC가 이미 처리했지만 로깅용)
     response_json = json.dumps(response_data, default=str, ensure_ascii=False)
-    response_size_bytes = len(response_json.encode('utf-8'))
-    response_size_kb = response_size_bytes / 1024
+    response_size_kb = len(response_json.encode('utf-8')) / 1024
     
-# Calculate response size for logging
-    response_json = json.dumps(response_data, default=str, ensure_ascii=False)
-    response_size_bytes = len(response_json.encode('utf-8'))
-    response_size_kb = response_size_bytes / 1024
+    logger.info(f"✅ InitializeStateData response: {response_size_kb:.1f}KB")
     
-    logger.info(f"✅ InitializeStateData response size: {response_size_kb:.1f}KB (workflow_config and current_state offloaded to S3)")
-    
-    # 🛡️ [Critical] Hard limit check - ensure we're under 250KB (safety margin)
     if response_size_kb > 250:
         logger.error(
             f"🚨 CRITICAL: Response exceeds 250KB ({response_size_kb:.1f}KB)! "
-            f"Step Functions will reject with DataLimitExceeded. "
-            f"Fields in response: {list(response_data.keys())}"
+            f"Step Functions will reject with DataLimitExceeded."
         )
     elif response_size_kb > 200:
-        logger.warning(
-            f"⚠️ WARNING: Response is {response_size_kb:.1f}KB (>200KB). "
-            f"Close to Step Functions limit."
-        )
+        logger.warning(f"⚠️ Response is {response_size_kb:.1f}KB (>200KB). Close to limit.")
     
     return response_data
 

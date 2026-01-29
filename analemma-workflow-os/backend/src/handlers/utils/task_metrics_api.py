@@ -266,10 +266,16 @@ def _get_task_metrics(task_id: str, request_owner_id: str, tenant_id: Optional[s
         task = None
         
         def query_task_table():
-            return task_table.get_item(Key={"execution_id": task_id}).get("Item")
+            return task_table.get_item(Key={
+                "ownerId": request_owner_id,
+                "executionArn": task_id
+            }).get("Item")
         
         def query_executions_table():
-            return executions_table.get_item(Key={"execution_id": task_id}).get("Item")
+            return executions_table.get_item(Key={
+                "ownerId": request_owner_id,
+                "executionArn": task_id
+            }).get("Item")
         
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = {

@@ -327,15 +327,39 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 node["type"] = "operator"
         
-        # 세그먼트 내부 엣지 추가
+        # [P0 Refactoring] Inter-segment edges 수집
+        outgoing_edges = []
         if config:
             all_edges = config.get("edges", [])
             for edge in all_edges:
                 source = edge.get("source")
                 target = edge.get("target")
+                
+                # Intra-segment edge (양쪽 노드가 모두 이 세그먼트에 있음)
                 if source in nodes_map and target in nodes_map:
                     if edge not in edges_list:  # 중복 방지
                         edges_list.append(edge)
+                
+                # Inter-segment edge (source만 이 세그먼트에 있고 target은 다른 세그먼트)
+                elif source in nodes_map and target not in nodes_map:
+                    edge_data = edge.get("data", {})
+                    outgoing_edges.append({
+                        "source_node": source,
+                        "target_node": target,
+                        "edge_type": edge.get("type", "normal"),
+                        "condition": edge.get("condition"),
+                        "is_loop_exit": edge_data.get("isLoopExit", False),
+                        "is_back_edge": edge_data.get("isBackEdge", False),
+                        "router_func": edge.get("router_func"),
+                        "mapping": edge.get("mapping"),
+                        "metadata": {
+                            "label": edge.get("label"),
+                            "style": edge.get("style"),
+                            "animated": edge.get("animated"),
+                            "edgeType": edge_data.get("edgeType"),
+                            "loopType": edge_data.get("loopType")
+                        }
+                    })
         
         # [Critical Fix] 노드 순서를 위상 정렬하여 첫 번째 노드가 실제 시작 노드가 되도록 보장
         # DynamicWorkflowBuilder는 nodes[0]을 entry point로 사용하므로 순서가 중요함
@@ -350,11 +374,16 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
             stats["llm"] += 1
         elif final_type == "hitp": 
             stats["hitp"] += 1
+        
+        logger.debug(f"[Segment Created] ID={seg_id_gen.current}, Type={final_type}, "
+                    f"Nodes={len(sorted_nodes)}, IntraEdges={len(edges_list)}, "
+                    f"OutgoingEdges={len(outgoing_edges)}")
             
         return {
             "id": override_id if override_id is not None else seg_id_gen.next(),
             "nodes": sorted_nodes,  # [Critical Fix] 위상 정렬된 노드 사용
             "edges": list(edges_list),
+            "outgoing_edges": outgoing_edges,  # [P0 Refactoring] Inter-segment edges
             "type": final_type,
             "node_ids": [n["id"] for n in sorted_nodes]  # 정렬된 순서 반영
         }

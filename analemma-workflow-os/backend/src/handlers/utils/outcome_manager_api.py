@@ -153,14 +153,17 @@ def _get_outcomes(task_id: str, request_owner_id: str) -> Dict[str, Any]:
     결과물 목록 조회 (Outcome-First)
     """
     try:
-        # DynamoDB에서 Task 조회
-        response = executions_table.get_item(Key={"execution_id": task_id})
+        # DynamoDB에서 Task 조회 (복합 키: ownerId + executionArn)
+        response = executions_table.get_item(Key={
+            "ownerId": request_owner_id,
+            "executionArn": task_id
+        })
         task = response.get("Item")
         
         if not task:
             return _error_response(404, f"Task not found: {task_id}")
         
-        # 소유권 검증
+        # 소유권은 이미 키로 검증됨 (ownerId가 키에 포함)
         task_owner_id = task.get("ownerId") or task.get("user_id") or task.get("created_by")
         if task_owner_id != request_owner_id:
             logger.warning(f"Unauthorized access attempt: user {request_owner_id} tried to access task {task_id}")
@@ -287,8 +290,11 @@ def _get_reasoning_path(task_id: str, artifact_id: str, request_owner_id: str) -
     인메모리 캐싱을 적용하여 S3 호출 비용 절감
     """
     try:
-        # DynamoDB에서 Task 조회
-        response = executions_table.get_item(Key={"execution_id": task_id})
+        # DynamoDB에서 Task 조회 (복합 키: ownerId + executionArn)
+        response = executions_table.get_item(Key={
+            "ownerId": request_owner_id,
+            "executionArn": task_id
+        })
         task = response.get("Item")
         
         if not task:

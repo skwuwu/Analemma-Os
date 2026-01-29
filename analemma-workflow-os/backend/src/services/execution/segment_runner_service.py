@@ -50,6 +50,13 @@ from src.services.workflow.repository import WorkflowRepository
 from src.handlers.core.main import run_workflow, partition_workflow as _partition_workflow_dynamically, _build_segment_config
 from src.common.statebag import normalize_inplace
 
+# [P0 Refactoring] Smart StateBag Architecture
+from src.common.state_hydrator import (
+    check_inter_segment_edges,
+    is_hitp_edge,
+    is_loop_exit_edge,
+    prepare_response_with_offload
+)
 
 
 logger = logging.getLogger(__name__)
@@ -414,14 +421,16 @@ class SegmentRunnerService:
             
             # Check if key is list merge target
             if self._should_merge_as_list(key):
+                # 🛡️ [P0 Fix] 리스트 병합 순서: existing + new (시간순 유지)
+                # 로그는 시간순으로 뒤에 붙는 것이 자연스럽습니다.
                 if isinstance(existing_value, list) and isinstance(new_value, list):
-                    result[key] = existing_value + new_value
+                    result[key] = existing_value + new_value  # 기존 뒤에 새 값 추가
                 elif isinstance(new_value, list):
-                    result[key] = [existing_value] + new_value if existing_value else new_value
+                    result[key] = ([existing_value] if existing_value else []) + new_value
                 elif isinstance(existing_value, list):
-                    result[key] = existing_value + [new_value] if new_value else existing_value
+                    result[key] = existing_value + ([new_value] if new_value else [])
                 else:
-                    result[key] = [existing_value, new_value]
+                    result[key] = [existing_value, new_value] if existing_value and new_value else [existing_value or new_value]
                 continue
             
             # Handle according to policy
@@ -451,8 +460,14 @@ class SegmentRunnerService:
         """
         [Critical] S3 중간 브랜치 결과 파일 정리 (Garbage Collection)
         
+        🛡️ [P0 강화] 멱등성 보장 + 재시도 로직
+        
         Aggregation 완료 후 각 브랜치가 생성한 임시 S3 파일들을 삭제하여
         S3 비용 절감 및 관리 부하 감소
+        
+        ⚠️ 실운영 권장사항:
+        - S3 Lifecycle Policy 설정 필수 (24시간 후 자동 삭제)
+        - 삭제 실패 시 '유령 데이터' 방지
         
         Args:
             parallel_results: 브랜치 실행 결과 목록
@@ -477,32 +492,54 @@ class SegmentRunnerService:
             logger.debug(f"[Aggregator] No S3 intermediate files to cleanup")
             return
         
-        logger.info(f"[Aggregator] 🧹 Cleaning up {len(s3_paths_to_delete)} S3 intermediate files")
+        logger.info(f"[Aggregator] Cleaning up {len(s3_paths_to_delete)} S3 intermediate files")
         
-        # 병렬 삭제
-        def delete_s3_object(s3_path: str) -> bool:
-            try:
-                bucket = s3_path.replace("s3://", "").split("/")[0]
-                key = "/".join(s3_path.replace("s3://", "").split("/")[1:])
-                self.state_manager.s3_client.delete_object(Bucket=bucket, Key=key)
-                return True
-            except Exception as e:
-                logger.warning(f"[Aggregator] Failed to delete {s3_path}: {e}")
-                return False
+        # 🛡️ [P0] 재시도 로직 추가 (max 2회)
+        MAX_RETRIES = 2
+        failed_paths = []
+        
+        def delete_s3_object_with_retry(s3_path: str) -> Tuple[bool, str]:
+            """S3 객체 삭제 (재시도 포함)"""
+            for attempt in range(MAX_RETRIES + 1):
+                try:
+                    bucket = s3_path.replace("s3://", "").split("/")[0]
+                    key = "/".join(s3_path.replace("s3://", "").split("/")[1:])
+                    self.state_manager.s3_client.delete_object(Bucket=bucket, Key=key)
+                    return True, s3_path
+                except Exception as e:
+                    if attempt < MAX_RETRIES:
+                        time.sleep(0.1 * (attempt + 1))  # 백오프
+                        continue
+                    logger.warning(
+                        f"[Aggregator] ⚠️ Failed to delete {s3_path} after {MAX_RETRIES + 1} attempts: {e}. "
+                        f"This file may become 'ghost data'. Consider S3 Lifecycle Policy."
+                    )
+                    return False, s3_path
+            return False, s3_path
         
         # ThreadPoolExecutor로 병렬 삭제 (빠르게 처리)
         deleted_count = 0
         with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(delete_s3_object, path): path for path in s3_paths_to_delete}
+            futures = {executor.submit(delete_s3_object_with_retry, path): path for path in s3_paths_to_delete}
             
             for future in as_completed(futures, timeout=30):
                 try:
-                    if future.result(timeout=5):
+                    success, path = future.result(timeout=5)
+                    if success:
                         deleted_count += 1
+                    else:
+                        failed_paths.append(path)
                 except Exception as e:
                     logger.warning(f"[Aggregator] Cleanup future failed: {e}")
         
-        logger.info(f"[Aggregator] ✅ Cleanup complete: {deleted_count}/{len(s3_paths_to_delete)} files deleted")
+        # 결과 로깅
+        if failed_paths:
+            logger.warning(
+                f"[Aggregator] ⚠️ Cleanup incomplete: {deleted_count}/{len(s3_paths_to_delete)} deleted, "
+                f"{len(failed_paths)} failed. Ghost data paths: {failed_paths[:3]}{'...' if len(failed_paths) > 3 else ''}"
+            )
+        else:
+            logger.info(f"[Aggregator] Cleanup complete: {deleted_count}/{len(s3_paths_to_delete)} files deleted")
 
     # ========================================================================
     # [Pattern 1] Segment-Level Self-Healing: Segment Auto-Splitting
@@ -1548,28 +1585,66 @@ class SegmentRunnerService:
         total_segments = _safe_get_total_segments(event)
         next_segment = segment_to_run + 1
         
+        # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+        # Uses partition_map.outgoing_edges instead of scanning workflow_config.edges
+        hitp_detected = False
+        
+        if next_segment < total_segments and partition_map and isinstance(partition_map, list):
+            current_seg = partition_map[segment_to_run] if segment_to_run < len(partition_map) else None
+            next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
+            
+            if current_seg and next_seg:
+                edge_info = check_inter_segment_edges(current_seg, next_seg)
+                if is_hitp_edge(edge_info):
+                    hitp_detected = True
+                    logger.info(f"[Aggregator] 🚨 HITP edge detected via outgoing_edges: "
+                              f"segment {segment_to_run} → {next_segment}, "
+                              f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+        
         # 완료 여부 판단
         is_complete = next_segment >= total_segments
         
         logger.info(f"[Aggregator] [Success] Aggregation complete: "
                    f"{successful_branches}/{len(parallel_results)} branches succeeded, "
-                   f"next_segment={next_segment if not is_complete else 'COMPLETE'}")
+                   f"next_segment={next_segment if not is_complete else 'COMPLETE'}, "
+                   f"hitp_detected={hitp_detected}")
         
         # [Critical] S3 중간 파일 정리 (Garbage Collection)
         # 각 브랜치가 S3에 저장한 임시 결과 파일들을 삭제
         # 병합 완료 후에는 더 이상 필요 없음 (비용 & 관리 부하 감소)
         self._cleanup_branch_intermediate_s3(parallel_results, workflow_id, segment_to_run)
         
-        # [Critical Fix] S3 offload 시 final_state 비우기 (256KB 제한 회피)
-        response_final_state = final_state
-        if output_s3_path:
-            response_final_state = {
-                "__s3_offloaded": True,
-                "__s3_path": output_s3_path,
-                "__original_size_kb": len(json.dumps(final_state, ensure_ascii=False).encode('utf-8')) / 1024 if final_state else 0
-            }
-            logger.info(f"[Aggregator] [S3 Offload] Replaced final_state with metadata reference. Original: {response_final_state['__original_size_kb']:.1f}KB → Response: ~0.2KB")
+        # [P0 Refactoring] S3 offload via helper function (DRY principle)
+        response_final_state = prepare_response_with_offload(final_state, output_s3_path)
+        if response_final_state.get('__s3_offloaded'):
+            logger.info(f"[Aggregator] [S3 Offload] Replaced final_state with metadata reference. "
+                       f"Original: {response_final_state.get('__original_size_kb', 0):.1f}KB → Response: ~0.2KB")
         
+        
+        # [Guard] [Fix] Handle HITP Detection
+        # If HITP edge detected, pause immediately before proceeding to next segment
+        if hitp_detected and not is_complete:
+            logger.info(f"[Aggregator] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
+            return {
+                "status": "PAUSED_FOR_HITP",
+                "final_state": response_final_state,
+                "final_state_s3_path": output_s3_path,
+                "current_state": response_final_state,
+                "state_s3_path": output_s3_path,
+                "next_segment_to_run": next_segment,
+                "new_history_logs": all_history_logs,
+                "error_info": None,
+                "branches": [],
+                "segment_type": "hitp_pause",
+                "segment_id": segment_to_run,
+                "total_segments": total_segments,
+                "aggregator_metadata": {
+                    'total_branches': len(parallel_results),
+                    'successful_branches': successful_branches,
+                    'failed_branches': len(branch_errors),
+                    'hitp_edge_detected': True
+                }
+            }
         
         # [Guard] [Fix] Handle Map Error (Loop Limit Exceeded, etc.)
         # If Map failed, we should PAUSE to allow human intervention or analysis
@@ -2888,11 +2963,47 @@ class SegmentRunnerService:
             # [Guard] 유효한 브랜치가 없으면 SUCCEEDED로 진행
             if not valid_branches:
                 logger.info(f"[Kernel] ⏭️ No valid branches to execute, skipping parallel group")
+                
+                # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+                next_segment = segment_id + 1
+                total_segments = _safe_get_total_segments(event)
+                hitp_detected = False
+                
+                # Use partition_map.outgoing_edges instead of scanning workflow_config.edges
+                if partition_map and isinstance(partition_map, list) and next_segment < total_segments:
+                    current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
+                    next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
+                    
+                    if current_seg and next_seg:
+                        edge_info = check_inter_segment_edges(current_seg, next_seg)
+                        if is_hitp_edge(edge_info):
+                            hitp_detected = True
+                            logger.info(f"[Empty Parallel] 🚨 HITP edge detected via outgoing_edges: "
+                                      f"segment {segment_id} → {next_segment}, "
+                                      f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+                
+                if hitp_detected:
+                    logger.info(f"[Empty Parallel] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
+                    return _finalize_with_offload({
+                        "status": "PAUSED_FOR_HITP",
+                        "final_state": mask_pii_in_state(initial_state),
+                        "final_state_s3_path": None,
+                        "next_segment_to_run": next_segment,
+                        "new_history_logs": [],
+                        "error_info": None,
+                        "branches": None,
+                        "segment_type": "hitp_pause",
+                        "hitp_metadata": {
+                            'hitp_edge_detected': True,
+                            'pause_location': 'empty_parallel_group'
+                        }
+                    })
+                
                 return _finalize_with_offload({
                     "status": "CONTINUE",  # [Guard] [Fix] Use CONTINUE for ASL routing
                     "final_state": mask_pii_in_state(initial_state),
                     "final_state_s3_path": None,
-                    "next_segment_to_run": segment_id + 1,
+                    "next_segment_to_run": next_segment,
                     "new_history_logs": [],
                     "error_info": None,
                     "branches": None,
@@ -3090,6 +3201,43 @@ class SegmentRunnerService:
             total_segments = _safe_get_total_segments(event)
             next_segment = segment_id + 1
             has_more_segments = next_segment < total_segments
+            
+            # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+            hitp_detected = False
+            if has_more_segments:
+                partition_map = event.get('partition_map')
+                if partition_map and isinstance(partition_map, list):
+                    current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
+                    next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
+                    
+                    if current_seg and next_seg:
+                        edge_info = check_inter_segment_edges(current_seg, next_seg)
+                        if is_hitp_edge(edge_info):
+                            hitp_detected = True
+                            logger.info(f"[Partial Success] 🚨 HITP edge detected via outgoing_edges: "
+                                      f"segment {segment_id} → {next_segment}, "
+                                      f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+            
+            if hitp_detected:
+                logger.info(f"[Partial Success] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
+                return _finalize_response({
+                    "status": "PAUSED_FOR_HITP",
+                    "final_state": response_final_state,
+                    "final_state_s3_path": output_s3_path,
+                    "next_segment_to_run": next_segment,
+                    "new_history_logs": [],
+                    "error_info": execution_error,
+                    "branches": None,
+                    "segment_type": "hitp_pause",
+                    "kernel_action": kernel_log,
+                    "execution_time": execution_time,
+                    "_partial_success": True,
+                    "total_segments": total_segments,
+                    "hitp_metadata": {
+                        'hitp_edge_detected': True,
+                        'pause_location': 'partial_success'
+                    }
+                })
             
             return _finalize_response({
                 # [Guard] [Fix] Use CONTINUE/COMPLETE instead of SUCCEEDED for ASL routing
@@ -3339,16 +3487,46 @@ class SegmentRunnerService:
             })
         
         # 아직 실행할 세그먼트가 남아있음
-        # [Critical Fix] S3 offload 시 final_state 비우기 (256KB 제한 회피)
-        response_final_state = final_state
-        if output_s3_path:
-            # S3에 전체 상태 저장됨 → 응답은 메타데이터만
-            response_final_state = {
-                "__s3_offloaded": True,
-                "__s3_path": output_s3_path,
-                "__original_size_kb": len(json.dumps(final_state, ensure_ascii=False).encode('utf-8')) / 1024 if final_state else 0
-            }
-            logger.info(f"[S3 Offload] Replaced final_state with metadata reference. Original: {response_final_state['__original_size_kb']:.1f}KB → Response: ~0.2KB")
+        # [P0 Refactoring] S3 offload via helper function (DRY principle)
+        response_final_state = prepare_response_with_offload(final_state, output_s3_path)
+        if response_final_state.get('__s3_offloaded'):
+            logger.info(f"[S3 Offload] Replaced final_state with metadata reference. "
+                       f"Original: {response_final_state.get('__original_size_kb', 0):.1f}KB → Response: ~0.2KB")
+        
+        # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+        hitp_detected = False
+        if next_segment < total_segments and partition_map and isinstance(partition_map, list):
+            current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
+            next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
+            
+            if current_seg and next_seg:
+                edge_info = check_inter_segment_edges(current_seg, next_seg)
+                if is_hitp_edge(edge_info):
+                    hitp_detected = True
+                    logger.info(f"[General Segment] 🚨 HITP edge detected via outgoing_edges: "
+                              f"segment {segment_id} → {next_segment}, "
+                              f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+        
+        if hitp_detected:
+            logger.info(f"[General Segment] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
+            return _finalize_response({
+                "status": "PAUSED_FOR_HITP",
+                "final_state": response_final_state,
+                "final_state_s3_path": output_s3_path,
+                "next_segment_to_run": next_segment,
+                "new_history_logs": new_history_logs,
+                "error_info": None,
+                "branches": None,
+                "segment_type": "hitp_pause",
+                "state_s3_path": output_s3_path,
+                "execution_time": execution_time,
+                "kernel_actions": kernel_actions if kernel_actions else None,
+                "total_segments": total_segments,
+                "hitp_metadata": {
+                    'hitp_edge_detected': True,
+                    'pause_location': 'general_segment_completion'
+                }
+            })
         
         return _finalize_response({
             "status": "CONTINUE",  # [Guard] [Fix] Explicit status for loop continuation (was 'SUCCEEDED')
