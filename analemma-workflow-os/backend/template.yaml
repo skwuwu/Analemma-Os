@@ -2672,6 +2672,22 @@ Resources:
         - CloudWatchPutMetricPolicy: {}
         - CloudWatchLogsFullAccess
 
+  ViewComprehensiveReportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "ViewComprehensiveReport-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.view_comprehensive_report.lambda_handler"]
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          STAGE_NAME: !Ref StageName
+      Policies:
+        - CloudWatchLogsFullAccess
+
   # LLM Simulator Step Functions State Machine
   LLMSimulatorStateMachine:
     Type: AWS::Serverless::StateMachine
@@ -2682,6 +2698,7 @@ Resources:
         PrepareLLMTestFunction: !GetAtt PrepareLLMTestFunction.Arn
         VerifyLLMTestFunction: !GetAtt VerifyLLMTestFunction.Arn
         AggregateLLMResultsFunction: !GetAtt AggregateLLMResultsFunction.Arn
+        ViewComprehensiveReportFunction: !GetAtt ViewComprehensiveReportFunction.Arn
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref PrepareLLMTestFunction
@@ -2689,6 +2706,8 @@ Resources:
             FunctionName: !Ref VerifyLLMTestFunction
         - LambdaInvokePolicy:
             FunctionName: !Ref AggregateLLMResultsFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ViewComprehensiveReportFunction
         - Statement:
           - Effect: Allow
             Action:

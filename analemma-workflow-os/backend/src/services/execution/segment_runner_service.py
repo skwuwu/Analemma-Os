@@ -319,7 +319,7 @@ class SegmentRunnerService:
              )
         
         # [v3.11] Initialize StateHydrator once (Reuse connection)
-        self.hydrator = StateHydrator(s3_bucket=self.state_bucket)
+        self.hydrator = StateHydrator(bucket_name=self.state_bucket)
         
         if not self.state_bucket:
             logger.warning("[Warning] [SegmentRunnerService] S3 bucket not configured - large payloads may fail")

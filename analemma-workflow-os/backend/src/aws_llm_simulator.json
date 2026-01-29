@@ -215,6 +215,46 @@
                     "Next": "SimulatorComplete"
                 }
             ],
+            "Next": "GenerateComprehensiveReport"
+        },
+        "GenerateComprehensiveReport": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "TimeoutSeconds": 30,
+            "Comment": "Generate detailed comprehensive report with formatted output",
+            "Parameters": {
+                "FunctionName": "${ViewComprehensiveReportFunction}",
+                "Payload": {
+                    "report.$": "$.report_result.report"
+                }
+            },
+            "ResultSelector": {
+                "formatted_report.$": "$.Payload.formatted_report",
+                "comprehensive_report.$": "$.Payload.comprehensive_report",
+                "summary.$": "$.Payload.summary"
+            },
+            "ResultPath": "$.comprehensive_report_result",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Lambda.ServiceException",
+                        "Lambda.AWSLambdaException",
+                        "Lambda.SdkClientException"
+                    ],
+                    "IntervalSeconds": 2,
+                    "MaxAttempts": 2,
+                    "BackoffRate": 2.0
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.comprehensive_report_error",
+                    "Next": "SimulatorComplete"
+                }
+            ],
             "Next": "SimulatorComplete"
         },
         "SimulatorComplete": {
@@ -225,6 +265,7 @@
                 "start_time.$": "$.start_time",
                 "test_results.$": "$.test_results",
                 "report.$": "$.report_result.report",
+                "comprehensive_report.$": "$.comprehensive_report_result",
                 "mock_mode": "false"
             },
             "End": true

@@ -341,7 +341,7 @@ def lambda_handler(event, context):
         raw_bucket = os.environ.get('S3_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
         bucket = raw_bucket.strip() if raw_bucket else None
     
-    hydrator = StateHydrator(s3_bucket=bucket)
+    hydrator = StateHydrator(bucket_name=bucket)
     
     # 2. Input Resolution
     raw_input = event.get('input', event)

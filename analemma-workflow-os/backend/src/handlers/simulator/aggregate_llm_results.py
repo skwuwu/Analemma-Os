@@ -40,6 +40,196 @@ def _extract_payload(result: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+def _extract_thinking_logs(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    테스트 결과에서 Thinking Mode 로그를 추출합니다.
+    
+    Args:
+        result: 테스트 결과 딕셔너리
+    
+    Returns:
+        Thinking 로그 리스트 [{"step": 1, "thought": "...", "reasoning": "..."}]
+    """
+    thinking_logs = []
+    
+    try:
+        test_result = result.get('test_result', {})
+        final_state = test_result.get('output', test_result)
+        
+        if isinstance(final_state, str):
+            try:
+                final_state = json.loads(final_state)
+            except:
+                final_state = {}
+        
+        # State에서 thinking 관련 키 찾기
+        # 패턴: {node_id}_thinking, thinking_output, llm_thinking 등
+        for key, value in final_state.items():
+            if 'thinking' in key.lower() and isinstance(value, (list, dict)):
+                if isinstance(value, list):
+                    thinking_logs.extend(value)
+                elif isinstance(value, dict):
+                    thinking_logs.append(value)
+        
+        # metadata에서도 확인
+        if isinstance(final_state, dict):
+            for key in final_state.keys():
+                if key.endswith('_meta'):
+                    meta = final_state[key]
+                    if isinstance(meta, dict) and 'thinking' in meta:
+                        thinking_data = meta['thinking']
+                        if isinstance(thinking_data, list):
+                            thinking_logs.extend(thinking_data)
+                        elif isinstance(thinking_data, dict):
+                            thinking_logs.append(thinking_data)
+    
+    except Exception as e:
+        logger.warning(f"Failed to extract thinking logs: {e}")
+    
+    return thinking_logs
+
+
+def _extract_context_info(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    테스트 결과에서 Context 정보를 추출합니다.
+    
+    Args:
+        result: 테스트 결과 딕셔너리
+    
+    Returns:
+        Context 정보 {"size_tokens": int, "cached_tokens": int, "cache_hit_rate": float}
+    """
+    context_info = {
+        "size_tokens": 0,
+        "cached_tokens": 0,
+        "cache_hit_rate": 0.0,
+        "estimated_size_kb": 0
+    }
+    
+    try:
+        test_result = result.get('test_result', {})
+        final_state = test_result.get('output', test_result)
+        
+        if isinstance(final_state, str):
+            try:
+                final_state = json.loads(final_state)
+            except:
+                final_state = {}
+        
+        # Usage에서 토큰 정보 추출
+        usage = final_state.get('usage') or final_state.get('final_state', {}).get('usage', {})
+        
+        input_tokens = usage.get('input_tokens', 0)
+        cached_tokens = usage.get('cached_tokens', 0)
+        
+        context_info['size_tokens'] = input_tokens
+        context_info['cached_tokens'] = cached_tokens
+        
+        if input_tokens > 0:
+            context_info['cache_hit_rate'] = round((cached_tokens / input_tokens) * 100, 2)
+        
+        # 대략적인 크기 추정 (1 token ≈ 4 bytes)
+        context_info['estimated_size_kb'] = round((input_tokens * 4) / 1024, 2)
+    
+    except Exception as e:
+        logger.warning(f"Failed to extract context info: {e}")
+    
+    return context_info
+
+
+def _generate_comprehensive_report(
+    results: List[Dict[str, Any]],
+    scenarios: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    종합 리포트 생성: 시나리오별 usage, context, thinking 로그를 집계합니다.
+    
+    Args:
+        results: 전체 테스트 결과 리스트
+        scenarios: 시나리오별 결과 딕셔너리
+    
+    Returns:
+        종합 리포트 딕셔너리
+    """
+    comprehensive_report = {
+        "scenario_details": {},
+        "aggregate_statistics": {
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "total_cached_tokens": 0,
+            "total_cost_usd": 0.0,
+            "total_cost_saved_usd": 0.0,
+            "average_cache_hit_rate": 0.0,
+            "total_thinking_steps": 0
+        },
+        "thinking_logs_by_scenario": {},
+        "context_analysis": {}
+    }
+    
+    total_scenarios_with_cache = 0
+    total_cache_hit_rate = 0.0
+    
+    for result in results:
+        scenario = result.get('scenario', 'unknown')
+        
+        # Thinking 로그 추출
+        thinking_logs = _extract_thinking_logs(result)
+        if thinking_logs:
+            comprehensive_report['thinking_logs_by_scenario'][scenario] = {
+                "count": len(thinking_logs),
+                "logs": thinking_logs
+            }
+            comprehensive_report['aggregate_statistics']['total_thinking_steps'] += len(thinking_logs)
+        
+        # Context 정보 추출
+        context_info = _extract_context_info(result)
+        comprehensive_report['context_analysis'][scenario] = context_info
+        
+        # Usage 통계 집계
+        scenario_data = scenarios.get(scenario, {})
+        usage = scenario_data.get('usage', {})
+        
+        comprehensive_report['aggregate_statistics']['total_input_tokens'] += usage.get('input_tokens', 0)
+        comprehensive_report['aggregate_statistics']['total_output_tokens'] += usage.get('output_tokens', 0)
+        comprehensive_report['aggregate_statistics']['total_cached_tokens'] += usage.get('cached_tokens', 0)
+        comprehensive_report['aggregate_statistics']['total_cost_usd'] += usage.get('estimated_cost_usd', 0.0)
+        comprehensive_report['aggregate_statistics']['total_cost_saved_usd'] += usage.get('cost_saved_usd', 0.0)
+        
+        # Cache hit rate 평균 계산
+        if context_info['cache_hit_rate'] > 0:
+            total_cache_hit_rate += context_info['cache_hit_rate']
+            total_scenarios_with_cache += 1
+        
+        # 시나리오별 상세 정보
+        comprehensive_report['scenario_details'][scenario] = {
+            "status": scenario_data.get('status', 'UNKNOWN'),
+            "usage": usage,
+            "context": context_info,
+            "thinking_steps_count": len(thinking_logs),
+            "provider": usage.get('provider', 'unknown'),
+            "execution_id": scenario_data.get('execution_id'),
+            "outcome_url": scenario_data.get('outcome_url')
+        }
+    
+    # 평균 cache hit rate 계산
+    if total_scenarios_with_cache > 0:
+        comprehensive_report['aggregate_statistics']['average_cache_hit_rate'] = round(
+            total_cache_hit_rate / total_scenarios_with_cache, 2
+        )
+    
+    # 비용 절감률 계산
+    total_cost = comprehensive_report['aggregate_statistics']['total_cost_usd']
+    total_saved = comprehensive_report['aggregate_statistics']['total_cost_saved_usd']
+    if total_cost > 0:
+        comprehensive_report['aggregate_statistics']['cost_reduction_percentage'] = round(
+            (total_saved / (total_cost + total_saved)) * 100, 2
+        )
+    else:
+        comprehensive_report['aggregate_statistics']['cost_reduction_percentage'] = 0.0
+    
+    return comprehensive_report
+
+
 def _publish_metrics(results: List[Dict[str, Any]], passed_count: int, total: int):
     """CloudWatch 메트릭을 발행합니다."""
     try:
@@ -202,7 +392,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # CloudWatch 메트릭 발행
     _publish_metrics(results, passed_count, total)
     
-    # 종합 리포트
+    # 종합 리포트 생성
+    comprehensive_report = _generate_comprehensive_report(results, scenarios)
+    
+    # 기본 리포트
     report = {
         'simulator_execution_id': sim_exec_id,
         'start_time': start_time,
@@ -217,7 +410,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         },
         'scenarios': scenarios,
         'failed_scenarios': failed_scenarios,
-        'mock_mode': 'false'
+        'mock_mode': 'false',
+        # 종합 리포트 추가
+        'comprehensive_report': comprehensive_report
     }
     
     if failed_count > 0:
@@ -226,6 +421,20 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     else:
         logger.info(f"✅ LLM Simulator SUCCESS: All {total} scenarios passed")
     
+    # 종합 통계 로깅
+    agg_stats = comprehensive_report['aggregate_statistics']
     logger.info(f"Pass rate: {report['summary']['pass_rate']}%")
+    logger.info(f"📊 Aggregate Statistics:")
+    logger.info(f"  - Total tokens: {agg_stats['total_input_tokens'] + agg_stats['total_output_tokens']:,}")
+    logger.info(f"  - Cached tokens: {agg_stats['total_cached_tokens']:,}")
+    logger.info(f"  - Cache hit rate: {agg_stats['average_cache_hit_rate']}%")
+    logger.info(f"  - Total cost: ${agg_stats['total_cost_usd']:.6f}")
+    logger.info(f"  - Cost saved: ${agg_stats['total_cost_saved_usd']:.6f} ({agg_stats.get('cost_reduction_percentage', 0)}%)")
+    logger.info(f"  - Thinking steps: {agg_stats['total_thinking_steps']}")
+    
+    # Thinking 로그가 있는 시나리오 로깅
+    thinking_scenarios = list(comprehensive_report['thinking_logs_by_scenario'].keys())
+    if thinking_scenarios:
+        logger.info(f"🧠 Scenarios with Thinking Mode: {', '.join(thinking_scenarios)}")
     
     return report
