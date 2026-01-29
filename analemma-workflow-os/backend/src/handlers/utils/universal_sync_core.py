@@ -495,6 +495,13 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
         elif action == 'init':
             # 탄생 (Day-Zero Sync): 파티셔닝 결과 + 초기 상태를 그대로 전달
             # required metadata는 merge_logic에서 강제 주입됨
+            
+            # 🔑 [Critical] Extract bag contents and merge into delta
+            # InitializeStateData passes {'bag': payload}, we need to extract payload
+            bag_contents = result.get('bag', result)
+            if isinstance(bag_contents, dict):
+                delta.update(bag_contents)
+            
             delta['_is_init'] = True
             delta['_status'] = 'STARTED'
             # 🌿 [Pointer Strategy] Manifest extraction for Init
