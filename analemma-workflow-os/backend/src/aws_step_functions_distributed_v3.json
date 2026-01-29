@@ -125,7 +125,8 @@
         "Payload.$": "$"
       },
       "ResultSelector": {
-        "bag.$": "$.Payload.state_data"
+        "bag.$": "$.Payload.state_data",
+        "next_action.$": "$.Payload.next_action"
       },
       "ResultPath": "$.state_data",
       "Retry": [
@@ -536,12 +537,10 @@
     "ExecuteSegment": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🎯 [Standardized] 단일 객체로 페이로드 전달",
+      "Comment": "🎯 [Standardized] bag 내용물을 직접 전달",
       "Parameters": {
         "FunctionName": "${ExecuteSegmentArn}",
-        "Payload": {
-          "state_data.$": "$.state_data.bag"
-        }
+        "Payload.$": "$.state_data.bag"
       },
       "ResultSelector": {
         "result.$": "$.Payload"
@@ -921,7 +920,7 @@
               "execution_id.$": "$$.Execution.Id",
               "ownerId.$": "$.state_data.bag.ownerId",
               "workflowId.$": "$.state_data.bag.workflowId",
-              "final_state_s3_path.$": "$.state_data.bag.state_s3_path",
+              "final_state.$": "$.state_data.bag",
               "total_segments.$": "$.state_data.bag.total_segments",
               "loop_counter.$": "$.state_data.bag.loop_counter",
               "timestamp.$": "$$.State.EnteredTime"
@@ -939,7 +938,7 @@
         "execution_id.$": "$$.Execution.Id",
         "ownerId.$": "$.state_data.bag.ownerId",
         "workflowId.$": "$.state_data.bag.workflowId",
-        "final_state_s3_path.$": "$.state_data.bag.state_s3_path",
+        "final_state.$": "$.state_data.bag",
         "total_segments.$": "$.state_data.bag.total_segments",
         "loop_counter.$": "$.state_data.bag.loop_counter",
         "distributed_execution": true

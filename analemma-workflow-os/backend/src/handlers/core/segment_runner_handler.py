@@ -70,9 +70,10 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 logger.error(f"🚨 Failed to convert total_segments: {e}, raw_value={raw_total}")
                 result['total_segments'] = 1
             
-            # 🛡️ [v2.5] threshold도 result에 포함 (디버깅용)
+            # 🛡️ [v3.3] threshold 안전 추출 (AttributeError 방지)
+            # service.threshold 속성이 없을 수 있으므로 getattr 사용
             if 'state_size_threshold' not in result:
-                result['state_size_threshold'] = service.threshold
+                result['state_size_threshold'] = getattr(service, 'threshold', 180)
         
         logger.info("✅ Segment Runner finished successfully.")
         return result
@@ -86,15 +87,40 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "error_type": type(e).__name__
         }
         
-        # 🛡️ [P0 Fix] total_segments 안전 추출 - TypeError 방지
-        p_map = event.get('partition_map', [])
+        # 🛡️ [v3.3] total_segments 추출 로직 강화 (S3 포인터 대응)
+        # 우선순위: event.total_segments > partition_map 길이 > 기본값 유지
         raw_total = event.get('total_segments')
-        if raw_total is not None and isinstance(raw_total, (int, float)):
-            safe_total_segments = max(1, int(raw_total))
-        elif isinstance(p_map, list) and p_map:
-            safe_total_segments = len(p_map)
+        p_map = event.get('partition_map')
+        
+        # 1. 숫자로 변환 가능한 경우
+        if raw_total is not None:
+            try:
+                if isinstance(raw_total, (int, float)):
+                    safe_total_segments = max(1, int(raw_total))
+                elif isinstance(raw_total, str) and raw_total.strip().isdigit():
+                    safe_total_segments = max(1, int(raw_total.strip()))
+                else:
+                    safe_total_segments = None
+            except (TypeError, ValueError):
+                safe_total_segments = None
         else:
+            safe_total_segments = None
+        
+        # 2. partition_map이 실제 리스트인 경우
+        if safe_total_segments is None and isinstance(p_map, list) and p_map:
+            safe_total_segments = len(p_map)
+        
+        # 3. 최후의 보루: S3 포인터만 있거나 완전히 없는 경우
+        # Step Functions가 조기 종료하지 않도록 1로 설정
+        # (실제 total_segments는 state_data.bag에 보존되어야 함)
+        if safe_total_segments is None:
             safe_total_segments = 1
+            # partition_map_s3_path가 있으면 경고 로깅
+            if event.get('partition_map_s3_path'):
+                logger.warning(
+                    f"🛡️ [v3.3] total_segments unknown (partition_map offloaded to S3). "
+                    f"Using fallback=1. This may cause premature workflow termination."
+                )
         
         return {
             "status": "FAILED",
@@ -113,11 +139,17 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "segment_id": event.get('segment_id', 0)
         }
 
-# --- Legacy Helper Imports Preservation ---
-# To avoid breaking other files that import from here during transition
-# (though ideally they should import from src.services now)
-from src.services.state.state_manager import StateManager
-from src.services.workflow.repository import WorkflowRepository
-# We re-export run_workflow from main to keep interface if used as lib
-from src.handlers.core.main import run_workflow, partition_workflow, _build_segment_config
+# --- Legacy Helper Imports REMOVED (v3.3) ---
+# 🚨 [WARNING] 아래 임포트는 Circular Import 위험으로 제거되었습니다.
+# 필요한 경우 함수 내부에서 Local Import를 사용하세요.
+#
+# REMOVED:
+#   from src.services.state.state_manager import StateManager
+#   from src.services.workflow.repository import WorkflowRepository
+#   from src.handlers.core.main import run_workflow, partition_workflow, _build_segment_config
+#
+# 대안: 함수 내부에서 로컬 임포트 사용
+# def some_function():
+#     from src.services.state.state_manager import StateManager
+#     ...
 

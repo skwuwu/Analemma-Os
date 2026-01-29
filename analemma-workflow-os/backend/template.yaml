@@ -566,6 +566,9 @@ Resources:
           # 🗂️ [S3 Offload] State offloading for large payloads (>256KB)
           SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
           WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          # 🔧 [Fix] USC가 state_data_manager 모듈 import 시 필요
+          STATE_STORAGE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          MAX_PAYLOAD_SIZE_KB: "200"
           STREAM_INLINE_THRESHOLD_BYTES: "200000"  # 200KB threshold (safer than 250KB)
       Policies:
         - DynamoDBReadPolicy:

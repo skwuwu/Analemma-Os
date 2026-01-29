@@ -54,13 +54,15 @@ logger = Logger(
 s3_client = boto3.client('s3')
 cloudwatch_client = boto3.client('cloudwatch')
 
-# Environment variables
-# Environment variables
-S3_BUCKET = os.environ.get('STATE_STORAGE_BUCKET')
+# Environment variables (STATE_STORAGE_BUCKET → WORKFLOW_STATE_BUCKET → SKELETON_S3_BUCKET fallback)
+S3_BUCKET = (
+    os.environ.get('STATE_STORAGE_BUCKET') or 
+    os.environ.get('WORKFLOW_STATE_BUCKET') or 
+    os.environ.get('SKELETON_S3_BUCKET')
+)
 if not S3_BUCKET:
-    logger.error("[CRITICAL] STATE_STORAGE_BUCKET env var is NOT set! Offloading will fail.")
+    logger.warning("[WARN] No S3 bucket env var set (STATE_STORAGE_BUCKET/WORKFLOW_STATE_BUCKET/SKELETON_S3_BUCKET). S3 offloading disabled.")
 
-MAX_PAYLOAD_SIZE_KB = int(os.environ.get('MAX_PAYLOAD_SIZE_KB', '200'))
 MAX_PAYLOAD_SIZE_KB = int(os.environ.get('MAX_PAYLOAD_SIZE_KB', '200'))
 
 
@@ -74,6 +76,31 @@ def calculate_payload_size(data: Dict[str, Any]) -> int:
     except Exception as e:
         logger.warning(f"Failed to calculate payload size: {e}")
         return 0
+
+
+def quick_size_check(data: Any) -> int:
+    """
+    🚀 [Perf] JSON 직렬화 없이 대략적인 크기 측정 (Bytes)
+    
+    O(N^2) 문제 방지: 매번 json.dumps() 호출 대신 근사치 먼저 계산.
+    임계치 초과 예상 시에만 정밀 계산 수행.
+    
+    Returns:
+        대략적인 크기 (KB)
+    """
+    if data is None:
+        return 0
+    if isinstance(data, (str, bytes)):
+        return len(data) // 1024
+    if isinstance(data, (int, float, bool)):
+        return 0  # 무시할 수 있는 크기
+    if isinstance(data, (list, dict)):
+        # 문자열 변환 근사치 (정밀하지 않음)
+        try:
+            return len(str(data)) // 1024
+        except:
+            return 0
+    return 0
 
 
 def compress_data(data: Any) -> str:
@@ -262,7 +289,10 @@ CONTROL_FIELDS_NEVER_OFFLOAD = {
 # Lambda 내부 캐시 (Cold Start 동안 유지)
 _s3_cache: Dict[str, Any] = {}
 _cache_timestamps: Dict[str, float] = {}
+_cache_sizes: Dict[str, int] = {}  # 🛡️ [OOM Guard] 각 항목 크기 추적
 CACHE_TTL_SECONDS = 300  # 5분
+CACHE_MAX_TOTAL_MB = 50  # 🛡️ [OOM Guard] 총 캐시 용량 제한
+CACHE_MAX_ITEM_MB = 5    # 🛡️ [OOM Guard] 개별 항목 크기 제한
 
 
 def cached_load_from_s3(s3_path: str) -> Any:
@@ -271,6 +301,8 @@ def cached_load_from_s3(s3_path: str) -> Any:
     
     동일한 S3 경로를 반복 요청할 때 네트워크 비용 감소.
     Lambda 콜드 스타트 동안 캐시 유지 (5분 TTL)
+    
+    🛡️ [OOM Guard] 총 캐시 용량 50MB, 개별 5MB 제한
     """
     import time
     
@@ -289,20 +321,49 @@ def cached_load_from_s3(s3_path: str) -> Any:
             # TTL 만료 - 캐시 제거
             del _s3_cache[s3_path]
             del _cache_timestamps[s3_path]
+            if s3_path in _cache_sizes:
+                del _cache_sizes[s3_path]
     
     # S3에서 로드
     data = load_from_s3(s3_path)
     
     if data is not None:
-        # 캐시에 저장 (최대 20개 항목만 유지)
+        # 🛡️ [OOM Guard] 크기 체크
+        try:
+            data_size_mb = len(json.dumps(data, default=str).encode('utf-8')) / (1024 * 1024)
+        except:
+            data_size_mb = 0
+        
+        # 개별 항목 크기 제한
+        if data_size_mb > CACHE_MAX_ITEM_MB:
+            logger.warning(f"[OOM Guard] Skipping cache for {s3_path}: {data_size_mb:.2f}MB > {CACHE_MAX_ITEM_MB}MB limit")
+            return data
+        
+        # 총 캐시 용량 계산
+        total_cache_mb = sum(_cache_sizes.values()) / (1024 * 1024)
+        
+        # 용량 초과 시 가장 오래된 항목 제거
+        while total_cache_mb + data_size_mb > CACHE_MAX_TOTAL_MB and _s3_cache:
+            oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
+            removed_size = _cache_sizes.get(oldest_key, 0)
+            del _s3_cache[oldest_key]
+            del _cache_timestamps[oldest_key]
+            if oldest_key in _cache_sizes:
+                del _cache_sizes[oldest_key]
+            total_cache_mb -= removed_size / (1024 * 1024)
+            logger.debug(f"[OOM Guard] Evicted {oldest_key} to free cache space")
+        
+        # 캐시에 저장 (최대 20개 항목)
         if len(_s3_cache) >= 20:
-            # 가장 오래된 항목 제거
             oldest_key = min(_cache_timestamps, key=_cache_timestamps.get)
             del _s3_cache[oldest_key]
             del _cache_timestamps[oldest_key]
+            if oldest_key in _cache_sizes:
+                del _cache_sizes[oldest_key]
         
         _s3_cache[s3_path] = data
         _cache_timestamps[s3_path] = current_time
+        _cache_sizes[s3_path] = int(data_size_mb * 1024 * 1024)
     
     return data
 
@@ -348,7 +409,12 @@ def optimize_state_history(state_history: list, idempotency_key: str, max_entrie
 
 
 def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) -> Tuple[Dict[str, Any], bool]:
-    """Optimize current state by moving large fields to S3"""
+    """
+    Optimize current state by moving large fields to S3
+    
+    🚀 [v3.3 Perf] O(N^2) 방지: quick_size_check로 근사치 먼저 계산
+    🛡️ [v3.3 Guard] 이미 오프로딩된 포인터 재처리 방지
+    """
     if not current_state:
         return current_state, False
     
@@ -361,6 +427,10 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
     optimized_state = current_state.copy()
     s3_offloaded = False
     
+    # 🚀 [Perf] 전체 크기가 작으면 최적화 스킵
+    if total_size_kb < 30:
+        return optimized_state, False
+    
     # Strategy 1: Individual Field Offloading
     # Iterate over ALL fields, not just a hardcoded list
     for field, field_data in list(optimized_state.items()):
@@ -368,11 +438,23 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
         if field_data is None or isinstance(field_data, (bool, int, float)):
             continue
             
-        # Skip already offloaded fields
-        if isinstance(field_data, dict) and field_data.get('__s3_offloaded'):
+        # 🛡️ [v3.3] Skip already offloaded fields (pointer reprocessing prevention)
+        if isinstance(field_data, dict):
+            # __s3_offloaded 플래그 체크
+            if field_data.get('__s3_offloaded'):
+                continue
+            # s3_reference/history_archive 타입 체크 (포인터 재오프로딩 방지)
+            if field_data.get('type') in ('s3_reference', 'history_archive', 'compressed', 'error_truncated'):
+                continue
+        
+        # 🚀 [Perf] quick_size_check로 근사치 먼저 계산 (JSON 직렬화 회피)
+        approx_size_kb = quick_size_check(field_data)
+        
+        # 근사치가 20KB 미만이면 스킵 (안전 마진)
+        if approx_size_kb < 20:
             continue
-            
-        # Helper to check field size
+        
+        # 근사치가 임계치 근처일 때만 정밀 계산
         try:
             field_size = calculate_payload_size({field: field_data})
         except:
@@ -442,123 +524,39 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
 
 
 def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Main function to update and compress state data"""
+    """
+    Main function to update and compress state data
+    
+    🛡️ [v3.3] 레거시 호환성 래퍼 - USC로 위임
+    
+    문제점: 이전 버전은 필드를 하드코딩하여 재구성했음
+    - 새 필드 추가 시 누락 위험 (Logic Drift)
+    - "Unified Pipe" 원칙 위배
+    
+    해결: universal_sync_core에 위임하여 단일 파이프 유지
+    """
     state_data = event.get('state_data', {})
     execution_result = event.get('execution_result', {})
-    max_payload_size_kb = event.get('max_payload_size_kb', MAX_PAYLOAD_SIZE_KB)
     
-    # Extract key information
-    idempotency_key = state_data.get('idempotency_key', 'unknown')
+    # 🎯 USC로 위임 - 단일 파이프 원칙
+    result = universal_sync_core(
+        base_state=state_data,
+        new_result={'execution_result': execution_result},
+        context={'action': 'sync'}
+    )
     
-    # Update state data with execution result
-    updated_state_data = {
-        'light_config': state_data.get('light_config'),
-        'workflow_config_s3_path': state_data.get('workflow_config_s3_path'),
-        'state_s3_path': execution_result.get('final_state_s3_path', state_data.get('state_s3_path')),
-        'state_history': execution_result.get('new_history_logs', state_data.get('state_history', [])),
-        'ownerId': state_data.get('ownerId'),
-        'workflowId': state_data.get('workflowId'),
-        'segment_to_run': state_data.get('segment_to_run'),
-        'idempotency_key': idempotency_key,
-        'quota_reservation_id': state_data.get('quota_reservation_id'),
-        'total_segments': state_data.get('total_segments'),
-        'partition_map': state_data.get('partition_map'),
-        # [FIX] Add missing fields for Step Functions loop and Distributed Map
-        'partition_map_s3_path': state_data.get('partition_map_s3_path'),
-        # 🚨 [Critical] Distributed Map Manifest Fields
-        'segment_manifest': state_data.get('segment_manifest'),
-        'segment_manifest_s3_path': state_data.get('segment_manifest_s3_path'),
-        
-        'distributed_mode': state_data.get('distributed_mode'),
-        'distributed_strategy': state_data.get('distributed_strategy'),
-        'max_concurrency': state_data.get('max_concurrency'),
-        
-        # 🚨 [Critical] Statistics Fields for Scenario J
-        'llm_segments': state_data.get('llm_segments'),
-        'hitp_segments': state_data.get('hitp_segments'),
-        
-        # [Fix] Preserve input & pointers during sync to prevent Data Loss
-        'input': state_data.get('input'),
-        'input_s3_path': state_data.get('input_s3_path'),
-        
-        'state_durations': state_data.get('state_durations'),
-        'last_update_time': state_data.get('last_update_time'),
-        'start_time': state_data.get('start_time'),
-        'max_loop_iterations': int(state_data.get('max_loop_iterations', 100)),
-        'max_branch_iterations': int(state_data.get('max_branch_iterations', 100)),
-        'loop_counter': int(state_data.get('loop_counter', 0))
-    }
-
+    updated_state_data = result.get('state_data', {})
     
-    # Calculate initial payload size
-    initial_size_kb = calculate_payload_size(updated_state_data)
-    logger.info(f"Initial payload size: {initial_size_kb}KB")
+    # 레거시 호환성: CloudWatch 메트릭 발송
+    initial_size_kb = calculate_payload_size(state_data)
+    final_size_kb = updated_state_data.get('payload_size_kb', calculate_payload_size(updated_state_data))
     
-    compression_applied = False
-    s3_offloaded = False
-    
-    # If payload is too large, apply optimizations
-    # [Fix] ALWAYS optimize current state to catch large individual fields early
-    # regardless of total size. This keeps state lean.
-    if updated_state_data.get('current_state'):
-        optimized_state, state_s3_offloaded = optimize_current_state(
-            updated_state_data['current_state'], 
-            idempotency_key
-        )
-        updated_state_data['current_state'] = optimized_state
-        if state_s3_offloaded:
-            s3_offloaded = True
-
-    if initial_size_kb > max_payload_size_kb:
-        logger.info(f"Payload size ({initial_size_kb}KB) exceeds limit ({max_payload_size_kb}KB), applying further optimizations")
-        
-        # 1. Optimize state history
-        if updated_state_data.get('state_history'):
-            optimized_history, history_s3_path = optimize_state_history(
-                updated_state_data['state_history'], 
-                idempotency_key=idempotency_key,
-                max_entries=30
-            )
-            updated_state_data['state_history'] = optimized_history
-            if history_s3_path:
-                compression_applied = True
-        
-        # 2. [Already done above] Optimize current state
-        # (Moved outside this block to run unconditionally)
-        
-        # 3. If still too large, compress workflow_config
-        final_size_kb = calculate_payload_size(updated_state_data)
-        if final_size_kb > max_payload_size_kb and updated_state_data.get('workflow_config'):
-            try:
-                compressed_config = compress_data(updated_state_data['workflow_config'])
-                updated_state_data['workflow_config'] = {
-                    "type": "compressed",
-                    "data": compressed_config,
-                    "compressed_at": datetime.now(timezone.utc).isoformat()
-                }
-                compression_applied = True
-                logger.info("Applied compression to workflow_config")
-            except Exception as e:
-                logger.warning(f"Failed to compress workflow_config: {e}")
-    
-    # Final size calculation
-    final_size_kb = calculate_payload_size(updated_state_data)
-    
-    # Add metadata
-    updated_state_data['payload_size_kb'] = final_size_kb
-    updated_state_data['compression_applied'] = compression_applied
-    updated_state_data['s3_offloaded'] = s3_offloaded
-    updated_state_data['last_optimization'] = datetime.now(timezone.utc).isoformat()
-    
-    logger.info(f"Final payload size: {final_size_kb}KB (compression: {compression_applied}, s3_offload: {s3_offloaded})")
-    
-    # Send CloudWatch metrics
     _send_cloudwatch_metrics(
         initial_size_kb=initial_size_kb,
         final_size_kb=final_size_kb,
-        compression_applied=compression_applied,
-        s3_offloaded=s3_offloaded,
-        idempotency_key=idempotency_key
+        compression_applied=updated_state_data.get('compression_applied', False),
+        s3_offloaded=updated_state_data.get('s3_offloaded', False),
+        idempotency_key=state_data.get('idempotency_key', 'unknown')
     )
     
     return updated_state_data
@@ -898,6 +896,7 @@ def create_snapshot(event: Dict[str, Any]) -> Dict[str, Any]:
     - Post-Snapshot: MAP 실행 후 최종 상태 기록
     
     v3.2: 포인터 모드 자동 감지 - state_s3_path 존재 시 경량 스냅샷 생성
+    v3.3: 🛡️ S3_BUCKET 변수 통일 (버킷 불일치 방지)
     
     Returns:
         state_data: 스냅샷 경로가 추가된 상태
@@ -909,6 +908,16 @@ def create_snapshot(event: Dict[str, Any]) -> Dict[str, Any]:
     idempotency_key = state_data.get('idempotency_key', 'unknown')
     
     updated_state = state_data.copy()
+    
+    # 🛡️ [v3.3] S3_BUCKET 통일 - 버킷 불일치 방지
+    snapshot_bucket = S3_BUCKET
+    if not snapshot_bucket:
+        logger.error("[CRITICAL] S3_BUCKET not configured for snapshots!")
+        return {
+            'state_data': updated_state,
+            'snapshot_s3_path': None,
+            'error': 'S3_BUCKET not configured'
+        }
     
     try:
         # 스냅샷 ID 생성
@@ -955,18 +964,17 @@ def create_snapshot(event: Dict[str, Any]) -> Dict[str, Any]:
                 'is_pointer_only': False
             }
         
-        # S3에 스냅샷 저장
-        bucket = os.environ.get('STATE_BUCKET', 'analemma-state')
+        # S3에 스냅샷 저장 - 통일된 버킷 사용
         snapshot_key = f"snapshots/{execution_id}/{snapshot_type}_{timestamp}.json"
         
         s3_client.put_object(
-            Bucket=bucket,
+            Bucket=snapshot_bucket,
             Key=snapshot_key,
             Body=json.dumps(snapshot_data, ensure_ascii=False, default=str),
             ContentType='application/json'
         )
         
-        snapshot_s3_path = f"s3://{bucket}/{snapshot_key}"
+        snapshot_s3_path = f"s3://{snapshot_bucket}/{snapshot_key}"
         
         # 상태에 스냅샷 경로 추가
         if snapshot_type == 'pre':

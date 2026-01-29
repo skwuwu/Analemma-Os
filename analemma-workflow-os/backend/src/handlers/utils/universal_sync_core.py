@@ -77,6 +77,12 @@ def _get_s3_bucket():
             os.environ.get('STATE_STORAGE_BUCKET') or
             ''
         )
+        # 🛡️ [Guard] Fail-fast if no bucket configured
+        if not _S3_BUCKET:
+            _get_logger().error(
+                "[CRITICAL] No S3 bucket configured! "
+                "Set WORKFLOW_STATE_BUCKET, S3_BUCKET, or STATE_STORAGE_BUCKET env var."
+            )
     return _S3_BUCKET
 
 
@@ -481,6 +487,15 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['segment_to_run'] = 0
             delta['_status'] = payload.get('status', 'CONTINUE')
             
+            # 🔑 [Critical Fix] Merge final_state.current_state into delta
+            # SegmentRunner stores execution results in final_state.current_state
+            # This must be merged into state_data for subsequent segments
+            final_state = payload.get('final_state')
+            if isinstance(final_state, dict):
+                current_state = final_state.get('current_state')
+                if isinstance(current_state, dict):
+                    delta['current_state'] = current_state
+            
         elif action == 'aggregate_branches':
             # 병렬 브랜치 결과 (포인터 배열)
             pointers = result.get('parallel_results', result.get('branch_pointers', []))
@@ -498,14 +513,21 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
             
             # 🔑 [Critical] Extract bag contents and merge into delta
             # InitializeStateData passes {'bag': payload}, we need to extract payload
-            bag_contents = result.get('bag', result)
+            # 🛡️ [Guard] bag이 None이거나 없는 경우 result 자체를 사용
+            bag_contents = result.get('bag') if isinstance(result, dict) else None
+            if bag_contents is None:
+                # bag 키가 없거나 값이 None인 경우 result 자체 사용
+                bag_contents = result if isinstance(result, dict) else {}
+            
             if isinstance(bag_contents, dict):
                 delta.update(bag_contents)
+            else:
+                _get_logger().warning(f"[Init] bag_contents is not dict: {type(bag_contents)}")
             
             delta['_is_init'] = True
             delta['_status'] = 'STARTED'
             # 🌿 [Pointer Strategy] Manifest extraction for Init
-            if result.get('segment_manifest_s3_path'):
+            if isinstance(result, dict) and result.get('segment_manifest_s3_path'):
                  delta['segment_manifest_s3_path'] = result['segment_manifest_s3_path']
             
         else:
@@ -930,13 +952,16 @@ def _compute_next_action(
     모든 액션의 next_action을 단일 로직으로 결정합니다.
     
     탄생 (init): 'STARTED' 반환
+    
+    🛡️ [v3.3] 타입 안전성 강화 - TypeError 방지
     """
     # 탄생 (init) - 시작 상태
     if action == 'init' or delta.get('_is_init'):
         return 'STARTED'
     
-    # delta에서 상태 추출
-    status = delta.get('_status', 'CONTINUE')
+    # delta에서 상태 추출 (문자열 정규화)
+    raw_status = delta.get('_status', 'CONTINUE')
+    status = str(raw_status).upper() if raw_status is not None else 'CONTINUE'
     
     # 명시적 실패/중단 상태
     if status in ('FAILED', 'HALTED', 'SIGKILL'):
@@ -947,24 +972,34 @@ def _compute_next_action(
         return 'COMPLETE'
     
     # HITP 대기
-    if status == 'PAUSED_FOR_HITP':
+    if status in ('PAUSED_FOR_HITP', 'PAUSE'):
         return 'PAUSED_FOR_HITP'
     
     # Distributed 전체 실패
     if delta.get('_aggregation_complete'):
         failed = delta.get('_failed_segments', [])
-        total = delta.get('distributed_chunk_summary', {}).get('total', 0)
+        chunk_summary = delta.get('distributed_chunk_summary')
+        total = chunk_summary.get('total', 0) if isinstance(chunk_summary, dict) else 0
         if failed and len(failed) == total:
             return 'FAILED'
     
     # 다음 세그먼트 없으면 완료
     if delta.get('segment_to_run') is None and status == 'CONTINUE':
-        # segment_to_run이 명시적으로 설정되지 않았고 CONTINUE면
-        # 완료 여부는 상태의 segment_to_run과 total_segments 비교
-        current_segment = state.get('segment_to_run', 0)
-        total_segments = state.get('total_segments')
-        if total_segments and current_segment >= total_segments:
-            return 'COMPLETE'
+        # 🛡️ [Guard] 안전한 숫자 비교 - TypeError 방지
+        try:
+            current_segment = int(state.get('segment_to_run', 0) or 0)
+            total_segments_raw = state.get('total_segments')
+            
+            if total_segments_raw is not None:
+                total_segments = int(total_segments_raw)
+                if current_segment >= total_segments:
+                    return 'COMPLETE'
+        except (ValueError, TypeError) as e:
+            _get_logger().warning(
+                f"[_compute_next_action] Invalid segment numbers: "
+                f"segment_to_run={state.get('segment_to_run')}, "
+                f"total_segments={state.get('total_segments')}. Error: {e}. Defaulting to CONTINUE."
+            )
     
     return 'CONTINUE'
 

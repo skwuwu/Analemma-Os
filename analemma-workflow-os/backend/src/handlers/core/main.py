@@ -1981,8 +1981,9 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     logger.warning(f"Quality Kernel check failed for node {node_id}: {qk_error}")
                     kernel_quality_result = {"error": str(qk_error)}
             
-            # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
-            raw_output = {out_key: output_value, f"{node_id}_meta": meta, "step_history": new_history, "usage": usage}
+            # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
+            # 사용자 코드가 생성한 output_value만 검증 - 커널 메타데이터는 검증 후 추가
+            user_output = {out_key: output_value}
             
             # ═══════════════════════════════════════════════════════════════════════
             # Thinking Mode Output: Extract thinking process and add to state
@@ -1991,15 +1992,22 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 thinking_data = resp["metadata"].get("thinking")
                 if thinking_data:
                     # Add thinking output to state with dedicated key
-                    raw_output[f"{node_id}_thinking"] = thinking_data
+                    user_output[f"{node_id}_thinking"] = thinking_data
                     logger.info(f"🧠 [Thinking Mode] Added {len(thinking_data)} thinking steps to state key: {node_id}_thinking")
             
-            # Quality Kernel 결과 추가
+            # Quality Kernel 결과 추가 (사용자 출력에 포함 - 검증 대상)
             if kernel_quality_result:
-                raw_output["_kernel_quality_check"] = kernel_quality_result
-                raw_output["_kernel_action"] = kernel_quality_result.get("action", "PASS")
+                user_output["_kernel_quality_check"] = kernel_quality_result
+                user_output["_kernel_action"] = kernel_quality_result.get("action", "PASS")
             
-            validated_output = _validate_output_keys(raw_output, node_id)
+            # 사용자 출력만 검증 (커널 메타데이터 제외)
+            validated_output = _validate_output_keys(user_output, node_id)
+            
+            # 🛡️ [Kernel Metadata] 검증 후 커널 메타데이터 추가 (Reserved Keys이지만 커널이 관리)
+            validated_output[f"{node_id}_meta"] = meta
+            validated_output["step_history"] = new_history
+            validated_output["usage"] = usage
+            
             # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
             return validate_state_with_schema(validated_output, node_id)
             
@@ -2568,19 +2576,21 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     if error:
         log_entry["error"] = error
     
-    # Prepare output
-    output = {output_key: result}
+    # Prepare USER output (excluding kernel metadata)
+    user_output = {output_key: result}
     
+    # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
+    validated_output = _validate_output_keys(user_output, node_id)
+    
+    # 🛡️ [Kernel Metadata] 검증 후 커널이 관리하는 메타데이터 추가
     # Append to skill execution log (uses Annotated accumulator)
     current_log = exec_state.get("skill_execution_log", [])
-    output["skill_execution_log"] = current_log + [log_entry]
+    validated_output["skill_execution_log"] = current_log + [log_entry]
     
-    # Update step history
+    # Update step history (커널 관리 필드)
     current_history = exec_state.get("step_history", [])
-    output["step_history"] = current_history + [f"{node_id}:skill_executor:{skill_ref}.{tool_call}"]
+    validated_output["step_history"] = current_history + [f"{node_id}:skill_executor:{skill_ref}.{tool_call}"]
     
-    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
-    validated_output = _validate_output_keys(output, node_id)
     # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
     return validate_state_with_schema(validated_output, node_id)
 
@@ -2961,8 +2971,16 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     })
     final_updates['estimated_cost_usd'] = estimated_cost
     
-    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
+    # 🛡️ [Kernel Metadata] step_history를 분리하여 검증 후 추가
+    preserved_step_history = final_updates.pop("step_history", None)
+    
+    # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
     validated_output = _validate_output_keys(final_updates, node_id)
+    
+    # 🛡️ [Kernel Metadata] 검증 후 step_history 복원 (커널 관리 필드)
+    if preserved_step_history is not None:
+        validated_output["step_history"] = preserved_step_history
+    
     # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
     return validate_state_with_schema(validated_output, node_id)
 
@@ -3467,7 +3485,11 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     if not media_inputs:
         logger.warning(f"No media sources resolved for vision node {node_id}")
         out_key = vision_config.get("output_key", f"{node_id}_output")
-        return {out_key: "[Error: No media provided]", "step_history": state.get("step_history", []) + [f"{node_id}:no_media"]}
+        # 🛡️ 커널 내부 에러 처리 - _validate_output_keys 거치지 않음 (Reserved key 직접 사용 허용)
+        return {
+            out_key: "[Error: No media provided]", 
+            "step_history": state.get("step_history", []) + [f"{node_id}:no_media"]
+        }
     
     # 3. Render prompt
     prompt_template = vision_config.get("prompt_content") or vision_config.get("user_prompt_template", "이 컨텐츠를 분석해주세요.")
@@ -3530,7 +3552,8 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
         
         out_key = vision_config.get("output_key", f"{node_id}_output")
         
-        raw_output = {
+        # 🛡️ [Guard] Layer 1: USER 출력만 검증 (커널 메타데이터 제외)
+        user_output = {
             out_key: text,
             f"{node_id}_meta": {
                 "model": model_name,
@@ -3539,18 +3562,21 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
                 "total_media": len(media_inputs),
                 "token_usage": metadata.get("token_usage", {}),
                 "latency_ms": metadata.get("latency_ms", 0)
-            },
-            "step_history": new_history
+            }
         }
         
-        # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
-        validated_output = _validate_output_keys(raw_output, node_id)
+        validated_output = _validate_output_keys(user_output, node_id)
+        
+        # 🛡️ [Kernel Metadata] 검증 후 step_history 추가 (커널 관리)
+        validated_output["step_history"] = new_history
+        
         # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
         return validate_state_with_schema(validated_output, node_id)
         
     except Exception as e:
         logger.exception(f"Vision runner failed for node {node_id}: {e}")
         out_key = vision_config.get("output_key", f"{node_id}_output")
+        # 🛡️ 커널 내부 에러 처리 - _validate_output_keys 거치지 않음
         return {
             out_key: f"[Vision Error: {str(e)}]",
             "step_history": state.get("step_history", []) + [f"{node_id}:error"]
@@ -3680,17 +3706,17 @@ def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> D
         else:
             raise
     
-    # Build output
+    # Build USER output (excluding kernel metadata)
     output_key = inner_config.get("output_key") or f"{node_id}_result"
+    user_output = {output_key: result}
     
-    output = {output_key: result}
+    # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
+    validated_output = _validate_output_keys(user_output, node_id)
     
-    # Update step history
+    # 🛡️ [Kernel Metadata] 검증 후 커널이 관리하는 step_history 추가
     current_history = state.get("step_history", [])
-    output["step_history"] = current_history + [f"{node_id}:operator_official:{strategy}"]
+    validated_output["step_history"] = current_history + [f"{node_id}:operator_official:{strategy}"]
     
-    # 🛡️ [Guard] Layer 1: Validate output keys (Reserved key check)
-    validated_output = _validate_output_keys(output, node_id)
     # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
     return validate_state_with_schema(validated_output, node_id)
 
