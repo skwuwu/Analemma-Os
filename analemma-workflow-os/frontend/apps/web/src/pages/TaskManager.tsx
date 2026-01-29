@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useCallback, useMemo, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -114,6 +114,7 @@ const StatusBadge = ({ status }: { status: string }) => {
 
 export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const API_BASE = import.meta.env.VITE_API_BASE_URL;
   
   const [searchQuery, setSearchQuery] = useState('');
@@ -186,6 +187,18 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     loadCompletedExecutions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // ✅ 마운트 시 한 번만 실행
+  
+  // Auto-select task from URL parameter
+  useEffect(() => {
+    const taskId = searchParams.get('taskId');
+    if (taskId && !taskManager.isLoading && taskManager.tasks.length > 0) {
+      // Check if task exists in the list
+      const task = taskManager.tasks.find(t => t.task_id === taskId);
+      if (task) {
+        taskManager.selectTask(taskId);
+      }
+    }
+  }, [searchParams, taskManager.tasks, taskManager.isLoading]);
   
   // ExecutionTimeline hook
   const { executionTimelines, fetchExecutionTimeline } = useExecutionTimeline(notifications, API_BASE);

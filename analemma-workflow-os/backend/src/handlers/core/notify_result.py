@@ -309,6 +309,21 @@ def lambda_handler(event, context):
         owner_id = None
         if isinstance(input_obj, dict):
             owner_id = input_obj.get('ownerId')
+        
+        # [v2.2] Fallback: ownerId 누락 시 describe_execution으로 조회
+        if not owner_id and execution_arn:
+            try:
+                sfn_client = boto3.client('stepfunctions')
+                desc = sfn_client.describe_execution(executionArn=execution_arn)
+                desc_input = desc.get('input')
+                if desc_input:
+                    desc_input_obj = json.loads(desc_input)
+                    if isinstance(desc_input_obj, dict):
+                        owner_id = desc_input_obj.get('ownerId')
+                        if owner_id:
+                            logger.info('Retrieved ownerId from describe_execution for %s', execution_arn[:60])
+            except Exception as e:
+                logger.warning('Failed to retrieve ownerId from describe_execution: %s', e)
 
         # Common places clients may include callback_url
         candidates = []

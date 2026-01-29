@@ -1,4 +1,5 @@
 import React, { useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Trash2, BellOff, CheckCheck, Check, AlertCircle, Info, X } from 'lucide-react';
@@ -36,6 +37,7 @@ const NotificationsList: React.FC<Props> = ({
   onMarkAllRead,
   onClearAll
 }) => {
+  const router = useRouter();
   const unreadCount = useMemo(() => notifications.filter(n => !n.read).length, [notifications]);
 
   if (!notifications || notifications.length === 0) {
@@ -109,6 +111,29 @@ const NotificationsList: React.FC<Props> = ({
 
             // Stable key
             const stableId = n.id || `${payload.execution_id || n.execution_id || 'no-id'}-${n.receivedAt}`;
+            
+            // Extract task ID for navigation
+            const taskId = payload.execution_id || n.execution_id;
+            
+            // Handle notification click - navigate to Task Manager
+            const handleNotificationClick = (e: React.MouseEvent) => {
+              // Don't navigate if clicking on action buttons
+              if ((e.target as HTMLElement).closest('button')) {
+                return;
+              }
+              
+              if (taskId) {
+                // Mark as read when navigating
+                if (isUnread) {
+                  onMarkRead(n.id);
+                }
+                // Navigate to Task Manager with selected task
+                router.push(`/task-manager?taskId=${taskId}`);
+              } else {
+                // Fallback to existing onSelect behavior
+                onSelect(taskId || (n.id ? `notification:${n.id}` : null));
+              }
+            };
 
             return (
               <motion.div
@@ -120,7 +145,7 @@ const NotificationsList: React.FC<Props> = ({
                 transition={{ duration: 0.2 }}
               >
                 <Card
-                  onClick={() => onSelect(payload.execution_id || n.execution_id || (n.id ? `notification:${n.id}` : null))}
+                  onClick={handleNotificationClick}
                   className={cn(
                     "group relative cursor-pointer border-slate-100 hover:border-slate-200 transition-all shadow-sm hover:shadow-md active:scale-[0.99] border-l-4 overflow-hidden",
                     isUnread ? "bg-white" : "bg-slate-50/40",
@@ -128,8 +153,14 @@ const NotificationsList: React.FC<Props> = ({
                       isSuccess ? "border-l-green-500" :
                         isRunning ? "border-l-blue-500" : "border-l-slate-200"
                   )}
-                  role="status"
-                  aria-label={`${title}: ${n.message || ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${title}: ${n.message || ''} - Click to view in Task Manager`}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      handleNotificationClick(e as any);
+                    }
+                  }}
                 >
                   <CardContent className="p-4 flex items-start gap-4">
                     {/* Status Icon */}
@@ -187,6 +218,15 @@ const NotificationsList: React.FC<Props> = ({
                           <CheckCheck className="w-4 h-4" />
                         </Button>
                       )}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-8 w-8 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg"
+                        onClick={(e) => { e.stopPropagation(); onRemove(n.id); }}
+                        title="Dismiss notification"
+                      >
+                        <X className="w-4 h-4" />
+                      </Button>
                       <Button
                         variant="ghost"
                         size="icon"
