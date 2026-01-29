@@ -61,6 +61,9 @@ WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+# [v3.11] Unified State Hydration Strategy
+from src.common.state_hydrator import StateHydrator, SmartStateBag
+
 def _calculate_distributed_strategy(
     total_segments: int,
     llm_segments: int,
@@ -320,490 +323,206 @@ def _load_precompiled_partition(owner_id: str, workflow_id: str) -> dict:
 
 def lambda_handler(event, context):
     """
-    Initializes state data.
-    [Priority 1 Optimization] Load pre-compiled partition_map from DB.
-    Fallback: Runtime calculation (maintain backward compatibility)
+    Initializes state data using StateHydrator for strict "SFN Only Sees Pointers" strategy.
     
-    [Subgraph Support] If workflow_config includes subgraphs,
-    DynamicWorkflowBuilder will build recursively.
+    Processing Steps:
+    1. Resolve inputs (workflow_config, partition_map).
+    2. Calculate strategy (distributed vs sequential).
+    3. Initialize SmartStateBag.
+    4. Dehydrate state (Offload large data to S3).
+    5. Return safe payload to Step Functions.
     """
-    logger.info("Initializing state data")
+    logger.info("Initializing state data with StateHydrator strategy")
     
-    # ====================================================================
-    # 🛡️ [v2.6 P0 Fix] 최우선 초기화 - 에러 발생 시에도 필수 필드 보존
-    # Step Functions ASL이 $.total_segments를 참조할 때 null 방지
-    # ====================================================================
+    # 1. State Hydrator Initialization
+    bucket = os.environ.get('WORKFLOW_STATE_BUCKET')
+    # Validate bucket early
+    if not bucket:
+        raw_bucket = os.environ.get('S3_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
+        bucket = raw_bucket.strip() if raw_bucket else None
+    
+    hydrator = StateHydrator(s3_bucket=bucket)
+    
+    # 2. Input Resolution
     raw_input = event.get('input', event)
     if not isinstance(raw_input, dict):
         raw_input = {}
-    
-    # 🛡️ [P0] total_segments 안전 초기화 - try 블록 외부에서 먼저 계산
-    _early_partition_map = raw_input.get('partition_map', [])
-    _safe_total_segments = len(_early_partition_map) if isinstance(_early_partition_map, list) and _early_partition_map else 1
-    
-    # [FIX] 1. Move initialization to top (prevent NameError in S3 Metadata)
-    current_time = int(time.time())
         
-    # [FIX] Explicit variable initialization (prevent UnboundLocalError and Missing Field)
-    # Keys must always exist to prevent errors when SFN references $.field_name
-    partition_map_s3_path = ""
-    manifest_s3_path = ""
-    state_s3_path = ""
-    
-    # 2. Refine config determination priority
-    workflow_config = raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
-    # [Hydration] Check for S3 offloaded config
-    config_s3_path = raw_input.get('test_workflow_config_s3_path') or raw_input.get('workflow_config_s3_path')
-    
     owner_id = raw_input.get('ownerId', "")
     workflow_id = raw_input.get('workflowId', "")
-    idempotency_key = raw_input.get('idempotency_key', "")
-    quota_reservation_id = raw_input.get('quota_reservation_id', "")
+    current_time = int(time.time())
     
-    # [Fix] Extract MOCK_MODE - for simulator E2E testing
-    mock_mode = raw_input.get('MOCK_MODE', 'false')
-
-    # [Hydration] Download config from S3 if offloaded
-    if not workflow_config and config_s3_path:
-        try:
-            logger.info(f"⬇️ [Hydration] Downloading workflow_config from S3: {config_s3_path}")
-            # Parse s3://bucket/key
-            bucket_name = config_s3_path.replace("s3://", "").split("/")[0]
-            key_name = "/".join(config_s3_path.replace("s3://", "").split("/")[1:])
-            
-            s3_client = boto3.client('s3')
-            obj = s3_client.get_object(Bucket=bucket_name, Key=key_name)
-            workflow_config = json.loads(obj['Body'].read().decode('utf-8'))
-            logger.info(f"✅ [Hydration] Config restored ({len(json.dumps(workflow_config))} bytes)")
-        except Exception as e:
-            logger.error(f"❌ [Hydration] Failed to download config from S3: {e}")
-            # If failed, proceed (will try DB or fallback)
+    # 2.1 Load Config & Partition Map
+    # Priority: Input > DB (Precompiled) > Runtime Calc
     
-    # [Robustness Fix] Load from DB if workflow_config missing (when test_config absent)
+    workflow_config = raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
+    partition_map = raw_input.get('partition_map')
+    
+    # DB Loader Fallback
     if not workflow_config and workflow_id and owner_id:
-        logger.info(f"workflow_config missing in input, loading from DB: {workflow_id}")
         db_data = _load_workflow_config(owner_id, workflow_id)
-        if db_data and db_data.get('config'):
+        if db_data:
             workflow_config = db_data.get('config')
-            # Also load partition_map from DB if available
-            if db_data.get('partition_map'):
-                event['_db_partition_map'] = db_data.get('partition_map')
-                event['_db_total_segments'] = db_data.get('total_segments')
-                event['_db_llm_segments'] = db_data.get('llm_segments_count')
-                event['_db_hitp_segments'] = db_data.get('hitp_segments_count')
-        else:
-            logger.warning(f"Workflow not found in DB: {workflow_id}")
-
-    # Set to empty dict if workflow_config still missing to prevent crash
+            # Only use DB partition map if not provided in input
+            if not partition_map: 
+                partition_map = db_data.get('partition_map')
+    
+    # Robustness: Ensure workflow_config is dict
     if not workflow_config:
         workflow_config = {}
-        logger.warning("Proceeding with empty workflow_config (risk of later failure)")
-
-    # [Fix v2] Merge initial_state bidirectionally for test mode
-    # When using test_workflow_config:
-    # - workflow_config.initial_state may have workflow-defined variables (e.g., input_text)
-    # - raw_input.initial_state may have test metadata (e.g., e2e_test_scenario)
-    # Both must be merged, with workflow definition taking precedence for variable values
-    top_level_initial_state = raw_input.get('initial_state', {})
-    workflow_initial_state = workflow_config.get('initial_state', {})
+        logger.warning("Proceeding with empty workflow_config")
     
-    if top_level_initial_state or workflow_initial_state:
-        # Merge: workflow definition first, then overlay test metadata (test metadata can't override workflow vars)
-        merged_initial_state = {**workflow_initial_state, **top_level_initial_state}
-        # But if workflow has explicit variables, those should win (e.g., input_text from workflow definition)
-        # Re-overlay workflow vars to ensure they're not overwritten by empty test metadata
-        for key, value in workflow_initial_state.items():
-            if value is not None and value != "":
-                merged_initial_state[key] = value
-        
-        workflow_config['initial_state'] = merged_initial_state
-        logger.info(f"Merged initial_state (workflow + test metadata): {list(merged_initial_state.keys())}")
-
-    # 3. MOCK_MODE: Force partitioning (prepare for no DB data)
-    if raw_input.get('test_workflow_config'):
-         if not _HAS_PARTITION:
-             logger.warning("MOCK_MODE but partition logic unavailable!")
-         else:
-             logger.info("MOCK_MODE detected: Forcing runtime partition calculation")
-             try:
-                 partition_result = partition_workflow_advanced(workflow_config)
-                 
-                 # 🛡️ [v2.6 P0 Fix] 유령 'code' 타입 박멸 로직
-                 # 상위 데이터 오염을 런타임에서 교정
-                 for seg in partition_result.get('partition_map', []):
-                     if seg is None:
-                         logger.warning("🛡️ [Self-Healing] Skipping None segment in partition_map")
-                         continue
-                     for node in (seg.get('nodes', []) if isinstance(seg, dict) else []):
-                         if isinstance(node, dict) and node.get('type') == 'code':
-                             logger.warning(f"🛡️ [Self-Healing] Aliasing 'code' to 'operator' for node {node.get('id')}")
-                             node['type'] = 'operator'
-                 
-                 # Override raw inputs/event cache with fresh calculation
-                 raw_input['partition_map'] = partition_result.get('partition_map', [])
-                 raw_input['total_segments'] = partition_result.get('total_segments', 0)
-                 raw_input['llm_segments'] = partition_result.get('llm_segments', 0)
-                 raw_input['hitp_segments'] = partition_result.get('hitp_segments', 0)
-                 
-                 # 🛡️ [P0] 조기 계산된 _safe_total_segments 업데이트
-                 _safe_total_segments = max(1, partition_result.get('total_segments', 1))
-                 
-             except Exception as e:
-                 logger.error(f"MOCK_MODE partitioning failed: {e}")
-
-    # 2. Partitioning (priority: input > DB pre-compiled > runtime calculation)
-    partition_map = None
-    total_segments = 0
-    llm_segments = 0
-    hitp_segments = 0
-    
-    # 2a. Use partition_map if already in input (retry/Child Workflow)
-    if raw_input.get('partition_map'):
-        logger.info("Using provided partition_map from input")
-        partition_map = raw_input.get('partition_map')
-        total_segments = raw_input.get('total_segments', len(partition_map))
-        llm_segments = raw_input.get('llm_segments') or 0
-        hitp_segments = raw_input.get('hitp_segments') or 0
-        _safe_total_segments = max(1, total_segments)  # 🛡️ Update safe counter
-    
-    # 2a-1. Use partition_map loaded with config
-    if not partition_map and event.get('_db_partition_map'):
-        logger.info("Using partition_map from DB config load")
-        partition_map = event.get('_db_partition_map')
-        total_segments = event.get('_db_total_segments', len(partition_map) if partition_map else 0)
-        llm_segments = event.get('_db_llm_segments') or 0
-        hitp_segments = event.get('_db_hitp_segments') or 0
-        _safe_total_segments = max(1, total_segments)  # 🛡️ Update safe counter
-    
-    # 2b. Load pre-compiled partition_map from DB (priority 1 optimization)
-    if not partition_map:
-        precompiled = _load_precompiled_partition(owner_id, workflow_id)
-        if precompiled:
-            partition_map = precompiled.get('partition_map')
-            total_segments = precompiled.get('total_segments', len(partition_map) if partition_map else 0)
-            llm_segments = precompiled.get('llm_segments_count') or 0
-            hitp_segments = precompiled.get('hitp_segments_count') or 0
-            _safe_total_segments = max(1, total_segments)  # 🛡️ Update safe counter
-    
-    # 2c. Fallback: Runtime calculation (existing logic, maintain backward compatibility)
-    if not partition_map:
-        if not _HAS_PARTITION:
-            raise RuntimeError("partition_workflow_advanced not available and no pre-compiled partition_map found")
-        
-        logger.info("Calculating partition_map at runtime (fallback)...")
+    # Runtime Partitioning Fallback
+    if not partition_map and _HAS_PARTITION:
+        logger.info("Calculating partition_map at runtime...")
         try:
             partition_result = partition_workflow_advanced(workflow_config)
             partition_map = partition_result.get('partition_map', [])
-            total_segments = partition_result.get('total_segments', 0)
-            llm_segments = partition_result.get('llm_segments', 0)
-            hitp_segments = partition_result.get('hitp_segments', 0)
-            
-            # 🛡️ Update _safe_total_segments after runtime partitioning
-            _safe_total_segments = max(1, total_segments)
-            
-            # 🛡️ [v2.6 P0 Fix] 유령 'code' 타입 박멸 로직
-            for seg in partition_map:
-                if seg is None:
-                    logger.warning("🛡️ [Self-Healing] Skipping None segment in partition_map")
-                    continue
-                for node in (seg.get('nodes', []) if isinstance(seg, dict) else []):
-                    if isinstance(node, dict) and node.get('type') == 'code':
-                        logger.warning(f"🛡️ [Self-Healing] Aliasing 'code' to 'operator' for node {node.get('id')}")
-                        node['type'] = 'operator'
-            
         except Exception as e:
             logger.error(f"Partitioning failed: {e}")
-            raise RuntimeError(f"Failed to partition workflow: {str(e)}")
-
-    # 🚨 [Critical Fix] Recalculate metadata from partition_map if it doesn't match
-    # This handles cases where DB has stale or incorrect metadata
-    # Recalculate if: partition_map exists AND (metadata missing OR doesn't match actual segment types)
-    if partition_map:
-        # Count actual segment types from partition_map
-        actual_llm_count = sum(1 for seg in partition_map if seg and seg.get('type') == 'llm')
-        actual_hitp_count = sum(1 for seg in partition_map if seg and seg.get('type') == 'hitp')
-        
-        # Recalculate if metadata is missing, None, or doesn't match actual counts
-        needs_recalc = (
-            llm_segments is None or 
-            hitp_segments is None or 
-            llm_segments != actual_llm_count or 
-            hitp_segments != actual_hitp_count
+            partition_map = []
+            
+    # Metadata Calculation
+    total_segments = len(partition_map) if partition_map else 0
+    llm_segments = sum(1 for seg in partition_map if seg.get('type') == 'llm') if partition_map else 0
+    hitp_segments = sum(1 for seg in partition_map if seg.get('type') == 'hitp') if partition_map else 0
+    
+    # 3. Strategy Calculation
+    try:
+        distributed_strategy = _calculate_distributed_strategy(
+            total_segments=total_segments,
+            llm_segments=llm_segments,
+            hitp_segments=hitp_segments,
+            partition_map=partition_map or []
         )
-        
-        if needs_recalc:
-            logger.info(f"Recalculating metadata: stored=(llm:{llm_segments}, hitp:{hitp_segments}), actual=(llm:{actual_llm_count}, hitp:{actual_hitp_count})")
-            llm_segments = actual_llm_count
-            hitp_segments = actual_hitp_count
-            total_segments = len(partition_map)
-            _safe_total_segments = max(1, total_segments)
-            logger.info(f"✅ Metadata corrected: llm_segments={llm_segments}, hitp_segments={hitp_segments}, total_segments={total_segments}")
-
-    # 🎯 [Unification Strategy] Create segment_manifest (list of segments to execute)
+    except Exception as e:
+        logger.error(f"Strategy calculation failed: {e}")
+        distributed_strategy = {
+            "strategy": "SAFE",
+            "max_concurrency": 1,
+            "reason": "Strategy calculation failed"
+        }
+    
+    # Concurrency Calculation
+    max_concurrency = distributed_strategy.get('max_concurrency', 1)
+    is_distributed_mode = distributed_strategy['strategy'] in ["MAP_REDUCE", "BATCHED"]
+    
+    # 4. State Bag Construction
+    # We populate the bag with all data that needs to be passed down
+    bag = SmartStateBag({}, hydrator=hydrator)
+    
+    bag['workflow_config'] = workflow_config
+    bag['current_state'] = workflow_config.get('initial_state', {})
+    bag['partition_map'] = partition_map
+    
+    # Metadata
+    bag['ownerId'] = owner_id
+    bag['workflowId'] = workflow_id
+    bag['idempotency_key'] = raw_input.get('idempotency_key', "")
+    bag['quota_reservation_id'] = raw_input.get('quota_reservation_id', "")
+    bag['segment_to_run'] = 0
+    bag['total_segments'] = max(1, total_segments)
+    bag['distributed_mode'] = is_distributed_mode
+    bag['max_concurrency'] = int(max_concurrency)
+    bag['llm_segments'] = llm_segments
+    bag['hitp_segments'] = hitp_segments
+    
+    # [State Bag] Enforce Input Encapsulation
+    # Embed raw input into the bag so it can be offloaded if large
+    bag['input'] = raw_input
+    bag['loop_counter'] = 0
+    bag['max_loop_iterations'] = workflow_config.get('max_loop_iterations', 100)
+    bag['max_branch_iterations'] = workflow_config.get('max_branch_iterations', 100)
+    bag['start_time'] = current_time
+    bag['last_update_time'] = current_time
+    bag['state_durations'] = {}
+    
+    # 5. Segment Manifest & Pointer Strategy
+    # Segment manifest is critical for Map execution.
+    # We offload the FULL manifest to S3, but pass a LIST OF POINTERS to Step Functions
+    # so the Map state can iterate over them.
+    
     segment_manifest = []
-    for idx, segment in enumerate(partition_map):
-        segment_manifest.append({
-            "segment_id": idx,
-            "segment_config": segment,
-            "execution_order": idx,
-            "dependencies": segment.get("dependencies", []),
-            "type": segment.get("type", "normal")
-        })
-    
-    # � [MOVED UP] Hybrid Distributed Strategy Calculation - BEFORE S3 offload decision
-    distributed_strategy = _calculate_distributed_strategy(
-        total_segments=total_segments,
-        llm_segments=llm_segments,
-        hitp_segments=hitp_segments,
-        partition_map=partition_map
-    )
-    
-    logger.info(f"[Distributed Strategy] {distributed_strategy['strategy']}: {distributed_strategy['reason']}")
-    
-    # 🚨 [Critical Fix] Detect distributed mode and offload large data to S3
-    # Check if workflow explicitly sets distributed_mode in initial_state
-    explicit_distributed_mode = workflow_config.get('initial_state', {}).get('distributed_mode')
-    if explicit_distributed_mode is not None:
-        is_distributed_mode = bool(explicit_distributed_mode)
-        logger.info(f"[Distributed Mode] Using explicit value from initial_state: {is_distributed_mode}")
-    else:
-        is_distributed_mode = total_segments > 300  # Distributed mode threshold
-        logger.info(f"[Distributed Mode] Auto-detected based on segment count: {is_distributed_mode} (total_segments={total_segments})")
-    
-    partition_map_for_return = partition_map  # Default: return all
-    
-    # 🚀 [Hybrid Mode Compatibility] MAP_REDUCE/BATCHED 모드에서는 segment_manifest 인라인 유지
-    uses_inline_manifest = distributed_strategy["strategy"] in ("MAP_REDUCE", "BATCHED")
-    
-    # [Payload Safety] Calculate manifest size to prevent inline explosion
-    if DecimalEncoder:
-        manifest_json = json.dumps(segment_manifest, cls=DecimalEncoder, ensure_ascii=False)
-    else:
-        # Fallback: try to convert decimals manually
-        def convert_decimals(obj):
-            if isinstance(obj, dict):
-                return {k: convert_decimals(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_decimals(v) for v in obj]
-            elif hasattr(obj, '__class__') and 'Decimal' in obj.__class__.__name__:
-                return float(obj) if '.' in str(obj) else int(obj)
-            else:
-                return obj
-        
-        converted_manifest = convert_decimals(segment_manifest)
-        manifest_json = json.dumps(converted_manifest, ensure_ascii=False)
-    
-    manifest_size_kb = len(manifest_json.encode('utf-8')) / 1024
-    
-    # If manifest is too large (> 50KB), force offload regardless of strategy
-    if manifest_size_kb > 50:
-        logger.warning(f"Manifest size {manifest_size_kb:.1f}KB exceeds limit. Forcing offload (Override strategy {distributed_strategy['strategy']})")
-        uses_inline_manifest = False
-
-    # AWS Clients
-    s3_client = None
-    bucket = os.environ.get('WORKFLOW_STATE_BUCKET')
-    
-    # Initialize boto3 client only when S3 upload needed
-    if bucket and owner_id and workflow_id:
-        if (len(segment_manifest) > 50 and not uses_inline_manifest) or is_distributed_mode:
-            import boto3
-            s3_client = boto3.client('s3')
-
-    # 1. Manifest Offloading (when exceeding 50 items OR forced by size)
-    if (len(segment_manifest) > 50 or manifest_size_kb > 50) and s3_client and not uses_inline_manifest:
+    if partition_map:
+        for idx, segment in enumerate(partition_map):
+            segment_manifest.append({
+                "segment_id": idx,
+                "segment_config": segment,
+                "execution_order": idx,
+                "dependencies": segment.get("dependencies", []),
+                "type": segment.get("type", "normal")
+            })
+            
+    # Offload Manifest Manually (to get the S3 path for all pointers)
+    manifest_s3_path = ""
+    if hydrator.s3_client and bucket:
         try:
             manifest_key = f"workflow-manifests/{owner_id}/{workflow_id}/segment_manifest.json"
-            # Use pre-calculated json
-            s3_client.put_object(
+            hydrator.s3_client.put_object(
                 Bucket=bucket,
                 Key=manifest_key,
-                Body=manifest_json.encode('utf-8')
+                Body=json.dumps(segment_manifest, default=str),
+                ContentType='application/json'
             )
             manifest_s3_path = f"s3://{bucket}/{manifest_key}"
-            logger.info(f"Segment manifest uploaded to S3: {manifest_s3_path}")
+            logger.info(f"🌿 [State Bag] Segment manifest uploaded: {manifest_s3_path}")
         except Exception as e:
-            logger.warning(f"Failed to upload segment manifest to S3: {e}")
-            # Keep manifest_s3_path as initial value "" on failure
-
-    # 2. Partition Map Offloading (distributed mode)
-    # 🚨 [Critical Fix] Optimize partition_map size in distributed mode
-    # Check size FIRST to determine if we need to enter distributed/offloaded mode
-    if DecimalEncoder:
-        partition_map_json = json.dumps(partition_map, cls=DecimalEncoder, ensure_ascii=False)
+            logger.warning(f"Failed to upload manifest: {e}")
+            
+    # Create Pointers List for ItemProcessor
+    segment_manifest_pointers = []
+    if manifest_s3_path:
+        # Pointers only
+        for idx, seg in enumerate(segment_manifest):
+            segment_manifest_pointers.append({
+                'segment_index': idx,
+                'segment_id': seg.get('segment_id', idx),
+                'segment_type': seg.get('type', 'normal'),
+                'manifest_s3_path': manifest_s3_path,
+                'total_segments': len(segment_manifest)
+            })
     else:
-        # Fallback: try to convert decimals manually
-        def convert_decimals(obj):
-            if isinstance(obj, dict):
-                return {k: convert_decimals(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [convert_decimals(v) for v in obj]
-            elif hasattr(obj, '__class__') and 'Decimal' in obj.__class__.__name__:
-                return float(obj) if '.' in str(obj) else int(obj)
-            else:
-                return obj
-        
-        converted_map = convert_decimals(partition_map)
-        partition_map_json = json.dumps(converted_map, ensure_ascii=False)
-    
-    partition_map_size_kb = len(partition_map_json.encode('utf-8')) / 1024
-    
-    # Offload if segments > 300 OR payload > 100KB (Safety margin for 256KB limit)
-    should_offload_map = is_distributed_mode or partition_map_size_kb > 100
-    
-    if should_offload_map:
-        # Force distributed flag if offloading due to size
-        is_distributed_mode = True
-        
-        logger.info(f"Large payload detected: {total_segments} segments, map size: {partition_map_size_kb:.1f}KB. Forcing offload.")
-        
-        # Offload partition_map larger than 100KB to S3
-        if s3_client:
-            try:
-                partition_map_key = f"workflow-partitions/{owner_id}/{workflow_id}/partition_map.json"
-                s3_client.put_object(
-                    Bucket=bucket,
-                    Key=partition_map_key,
-                    Body=partition_map_json.encode('utf-8'),
-                    ContentType='application/json',
-                    Metadata={
-                        'total_segments': str(total_segments),
-                        'size_kb': str(int(partition_map_size_kb)),
-                        'created_at': str(current_time)
-                    }
-                )
-                
-                partition_map_s3_path = f"s3://{bucket}/{partition_map_key}"
-                logger.info(f"Large partition_map offloaded to S3: {partition_map_s3_path}")
-                
-                # 🚨 [Critical] Exclude partition_map in distributed mode
-                partition_map_for_return = None
-                
-            except Exception as e:
-                logger.warning(f"Failed to offload partition_map to S3: {e}")
-                # Warn and fallback to inline on S3 failure
-                logger.warning(f"Proceeding with inline partition_map ({partition_map_size_kb:.1f}KB)")
-        else:
-            logger.info(f"partition_map size acceptable for inline return: {partition_map_size_kb:.1f}KB")
+        # Fallback to inline (only if S3 failed/missing)
+        segment_manifest_pointers = segment_manifest
 
-    # 3. Initial state configuration
-    current_time = int(time.time())
+    # Add to bag (will be overwritten by pointers in final step)
+    # [Zero-Payload-Limit] Do NOT add full manifest to bag inline. Relies on S3 path.
+    # bag['segment_manifest'] = segment_manifest
+    bag['segment_manifest_s3_path'] = manifest_s3_path
     
-    # Set current_state to null if S3 path exists, otherwise use initial_state
-    initial_state_s3_path = workflow_config.get('initial_state_s3_path')
-    if initial_state_s3_path:
-        # Large payload: Load from S3 (handled by segment_runner)
-        current_state = None
-        state_s3_path = initial_state_s3_path
-        input_value = initial_state_s3_path
-    else:
-        # Inline state
-        current_state = workflow_config.get('initial_state', {})
-        # state_s3_path = "" # Already initialized above
-        input_value = current_state
+    # 6. Dehydrate Final Payload
+    # Force offload large fields to Ensure "SFN Only Sees Pointers"
+    # Added 'input' to forced offload list to prevent Zombie Data
+    force_offload = {'workflow_config', 'partition_map', 'current_state', 'input'}
     
-    # 🚨 [Strategy 2] Always offload workflow_config and current_state to S3
-    # Step Functions will only receive S3 paths, Lambda functions hydrate on demand
-    import boto3
-    s3_client = boto3.client('s3')
-    bucket = os.environ.get('WORKFLOW_STATE_BUCKET')
-    
-    # Upload workflow_config to S3
-    workflow_config_s3_key = f"workflow-states/{owner_id}/{workflow_id}/workflow_config_{current_time}.json"
-    workflow_config_json = json.dumps(workflow_config, default=str, ensure_ascii=False)
-    s3_client.put_object(
-        Bucket=bucket,
-        Key=workflow_config_s3_key,
-        Body=workflow_config_json.encode('utf-8'),
-        ContentType='application/json'
-    )
-    workflow_config_s3_path_full = f"s3://{bucket}/{workflow_config_s3_key}"
-    logger.info(f"✅ Uploaded workflow_config to S3: {workflow_config_s3_path_full} ({len(workflow_config_json)/1024:.1f}KB)")
-    
-    # Upload current_state to S3 if it exists (skip if None from initial_state_s3_path)
-    if current_state is not None:
-        state_s3_key = f"workflow-states/{owner_id}/{workflow_id}/current_state_{current_time}.json"
-        state_json = json.dumps(current_state, default=str, ensure_ascii=False)
-        s3_client.put_object(
-            Bucket=bucket,
-            Key=state_s3_key,
-            Body=state_json.encode('utf-8'),
-            ContentType='application/json'
-        )
-        state_s3_path = f"s3://{bucket}/{state_s3_key}"
-        logger.info(f"✅ Uploaded current_state to S3: {state_s3_path} ({len(state_json)/1024:.1f}KB)")
-    # else: state_s3_path already set to initial_state_s3_path above
-    
-    # 4. Dynamic concurrency calculation (Map state optimization)
-    max_concurrency = _calculate_dynamic_concurrency(
-        total_segments=total_segments,
-        llm_segments=llm_segments,
-        hitp_segments=hitp_segments,
-        partition_map=partition_map,
-        owner_id=owner_id
+    payload = hydrator.dehydrate(
+        state=bag,
+        owner_id=owner_id,
+        workflow_id=workflow_id,
+        return_delta=False,
+        force_offload_fields=force_offload
     )
     
-    # 🚀 Override max_concurrency with strategy-recommended value (strategy calculated earlier)
-    max_concurrency = distributed_strategy.get("max_concurrency", max_concurrency)
+    # 7. Post-Processing & Compatibility
+    # [Zero-Payload-Limit] Removed inline segment_manifest pointers
+    # payload['segment_manifest'] = segment_manifest_pointers -> REMOVED
+    # The Distributed Map (PrepareDistributedExecution) will load partition_map from S3.
     
-    # � [Light Config] Extract minimal metadata for Step Functions routing
-    light_config = {
-        "workflow_id": workflow_id,
-        "execution_mode": workflow_config.get("execution_mode", "SEQUENTIAL"),
-        "node_count": len(workflow_config.get("nodes", [])),
-        "distributed_mode": is_distributed_mode,
-        "distributed_strategy": distributed_strategy["strategy"],
-        "llm_segments": llm_segments,
-        "hitp_segments": hitp_segments,
-        "max_concurrency": max_concurrency
-    }
+    # Ensure compatibility aliases exist if fields were offloaded
+    # (ASL might reference _s3_path fields directly)
+    for field in ['workflow_config', 'partition_map', 'current_state', 'input']:
+        val = payload.get(field)
+        if isinstance(val, dict) and val.get('__s3_offloaded'):
+            payload[f"{field}_s3_path"] = val.get('__s3_path')
+            
+    # Explicitly set state_s3_path alias for current_state
+    if payload.get('current_state_s3_path'):
+        payload['state_s3_path'] = payload['current_state_s3_path']
+        
+    # [No Data at Root] REMOVED inline input copy to prevent payload explosion
+    # payload['input'] = raw_input - DELETED
     
-    # ============================================================
-    # 🎯 v3.3 Unified Pipe: Universal Sync Core를 통한 Day-Zero Sync
-    # ============================================================
-    # 
-    # 비즈니스 로직(파티셔닝)은 여기까지, 데이터 저장/최적화는 USC에 위임
-    # - P0: Dirty Input 자동 방어 (256KB 초과 시 자동 오프로딩)
-    # - 필수 메타데이터 강제 주입 (segment_to_run, loop_counter 등)
-    # - 생애 주기 전체에 걸쳐 단일 파이프 통과
-    #
-    initial_payload = {
-        # Light Config: Step Functions 라우팅용 경량 메타데이터
-        "light_config": light_config,
-        # S3 paths (이미 업로드된 경로)
-        "workflow_config_s3_path": workflow_config_s3_path_full,
-        "state_s3_path": state_s3_path,
-        "input": input_value,
-        "ownerId": owner_id,
-        "workflowId": workflow_id,
-        "idempotency_key": idempotency_key,
-        "quota_reservation_id": quota_reservation_id,
-        
-        # 파티셔닝 결과
-        "total_segments": _safe_total_segments,
-        "partition_map": partition_map_for_return,
-        "partition_map_s3_path": partition_map_s3_path,
-        "segment_manifest": segment_manifest if manifest_s3_path == "" else None,
-        "segment_manifest_s3_path": manifest_s3_path,
-        
-        # 통계 및 메타데이터
-        "llm_segments": llm_segments,
-        "hitp_segments": hitp_segments,
-        "state_durations": {},
-        "start_time": current_time,
-        
-        # 분산 실행 설정
-        "distributed_mode": is_distributed_mode,
-        "distributed_strategy": distributed_strategy["strategy"],
-        "max_concurrency": max_concurrency,
-        
-        # 루프 제어 (Step Functions 비교용 int 강제)
-        "max_loop_iterations": int(workflow_config.get("max_loop_iterations", 100)),
-        "max_branch_iterations": int(workflow_config.get("max_branch_iterations", 100)),
-        
-        # 테스트 모드
-        "MOCK_MODE": mock_mode,
-    }
+    logger.info(f"✅ State Initialization Complete. Keys: {list(payload.keys())}")
     
     # 🎯 Universal Sync Core 호출 (action='init')
     # - 빈 상태 {}에서 시작하여 표준 StateBag으로 승격
@@ -812,9 +531,12 @@ def lambda_handler(event, context):
     if _HAS_USC and universal_sync_core:
         logger.info("🎯 [Day-Zero Sync] Routing through Universal Sync Core (action='init')")
         
+        # Ensure idempotency_key is available
+        idempotency_key = bag.get('idempotency_key') or raw_input.get('idempotency_key') or "unknown"
+        
         usc_result = universal_sync_core(
             base_state={},  # 빈 상태에서 시작
-            new_result=initial_payload,
+            new_result=payload, # Use hydrated payload
             context={
                 'action': 'init',
                 'execution_id': idempotency_key,

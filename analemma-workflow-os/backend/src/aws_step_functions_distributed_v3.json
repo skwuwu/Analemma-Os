@@ -342,8 +342,8 @@
           "WaitForChunkCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
-            "Comment": "⏸️ [HITP] HeartbeatSeconds로 부모 타임아웃 방지",
-            "HeartbeatSeconds": 3600,
+            "Comment": "⏸️ [HITP] HeartbeatSeconds로 부모 타임아웃 방지 (24시간)",
+            "HeartbeatSeconds": 86400,
             "Parameters": {
               "FunctionName": "${StoreDistributedTaskTokenArn}",
               "Payload": {
@@ -661,12 +661,12 @@
     },
     "ProcessParallelBranches": {
       "Type": "Map",
-      "Comment": "🌿 [P0 Optimized] 병렬 브랜치 - 결과는 포인터만 반환",
+      "Comment": "🌿 [Pointer Strategy] Distributed parallel branches - pointers only in pending_branches",
       "ItemsPath": "$.state_data.bag.pending_branches",
       "MaxConcurrencyPath": "$.state_data.bag.max_concurrency",
       "ItemSelector": {
         "state_data.$": "$.state_data.bag",
-        "branch_config.$": "$$.Map.Item.Value",
+        "branch_pointer.$": "$$.Map.Item.Value",
         "branch_index.$": "$$.Map.Item.Index"
       },
       "ResultSelector": {
@@ -677,8 +677,50 @@
           "Mode": "DISTRIBUTED",
           "ExecutionType": "STANDARD"
         },
-        "StartAt": "ExecuteBranchWithHydration",
+        "StartAt": "HydrateBranchConfig",
         "States": {
+          "HydrateBranchConfig": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "🌿 [Pointer Strategy] Hydrate branch config from S3 using branch pointer",
+            "Parameters": {
+              "FunctionName": "${StateDataManagerArn}",
+              "Payload": {
+                "action": "hydrate_branch",
+                "branch_pointer.$": "$.branch_pointer",
+                "branch_index.$": "$.branch_index",
+                "state_data.$": "$.state_data"
+              }
+            },
+            "ResultSelector": {
+              "branch_config.$": "$.Payload.branch_config",
+              "branch_index.$": "$.Payload.branch_index",
+              "state_data.$": "$.Payload.state_data"
+            },
+            "ResultPath": "$",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.TooManyRequestsException",
+                  "States.Timeout"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.hydrate_error",
+                "Next": "HandleBranchError"
+              }
+            ],
+            "Next": "ExecuteBranchWithHydration"
+          },
           "ExecuteBranchWithHydration": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
@@ -729,7 +771,7 @@
           "WaitForBranchCallback": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
-            "HeartbeatSeconds": 3600,
+            "HeartbeatSeconds": 86400,
             "Parameters": {
               "FunctionName": "${StoreDistributedTaskTokenArn}",
               "Payload": {

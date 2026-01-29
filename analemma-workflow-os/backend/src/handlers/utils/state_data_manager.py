@@ -477,6 +477,10 @@ def update_and_compress_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
         'llm_segments': state_data.get('llm_segments'),
         'hitp_segments': state_data.get('hitp_segments'),
         
+        # [Fix] Preserve input & pointers during sync to prevent Data Loss
+        'input': state_data.get('input'),
+        'input_s3_path': state_data.get('input_s3_path'),
+        
         'state_durations': state_data.get('state_durations'),
         'last_update_time': state_data.get('last_update_time'),
         'start_time': state_data.get('start_time'),
@@ -645,6 +649,79 @@ def sync_state_data(event: Dict[str, Any]) -> Dict[str, Any]:
         new_result={'execution_result': execution_result},
         context={'action': 'sync'}
     )
+
+
+def hydrate_branch_config(event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    🌿 [Pointer Strategy] S3에서 브랜치 설정 Hydrate
+    
+    Map 내부에서 호출되어 경량 포인터를 사용해 S3에서 실제 브랜치 설정을 로드합니다.
+    
+    Input:
+        - branch_pointer: {branch_index, branch_id, branches_s3_path, total_branches}
+        - branch_index: Map Iterator 인덱스
+        - state_data: 부모의 State Bag
+    
+    Output:
+        - branch_config: S3에서 로드된 실제 브랜치 설정 (partition_map, nodes 포함)
+        - branch_index: 원본 인덱스
+        - state_data: 원본 State Bag (변경 없음)
+    
+    이 패턴을 통해:
+    1. pending_branches에는 경량 포인터만 전달 (256KB 제한 회피)
+    2. Map 내부 각 브랜치가 개별적으로 S3에서 자신의 데이터 Hydrate
+    3. 개별 Lambda 반환값은 작음 (256KB 제한 회피)
+    """
+    branch_pointer = event.get('branch_pointer', {})
+    branch_index = event.get('branch_index', 0)
+    state_data = event.get('state_data', {})
+    
+    # 포인터에서 S3 경로 추출
+    branches_s3_path = branch_pointer.get('branches_s3_path')
+    pointer_branch_index = branch_pointer.get('branch_index', branch_index)
+    
+    if not branches_s3_path:
+        # 폴백: 포인터가 아닌 전체 브랜치 데이터가 직접 전달된 경우
+        # (S3 오프로딩 실패 시 또는 작은 브랜치의 경우)
+        logger.warning(f"[Hydrate Branch] No branches_s3_path in pointer. Using pointer as branch_config directly.")
+        return {
+            'branch_config': branch_pointer,
+            'branch_index': branch_index,
+            'state_data': state_data
+        }
+    
+    try:
+        # S3에서 전체 branches 배열 로드 (캐싱 활용)
+        all_branches = cached_load_from_s3(branches_s3_path)
+        
+        if not all_branches:
+            logger.error(f"[Hydrate Branch] Failed to load branches from S3: {branches_s3_path}")
+            raise ValueError(f"Failed to load branches from S3: {branches_s3_path}")
+        
+        if not isinstance(all_branches, list):
+            logger.error(f"[Hydrate Branch] Loaded data is not a list: {type(all_branches)}")
+            raise ValueError(f"Loaded branches data is not a list")
+        
+        # 해당 인덱스의 브랜치 추출
+        if pointer_branch_index >= len(all_branches):
+            logger.error(f"[Hydrate Branch] Branch index {pointer_branch_index} out of range (total: {len(all_branches)})")
+            raise ValueError(f"Branch index {pointer_branch_index} out of range")
+        
+        branch_config = all_branches[pointer_branch_index]
+        
+        logger.info(f"[Hydrate Branch] ✅ Loaded branch {pointer_branch_index}/{len(all_branches)} from S3 "
+                   f"(nodes: {len(branch_config.get('nodes', []))}, "
+                   f"partition_map: {len(branch_config.get('partition_map', []))})")
+        
+        return {
+            'branch_config': branch_config,
+            'branch_index': branch_index,
+            'state_data': state_data
+        }
+        
+    except Exception as e:
+        logger.error(f"[Hydrate Branch] ❌ Error hydrating branch {pointer_branch_index}: {e}")
+        raise
 
 
 def aggregate_branches(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -948,6 +1025,10 @@ def lambda_handler(event, context):
         
         elif action == 'aggregate_branches':
             return aggregate_branches(event)
+        
+        elif action == 'hydrate_branch':
+            # 🌿 [Pointer Strategy] S3에서 브랜치 설정 Hydrate
+            return hydrate_branch_config(event)
         
         elif action == 'merge_callback':
             return merge_callback_result(event)

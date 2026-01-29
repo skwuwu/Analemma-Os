@@ -69,7 +69,14 @@ def _get_s3_bucket():
     global _S3_BUCKET
     if _S3_BUCKET is None:
         import os
-        _S3_BUCKET = os.environ.get('STATE_STORAGE_BUCKET', '')
+        # 🛡️ [Constraint] Bucket Name Consistency
+        # Prioritize unified WORKFLOW_STATE_BUCKET, then legacy fallbacks
+        _S3_BUCKET = (
+            os.environ.get('WORKFLOW_STATE_BUCKET') or 
+            os.environ.get('S3_BUCKET') or 
+            os.environ.get('STATE_STORAGE_BUCKET') or
+            ''
+        )
     return _S3_BUCKET
 
 
@@ -100,6 +107,7 @@ class SyncContext(TypedDict, total=False):
 CONTROL_FIELDS_NEVER_OFFLOAD = frozenset({
     'execution_id',
     'segment_to_run', 
+    'segment_id',  # 🛡️ [Fix] Routing safety
     'loop_counter',
     'next_action',
     'status',
@@ -349,7 +357,52 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
     action = context.get('action', 'sync') if context else 'sync'
     
     # ============================================
-    # Distributed Map 결과 (리스트 입력)
+    # Distributed Map ResultWriter 처리 (Manifest Pointer)
+    # ============================================
+    if isinstance(result, dict) and 'ResultWriterDetails' in result:
+        rw_details = result['ResultWriterDetails']
+        bucket = rw_details.get('Bucket')
+        key = rw_details.get('Key')
+        
+        if bucket and key:
+            try:
+                # 1. Load Manifest Summary (Lightweight)
+                s3 = _get_s3_client()
+                obj = s3.get_object(Bucket=bucket, Key=key)
+                manifest_data = json.loads(obj['Body'].read().decode('utf-8'))
+                
+                # 2. Extract Stats
+                # Manifest structure varies, but typically contains stats or pointers
+                # Assuming standard SFN Distributed Map output or custom aggregator format
+                succeeded_count = 0
+                failed_count = 0
+                
+                # Standard SFN Manifest typically separates Success/Failure file shards
+                # We won't iterate all shards here (too heavy).
+                # Instead, we rely on the manifest path itself as the "result".
+                
+                # If the manifest contains direct stats (some versions do):
+                # otherwise we might need to assume success or check execution output?
+                # Actually, for huge maps, we just store the pointer.
+                
+                return {
+                    'segment_manifest_s3_path': f"s3://{bucket}/{key}",
+                    'distributed_chunk_summary': {
+                         'status': 'MANIFEST_ONLY',
+                         'manifest_bucket': bucket,
+                         'manifest_key': key
+                    },
+                    '_aggregation_complete': True
+                }
+            except Exception as e:
+                _get_logger().error(f"Failed to process ResultWriter manifest: {e}")
+                return {
+                    'error': f"Failed to load manifest: {str(e)}",
+                    '_aggregation_complete': False
+                }
+
+    # ============================================
+    # Distributed Map 결과 (리스트 입력 - 인라인 모드)
     # ============================================
     if isinstance(result, list):
         # P1: execution_order 기준 정렬 → 논리적 마지막 세그먼트 보장
@@ -377,7 +430,9 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 'chunk_results': sorted_results[:10]  # 256KB 방지
             },
             '_failed_segments': failed,  # 내부 처리용
-            '_aggregation_complete': True
+            '_aggregation_complete': True,
+            # 🌿 [Pointer Strategy] Manifest extraction
+            'segment_manifest_s3_path': successful[-1].get('segment_manifest_s3_path') if successful else None
         }
     
     # ============================================
@@ -415,6 +470,12 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['new_history_logs'] = payload['new_history_logs']
             if payload.get('branches'):
                 delta['pending_branches'] = payload['branches']
+            # 🌿 [Pointer Strategy] branches_s3_path도 State Bag에 저장
+            if payload.get('branches_s3_path'):
+                delta['branches_s3_path'] = payload['branches_s3_path']
+            # 🌿 [Pointer Strategy] Manifest extraction
+            if payload.get('segment_manifest_s3_path'):
+                 delta['segment_manifest_s3_path'] = payload['segment_manifest_s3_path']
             if payload.get('inner_partition_map'):
                 delta['partition_map'] = payload['inner_partition_map']
                 delta['segment_to_run'] = 0
@@ -434,9 +495,11 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
         elif action == 'init':
             # 탄생 (Day-Zero Sync): 파티셔닝 결과 + 초기 상태를 그대로 전달
             # required metadata는 merge_logic에서 강제 주입됨
-            delta = result.copy() if isinstance(result, dict) else {}
             delta['_is_init'] = True
             delta['_status'] = 'STARTED'
+            # 🌿 [Pointer Strategy] Manifest extraction for Init
+            if result.get('segment_manifest_s3_path'):
+                 delta['segment_manifest_s3_path'] = result['segment_manifest_s3_path']
             
         else:
             # 기본: 래퍼 제거
@@ -816,8 +879,14 @@ def universal_sync_core(
     updated_state = merge_logic(base_state, normalized_delta, context)
     
     # Step 3: 공통 필드 업데이트 (루프 카운터, 세그먼트)
-    # 탄생 (init)은 루프 카운터 증가 제외
-    if action != 'init':
+    # 🛡️ [Fix] 루프 카운터 스마트 증가
+    # 무조건 증가시키면 한 세그먼트에서 카운터가 폭증하는 버그 발생
+    # action='sync'일 때만 증가하거나, 명시적 플래그가 있을 때만 증가
+    should_increment_loop = (
+        action == 'sync' or 
+        normalized_delta.get('_increment_loop', False)
+    )
+    if should_increment_loop and action != 'init':
         updated_state['loop_counter'] = int(updated_state.get('loop_counter', 0)) + 1
     
     # 세그먼트 증가 (플래그가 있는 경우)

@@ -177,13 +177,24 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         else:
             logger.warning(f"Scenario {scenario}: provider not found in result")
         
+        # [v3.3] Outcome Manager Link Generation
+        # Extract execution ID to enable accessing Detailed Outcome Report
+        execution_id = final_state.get('llm_execution_id') or final_state.get('execution_id') or test_result.get('executionArn')
+        
+        outcome_url = None
+        if execution_id:
+            # Assuming standard API path, can be used by frontend or CLI
+            outcome_url = f"/tasks/{execution_id}/outcomes"
+
         scenarios[scenario] = {
             'status': status,
             'message': verification.get('message', ''),
             'test_result': test_result,
             'verification': verification,
             'provider': provider,
-            'usage': usage
+            'usage': usage,
+            'execution_id': execution_id,
+            'outcome_url': outcome_url
         }
     
     overall_status = 'SUCCESS' if failed_count == 0 else 'FAILURE'

@@ -63,7 +63,8 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             'workflow_id': event.get('workflowId'),
             'execution_id': event.get('execution_id'),
             'workflow_config': event.get('workflow_config', {}),
-            'max_concurrency': event.get('max_concurrency')
+            'max_concurrency': event.get('max_concurrency'),
+            'state_bucket': state_bucket
         }
         
         # 4. Delegate to Domain Service

@@ -39,10 +39,55 @@ PRESIGNED_URL_EXPIRY_SECONDS = int(os.environ.get("PRESIGNED_URL_EXPIRY_SECONDS"
 _reasoning_cache: Dict[str, tuple] = {}  # {cache_key: (data, timestamp)}
 CACHE_TTL_SECONDS = 300  # 5분
 
+
 # AWS 클라이언트
 dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1"))
 executions_table = dynamodb.Table(EXECUTIONS_TABLE)
 s3_client = boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1"))
+
+# [v3.3] Unified State Bag Support
+try:
+    from src.handlers.utils.state_data_manager import cached_load_from_s3, load_from_s3
+except ImportError:
+    # Fallback if layer is missing (though should be present)
+    def cached_load_from_s3(s3_path: str):
+        try:
+            bucket, key = s3_path.replace("s3://", "").split("/", 1)
+            resp = s3_client.get_object(Bucket=bucket, Key=key)
+            return json.loads(resp['Body'].read().decode('utf-8'))
+        except Exception:
+            return None
+    load_from_s3 = cached_load_from_s3
+
+def _hydrate_data(data: Any) -> Any:
+    """
+    Check if data is S3 offloaded and hydrate if necessary.
+    Supports Unified State Bag pattern: {'__s3_offloaded': True, ...}
+    Also supports legacy Pointer pattern: {'type': 's3_reference', ...}
+    """
+    if not isinstance(data, dict):
+        return data
+        
+    s3_path = None
+    
+    # 1. Unified State Bag
+    if data.get('__s3_offloaded') is True:
+        s3_path = data.get('__s3_path') or data.get('s3_path')
+        
+    # 2. Legacy Pointer / Generic S3 Reference
+    elif data.get('type') == 's3_reference' and data.get('s3_path'):
+        s3_path = data.get('s3_path')
+        
+    if s3_path:
+        # Prevent recursive loops or self-reference if needed, but cached_load handles basics
+        hydrated = cached_load_from_s3(s3_path)
+        if hydrated:
+            # If it was a list that got offloaded, returning the list is correct
+            # If it was a dict, merge metadata if critical? Usually replacements are full.
+            return hydrated
+            
+    return data
+
 
 
 # =============================================================================
@@ -170,7 +215,12 @@ def _get_outcomes(task_id: str, request_owner_id: str) -> Dict[str, Any]:
             return _error_response(403, "You do not have permission to access this task")
         
         # 결과물 추출 및 정렬 (최종 결과물 우선)
-        artifacts = task.get("artifacts", [])
+        # [v3.3] Hydrate potentially offloaded artifacts list
+        raw_artifacts = task.get("artifacts", [])
+        artifacts = _hydrate_data(raw_artifacts)
+        if not isinstance(artifacts, list):
+            artifacts = []
+            
         outcomes = []
         
         for artifact in artifacts:
@@ -237,8 +287,13 @@ def _build_collapsed_history(task: Dict[str, Any]) -> CollapsedHistoryResponse:
         )
     
     # 히스토리에서 동적 생성
-    state_history = task.get("state_history", [])
-    thought_history = task.get("thought_history", [])
+    # 히스토리에서 동적 생성
+    # [v3.3] Hydrate history fields
+    state_history = _hydrate_data(task.get("state_history", []))
+    if not isinstance(state_history, list): state_history = []
+    
+    thought_history = _hydrate_data(task.get("thought_history", []))
+    if not isinstance(thought_history, list): thought_history = []
     
     node_count = len(set(s.get("state_name", "") for s in state_history))
     llm_call_count = sum(1 for t in thought_history if "llm" in t.get("thought_type", "").lower())
@@ -324,7 +379,11 @@ def _get_reasoning_path(task_id: str, artifact_id: str, request_owner_id: str) -
             )
         
         # 해당 아티팩트 찾기
-        artifacts = task.get("artifacts", [])
+        # 해당 아티팩트 찾기
+        # [v3.3] Hydrate artifacts
+        artifacts = _hydrate_data(task.get("artifacts", []))
+        if not isinstance(artifacts, list): artifacts = []
+        
         target_artifact = None
         
         for artifact in artifacts:
@@ -340,7 +399,10 @@ def _get_reasoning_path(task_id: str, artifact_id: str, request_owner_id: str) -
         reasoning_steps = []
         
         # thought_history에서 관련 항목 추출
-        thought_history = task.get("thought_history", [])
+        # thought_history에서 관련 항목 추출
+        # [v3.3] Hydrate thought_history
+        thought_history = _hydrate_data(task.get("thought_history", []))
+        if not isinstance(thought_history, list): thought_history = []
         
         for i, thought in enumerate(thought_history):
             # logic_trace_id가 있으면 해당 시점까지만

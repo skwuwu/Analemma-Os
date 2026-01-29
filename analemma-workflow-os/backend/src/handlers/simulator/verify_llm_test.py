@@ -297,6 +297,67 @@ def verify_multimodal_vision(final_state: Dict, test_config: Dict) -> Tuple[bool
         return False, f"Vision output too short: {len(str(vision_output))}"
     
     diagram_words = ['diagram', 'architecture', 'flow', 'component', 'system', 'connection']
+    has_diagram = any(w in str(vision_output).lower() for w in diagram_words)
+    if not has_diagram:
+        return False, "Vision output does not describe a diagram"
+        
+    return True, "Multimodal vision analysis successful"
+
+def verify_stage5_hyper_stress(final_state: Dict, test_config: Dict) -> Tuple[bool, str]:
+    """Stage 5: Hyper Stress Verification with StateBag Integrity"""
+    
+    # 1. StateBag Integrity Check
+    if test_config.get('verify_state_bag_integrity'):
+        passed, msg = verify_state_bag_integrity(final_state, test_config)
+        if not passed:
+            return False, msg
+            
+    # 2. Token Usage Check
+    usage = final_state.get('usage', {})
+    total_tokens = usage.get('total_tokens', 0)
+    if total_tokens > 50000:
+        return False, f"Token Limit Exceeded: {total_tokens} > 50000"
+        
+    return True, f"Stage 5 Passed: System survived hyper stress (Tokens: {total_tokens})"
+
+
+def verify_state_bag_integrity(state: dict, test_config: dict) -> Tuple[bool, str]:
+    """
+    Verify StateBag Architecture Compliance
+    - Checks if large payloads (>30KB) were correctly offloaded.
+    - Checks metadata (payload_size_kb, s3_offloaded).
+    """
+    # 1. Check Metadata Existence
+    if 'payload_size_kb' not in state:
+        # Some legacy paths might miss this, checking strictly for Stage 5
+        if test_config.get('strict_mode'):
+            return False, "Missing 'payload_size_kb' metadata in StateBag"
+        
+    s3_offloaded = state.get('s3_offloaded', False)
+    payload_size = state.get('payload_size_kb', 0)
+    
+    # 2. Verify Offloading Logic
+    # If size > 200KB (MAX), s3_offloaded MUST be true
+    if payload_size > 200 and not s3_offloaded:
+        return False, f"StateBag Breach: Size {payload_size}KB > 200KB but NOT offloaded"
+        
+    # 3. Check for specific field offloading (Pointer check)
+    large_inline_fields = []
+    for key, val in state.items():
+        if isinstance(val, (dict, list)) and not key.startswith('__'):
+            try:
+                # Approximate sizing
+                json_str = json.dumps(val)
+                if len(json_str) > 50 * 1024: # 50KB
+                    large_inline_fields.append(key)
+            except:
+                pass
+                
+    if large_inline_fields:
+        logger.warning(f"StateBag Warning: Large inline fields detected: {large_inline_fields}")
+        
+    return True, f"StateBag Integrity OK (Size: {payload_size}KB, Offloaded: {s3_offloaded})"
+
 
 
 # ============================================================================

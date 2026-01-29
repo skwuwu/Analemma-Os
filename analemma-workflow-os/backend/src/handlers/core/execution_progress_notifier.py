@@ -785,18 +785,15 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         # 2. payload.conversation_id (fallback)
         # 3. state_data.executionArn (completion events 에서 state_data 안에 있을 수 있음)
         # 4. payload.$$.Execution.Id 값이 state_data에 저장될 수 있음
+        # [Integrity] ID Extraction Priority: Canonical StateBag ID first
         'execution_id': (
-            payload.get('execution_id') 
+            state_data.get('bag', {}).get('execution_id')
+            or payload.get('execution_id') 
             or payload.get('conversation_id')
             or state_data.get('executionArn')
             or state_data.get('execution_id')
         ),
         'workflowId': payload.get('workflowId') or state_data.get('workflowId'),
-        
-        # 순서 보장을 위한 메타데이터
-        'sequence_number': sequence_number,
-        'server_timestamp': current_time,
-        'segment_sequence': current_segment,  # 세그먼트 기반 순서
         
         # [Glass Box] 핵심 메타데이터 추가
         'current_segment': current_segment,
@@ -814,6 +811,96 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
         # [NEW] state_history for node status tracking
         'state_history': payload.get('new_history_logs') or state_data.get('state_history', []),
     }
+
+    # =================================================================================
+    # 🔦 [Glass-Box UX] Light Hydration Strategy
+    # S3 포인터만 있는 경우, 실제 "델타" 정보(로그, 아웃풋)를 살짝 꺼내서 인라인으로 주입
+    # =================================================================================
+    
+    # 1. 대상 식별: final_state가 없고 S3 포인터만 있는 경우
+    # 우선순위: final_state_s3_path > state_s3_path
+    target_s3_path = (
+        payload.get('final_state_s3_path') 
+        or state_data.get('final_state_s3_path') 
+        or state_data.get('state_s3_path')
+    )
+    
+    # 이미 데이터가 인라인에 있다면 스킵 (불필요한 S3 call 방지)
+    has_inline_data = (
+        payload.get('final_state') 
+        or state_data.get('final_state') 
+        or inner_payload.get('new_history_logs')
+        or inner_payload.get('final_result')
+    )
+    
+    if target_s3_path and not has_inline_data:
+        try:
+            logger.info(f"🔦 [Glassbox] Attempting light hydration from: {target_s3_path}")
+            
+            # 2. S3 Fetch with Retry (Eventual Consistency Defense)
+            bucket_name = target_s3_path.replace("s3://", "").split("/")[0]
+            key_name = "/".join(target_s3_path.replace("s3://", "").split("/")[1:])
+            
+            hydrated_data = None
+            for attempt in range(3):
+                try:
+                    obj = s3_client.get_object(Bucket=bucket_name, Key=key_name)
+                    content = obj['Body'].read().decode('utf-8')
+                    hydrated_data = json.loads(content)
+                    break
+                except Exception as fetch_err:
+                    if attempt < 2:
+                        time.sleep(0.5 * (2 ** attempt)) # Exponential backoff
+                    else:
+                        logger.warning(f"🔦 [Glassbox] S3 Fetch failed after retries: {fetch_err}")
+
+            # 3. Surgical Extraction (핀셋 추출)
+            # 프론트엔드 렌더링에 꼭 필요한 "델타"만 추출
+            if hydrated_data:
+                # [Data Chef] 메시지 요리: last_node_output을 메시지로 승격
+                if not inner_payload.get('message') or inner_payload.get('message') == 'Execution progress update':
+                    # output이 문자열이면 메시지로 사용, 객체면 요약
+                    last_output = hydrated_data.get('last_node_output') or hydrated_data.get('output')
+                    if isinstance(last_output, str):
+                        inner_payload['message'] = last_output[:200] + ("..." if len(last_output)>200 else "")
+                    elif isinstance(last_output, dict) and 'message' in last_output:
+                        inner_payload['message'] = str(last_output['message'])
+
+                # A. 로그 추출 (가장 중요)
+                logs = hydrated_data.get('new_history_logs') or hydrated_data.get('state_history') or []
+                if logs:
+                    # 너무 많으면 최근 것만 (Payload Limit 방어)
+                    inner_payload['new_history_logs'] = logs[-10:] if len(logs) > 10 else logs
+                
+                # B. 아웃풋/결과 추출
+                if 'final_state' in hydrated_data:
+                    fs = hydrated_data['final_state']
+                    inner_payload['final_state'] = {
+                        'output': fs.get('output'), # 결과값
+                        'status': fs.get('status'), # 상태
+                        'error': fs.get('error')    # 에러 정보
+                    }
+                elif 'output' in hydrated_data:
+                     inner_payload['output'] = hydrated_data.get('output')
+                
+                # C. [UX Upgrade] Signed URL 생성 (직접 다운로드용)
+                try:
+                    presigned_url = s3_client.generate_presigned_url(
+                        'get_object',
+                        Params={'Bucket': bucket_name, 'Key': key_name},
+                        ExpiresIn=3600  # 1시간 유효
+                    )
+                    inner_payload['state_s3_url'] = presigned_url
+                    logger.info("🔦 [Glassbox] Generated Signed URL for full state access")
+                except Exception as url_err:
+                     logger.warning(f"Failed to generate signed URL: {url_err}")
+                
+                logger.info("🔦 [Glassbox] Light hydration successful. Injected logs/output/url.")
+                
+        except Exception as e:
+            # 4. Graceful Error Handling
+            # 알림 자체는 실패하면 안 됨. 로그만 남기고 진행.
+            logger.warning(f"🔦 [Glassbox] Light hydration failed (non-fatal): {e}")
 
     # [Added] Construct final notification payload
     notification_payload = {

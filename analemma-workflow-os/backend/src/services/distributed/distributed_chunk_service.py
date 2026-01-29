@@ -2,7 +2,10 @@
 import logging
 import time
 import os
+import os
 from typing import Dict, List, Any, Optional
+import boto3
+import json
 
 from src.services.infrastructure.partition_cache_service import PartitionCacheService
 
@@ -191,13 +194,59 @@ class DistributedChunkService:
              if last_completed:
                  current_state['__latest_segment_id'] = last_completed[-1]['segment_index']
 
-        return self._build_response(
+        # 🚨 [Distributed Map Optimization] S3 Offloading
+        # Prevent "Payload Size Exceeded" by offloading huge chunk results
+        state_bucket = context.get('state_bucket')
+        s3_prefix = f"distributed-results/{owner_id}/{workflow_id}/{context.get('execution_id')}"
+        
+        final_state_ref = current_state
+        chunk_results_ref = chunk_results
+        
+        # Check size & Offload if needed (Threshold: 32KB to be safe)
+        if state_bucket:
+            s3_client = boto3.client('s3')
+            
+            # 1. Offload Chunk Results
+            results_json = json.dumps(chunk_results, default=str)
+            if len(results_json.encode('utf-8')) > 32 * 1024:
+                results_key = f"{s3_prefix}/chunk_{chunk_id}_results.json"
+                try:
+                    s3_client.put_object(
+                        Bucket=state_bucket,
+                        Key=results_key,
+                        Body=results_json,
+                        ContentType='application/json'
+                    )
+                    chunk_results_ref = None # Remove inline data
+                    logger.info(f"Offloaded chunk results to s3://{state_bucket}/{results_key}")
+                except Exception as e:
+                    logger.error(f"Failed to offload chunk results: {e}")
+
+            # 2. Offload Final State
+            state_json = json.dumps(current_state, default=str)
+            if len(state_json.encode('utf-8')) > 32 * 1024:
+                state_key = f"{s3_prefix}/chunk_{chunk_id}_final_state.json"
+                try:
+                    s3_client.put_object(
+                        Bucket=state_bucket,
+                        Key=state_key,
+                        Body=state_json,
+                        ContentType='application/json'
+                    )
+                    final_state_ref = None # Remove inline data
+                    # Pointer is sufficient? No, we need explicit path field.
+                    # _build_response handles generic kwargs, so we'll pass s3 path there.
+                    logger.info(f"Offloaded final state to s3://{state_bucket}/{state_key}")
+                except Exception as e:
+                    logger.error(f"Failed to offload final state: {e}")
+
+        response = self._build_response(
             chunk_id=chunk_id,
             status=final_status,
             processed_segments=success_count,
             failed_segments=failed_count,
-            final_state=current_state,
-            chunk_results=chunk_results,
+            final_state=final_state_ref,
+            chunk_results=chunk_results_ref,
             execution_time=time.time() - execution_start_time,
             execution_summary={
                 'total_segments': len(partition_slice),
@@ -206,6 +255,15 @@ class DistributedChunkService:
                 'chunk_index': chunk_index
             }
         )
+        
+        # Inject S3 paths if offloaded
+        if state_bucket:
+            if final_state_ref is None:
+                response['final_state_s3_path'] = f"s3://{state_bucket}/{s3_prefix}/chunk_{chunk_id}_final_state.json"
+            if chunk_results_ref is None:
+                response['chunk_results_s3_path'] = f"s3://{state_bucket}/{s3_prefix}/chunk_{chunk_id}_results.json"
+                
+        return response
 
     def _validate_chunk_data(self, chunk_data: Dict) -> Dict:
         """Mirroring original validation logic."""

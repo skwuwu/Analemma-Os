@@ -245,19 +245,61 @@
     },
     "ExecuteMapReduceMode": {
       "Type": "Map",
-      "Comment": "🚀 MAP_REDUCE: High-concurrency parallel execution",
+      "Comment": "🚀 [Pointer Strategy] MAP_REDUCE with segment pointer hydration",
       "MaxConcurrencyPath": "$.state_data.bag.max_concurrency",
       "ItemsPath": "$.state_data.bag.segment_manifest",
       "Parameters": {
-        "segment_config.$": "$$.Map.Item.Value.segment_config",
-        "segment_id.$": "$$.Map.Item.Value.segment_id",
-        "execution_order.$": "$$.Map.Item.Value.execution_order",
+        "segment_pointer.$": "$$.Map.Item.Value",
+        "segment_index.$": "$$.Map.Item.Index",
         "state_data.$": "$.state_data.bag",
         "execution_mode": "MAP_REDUCE"
       },
       "Iterator": {
-        "StartAt": "MapReduceRunner",
+        "StartAt": "HydrateSegmentConfig",
         "States": {
+          "HydrateSegmentConfig": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "🌿 [Pointer Strategy] Hydrate segment config from S3",
+            "Parameters": {
+              "FunctionName": "${StateDataManagerArn}",
+              "Payload": {
+                "action": "hydrate_segment",
+                "segment_pointer.$": "$.segment_pointer",
+                "segment_index.$": "$.segment_index",
+                "state_data.$": "$.state_data"
+              }
+            },
+            "ResultSelector": {
+              "segment_config.$": "$.Payload.segment_config",
+              "segment_id.$": "$.Payload.segment_id",
+              "execution_order.$": "$.Payload.execution_order",
+              "state_data.$": "$.Payload.state_data",
+              "execution_mode": "MAP_REDUCE"
+            },
+            "ResultPath": "$",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.TooManyRequestsException"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.hydrate_error",
+                "Next": "MapReduceSegmentFailed"
+              }
+            ],
+            "Next": "MapReduceRunner"
+          },
           "MapReduceRunner": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
@@ -557,7 +599,7 @@
     },
     "CheckLoopLimit": {
       "Type": "Choice",
-      "Comment": "🛡️ [Safety Valve] Prevent infinite loops",
+      "Comment": "[Safety Valve] Prevent infinite loops",
       "Choices": [
         {
           "Variable": "$.state_data.bag.loop_counter",
@@ -574,11 +616,11 @@
     },
     "ProcessParallelBranches": {
       "Type": "Map",
-      "Comment": "🌿 [Fork] Execute parallel branches with dynamic concurrency",
+      "Comment": "🌿 [Fork] Execute parallel branches with dynamic concurrency - Pointer Strategy",
       "ItemsPath": "$.state_data.bag.pending_branches",
       "MaxConcurrencyPath": "$.state_data.bag.max_concurrency",
       "Parameters": {
-        "branch_config.$": "$$.Map.Item.Value",
+        "branch_pointer.$": "$$.Map.Item.Value",
         "branch_index.$": "$$.Map.Item.Index",
         "state_data.$": "$.state_data.bag"
       },
@@ -586,10 +628,53 @@
         "branches.$": "$"
       },
       "Iterator": {
-        "StartAt": "InitBranchState",
+        "StartAt": "HydrateBranchConfig",
         "States": {
+          "HydrateBranchConfig": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Comment": "🌿 [Pointer Strategy] Hydrate branch config from S3 using branch pointer",
+            "Parameters": {
+              "FunctionName": "${StateDataManagerArn}",
+              "Payload": {
+                "action": "hydrate_branch",
+                "branch_pointer.$": "$.branch_pointer",
+                "branch_index.$": "$.branch_index",
+                "state_data.$": "$.state_data"
+              }
+            },
+            "ResultSelector": {
+              "branch_config.$": "$.Payload.branch_config",
+              "branch_index.$": "$.Payload.branch_index",
+              "state_data.$": "$.Payload.state_data"
+            },
+            "ResultPath": "$",
+            "Retry": [
+              {
+                "ErrorEquals": [
+                  "Lambda.ServiceException",
+                  "Lambda.TooManyRequestsException",
+                  "States.Timeout"
+                ],
+                "IntervalSeconds": 1,
+                "MaxAttempts": 3,
+                "BackoffRate": 2.0
+              }
+            ],
+            "Catch": [
+              {
+                "ErrorEquals": [
+                  "States.ALL"
+                ],
+                "ResultPath": "$.hydrate_error",
+                "Next": "HandleBranchError"
+              }
+            ],
+            "Next": "InitBranchState"
+          },
           "InitBranchState": {
             "Type": "Pass",
+            "Comment": "Initialize branch with hydrated config from S3",
             "Parameters": {
               "branch_id.$": "States.Format('branch_{}', $.branch_index)",
               "segment_to_run": 0,
@@ -642,7 +727,7 @@
           "SyncBranchState": {
             "Type": "Task",
             "Resource": "arn:aws:states:::lambda:invoke",
-            "Comment": "🔄 Sync branch state - same StateDataManager interface",
+            "Comment": "Sync branch state - same StateDataManager interface",
             "Parameters": {
               "FunctionName": "${StateDataManagerArn}",
               "Payload": {
@@ -697,7 +782,7 @@
           },
           "HandleBranchError": {
             "Type": "Pass",
-            "Comment": "🛡️ Convert branch error to partial failure for aggregator",
+            "Comment": "Convert branch error to partial failure for aggregator",
             "Parameters": {
               "branch_id.$": "$.branch_state.branch_id",
               "status": "PARTIAL_FAILURE",
@@ -711,7 +796,6 @@
             "Parameters": {
               "branch_id.$": "$.branch_state.branch_id",
               "status": "COMPLETE",
-              "final_state.$": "$.execution_result.result.final_state",
               "final_state_s3_path.$": "$.execution_result.result.final_state_s3_path",
               "new_history_logs.$": "$.execution_result.result.new_history_logs"
             },
@@ -733,7 +817,7 @@
     },
     "HandleMapError": {
       "Type": "Pass",
-      "Comment": "🛡️ Convert Map error to aggregatable result while preserving bag layer",
+      "Comment": "Convert Map error to aggregatable result while preserving bag layer",
       "Parameters": {
         "parallel_results": [],
         "map_error.$": "$.map_error",
@@ -746,7 +830,7 @@
     "AggregateParallelResults": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🔀 [Join] Merge parallel branch results using Fork-Join pattern (pointer-only input)",
+      "Comment": "[Join] Merge parallel branch results using Fork-Join pattern (pointer-only input)",
       "Parameters": {
         "FunctionName": "${StateDataManagerArn}",
         "Payload": {
@@ -769,7 +853,7 @@
     "WaitForHITPCallback": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
-      "Comment": "⏸️ [HITP] Store TaskToken and wait for external resume",
+      "Comment": "⏸[HITP] Store TaskToken and wait for external resume",
       "HeartbeatSeconds": 86400,
       "Parameters": {
         "FunctionName": "${StoreTaskTokenArn}",
@@ -795,7 +879,7 @@
     "HandleHITPTimeout": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
-      "Comment": "⏰ Notify user about HITP timeout and trigger retry notification",
+      "Comment": "Notify user about HITP timeout and trigger retry notification",
       "Parameters": {
         "Entries": [
           {
@@ -819,7 +903,7 @@
     "MergeCallbackResult": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🔄 Merge HITP callback result into state_data",
+      "Comment": "Merge HITP callback result into state_data",
       "Parameters": {
         "FunctionName": "${StateDataManagerArn}",
         "Payload": {
@@ -849,7 +933,7 @@
     "HandleAsyncLLM": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
-      "Comment": "📢 Notify user about async LLM processing",
+      "Comment": "Notify user about async LLM processing",
       "Parameters": {
         "Entries": [
           {
@@ -873,7 +957,7 @@
     "WaitForAsyncLLMCallback": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
-      "Comment": "⏸️ Wait for async LLM completion",
+      "Comment": "⏸Wait for async LLM completion",
       "Parameters": {
         "FunctionName": "${AsyncLLMHandlerArn}",
         "Payload": {
@@ -888,7 +972,7 @@
     "MergeAsyncResult": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
-      "Comment": "🔄 Merge async LLM result into state_data",
+      "Comment": "Merge async LLM result into state_data",
       "Parameters": {
         "FunctionName": "${StateDataManagerArn}",
         "Payload": {
@@ -909,7 +993,7 @@
     "NotifyWorkflowCompleted": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
-      "Comment": "✅ Publish workflow completion event",
+      "Comment": "Publish workflow completion event",
       "Parameters": {
         "Entries": [
           {
@@ -935,7 +1019,7 @@
     },
     "PrepareSuccessOutput": {
       "Type": "Pass",
-      "Comment": "📦 Prepare final output with execution metrics",
+      "Comment": "Prepare final output with execution metrics",
       "Parameters": {
         "status": "SUCCEEDED",
         "execution_id.$": "$$.Execution.Id",
@@ -957,7 +1041,7 @@
     "NotifyAndFail": {
       "Type": "Task",
       "Resource": "arn:aws:states:::events:putEvents",
-      "Comment": "🛡️ [Hardened] Safe failure notification - dumps full context to avoid field reference crashes",
+      "Comment": "[Hardened] Safe failure notification - dumps full context to avoid field reference crashes",
       "Parameters": {
         "Entries": [
           {

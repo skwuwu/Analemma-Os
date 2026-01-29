@@ -44,6 +44,8 @@ except ImportError:
 # Services
 from src.services.state.state_manager import StateManager, mask_pii_in_state
 from src.services.recovery.self_healing_service import SelfHealingService
+# [v3.11] Unified State Hydration
+from src.common.state_hydrator import StateHydrator, SmartStateBag
 # Legacy Imports (for now, until further refactoring)
 from src.services.workflow.repository import WorkflowRepository
 # Using generic imports from main handler file as source of truth
@@ -154,9 +156,21 @@ def _safe_get_total_segments(event: Dict[str, Any]) -> int:
     """
     raw_value = event.get('total_segments')
     
-    # None이면 partition_map에서 계산
+    # None이면 State Bag에서 partition_map 추출하여 계산
     if raw_value is None:
-        partition_map = event.get('partition_map')
+        partition_map = None
+        if isinstance(event.get('state_data'), dict):
+            state_data = event['state_data']
+            # Handle both wrapped (ExecuteSegment) and unwrapped (MAP_REDUCE/Branch) State Bag
+            if 'bag' in state_data and isinstance(state_data['bag'], dict):
+                partition_map = state_data['bag'].get('partition_map')
+            else:
+                partition_map = state_data.get('partition_map')
+        
+        # Fallback to event root
+        if not partition_map:
+            partition_map = event.get('partition_map')
+        
         if partition_map and isinstance(partition_map, list):
             return max(1, len(partition_map))
         return 1
@@ -292,18 +306,25 @@ class SegmentRunnerService:
                 self.threshold = SF_SAFE_THRESHOLD
         else:
             self.threshold = SF_SAFE_THRESHOLD
-        
-        # [Guard] [v2.5] S3 Bucket - 핸들러에서 주입받거나 환경변수 폴백
-        if s3_bucket and s3_bucket.strip():
-            self.s3_bucket = s3_bucket.strip()
+            
+        # [v3.11] Unified Bucket Resolution
+        # Prioritize S3_BUCKET (standard), fallback to env vars if explicit arg missing
+        if s3_bucket:
+             self.state_bucket = s3_bucket
         else:
-            env_bucket = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET") or ""
-            self.s3_bucket = env_bucket.strip() if env_bucket else ""
+             self.state_bucket = (
+                 os.environ.get('WORKFLOW_STATE_BUCKET') or 
+                 os.environ.get('S3_BUCKET') or 
+                 os.environ.get('SKELETON_S3_BUCKET')
+             )
         
-        if not self.s3_bucket:
+        # [v3.11] Initialize StateHydrator once (Reuse connection)
+        self.hydrator = StateHydrator(s3_bucket=self.state_bucket)
+        
+        if not self.state_bucket:
             logger.warning("[Warning] [SegmentRunnerService] S3 bucket not configured - large payloads may fail")
         else:
-            logger.info(f"[Success] [SegmentRunnerService] S3 bucket: {self.s3_bucket}, threshold: {self.threshold}")
+            logger.info(f"[Success] [SegmentRunnerService] S3 bucket: {self.state_bucket}, threshold: {self.threshold}")
         
         # [Guard] [Kernel] S3 Client (Lazy Initialization)
         self._s3_client = None
@@ -368,7 +389,7 @@ class SegmentRunnerService:
         return self._s3_client
 
     # ========================================================================
-    # � [Utility] State Merge: 무결성 보장 상태 병합
+    #  [Utility] State Merge: 무결성 보장 상태 병합
     # ========================================================================
     def _should_merge_as_list(self, key: str) -> bool:
         """
@@ -947,6 +968,81 @@ class SegmentRunnerService:
     # ========================================================================
     # [Parallel] [Pattern 3] Parallel Scheduler: 인프라 인지형 병렬 스케줄링
     # ========================================================================
+    
+    def _offload_branches_to_s3(
+        self,
+        branches: List[Dict[str, Any]],
+        owner_id: str,
+        workflow_id: str,
+        segment_id: int
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """
+        🌿 [Pointer Strategy] 각 브랜치를 S3에 업로드하고 경량 포인터 배열 반환
+        
+        Map 내부 Hydrate 전략:
+        - 전체 branches 데이터를 S3에 업로드 (단일 파일)
+        - pending_branches에는 인덱스 + S3 경로만 포함된 경량 포인터 배열 전달
+        - Map Iterator 첫 단계에서 각 브랜치가 S3 경로로 자신의 데이터 hydrate
+        
+        Returns:
+            (branch_pointers, branches_s3_path)
+            - branch_pointers: [{branch_index, branch_id, branches_s3_path, total_branches}, ...]
+            - branches_s3_path: 전체 branches 배열이 저장된 S3 경로
+        """
+        if not branches:
+            return [], None
+        
+        if not self.state_bucket:
+            logger.warning("[Pointer Strategy] No S3 bucket configured. Returning inline branches (may exceed payload limit)")
+            # 폴백: 인라인 반환 (위험하지만 S3 없으면 어쩔 수 없음)
+            return branches, None
+        
+        try:
+            import boto3
+            s3_client = boto3.client('s3')
+            
+            timestamp = int(time.time() * 1000)  # 밀리초 단위
+            s3_key = f"workflow-states/{owner_id}/{workflow_id}/segments/{segment_id}/branches/{timestamp}/all_branches.json"
+            
+            # 전체 branches 배열을 S3에 업로드
+            branches_json = json.dumps(branches, default=str)
+            s3_client.put_object(
+                Bucket=self.state_bucket,
+                Key=s3_key,
+                Body=branches_json,
+                ContentType='application/json'
+            )
+            
+            branches_s3_path = f"s3://{self.state_bucket}/{s3_key}"
+            branches_size_kb = len(branches_json) / 1024
+            
+            logger.info(f"[Pointer Strategy] ✅ Uploaded {len(branches)} branches ({branches_size_kb:.1f}KB) to {branches_s3_path}")
+            
+            # 경량 포인터 배열 생성
+            # Map Iterator에서 각 포인터를 받아 S3에서 자신의 브랜치 데이터를 hydrate
+            branch_pointers = []
+            for idx, branch in enumerate(branches):
+                pointer = {
+                    'branch_index': idx,
+                    'branch_id': branch.get('id') or branch.get('branch_id') or f'branch_{idx}',
+                    'branches_s3_path': branches_s3_path,
+                    'total_branches': len(branches),
+                    # 💡 경량 메타데이터만 포함 (hydrate 전 필요한 최소 정보)
+                    'segment_count': len(branch.get('partition_map', [])) if branch.get('partition_map') else 0,
+                }
+                branch_pointers.append(pointer)
+            
+            pointer_size = len(json.dumps(branch_pointers, default=str))
+            logger.info(f"[Pointer Strategy] 📦 Created {len(branch_pointers)} pointers ({pointer_size/1024:.2f}KB) - "
+                       f"Compression ratio: {branches_size_kb * 1024 / max(pointer_size, 1):.1f}x")
+            
+            return branch_pointers, branches_s3_path
+            
+        except Exception as e:
+            logger.error(f"[Pointer Strategy] ❌ Failed to offload branches to S3: {e}")
+            # 폴백: 인라인 반환 (위험하지만 S3 실패 시)
+            return branches, None
+    
     def _estimate_branch_resources(self, branch: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, int]:
         """
         브랜치의 예상 자원 요구량 추정
@@ -1137,15 +1233,23 @@ class SegmentRunnerService:
         self,
         segment_config: Dict[str, Any],
         state: Dict[str, Any],
-        segment_id: int
+        segment_id: int,
+        owner_id: str = None,
+        workflow_id: str = None
     ) -> Dict[str, Any]:
         """
         [Parallel] 병렬 그룹 스케줄링: resource_policy에 따라 실행 배치 결정
         
+        🌿 [Pointer Strategy] Map 내부 Hydrate를 위한 S3 오프로딩:
+        - 전체 branches 데이터를 S3에 업로드
+        - pending_branches에는 경량 포인터 배열만 전달 (branch_index, branch_s3_path)
+        - Map Iterator 내부에서 각 브랜치가 S3 경로로 자신의 데이터 hydrate
+        
         Returns:
             {
                 'status': 'PARALLEL_GROUP' | 'SCHEDULED_PARALLEL',
-                'branches': [...] (원본 또는 스케줄된 배치),
+                'branches': [...] (경량 포인터 배열 - S3 경로 포함),
+                'branches_s3_path': S3 경로 (전체 branches 데이터 위치),
                 'execution_batches': [[...], [...]] (배치 구조),
                 'scheduling_metadata': {...}
             }
@@ -1156,14 +1260,26 @@ class SegmentRunnerService:
         # resource_policy가 없으면 기본 병렬 실행
         if not resource_policy:
             logger.info(f"[Scheduler] No resource_policy, using default parallel execution for {len(branches)} branches")
+            
+            # 🌿 [Pointer Strategy] S3에 브랜치 오프로딩
+            branch_pointers, branches_s3_path = self._offload_branches_to_s3(
+                branches=branches,
+                owner_id=owner_id or 'unknown',
+                workflow_id=workflow_id or 'unknown',
+                segment_id=segment_id
+            )
+            
             return {
                 'status': 'PARALLEL_GROUP',
-                'branches': branches,
-                'execution_batches': [branches],  # 단일 배치
+                'branches': branch_pointers,  # 경량 포인터 배열
+                'branches_s3_path': branches_s3_path,  # S3 경로
+                'execution_batches': [branch_pointers],  # 단일 배치 (포인터)
                 'scheduling_metadata': {
                     'strategy': 'DEFAULT',
                     'total_branches': len(branches),
-                    'batch_count': 1
+                    'batch_count': 1,
+                    'pointer_strategy': True,
+                    'branches_s3_path': branches_s3_path
                 }
             }
         
@@ -1186,29 +1302,53 @@ class SegmentRunnerService:
                 execution_batches = self._bin_pack_branches(branches, resource_estimates, forced_policy)
                 
                 logger.info(f"[Scheduler] [Guard] Guardrail applied: {len(execution_batches)} batches")
+                
+                # 🌿 [Pointer Strategy] S3에 브랜치 오프로딩
+                branch_pointers, branches_s3_path = self._offload_branches_to_s3(
+                    branches=branches,
+                    owner_id=owner_id or 'unknown',
+                    workflow_id=workflow_id or 'unknown',
+                    segment_id=segment_id
+                )
+                
                 return {
                     'status': 'SCHEDULED_PARALLEL',
-                    'branches': branches,
-                    'execution_batches': execution_batches,
+                    'branches': branch_pointers,  # 경량 포인터 배열
+                    'branches_s3_path': branches_s3_path,
+                    'execution_batches': execution_batches,  # 원본 배치 구조 (스케줄링용)
                     'scheduling_metadata': {
                         'strategy': strategy,
                         'total_branches': len(branches),
                         'batch_count': len(execution_batches),
                         'guardrail_applied': True,
-                        'reason': 'Account concurrency limit exceeded'
+                        'reason': 'Account concurrency limit exceeded',
+                        'pointer_strategy': True,
+                        'branches_s3_path': branches_s3_path
                     }
                 }
             
             logger.info(f"[Scheduler] SPEED_OPTIMIZED: All {len(branches)} branches in parallel")
+            
+            # 🌿 [Pointer Strategy] S3에 브랜치 오프로딩
+            branch_pointers, branches_s3_path = self._offload_branches_to_s3(
+                branches=branches,
+                owner_id=owner_id or 'unknown',
+                workflow_id=workflow_id or 'unknown',
+                segment_id=segment_id
+            )
+            
             return {
                 'status': 'PARALLEL_GROUP',
-                'branches': branches,
-                'execution_batches': [branches],
+                'branches': branch_pointers,  # 경량 포인터 배열
+                'branches_s3_path': branches_s3_path,
+                'execution_batches': [branch_pointers],
                 'scheduling_metadata': {
                     'strategy': strategy,
                     'total_branches': len(branches),
                     'batch_count': 1,
-                    'guardrail_applied': False
+                    'guardrail_applied': False,
+                    'pointer_strategy': True,
+                    'branches_s3_path': branches_s3_path
                 }
             }
         
@@ -1233,10 +1373,20 @@ class SegmentRunnerService:
         # 제한 내라면 단일 배치
         if total_memory <= max_memory and total_tokens <= max_tokens:
             logger.info(f"[Scheduler] Resources within limits, single batch execution")
+            
+            # 🌿 [Pointer Strategy] S3에 브랜치 오프로딩
+            branch_pointers, branches_s3_path = self._offload_branches_to_s3(
+                branches=branches,
+                owner_id=owner_id or 'unknown',
+                workflow_id=workflow_id or 'unknown',
+                segment_id=segment_id
+            )
+            
             return {
                 'status': 'PARALLEL_GROUP',
-                'branches': branches,
-                'execution_batches': [branches],
+                'branches': branch_pointers,  # 경량 포인터 배열
+                'branches_s3_path': branches_s3_path,
+                'execution_batches': [branch_pointers],
                 'scheduling_metadata': {
                     'strategy': strategy,
                     'total_branches': len(branches),
@@ -1245,7 +1395,9 @@ class SegmentRunnerService:
                     'total_tokens': total_tokens,
                     # [Guard] [v3.4] Deep Evidence Metrics
                     'total_tokens_calculated': total_tokens,
-                    'actual_concurrency_limit': max_tokens
+                    'actual_concurrency_limit': max_tokens,
+                    'pointer_strategy': True,
+                    'branches_s3_path': branches_s3_path
                 }
             }
         
@@ -1257,10 +1409,19 @@ class SegmentRunnerService:
             batch_memory = sum(self._estimate_branch_resources(b, state)['memory_mb'] for b in batch)
             logger.info(f"[Scheduler]   Batch {i+1}: {len(batch)} branches, ~{batch_memory}MB")
         
+        # 🌿 [Pointer Strategy] S3에 브랜치 오프로딩
+        branch_pointers, branches_s3_path = self._offload_branches_to_s3(
+            branches=branches,
+            owner_id=owner_id or 'unknown',
+            workflow_id=workflow_id or 'unknown',
+            segment_id=segment_id
+        )
+        
         return {
             'status': 'SCHEDULED_PARALLEL',
-            'branches': branches,
-            'execution_batches': execution_batches,
+            'branches': branch_pointers,  # 경량 포인터 배열
+            'branches_s3_path': branches_s3_path,
+            'execution_batches': execution_batches,  # 원본 배치 구조 (스케줄링용)
             'scheduling_metadata': {
                 'strategy': strategy,
                 'total_branches': len(branches),
@@ -1270,7 +1431,9 @@ class SegmentRunnerService:
                 # [Guard] [v3.4] Deep Evidence Metrics
                 'total_tokens_calculated': total_tokens,
                 'actual_concurrency_limit': max_tokens,
-                'resource_policy': resource_policy
+                'resource_policy': resource_policy,
+                'pointer_strategy': True,
+                'branches_s3_path': branches_s3_path
             }
         }
 
@@ -1309,11 +1472,10 @@ class SegmentRunnerService:
                     # Fallback to empty state
                     current_state = ensure_state_bag({})
         
-        # 이벤트 원본도 갱신하여 하위 참조(merge 등)에서 안전 보장
-        event['current_state'] = current_state
+        # ⚠️ Keep current_state as local variable only - DO NOT add to event
         
         parallel_results = event.get('parallel_results', [])
-        base_state = event.get('current_state', {})
+        base_state = current_state  # Use local variable instead of event.get
         segment_to_run = event.get('segment_to_run', 0)
         workflow_id = event.get('workflowId') or event.get('workflow_id')
         auth_user_id = event.get('ownerId') or event.get('owner_id')
@@ -2065,58 +2227,14 @@ class SegmentRunnerService:
 
     def execute_segment(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Main execution logic for a workflow segment.
-        
-        [Guard] [Kernel Defense] 4단계 방어 메커니즘:
-        1. Reserved Concurrency: Lambda 레벨 동시성 제한 (template.yaml)
-        2. Kernel Scheduling: 부하 평탄화 + 배치 처리
-        3. Intelligent Retry: 적응형 품질 임계값 + 정보 증류
-        4. Budget/Drift Guardrail: 비용 서킷 브레이커 + 시맨틱 드리프트 감지
+        Main execution logic for a workflow segment with StateHydrator integration.
         """
-        # � [Critical Fix] Restore InitializeStateData S3 Offloading
-        # If the event is S3 offloaded from InitializeStateDataFunction, restore it
-        if isinstance(event, dict) and event.get('__s3_offloaded') is True:
-            s3_path = event.get('__s3_path')
-            if s3_path:
-                try:
-                    logger.info(f"[InitializeStateData Offload] Restoring event from S3: {s3_path}")
-                    restored_event = self.state_manager.download_state_from_s3(s3_path)
-                    if isinstance(restored_event, dict):
-                        event = restored_event
-                        logger.info(f"[InitializeStateData Offload] Successfully restored event ({len(str(event))} chars)")
-                    else:
-                        logger.error(f"[InitializeStateData Offload] Restored data is not a dict: {type(restored_event)}")
-                        raise ValueError("Invalid restored event data")
-                except Exception as e:
-                    logger.error(f"[InitializeStateData Offload] Failed to restore event from S3: {e}")
-                    raise RuntimeError(f"Failed to restore InitializeStateData from S3: {e}")
+        # 🛡️ [v3.11] Unified State Hydration (Input)
+        # Hydrate the event (convert to SmartStateBag) using pre-initialized hydrator
+        # This handles "__s3_offloaded" restoration automatically
+        event = self.hydrator.hydrate(event)
         
-        # [Strategy 2] Hydrate workflow_config and current_state from S3 paths
-        # InitializeStateData always offloads these to S3, so we must hydrate on demand
-        workflow_config_s3_path = event.get('workflow_config_s3_path')
-        if workflow_config_s3_path and not event.get('workflow_config'):
-            try:
-                logger.info(f"[Hydration] Loading workflow_config from S3: {workflow_config_s3_path}")
-                event['workflow_config'] = self.state_manager.download_state_from_s3(workflow_config_s3_path)
-                logger.info(f"[Hydration] workflow_config loaded ({len(str(event['workflow_config']))} chars)")
-            except Exception as e:
-                logger.error(f"[Hydration] Failed to load workflow_config from S3: {e}")
-                raise RuntimeError(f"Failed to hydrate workflow_config from S3: {e}")
-        
-        state_s3_path = event.get('state_s3_path')
-        if state_s3_path and not event.get('current_state'):
-            try:
-                logger.info(f"[Hydration] Loading current_state from S3: {state_s3_path}")
-                event['current_state'] = self.state_manager.download_state_from_s3(state_s3_path)
-                logger.info(f"[Hydration] current_state loaded ({len(str(event['current_state']))} chars)")
-            except Exception as e:
-                logger.error(f"[Hydration] Failed to load current_state from S3: {e}")
-                raise RuntimeError(f"Failed to hydrate current_state from S3: {e}")
-        
-        # �🛡️ [v3.6] Entropy Shield: 입력을 받자마자 StateBag으로 변환하여 하위 로직 전체를 보호
-        # event.get('current_state')가 None이어도 ensure_state_bag이 빈 StateBag으로 승격시킴
         from src.common.statebag import ensure_state_bag
-        event['current_state'] = ensure_state_bag(event.get('current_state') or event.get('state', {}))
         
         execution_start_time = time.time()
         
@@ -2138,341 +2256,111 @@ class SegmentRunnerService:
         
         def _finalize_response(res: Dict[str, Any], force_offload: bool = False) -> Dict[str, Any]:
             """
-            🛡️ [Guard] [v3.3 Standard Envelope] Universal Response Wrapper
-            Ensures ALL return paths conform to Step Functions contract with guaranteed metadata.
-            
-            1. Extract metadata from final_state (or defaults).
-            2. Inject back into final_state (persistence).
-            3. Inject into top-level response (ResultSelector access).
-            4. [v3.9] ASL passthrough fields - 입력 이벤트의 메타데이터를 그대로 전달
+            🛡️ [Guard] [v3.11] StateBag Dehydration Wrapper
+            Uses StateHydrator to offload large fields to S3, returning only pointers and metadata.
             """
-            # 🛡️ [P0 Critical] Step 1: Null Guard & Emergency Response Creation
+            # 1. Validation & Safety Defaults
             if not isinstance(res, dict):
-                logger.error(f"[Alert] [Kernel] _finalize_response received invalid type: {type(res)}! Creating emergency response.")
-                res = {
-                    "status": "FAILED",
-                    "error_info": {
-                        "error": f"Kernel Internal Error: Result is {type(res).__name__}, expected dict",
-                        "error_type": "KernelTypeMismatch"
-                    }
-                }
+                logger.error(f"[Alert] [Kernel] Invalid response type: {type(res)}! Emergency fallback.")
+                res = {"status": "FAILED", "error_info": {"error": "KernelTypeMismatch"}}
             
-            # 🛡️ [P0 Critical] Step 2: Ensure ASL JSONPath Required Fields FIRST
-            # These fields MUST exist before any other processing to prevent Step Functions crashes
-            res.setdefault('status', 'FAILED')  # Always have a status
-            res.setdefault('segment_type', 'normal')  # 👉 ASL requires this field!
-            res.setdefault('new_history_logs', [])  # 👉 This was causing JSONPath errors!
+            res.setdefault('status', 'FAILED')
+            res.setdefault('segment_type', 'normal')
+            res.setdefault('new_history_logs', [])
             res.setdefault('final_state', {})
             res.setdefault('total_segments', _total_segments)
             res.setdefault('segment_id', _segment_id)
             
-            # [Guard] [v3.5] Original Null Guard - Check AFTER basic fields set
-            if res.get('status') == 'FAILED' and not res.get('error_info'):
-                # If status is FAILED but no error_info, add generic one
-                res.setdefault('error_info', {
-                    "error": "Unknown Error",
-                    "error_type": "UnknownError"
-                })
+            # 2. Extract Metadata for Persistence & ASL
+            # We must rescue these values BEFORE dehydration hides them in S3 pointers
+            original_final_state = res.get('final_state', {})
+            if not isinstance(original_final_state, dict): original_final_state = {}
             
-            # [Guard] Extract standard metadata with fallback defaults
-            final_state = res.get('final_state')
-            # [Fix] Explicit None check because .get() returns None if key exists but value is null
-            if final_state is None:
-                final_state = {}
-                res['final_state'] = final_state
-            if not isinstance(final_state, dict):
-                logger.warning(f"[Kernel] final_state is not a dict ({type(final_state)}). Resetting.")
-                final_state = {}
-                res['final_state'] = final_state
-                
-            # 🛡️ [P0 Fix] Simulator Contract Guard
-            # 시뮬레이터가 무조건 기대하는 필드들을 None으로라도 보장하여 SFN 크래시 방지
-            SIMULATOR_REQUIRED_KEYS = ['batch_verification', 'loop_os_test_result', 'TEST_RESULT', 'VALIDATION_STATUS']
-            if isinstance(final_state, dict):
-                for sk in SIMULATOR_REQUIRED_KEYS:
-                    final_state.setdefault(sk, None)
+            # Standard standard metadata injection (into final_state)
+            # This ensures next lambda gets them even if we offload
+            gv = original_final_state.get('guardrail_verified', False)
+            bca = original_final_state.get('batch_count_actual', 1)
+            sm = original_final_state.get('scheduling_metadata', {})
             
-            # Explicitly extract to ensure we get a value (defaulting to False/1/{})
-            gv = final_state.get('guardrail_verified', False)
-            bca = final_state.get('batch_count_actual', 1)
-            sm = final_state.get('scheduling_metadata', {})
-            
-            standard_metadata = {
+            original_final_state.update({
                 'guardrail_verified': gv,
                 'batch_count_actual': bca,
                 'scheduling_metadata': sm,
-                'state_size_threshold': self.threshold
-            }
+                'state_size_threshold': self.threshold,
+                # Legacy aliases
+                '__scheduling_metadata': sm,
+                '__guardrail_verified': gv,
+                '__batch_count_actual': bca
+            })
+            res['final_state'] = original_final_state # update ref
             
-            # [Guard] 1. Inject into final_state (Persistence)
-            # This ensures the next step in SFN receives these values in its input state
-            if isinstance(res.get('final_state'), dict):
-                res['final_state'].update(standard_metadata)
-                
-                # [Compat] [v3.10 Fix] Alias metadata with double underscore for Legacy/Test operator compatibility
-                # Specifically for SPEED_GUARDRAIL_TEST which expects __scheduling_metadata
-                res['final_state']['__scheduling_metadata'] = sm
-                res['final_state']['__guardrail_verified'] = gv
-                res['final_state']['__batch_count_actual'] = bca
+            # 3. Use StateHydrator to Dehydrate
+            # This handles size checks and S3 offloading automatically
+            bag = SmartStateBag(res, hydrator=self.hydrator)
             
-            # [Guard] 2. Inject into Top-level (SFN ResultSelector Access)
-            for key, value in standard_metadata.items():
-                res[key] = value
+            # Determine fields to force offload
+            force_fields = set()
             
-            # [Guard] [v3.10] Ensure ASL ResultSelector required fields always exist
-            # Step Functions JSONPath fails if field is missing, so we ensure fields exist with appropriate values
-            # inner_partition_map: only has value for SEQUENTIAL_BRANCH, otherwise null
-            # branches: only has value for PARALLEL_GROUP, otherwise null  
-            res.setdefault('inner_partition_map', None)
-            res.setdefault('branches', None)
-            res.setdefault('branch_id', None)
-            res.setdefault('final_state_s3_path', None)  # [Critical Fix] ASL requires this field
-            res.setdefault('next_segment_to_run', None)  # [Critical Fix] ASL requires this field
-            res.setdefault('new_history_logs', [])  # 🛡️ [P0 Critical Fix] ASL JSONPath requires this field
+            # [Strict Mode] Always offload final_state to enforce "No Data at Root"
+            force_fields.add('final_state')
             
-     
-            # [Guard] [v3.9] ASL Passthrough Fields - 입력 이벤트의 메타데이터를 응답에 주입
-            # [Fix] Moved BEFORE S3 Offloading Check to ensure these large fields are also offloaded if needed
-            # ASL JSONPath는 Lambda 응답을 직접 파싱하므로 필드가 없으면 오류 발생
-            # StateBag은 Python 레벨에서만 동작하고 ASL에는 영향 없음
-            asl_passthrough_fields = [
-                'workflow_config', 'current_state', 'state_s3_path',
-                'ownerId', 'workflowId', 'idempotency_key', 'quota_reservation_id',
-                'partition_map', 'partition_map_s3_path',
-                'segment_manifest', 'segment_manifest_s3_path',
-                'distributed_mode', 'max_concurrency',
-                'max_loop_iterations', 'max_branch_iterations',
-                'loop_counter', 'llm_segments', 'hitp_segments', 'state_durations',
-                # [New] Pass through S3 config paths
-                'test_workflow_config_s3_path', 'config_s3_ref'
+            if force_offload or is_parallel_branch:
+                # Force offload large objects for aggregators or parallel branches
+                # force_fields.add('final_state') <- Already added above
+                force_fields.add('branches')
+                force_fields.add('execution_batches')
+                if is_parallel_branch:
+                    # Strip config from parallel branches to save space
+                    force_fields.add('workflow_config')
+                    force_fields.add('partition_map')
+
+            owner_id = event.get('ownerId') or event.get('owner_id', 'unknown')
+            workflow_id = event.get('workflowId') or event.get('workflow_id', 'unknown')
+            execution_id = event.get('execution_id', 'unknown')
+
+            payload = self.hydrator.dehydrate(
+                state=bag,
+                owner_id=owner_id,
+                workflow_id=workflow_id,
+                execution_id=execution_id,
+                segment_id=_segment_id,
+                force_offload_fields=force_fields,
+                return_delta=False
+            )
+            
+            # 4. Restore Critical Metadata to Top Level (ASL Visibility)
+            # Even if final_state is offloaded, these must be visible to Step Functions
+            # Copy from original_final_state (before dehydration)
+            keys_to_preserve = [
+                'total_tokens', 'total_input_tokens', 'total_output_tokens',
+                'guardrail_verified', 'batch_count_actual', 'scheduling_metadata',
+                'usage', 'branch_token_details',
+                'inner_partition_map', 'branch_id', 'next_segment_to_run'
             ]
-            for field in asl_passthrough_fields:
-                if field not in res:
-                    # 이벤트에서 값 가져오기 (test_workflow_config -> workflow_config 별칭 처리)
-                    if field == 'workflow_config':
-                        # [Optimization] If config is offloaded, do NOT pass huge inline config back
-                        # unless it's small or we absolutely have to.
-                        s3_path = event.get('test_workflow_config_s3_path') or event.get('config_s3_ref')
-                        should_skip_inline = s3_path is not None
-                        
-                        if should_skip_inline:
-                             # Skip re-injecting huge config (it's available via S3 path)
-                             pass
-                        else:
-                             res[field] = event.get('test_workflow_config') or event.get('workflow_config')
-                    elif field == 'ownerId':
-                        res[field] = event.get('ownerId') or event.get('owner_id')
-                    elif field == 'workflowId':
-                        res[field] = event.get('workflowId') or event.get('workflow_id')
-                    else:
-                        res[field] = event.get(field)
-
-            # 🛡️ [P0 Critical] Step Functions 256KB Payload Limit Guard
-            # AWS Step Functions rejects state transitions > 256KB
-            # Check BEFORE returning to ensure response fits within limits
-            try:
-                # 🛡️ [P0 Critical] Force offload for Aggregator/Parallel contexts
-                # These cases accumulate data from multiple branches, so always offload regardless of size
-                # [Fix] Also force offload if running as a Parallel Branch (to keep Map output small)
-                
-                if force_offload or is_parallel_branch:
-                    if is_parallel_branch:
-                        logger.info(f"[Kernel] [Force Offload] Parallel Branch execution detected - forcing S3 offload to prevent Map payload explosion")
-                    else:
-                        logger.info(f"[Kernel] [Force Offload] Aggregator/Parallel context - forcing S3 offload for all large fields")
-                    
-                    response_size = 999999  # Trigger offloading
-                    SFN_SIZE_LIMIT = 0  # Force all large fields to S3
-                else:
-                    response_size = len(json.dumps(res, default=str))
-                    # 150KB threshold (더 conservative한 안전 마진)
-                    SFN_SIZE_LIMIT = 150 * 1024
-                
-                if response_size > SFN_SIZE_LIMIT:
-                    logger.warning(
-                        f"[Kernel] ⚠️ Response size {response_size/1024:.1f}KB exceeds Step Functions limit. "
-                        f"Force offloading large fields to S3..."
-                    )
-                    
-                    # 🛡️ [P0 Fix] Force S3 offload for ALL large state fields
-                    # Not just final_state, but also current_state, branches, execution_batches and other large objects
-                    large_fields = ['final_state', 'current_state', 'workflow_config', 'branches', 'execution_batches']
-                    
-                    offloaded_count = 0
-                    for field_name in large_fields:
-                        field_value = res.get(field_name)
-                        # Skip if field doesn't exist, is None, or already offloaded
-                        if not field_value:
-                            continue
-                        if isinstance(field_value, dict) and field_value.get('__s3_offloaded'):
-                            continue
-                        
-                        # Calculate field size
-                        field_size = len(json.dumps(field_value, default=str))
-                        
-                        # Determine threshold
-                        if force_offload:
-                            # Force offload: 임계값 무시, 모든 필드 오프로딩 (1KB 이상이면)
-                            threshold = 1024  # 1KB
-                        else:
-                            # 30KB threshold for individual fields (더 낮은 임계값)
-                            threshold = 30 * 1024
-                            # branches/execution_batches는 더 낮은 임계값 (20KB)
-                            if field_name in ['branches', 'execution_batches']:
-                                threshold = 20 * 1024
-                        
-                        if field_size > threshold:
-                            # Generate S3 path for offloaded field
-                            owner_id = event.get('ownerId') or event.get('owner_id', 'unknown')
-                            workflow_id = event.get('workflowId') or event.get('workflow_id', 'unknown')
-                            segment_id = res.get('segment_id', 0)
-                            timestamp = int(time.time())
-                            
-                            s3_key = f"workflow-states/{owner_id}/{workflow_id}/segments/{segment_id}/{timestamp}/{field_name}.json"
-                            
-                            # S3 버킷 사용 가능 여부 체크
-                            if not self.state_bucket:
-                                logger.error(f"[Kernel] [S3 Offload] No S3 bucket configured. Cannot offload {field_name} ({field_size/1024:.1f}KB)")
-                                continue
-                            
-                            try:
-                                # Upload field to S3
-                                s3_client = boto3.client('s3')
-                                s3_client.put_object(
-                                    Bucket=self.state_bucket,
-                                    Key=s3_key,
-                                    Body=json.dumps(field_value, default=str),
-                                    ContentType='application/json'
-                                )
-                                
-                                s3_path = f"s3://{self.state_bucket}/{s3_key}"
-                                logger.info(f"[Kernel] [S3 Offload] Uploaded {field_name} ({field_size/1024:.1f}KB) to {s3_path}")
-                                
-                                # Replace field with S3 reference
-                                # For dict fields, preserve critical metadata
-                                if isinstance(field_value, dict):
-                                    # [FIX] Preserve dynamic node outputs (*_output, *_meta patterns)
-                                    # Extract all dynamic output fields from the dict
-                                    dynamic_outputs = {}
-                                    for key, value in field_value.items():
-                                        # Preserve node outputs, metadata, and verification data
-                                        if any([
-                                            key.endswith('_output'),
-                                            key.endswith('_meta'),
-                                            key.endswith('_result'),
-                                            key.endswith('_data'),
-                                            key.startswith('llm_'),
-                                            key.startswith('vision_')
-                                        ]):
-                                            dynamic_outputs[key] = value
-                                    
-                                    res[field_name] = {
-                                        "__s3_offloaded": True,
-                                        "__s3_path": s3_path,
-                                        "__original_size_kb": field_size / 1024,
-                                        # Preserve critical metadata for Step Functions JSONPath
-                                        "guardrail_verified": field_value.get('guardrail_verified', False),
-                                        "batch_count_actual": field_value.get('batch_count_actual', 1),
-                                        "scheduling_metadata": field_value.get('scheduling_metadata', {}),
-                                        "state_size_threshold": self.threshold,
-                                        # [FIX] Preserve token fields (critical for aggregator and verification)
-                                        "total_tokens": field_value.get('total_tokens', 0),
-                                        "total_input_tokens": field_value.get('total_input_tokens', 0),
-                                        "total_output_tokens": field_value.get('total_output_tokens', 0),
-                                        "usage": field_value.get('usage', {}),
-                                        "branch_token_details": field_value.get('branch_token_details', []),
-                                        # Preserve passthrough fields with double underscore (legacy compatibility)
-                                        "__scheduling_metadata": field_value.get('scheduling_metadata', {}),
-                                        "__guardrail_verified": field_value.get('guardrail_verified', False),
-                                        "__batch_count_actual": field_value.get('batch_count_actual', 1),
-                                        # [FIX] Include dynamic outputs for simulator verification
-                                        **dynamic_outputs,
-                                    }
-                                else:
-                                    # For list/array fields (branches, execution_batches)
-                                    res[field_name] = {
-                                        "__s3_offloaded": True,
-                                        "__s3_path": s3_path,
-                                        "__original_size_kb": field_size / 1024,
-                                        "__original_length": len(field_value) if isinstance(field_value, list) else 0
-                                    }
-                                
-                                # Update S3 path fields if this is final_state or current_state
-                                if field_name == 'final_state':
-                                    res['final_state_s3_path'] = s3_path
-                                    res['state_s3_path'] = s3_path  # ASL passthrough field
-                                elif field_name == 'current_state':
-                                    res['state_s3_path'] = s3_path
-                                
-                                offloaded_count += 1
-                                
-                            except Exception as s3_err:
-                                logger.error(f"[Kernel] [S3 Offload] Failed to upload {field_name} to S3: {s3_err}")
-                                # Continue without offloading - better to try other fields than crash
-                    
-                    # Verify new size after all offloads
-                    if offloaded_count > 0:
-                        new_size = len(json.dumps(res, default=str))
-                        if new_size < response_size:
-                            logger.info(
-                                f"[Kernel] [S3 Offload] Response size reduced ({offloaded_count} fields offloaded): "
-                                f"{response_size/1024:.1f}KB → {new_size/1024:.1f}KB "
-                                f"(saved {(response_size-new_size)/1024:.1f}KB)"
-                            )
-                        
-                        # [FIX] After offloading, copy token fields from final_state wrapper to root level
-                        # This ensures Step Functions JSONPath can access token data even after S3 offload
-                        final_state_ref = res.get('final_state')
-                        if isinstance(final_state_ref, dict) and final_state_ref.get('__s3_offloaded'):
-                            # Copy preserved token fields to root level for SFN ResultSelector access
-                            token_fields = ['total_tokens', 'total_input_tokens', 'total_output_tokens', 'usage', 'branch_token_details']
-                            for tf in token_fields:
-                                if tf in final_state_ref and tf not in res:
-                                    res[tf] = final_state_ref[tf]
-                                    logger.debug(f"[S3 Offload] Copied {tf} to root level for SFN access")
-                        
-                        # If still too large, log warning but continue (Step Functions will reject)
-                        if new_size > SFN_SIZE_LIMIT:
-                            logger.error(
-                                f"[Kernel] 🚨 CRITICAL: Response still {new_size/1024:.1f}KB after offloading {offloaded_count} fields. "
-                                f"Step Functions will reject this payload!"
-                            )
-                    else:
-                        logger.warning(f"[Kernel] ⚠️ No fields were offloaded despite response size {response_size/1024:.1f}KB exceeding limit")
-                            
-            except Exception as size_check_err:
-                logger.error(f"[Kernel] ⚠️ Failed to check response size: {size_check_err}. Proceeding without offload.")
+            for k in keys_to_preserve:
+                if k in original_final_state and k not in payload:
+                    payload[k] = original_final_state[k]
             
+            # Also ensure keys that were in 'res' but might be hidden if wrapped in something else (not likely with dehydrate)
+            # dehydrate keeps control plane fields.
+            
+            # 5. Generate S3 Path Aliases for ASL Compatibility
+            # If payload has { "final_state": { "bucket": "...", "key": "...", "__s3_pointer__": True } }
+            # Add "final_state_s3_path" = "s3://bucket/key"
+            for field in ['final_state', 'current_state', 'workflow_config', 'partition_map', 'segment_manifest', 'branches']:
+                val = payload.get(field)
+                if isinstance(val, dict) and (val.get('__s3_pointer__') or val.get('bucket')):
+                    # Check for S3Pointer signature
+                    bucket = val.get('bucket')
+                    key = val.get('key')
+                    if bucket and key:
+                        payload[f"{field}_s3_path"] = f"s3://{bucket}/{key}"
+            
+            # Explicit alias for state_s3_path
+            if payload.get('final_state_s3_path'):
+                payload['state_s3_path'] = payload['final_state_s3_path']
 
-                
-            # 🛡️ [P0 Critical] Aggressive Pruning for Parallel Branches
-            # Map State collects ALL branch results. If every branch returns huge metadata (workflow_config),
-            # the aggregated payload explodes (N * ConfigSize).
-            # The Aggregator (AggregateParallelResults) gets these from 'state_data', so branches DON'T need them.
-            if is_parallel_branch:
-                # List of fields to STRIP from branch response
-                prune_fields = [
-                    'workflow_config', 
-                    'partition_map', 'partition_map_s3_path',
-                    'segment_manifest', 'segment_manifest_s3_path',
-                    'test_workflow_config_s3_path', 'config_s3_ref',
-                    'distributed_mode', 'max_concurrency',
-                    'total_segments', 'segment_to_run', # Aggregator knows this
-                    'state_history', 'state_durations'  # Aggregator manages history
-                ]
-                
-                # Keep only essential fields:
-                # - status, final_state (or pointers), error_info, branch_id
-                
-                pruned_count = 0
-                for field in prune_fields:
-                    if field in res:
-                        del res[field]
-                        pruned_count += 1
-                        
-                logger.debug(f"[Parallel Pruning] Stripped {pruned_count} heavy metadata fields from branch response to save space.")
-
-            return res
+            return payload
         
         # ====================================================================
         # [Guard] [2단계] Pre-Execution Check: 동시성 및 예산 체크
@@ -2571,8 +2459,9 @@ class SegmentRunnerService:
         else:
             logger.debug(f"S3 bucket for state offloading: {s3_bucket}")
         
-        # 3. Load State (Inline or S3)
+        # 3. Load State (Inline or S3) - Keep as local variable only
         # [Critical Fix] Step Functions passes state as 'current_state', not 'state'
+        # ⚠️ DO NOT add to event to avoid 256KB limit
         state_s3_path = event.get('state_s3_path')
         initial_state = event.get('current_state') or event.get('state', {})
         
@@ -2603,6 +2492,7 @@ class SegmentRunnerService:
         if state_s3_path:
             initial_state = self.state_manager.download_state_from_s3(state_s3_path)
             # [Critical Fix] Double-check for S3 offload in downloaded state
+            from src.common.statebag import ensure_state_bag
             initial_state = ensure_state_bag(initial_state)
             if isinstance(initial_state, dict) and initial_state.get('__s3_offloaded') is True:
                 offloaded_path = initial_state.get('__s3_path')
@@ -2628,19 +2518,29 @@ class SegmentRunnerService:
             initial_state['MOCK_MODE'] = event['MOCK_MODE']
             logger.info(f"🔄 MOCK_MODE override: {old_value} → {event['MOCK_MODE']} (from payload)")
 
-        # [Fix] [v3.10] Normalize Event AFTER loading state
-        # Remove potentially huge state_data from event to save memory for child processes
-        # But ONLY after we have safely loaded it into initial_state
+        # ====================================================================
+        # [Hydration] [v3.10] Unified State Bag - Single Source of Truth
+        # Extract S3 path from state_data BEFORE normalize_inplace removes it
+        # ====================================================================
+        config_s3_path = None
+        if isinstance(event.get('state_data'), dict):
+            state_data = event['state_data']
+            # Handle both layer formats:
+            # 1. Direct bag (MAP_REDUCE/Branch): state_data = {...bag...}
+            # 2. Wrapped bag (ExecuteSegment): state_data = {bag: {...}}
+            if 'bag' in state_data and isinstance(state_data['bag'], dict):
+                config_s3_path = state_data['bag'].get('workflow_config_s3_path')
+            else:
+                # Already unwrapped (MAP_REDUCE/Branch mode)
+                config_s3_path = state_data.get('workflow_config_s3_path')
+        
+        # [Fix] [v3.10] Normalize Event AFTER extracting S3 path but BEFORE hydration
+        # Remove potentially huge state_data from event to save memory
         normalize_inplace(event, remove_state_data=True)
-
-        # ====================================================================
-        # [Hydration] [v3.9] Early Config Hydration from S3
-        # for extremely large config using s3
-        # ====================================================================
-        config_s3_path = event.get('test_workflow_config_s3_path')
-        if config_s3_path and not event.get('test_workflow_config'):
+        
+        if config_s3_path:
             try:
-                logger.info(f"⬇️ [Hydration] Downloading test_workflow_config from S3: {config_s3_path}")
+                logger.info(f"⬇️ [Hydration] Downloading workflow_config from State Bag S3: {config_s3_path}")
                 
                 # S3 Download with Retry (Eventual Consistency Protection)
                 def _download_config():
@@ -2649,11 +2549,10 @@ class SegmentRunnerService:
                     s3_client = self.state_manager.s3_client
                     obj = s3_client.get_object(Bucket=bucket_name, Key=key_name)
                     content = obj['Body'].read().decode('utf-8')
-                    return self._safe_json_load(content)  # 🛡️ Use safe loader
+                    return self._safe_json_load(content)
 
                 if RETRY_UTILS_AVAILABLE:
-                    # Exponential Backoff: 0.5s, 1.0s, 2.0s
-                    loaded_config = retry_call(
+                    workflow_config = retry_call(
                         _download_config,
                         max_retries=3,
                         base_delay=0.5,
@@ -2661,14 +2560,15 @@ class SegmentRunnerService:
                         exceptions=(Exception,)
                     )
                 else:
-                    loaded_config = _download_config()
+                    workflow_config = _download_config()
 
-                event['test_workflow_config'] = loaded_config
-                logger.info(f"✅ [Hydration] Config restored ({len(json.dumps(loaded_config))} bytes)")
+                # ⚠️ DO NOT add to event to avoid 256KB limit
+                # Keep as local variable only
+                    
+                logger.info(f"✅ [Hydration] Config restored from State Bag ({len(json.dumps(workflow_config))} bytes)")
                 
             except Exception as e:
-                logger.error(f"❌ [Hydration] Failed to download config from S3: {e}")
-                # Critical Fail: Config is required
+                logger.error(f"❌ [Hydration] Failed to download config from State Bag S3: {e}")
                 return _finalize_response({
                     "status": "FAILED",
                     "error_info": {
@@ -2677,11 +2577,33 @@ class SegmentRunnerService:
                     }
                 })
 
-        # 4. Resolve Segment Config
-        # [Critical Fix] Support both test_workflow_config (E2E tests) and workflow_config
-        workflow_config = event.get('test_workflow_config') or event.get('workflow_config')
-        partition_map = event.get('partition_map')
-        partition_map_s3_path = event.get('partition_map_s3_path')
+        # 4. Resolve Segment Config - Single Source of Truth
+        # workflow_config already set from hydration above, or fallback to initial_state
+        if 'workflow_config' not in locals() or workflow_config is None:
+            # Fallback: Check initial_state for inline workflow_config (backward compatibility)
+            if isinstance(initial_state, dict):
+                workflow_config = initial_state.get('workflow_config')
+            else:
+                workflow_config = None
+        
+        # Extract partition_map from State Bag (state_data has partition_map)
+        partition_map = None
+        partition_map_s3_path = None
+        if isinstance(event.get('state_data'), dict):
+            state_data = event['state_data']
+            # Handle both wrapped (ExecuteSegment) and unwrapped (MAP_REDUCE/Branch) State Bag structures
+            if 'bag' in state_data and isinstance(state_data['bag'], dict):
+                partition_map = state_data['bag'].get('partition_map')
+                partition_map_s3_path = state_data['bag'].get('partition_map_s3_path')
+            else:
+                partition_map = state_data.get('partition_map')
+                partition_map_s3_path = state_data.get('partition_map_s3_path')
+        
+        # Fallback: Check event root (backward compatibility or MAP_REDUCE direct pass)
+        if not partition_map:
+            partition_map = event.get('partition_map')
+        if not partition_map_s3_path:
+            partition_map_s3_path = event.get('partition_map_s3_path')
         
         # � [Critical Fix] Branch Execution: partition_map fallback from branch_config
         # ASL의 ProcessParallelSegments에서 branch_config에 전체 브랜치 정보가 전달됨
@@ -2697,7 +2619,16 @@ class SegmentRunnerService:
         
         # �🚀 [Hybrid Mode] Direct segment_config support for MAP_REDUCE/BATCHED modes
         direct_segment_config = event.get('segment_config')
-        execution_mode = event.get('execution_mode')
+        # Extract execution_mode from State Bag first
+        execution_mode = None
+        if isinstance(event.get('state_data'), dict):
+            state_data = event['state_data']
+            if 'bag' in state_data and isinstance(state_data['bag'], dict):
+                execution_mode = state_data['bag'].get('execution_mode')
+            else:
+                execution_mode = state_data.get('execution_mode')
+        if not execution_mode:
+            execution_mode = event.get('execution_mode')
         
         if direct_segment_config and execution_mode in ('MAP_REDUCE', 'BATCHED'):
             logger.info(f"[Hybrid Mode] Using direct segment_config for {execution_mode} mode")
@@ -3014,7 +2945,9 @@ class SegmentRunnerService:
             schedule_result = self._schedule_parallel_group(
                 segment_config=segment_config,
                 state=initial_state,
-                segment_id=segment_id
+                segment_id=segment_id,
+                owner_id=auth_user_id,
+                workflow_id=workflow_id
             )
             
             # SCHEDULED_PARALLEL: 배치별 순차 실행 필요
@@ -3053,6 +2986,11 @@ class SegmentRunnerService:
             initial_state['scheduling_metadata'] = meta
             initial_state['batch_count_actual'] = meta.get('batch_count', 1)
             
+            # 🌿 [Pointer Strategy] schedule_result.branches는 이미 경량 포인터 배열
+            # branches_s3_path도 전달하여 State Bag에 저장
+            branch_pointers = schedule_result.get('branches', valid_branches)
+            branches_s3_path = schedule_result.get('branches_s3_path')
+            
             return _finalize_with_offload({
                 "status": "PARALLEL_GROUP",
                 "final_state": mask_pii_in_state(initial_state),
@@ -3060,8 +2998,9 @@ class SegmentRunnerService:
                 "next_segment_to_run": segment_id + 1,
                 "new_history_logs": [],
                 "error_info": None,
-                "branches": valid_branches,  # 유효한 브랜치만
-                "execution_batches": schedule_result.get('execution_batches', [valid_branches]),
+                "branches": branch_pointers,  # 🌿 경량 포인터 배열
+                "branches_s3_path": branches_s3_path,  # 🌿 S3 경로
+                "execution_batches": schedule_result.get('execution_batches', [branch_pointers]),
                 "segment_type": "parallel_group",
                 "scheduling_metadata": meta
             })
@@ -3308,7 +3247,18 @@ class SegmentRunnerService:
         # 각 iteration 결과가 개별적으로는 작아도 Distributed Map이 모든 결과를
         # 배열로 수집하면 256KB 제한을 초과할 수 있음
         # [Fix] distributed_mode가 null(JSON)/None(Python)일 수 있으므로 명시적 True 체크
-        is_distributed_mode = event.get('distributed_mode') is True
+        # Extract from State Bag first
+        is_distributed_mode = None
+        if isinstance(event.get('state_data'), dict):
+            state_data = event['state_data']
+            if 'bag' in state_data and isinstance(state_data['bag'], dict):
+                is_distributed_mode = state_data['bag'].get('distributed_mode')
+            else:
+                is_distributed_mode = state_data.get('distributed_mode')
+        if is_distributed_mode is None:
+            is_distributed_mode = event.get('distributed_mode') is True
+        else:
+            is_distributed_mode = is_distributed_mode is True
         
         # [Critical Fix] Map State 브랜치 실행도 강제 오프로딩 필요
         # Map State가 모든 브랜치 결과를 수집할 때 256KB 제한 초과 방지
