@@ -33,7 +33,10 @@ def _hydrate_s3_offloaded_state(final_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     S3로 오프로드된 상태를 하이드레이션합니다.
     
-    __s3_offloaded: True 플래그가 있으면 __s3_path에서 전체 상태를 읽어옵니다.
+    v3.0: StateBag 아키텍처 지원
+    - __s3_offloaded: True + __s3_path → 레거시 오프로드 패턴
+    - state_s3_path → 새로운 StateBag 오프로드 패턴 (워크플로 실행 결과)
+    
     이 함수가 없으면 검증기가 빈 상태만 보고 실패로 판정합니다.
     
     Args:
@@ -45,13 +48,23 @@ def _hydrate_s3_offloaded_state(final_state: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(final_state, dict):
         return final_state
     
-    # S3 오프로드 플래그 확인
-    if not final_state.get('__s3_offloaded'):
-        return final_state
+    # S3 경로 결정: 여러 패턴 지원
+    # 1) 레거시: __s3_offloaded + __s3_path
+    # 2) StateBag: state_s3_path (워크플로 실행 결과)
+    # 3) final_state_s3_path (병렬 브랜치 결과)
+    s3_path = None
     
-    s3_path = final_state.get('__s3_path')
+    if final_state.get('__s3_offloaded'):
+        s3_path = final_state.get('__s3_path')
+    elif final_state.get('state_s3_path'):
+        s3_path = final_state.get('state_s3_path')
+        logger.info(f"[S3 Hydration] Detected StateBag pattern: state_s3_path")
+    elif final_state.get('final_state_s3_path'):
+        s3_path = final_state.get('final_state_s3_path')
+        logger.info(f"[S3 Hydration] Detected parallel branch pattern: final_state_s3_path")
+    
     if not s3_path:
-        logger.warning("[S3 Hydration] __s3_offloaded=True but no __s3_path found")
+        # S3 오프로드가 없으면 원본 반환
         return final_state
     
     logger.info(f"[S3 Hydration] Fetching offloaded state from: {s3_path}")
@@ -109,7 +122,8 @@ def _ensure_hydrated_state(final_state: Dict[str, Any]) -> Dict[str, Any]:
         
         if isinstance(obj, dict):
             # 현재 객체가 오프로드되었으면 하이드레이션
-            if obj.get('__s3_offloaded'):
+            # v3.0: __s3_offloaded, state_s3_path, final_state_s3_path 모두 지원
+            if obj.get('__s3_offloaded') or obj.get('state_s3_path') or obj.get('final_state_s3_path'):
                 obj = _hydrate_s3_offloaded_state(obj)
             
             # 모든 하위 필드에 대해 재귀 적용
@@ -1933,19 +1947,26 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             final_state = nested_state
     
     # ========================================
-    # v2.4: S3 Offload Hydration (Recursive)
+    # v3.0: S3 Offload Hydration (Recursive)
     # ========================================
+    # StateBag 아키텍처 지원: state_s3_path, final_state_s3_path 패턴 추가
     # Stage 4, 6, 7, 8에서 상태가 S3로 오프로드되면 빈 상태만 보이는 문제 수정
     # v2.4: 최상위뿐만 아니라 중첩된 필드 (vision_results, partition_results 등)도 하이드레이션
     if isinstance(final_state, dict):
-        # 1) 최상위가 오프로드된 경우
+        # 1) 최상위가 오프로드된 경우 (__s3_offloaded, state_s3_path, final_state_s3_path)
         # 2) 또는 중첩 필드 중 하나라도 오프로드된 경우 (Stage 4/6/7/8)
         has_offloaded_nested = any(
-            isinstance(v, dict) and v.get('__s3_offloaded')
+            isinstance(v, dict) and (v.get('__s3_offloaded') or v.get('state_s3_path') or v.get('final_state_s3_path'))
             for v in final_state.values()
         )
-        if final_state.get('__s3_offloaded') or has_offloaded_nested:
-            logger.info(f"[S3 Hydration] Detected offloaded state (top-level: {final_state.get('__s3_offloaded')}, nested: {has_offloaded_nested}), hydrating recursively...")
+        needs_hydration = (
+            final_state.get('__s3_offloaded') or 
+            final_state.get('state_s3_path') or 
+            final_state.get('final_state_s3_path') or 
+            has_offloaded_nested
+        )
+        if needs_hydration:
+            logger.info(f"[S3 Hydration] Detected offloaded state (legacy: {final_state.get('__s3_offloaded')}, statebag: {final_state.get('state_s3_path')}, nested: {has_offloaded_nested}), hydrating recursively...")
             final_state = _ensure_hydrated_state(final_state)
             logger.info(f"[S3 Hydration] Hydration complete. State keys: {list(final_state.keys())[:10]}")
     

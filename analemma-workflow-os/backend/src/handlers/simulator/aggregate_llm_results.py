@@ -151,6 +151,9 @@ def _generate_comprehensive_report(
     Returns:
         종합 리포트 딕셔너리
     """
+    # 🛡️ [Payload Optimization v2] 최소 구조만 유지 - 중복 제거
+    # - context_analysis 제거: scenario_details.cache_hit_rate에 이미 있음
+    # - thinking_summary 제거: scenario_details.thinking_steps에 이미 있음
     comprehensive_report = {
         "scenario_details": {},
         "aggregate_statistics": {
@@ -161,13 +164,9 @@ def _generate_comprehensive_report(
             "total_cost_saved_usd": 0.0,
             "average_cache_hit_rate": 0.0,
             "total_thinking_steps": 0,
-            # 🛡️ [Payload Optimization] 검증 결과 요약 추가
             "total_passed": 0,
             "total_failed": 0
-        },
-        # 🛡️ [Payload Optimization] thinking_logs 전체 저장 제거 - count만 유지
-        "thinking_summary": {},  # {scenario: count} only
-        "context_analysis": {}
+        }
     }
     
     total_scenarios_with_cache = 0
@@ -176,16 +175,13 @@ def _generate_comprehensive_report(
     for result in results:
         scenario = result.get('scenario', 'unknown')
         
-        # Thinking 로그 추출 - count만 저장
+        # Thinking 로그 추출 - count만 사용 (저장 안 함)
         thinking_logs = _extract_thinking_logs(result)
-        if thinking_logs:
-            # 🛡️ [Payload Optimization] logs 전체 대신 count만 저장
-            comprehensive_report['thinking_summary'][scenario] = len(thinking_logs)
-            comprehensive_report['aggregate_statistics']['total_thinking_steps'] += len(thinking_logs)
+        thinking_count = len(thinking_logs) if thinking_logs else 0
+        comprehensive_report['aggregate_statistics']['total_thinking_steps'] += thinking_count
         
-        # Context 정보 추출
+        # Context 정보 추출 - cache_hit_rate만 사용 (전체 저장 안 함)
         context_info = _extract_context_info(result)
-        comprehensive_report['context_analysis'][scenario] = context_info
         
         # Usage 통계 집계
         scenario_data = scenarios.get(scenario, {})
@@ -209,23 +205,20 @@ def _generate_comprehensive_report(
             total_cache_hit_rate += context_info['cache_hit_rate']
             total_scenarios_with_cache += 1
         
-        # 🛡️ [Payload Optimization] 시나리오별 상세 - 검증 결과 통합, 중복 제거
+        # 🛡️ [Payload Optimization v2] 시나리오별 상세 - 최소 필드만 유지
         verification_summary = scenario_data.get('verification_summary', {})
         comprehensive_report['scenario_details'][scenario] = {
             "status": status,
             "passed": verification_summary.get('passed', status == 'PASSED'),
             "checks": verification_summary.get('checks', []),
             "failure_reason": verification_summary.get('failure_reason'),
-            "usage": {
-                "input_tokens": usage.get('input_tokens', 0),
-                "output_tokens": usage.get('output_tokens', 0),
-                "cached_tokens": usage.get('cached_tokens', 0),
-                "estimated_cost_usd": usage.get('estimated_cost_usd', 0.0)
-            },
+            "input_tokens": usage.get('input_tokens', 0),
+            "output_tokens": usage.get('output_tokens', 0),
+            "cached_tokens": usage.get('cached_tokens', 0),
+            "cost_usd": usage.get('estimated_cost_usd', 0.0),
             "cache_hit_rate": context_info.get('cache_hit_rate', 0.0),
-            "thinking_steps": len(thinking_logs) if thinking_logs else 0,
-            "provider": usage.get('provider', 'unknown'),
-            "outcome_url": scenario_data.get('outcome_url')
+            "thinking_steps": thinking_count,
+            "provider": usage.get('provider', 'unknown')
         }
     
     # 평균 cache hit rate 계산
@@ -455,8 +448,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     logger.info(f"  - Cost saved: ${agg_stats['total_cost_saved_usd']:.6f} ({agg_stats.get('cost_reduction_percentage', 0)}%)")
     logger.info(f"  - Thinking steps: {agg_stats['total_thinking_steps']}")
     
-    # Thinking 로그가 있는 시나리오 로깅
-    thinking_scenarios = list(comprehensive_report.get('thinking_summary', {}).keys())
+    # Thinking 모드 사용 시나리오 로깅 (scenario_details에서 추출)
+    thinking_scenarios = [
+        s for s, d in comprehensive_report.get('scenario_details', {}).items() 
+        if d.get('thinking_steps', 0) > 0
+    ]
     if thinking_scenarios:
         logger.info(f"🧠 Scenarios with Thinking Mode: {', '.join(thinking_scenarios)}")
     

@@ -64,6 +64,51 @@ from src.common.state_hydrator import (
 logger = logging.getLogger(__name__)
 
 # ============================================================================
+# 🔍 [v3.5] None Reference Tracing: Environment-controlled debug logging
+# ============================================================================
+# Set NONE_TRACE_ENABLED=1 to enable verbose None tracing in logs
+NONE_TRACE_ENABLED = os.environ.get("NONE_TRACE_ENABLED", "0") == "1"
+
+
+def _trace_none_access(
+    key: str,
+    source: str,
+    actual_value: Any,
+    context: Dict[str, Any] = None,
+    caller: str = None
+) -> None:
+    """
+    🔍 [v3.5] Trace None value access for debugging NoneType errors
+    
+    This utility logs when a None value is accessed from state,
+    helping identify the source of NoneType errors in production.
+    
+    Usage:
+        val = state.get('input_list')
+        _trace_none_access('input_list', 'state', val, caller='for_each_runner:line2850')
+        if val is None:
+            # handle None case
+    
+    Args:
+        key: The key that was accessed
+        source: Where the value came from (e.g., 'state', 'event', 'config')
+        actual_value: The value that was retrieved (will log if None)
+        context: Optional dict with additional context (will sample keys for log)
+        caller: Optional caller identifier for tracing
+    """
+    if not NONE_TRACE_ENABLED:
+        return
+    
+    if actual_value is None:
+        ctx_keys = list(context.keys())[:10] if isinstance(context, dict) else "N/A"
+        logger.warning(
+            f"🔍 [None Trace] key='{key}' is None from {source}. "
+            f"Caller: {caller or 'unknown'}. "
+            f"Context keys (sample): {ctx_keys}"
+        )
+
+
+# ============================================================================
 # [Guard] [Kernel] Dynamic Scheduling Constants
 # ============================================================================
 # Memory Safety Margin (Trigger split at 80% usage)
@@ -142,49 +187,76 @@ LIST_MERGE_KEY_PATTERNS = [
 ]
 
 
-def _safe_get_from_bag(event: Dict[str, Any], key: str, default: Any = None) -> Any:
+def _safe_get_from_bag(
+    event: Dict[str, Any], 
+    key: str, 
+    default: Any = None,
+    caller: str = None,
+    log_on_default: bool = False
+) -> Any:
     """
-    🛡️ [v3.4 Deep Guard] State Bag에서 안전하게 값 추출
+    🛡️ [v3.4 Deep Guard] Safely extract value from State Bag
     
-    문제점: state_data['bag']이 None일 때 .get() 호출 시 AttributeError 발생
+    v3 ASL Design: ASL passes only $.state_data.bag
+    → Lambda receives event.state_data = bag_contents (flat)
     
-    검색 우선순위:
-        1. event.state_data.bag.{key}
-        2. event.state_data.{key} (⚠️ warning logged)
-        3. event.{key} (⚠️ warning logged)
-        4. default
+    Search Priority:
+        1. event.state_data.bag.{key}  (legacy: when bag wrapper exists)
+        2. event.state_data.{key}      (v3 normal: bag contents passed directly)
+        3. default
     
-    ⚠️ Fallback 경고: bag이 아닌 곳에서 발견 시 로그 출력
-       → 침묵하는 데이터 유실 방지 (Stale data 추적 가능)
+    ❌ Event root fallback removed
+       - v3 ASL only passes bag, so bag data doesn't exist in event root
+       - Event root only contains meta fields like action, segment_to_run, etc.
+    
+    Args:
+        event: Event dictionary from Lambda/Step Functions
+        key: Key to extract from bag
+        default: Default value if key not found
+        caller: (Optional) Caller identifier for tracing (e.g., "execute_segment:line2540")
+        log_on_default: (Optional) If True, log when returning default value
     
     Returns:
-        찾은 값 또는 default
+        Found value or default
     """
     if not isinstance(event, dict):
+        if log_on_default and caller:
+            logger.warning(
+                f"🔍 [None Trace] key='{key}' returned default={default}. "
+                f"Reason: event is not dict (type={type(event).__name__}). Caller: {caller}"
+            )
         return default
     
     state_data = event.get('state_data') or {}
-    bag = (state_data.get('bag') if isinstance(state_data, dict) else {}) or {}
     
-    # 순차적 시도 (값이 None이 아닌 첫 번째 것을 선택)
-    # 1. bag 내부 -> 2. state_data 내부 -> 3. event 루트
-    source_chain = [
-        (bag, 'bag'),
-        (state_data, 'state_data (unwrapped)'),
-        (event, 'event root')
-    ]
-    
-    for source, source_name in source_chain:
-        if isinstance(source, dict):
-            val = source.get(key)
+    if isinstance(state_data, dict):
+        # 1. Inside bag (legacy: when bag wrapper exists)
+        bag = state_data.get('bag')
+        if isinstance(bag, dict):
+            val = bag.get(key)
             if val is not None:
-                # ⚠️ [Deep Guard] Fallback 경고: bag이 아닌 곳에서 발견 시 로그
-                if source_name != 'bag':
-                    logger.warning(
-                        f"[Deep Guard Warning] Key '{key}' not found in 'bag'. "
-                        f"Falling back to {source_name}."
-                    )
                 return val
+        
+        # 2. state_data directly (v3 normal: ASL passes $.state_data.bag → state_data IS bag contents)
+        val = state_data.get(key)
+        if val is not None:
+            return val
+    
+    # ❌ Event root fallback removed - v3 ASL only passes bag, doesn't work
+    
+    # 🔍 [v3.5] None Reference Tracing: Log when returning default
+    if log_on_default:
+        # Collect diagnostic info
+        state_data_type = type(state_data).__name__
+        state_data_keys = list(state_data.keys())[:10] if isinstance(state_data, dict) else "N/A"
+        bag_type = type(bag).__name__ if 'bag' in dir() and bag is not None else "None"
+        
+        logger.warning(
+            f"🔍 [None Trace] key='{key}' returned default={default}. "
+            f"Caller: {caller or 'unknown'}. "
+            f"Diagnostics: state_data_type={state_data_type}, "
+            f"state_data_keys={state_data_keys}, bag_type={bag_type}"
+        )
     
     return default
 
@@ -1487,14 +1559,21 @@ class SegmentRunnerService:
         - map_error: (선택) Map 전체 실패 시 에러 정보
         
         Returns:
-            병합된 최종 상태 + 다음 세그먼트 정보
+            Merged final state + next segment info
         """
-        # 🛡️ [v3.6] 집계 시작 시 base_state 무결성 확보 (Entrance to Aggregator)
+        # 🛡️ [v3.6] Ensure base_state integrity at aggregation start (Entrance to Aggregator)
         from src.common.statebag import ensure_state_bag
-        # current_state가 null이어도 StateBag({})으로 승격
+        
+        # 🔍 [v3.5 None Trace] Aggregator entry tracing
+        _trace_none_access('current_state', 'event', event.get('current_state'), 
+                           context=event, caller='Aggregator:Entry')
+        _trace_none_access('parallel_results', 'event', event.get('parallel_results'), 
+                           context=event, caller='Aggregator:Entry')
+        
+        # current_state even if null becomes StateBag({})
         current_state = ensure_state_bag(event.get('current_state', {}))
         
-        # [Critical Fix] current_state가 S3 offload되었을 경우 복원
+        # [Critical Fix] Restore current_state if S3 offloaded
         if isinstance(current_state, dict) and current_state.get('__s3_offloaded') is True:
             offloaded_s3_path = current_state.get('__s3_path')
             if offloaded_s3_path:
@@ -1516,13 +1595,13 @@ class SegmentRunnerService:
         segment_to_run = event.get('segment_to_run', 0)
         workflow_id = event.get('workflowId') or event.get('workflow_id')
         auth_user_id = event.get('ownerId') or event.get('owner_id')
-        map_error = event.get('map_error')  # [Guard] Map 전체 에러 정보
+        map_error = event.get('map_error')  # [Guard] Map overall error info
         
         logger.info(f"[Aggregator] [Parallel] Aggregating {len(parallel_results)} branch results"
                    + (f" (map_error present)" if map_error else ""))
         
-        # [Optimization] S3 Hydration 병렬화 (N+1 Query 문제 해결)
-        # 브랜치가 많을 경우 (50개+) 순차 다운로드는 timeout 위험
+        # [Optimization] Parallelize S3 Hydration (Solve N+1 Query problem)
+        # Sequential download is timeout risk when many branches (50+)
         # [DEBUG] Log parallel_results structure before processing
         logger.info(f"[Aggregator] 🔍 DEBUG: parallel_results type: {type(parallel_results)}")
         logger.info(f"[Aggregator] 🔍 DEBUG: parallel_results length: {len(parallel_results) if parallel_results else 0}")
@@ -2525,15 +2604,80 @@ class SegmentRunnerService:
         else:
             logger.debug(f"S3 bucket for state offloading: {s3_bucket}")
         
+        # ====================================================================
         # 3. Load State (Inline or S3) - Keep as local variable only
-        # [Critical Fix] Step Functions passes state as 'current_state', not 'state'
         # ⚠️ DO NOT add to event to avoid 256KB limit
+        # ====================================================================
+        # 🛡️ [v3.4 Deep Lookup] Hierarchical state search
+        # In v3 ASL, state_data is passed as bag contents
+        # Parallel branch entry: event.state_data = bag_contents (flat)
+        # Normal segment: event.current_state or event.state_data.bag
+        # ====================================================================
         state_s3_path = event.get('state_s3_path')
-        initial_state = event.get('current_state') or event.get('state', {})
+        state_data = event.get('state_data', {})
         
-        # [Critical Fix] S3 Offload 복원: __s3_offloaded 플래그 확인
-        # 이전 세그먼트가 S3 offload를 수행한 경우 메타데이터만 포함됨
-        # → S3에서 전체 상태 복원 필요
+        # 🔍 [v3.5 None Trace] Entry point tracing
+        _trace_none_access('state_data', 'event', event.get('state_data'), 
+                           context=event, caller='ExecuteSegment:Entry')
+        
+        if not isinstance(state_data, dict):
+            state_data = {}
+        
+        # 🛡️ [v3.4] Search Priority (Deep Lookup):
+        # 1. state_data.bag.current_state (v3 standard: bag wrapper exists)
+        # 2. state_data.current_state (v3 unwrapped bag)
+        # 3. event.current_state (legacy)
+        # 4. event.state (legacy)
+        # 5. state_data itself is state (v3 branch: ASL passes $.state_data.bag)
+        bag_in_state_data = state_data.get('bag') if isinstance(state_data.get('bag'), dict) else None
+        
+        # 🔍 [v3.5 None Trace] Bag lookup tracing
+        _trace_none_access('bag', 'state_data', bag_in_state_data, 
+                           context=state_data, caller='ExecuteSegment:BagLookup')
+        
+        # Compute each candidate for tracing
+        candidate_1 = bag_in_state_data.get('current_state') if bag_in_state_data else None
+        candidate_2 = state_data.get('current_state') if state_data else None
+        candidate_3 = event.get('current_state')
+        candidate_4 = event.get('state')
+        candidate_5 = state_data if state_data else None
+        
+        initial_state = (
+            # 1. state_data.bag.current_state (v3 standard)
+            candidate_1 or
+            # 2. state_data.current_state (v3 unwrapped)
+            candidate_2 or
+            # 3. event.current_state (legacy)
+            candidate_3 or
+            # 4. event.state (legacy)
+            candidate_4 or
+            # 5. state_data itself is state (v3 branch: ASL passes $.state_data.bag → state_data IS bag contents)
+            candidate_5 or
+            # 6. Final fallback
+            {}
+        )
+        
+        # 🔍 [v3.5 None Trace] Final state resolution tracing
+        resolved_source = (
+            "bag.current_state" if candidate_1 else
+            "state_data.current_state" if candidate_2 else
+            "event.current_state" if candidate_3 else
+            "event.state" if candidate_4 else
+            "state_data_as_bag" if candidate_5 else
+            "empty_fallback"
+        )
+        if not initial_state or (isinstance(initial_state, dict) and len(initial_state) == 0):
+            _trace_none_access('initial_state', 'combined_lookup', None, 
+                               context=event, caller='ExecuteSegment:FinalStateResolve')
+        
+        logger.debug(f"[Deep Lookup] initial_state source: {resolved_source}, "
+                    f"bag_in_state_data={bag_in_state_data is not None}, "
+                    f"state_data keys={list(state_data.keys())[:5] if state_data else []}, "
+                    f"initial_state keys={list(initial_state.keys())[:5] if isinstance(initial_state, dict) else 'N/A'}")
+        
+        # [Critical Fix] S3 Offload Recovery: check __s3_offloaded flag
+        # If previous segment did S3 offload, only metadata is included
+        # → Full state needs to be restored from S3
         if isinstance(initial_state, dict) and initial_state.get('__s3_offloaded') is True:
             offloaded_s3_path = initial_state.get('__s3_path')
             if offloaded_s3_path:

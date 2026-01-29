@@ -379,8 +379,18 @@ RESERVED_STATE_KEYS = {
     # Sensitive Credentials (Prevent credential exposure)
     "user_api_keys", "aws_credentials",
     
-    # Response Envelope (Step Functions JSONPath 정합성 유지)
+    # Response Envelope (Step Functions JSONPath integrity)
     "status", "error_info"
+}
+
+# 🛡️ [v3.5] Kernel-Managed Keys: Legitimately set by kernel code AFTER _validate_output_keys
+# These should NOT be blocked by Pydantic model_validator because they are added by kernel, not user code
+KERNEL_MANAGED_KEYS = {
+    "step_history",           # Added by llm_chat_runner, for_each_runner etc.
+    "usage",                  # Token usage tracking
+    "__new_history_logs",     # Execution logs
+    "skill_execution_log",    # Skill execution tracking
+    "__kernel_actions",       # Kernel action audit trail
 }
 
 def _validate_output_keys(output: Dict[str, Any], node_id: str) -> Dict[str, Any]:
@@ -474,20 +484,28 @@ class SafeStateOutput(BaseModel):
     @classmethod
     def block_reserved_keys_globally(cls, data: Any) -> Any:
         """
-        🛡️ [Critical Fix] 전역 예약 키 차단 (extra 필드 포함)
+        🛡️ [Critical Fix] Global reserved key blocking (including extra fields)
         
-        field_validator('*')는 명시적으로 정의된 필드에만 적용되므로,
-        model_validator를 사용하여 extra 필드까지 포함한 전체 입력을 스캔합니다.
+        field_validator('*') only applies to explicitly defined fields,
+        so model_validator is used to scan all input including extra fields.
         
-        중요: return None이 아닌 키 삭제(pop)를 통해 상태 오염 방지
-        - None 반환 시: loop_counter=5 → None으로 덮어씀 (오염 발생)
-        - 키 삭제 시: loop_counter는 아예 출력에서 제외 (기존 값 유지)
+        Important: Use key deletion (pop) instead of returning None to prevent state pollution
+        - Returning None: loop_counter=5 → overwritten with None (pollution occurs)
+        - Key deletion: loop_counter is excluded from output entirely (existing value preserved)
+        
+        🛡️ [v3.5] KERNEL_MANAGED_KEYS Exception:
+        Keys in KERNEL_MANAGED_KEYS are legitimately added by kernel code AFTER _validate_output_keys,
+        so they should NOT be blocked here. This prevents double-filtering issue.
         """
         if not isinstance(data, dict):
             return data
-            
-        # 예약 키 탐지
-        forbidden_keys = [k for k in data.keys() if k in RESERVED_STATE_KEYS]
+        
+        # Detect reserved keys (excluding kernel-managed keys which are legitimate)
+        # Keys that are both in RESERVED_STATE_KEYS AND in KERNEL_MANAGED_KEYS are allowed
+        forbidden_keys = [
+            k for k in data.keys() 
+            if k in RESERVED_STATE_KEYS and k not in KERNEL_MANAGED_KEYS
+        ]
         
         if forbidden_keys:
             logger.warning(
@@ -497,7 +515,11 @@ class SafeStateOutput(BaseModel):
             
             # 🛡️ [Critical Fix] Remove keys instead of returning None (prevent state corruption)
             # Remove reserved keys from dict so existing values are preserved during state merge
-            cleaned_data = {k: v for k, v in data.items() if k not in RESERVED_STATE_KEYS}
+            # Keep KERNEL_MANAGED_KEYS since they are legitimately added by kernel
+            cleaned_data = {
+                k: v for k, v in data.items() 
+                if k not in RESERVED_STATE_KEYS or k in KERNEL_MANAGED_KEYS
+            }
             return cleaned_data
             
         return data
@@ -2621,6 +2643,14 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # Proactive S3 hydration - handles multiple offload patterns
     input_val = _get_nested_value(state, input_list_key)
     
+    # 🔍 [v3.5] None Trace: Log if input_val is None
+    if input_val is None:
+        state_keys = list(state.keys())[:15] if isinstance(state, dict) else "N/A"
+        logger.warning(
+            f"🔍 [None Trace] for_each input_list_key='{input_list_key}' returned None. "
+            f"Node: {node_id}. State keys (sample): {state_keys}"
+        )
+    
     # [S3 Hydration] Detect input_val offload patterns:
     # Note: Top-level state is already hydrated by segment_runner_service.execute_segment()
     # Here we only check if input_val itself is offloaded
@@ -3678,6 +3708,28 @@ def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> D
     else:
         # Use entire state as input
         input_value = state
+    
+    # 🛡️ [S3 Hydration] Detect and hydrate S3-offloaded input values
+    # Pattern 1: s3:// string pointer
+    # Pattern 2: dict with __s3_offloaded: True
+    if isinstance(input_value, str) and input_value.startswith("s3://"):
+        logger.info(f"💧 [operator_official] Hydrating input from S3 string: {input_value[:50]}...")
+        input_value = _hydrate_s3_value(input_value)
+    elif isinstance(input_value, dict) and input_value.get("__s3_offloaded"):
+        s3_path = input_value.get("s3_path") or input_value.get("__s3_path")
+        if s3_path:
+            logger.info(f"💧 [operator_official] Hydrating input from __s3_offloaded: {s3_path[:50]}...")
+            try:
+                from src.services.state.state_manager import StateManager
+                sm = StateManager()
+                hydrated_data = sm.download_state_from_s3(s3_path)
+                # If hydrated data has 'results' key, use that (for_each output format)
+                input_value = hydrated_data.get("results", hydrated_data) if isinstance(hydrated_data, dict) else hydrated_data
+                logger.info(f"✅ [operator_official] Hydrated input: {type(input_value).__name__}, len={len(input_value) if hasattr(input_value, '__len__') else 'N/A'}")
+            except Exception as hydrate_err:
+                logger.error(f"❌ [operator_official] S3 hydration failed: {hydrate_err}")
+        else:
+            logger.warning(f"⚠️ [operator_official] __s3_offloaded=True but no s3_path found")
     
     # Get strategy parameters
     params = inner_config.get("params", {})
