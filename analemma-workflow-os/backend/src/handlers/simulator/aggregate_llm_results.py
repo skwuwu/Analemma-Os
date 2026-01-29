@@ -160,9 +160,13 @@ def _generate_comprehensive_report(
             "total_cost_usd": 0.0,
             "total_cost_saved_usd": 0.0,
             "average_cache_hit_rate": 0.0,
-            "total_thinking_steps": 0
+            "total_thinking_steps": 0,
+            # 🛡️ [Payload Optimization] 검증 결과 요약 추가
+            "total_passed": 0,
+            "total_failed": 0
         },
-        "thinking_logs_by_scenario": {},
+        # 🛡️ [Payload Optimization] thinking_logs 전체 저장 제거 - count만 유지
+        "thinking_summary": {},  # {scenario: count} only
         "context_analysis": {}
     }
     
@@ -172,13 +176,11 @@ def _generate_comprehensive_report(
     for result in results:
         scenario = result.get('scenario', 'unknown')
         
-        # Thinking 로그 추출
+        # Thinking 로그 추출 - count만 저장
         thinking_logs = _extract_thinking_logs(result)
         if thinking_logs:
-            comprehensive_report['thinking_logs_by_scenario'][scenario] = {
-                "count": len(thinking_logs),
-                "logs": thinking_logs
-            }
+            # 🛡️ [Payload Optimization] logs 전체 대신 count만 저장
+            comprehensive_report['thinking_summary'][scenario] = len(thinking_logs)
             comprehensive_report['aggregate_statistics']['total_thinking_steps'] += len(thinking_logs)
         
         # Context 정보 추출
@@ -195,19 +197,34 @@ def _generate_comprehensive_report(
         comprehensive_report['aggregate_statistics']['total_cost_usd'] += usage.get('estimated_cost_usd', 0.0)
         comprehensive_report['aggregate_statistics']['total_cost_saved_usd'] += usage.get('cost_saved_usd', 0.0)
         
+        # 🛡️ [Payload Optimization] 검증 결과 집계
+        status = scenario_data.get('status', 'UNKNOWN')
+        if status == 'PASSED':
+            comprehensive_report['aggregate_statistics']['total_passed'] += 1
+        elif status == 'FAILED':
+            comprehensive_report['aggregate_statistics']['total_failed'] += 1
+        
         # Cache hit rate 평균 계산
         if context_info['cache_hit_rate'] > 0:
             total_cache_hit_rate += context_info['cache_hit_rate']
             total_scenarios_with_cache += 1
         
-        # 시나리오별 상세 정보
+        # 🛡️ [Payload Optimization] 시나리오별 상세 - 검증 결과 통합, 중복 제거
+        verification_summary = scenario_data.get('verification_summary', {})
         comprehensive_report['scenario_details'][scenario] = {
-            "status": scenario_data.get('status', 'UNKNOWN'),
-            "usage": usage,
-            "context": context_info,
-            "thinking_steps_count": len(thinking_logs),
+            "status": status,
+            "passed": verification_summary.get('passed', status == 'PASSED'),
+            "checks": verification_summary.get('checks', []),
+            "failure_reason": verification_summary.get('failure_reason'),
+            "usage": {
+                "input_tokens": usage.get('input_tokens', 0),
+                "output_tokens": usage.get('output_tokens', 0),
+                "cached_tokens": usage.get('cached_tokens', 0),
+                "estimated_cost_usd": usage.get('estimated_cost_usd', 0.0)
+            },
+            "cache_hit_rate": context_info.get('cache_hit_rate', 0.0),
+            "thinking_steps": len(thinking_logs) if thinking_logs else 0,
             "provider": usage.get('provider', 'unknown'),
-            "execution_id": scenario_data.get('execution_id'),
             "outcome_url": scenario_data.get('outcome_url')
         }
     
@@ -379,8 +396,13 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         scenarios[scenario] = {
             'status': status,
             'message': verification.get('message', ''),
-            'test_result': test_result,
-            'verification': verification,
+            # 🛡️ [Payload Optimization] test_result 전체 저장 제거 - 256KB 제한 방지
+            # 'test_result': test_result,  # REMOVED: 중복 데이터, 페이로드 폭발 원인
+            'verification_summary': {
+                'passed': status == 'PASSED',
+                'checks': verification.get('checks', []),  # 검증 조건 목록만
+                'failure_reason': verification.get('failure_reason') if status == 'FAILED' else None
+            },
             'provider': provider,
             'usage': usage,
             'execution_id': execution_id,
@@ -395,7 +417,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     # 종합 리포트 생성
     comprehensive_report = _generate_comprehensive_report(results, scenarios)
     
-    # 기본 리포트
+    # 🛡️ [Payload Optimization] 통합 리포트 - scenarios 중복 제거
+    # comprehensive_report.scenario_details에 검증 결과가 이미 포함됨
     report = {
         'simulator_execution_id': sim_exec_id,
         'start_time': start_time,
@@ -408,10 +431,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             'skipped': skipped_count,
             'pass_rate': round((passed_count / total * 100) if total > 0 else 0, 2)
         },
-        'scenarios': scenarios,
+        # 🛡️ scenarios 제거 - comprehensive_report.scenario_details로 통합
         'failed_scenarios': failed_scenarios,
         'mock_mode': 'false',
-        # 종합 리포트 추가
+        # 종합 리포트 (scenarios + 검증 결과 + usage 통합)
         'comprehensive_report': comprehensive_report
     }
     
@@ -433,7 +456,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     logger.info(f"  - Thinking steps: {agg_stats['total_thinking_steps']}")
     
     # Thinking 로그가 있는 시나리오 로깅
-    thinking_scenarios = list(comprehensive_report['thinking_logs_by_scenario'].keys())
+    thinking_scenarios = list(comprehensive_report.get('thinking_summary', {}).keys())
     if thinking_scenarios:
         logger.info(f"🧠 Scenarios with Thinking Mode: {', '.join(thinking_scenarios)}")
     

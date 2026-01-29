@@ -142,6 +142,53 @@ LIST_MERGE_KEY_PATTERNS = [
 ]
 
 
+def _safe_get_from_bag(event: Dict[str, Any], key: str, default: Any = None) -> Any:
+    """
+    🛡️ [v3.4 Deep Guard] State Bag에서 안전하게 값 추출
+    
+    문제점: state_data['bag']이 None일 때 .get() 호출 시 AttributeError 발생
+    
+    검색 우선순위:
+        1. event.state_data.bag.{key}
+        2. event.state_data.{key} (⚠️ warning logged)
+        3. event.{key} (⚠️ warning logged)
+        4. default
+    
+    ⚠️ Fallback 경고: bag이 아닌 곳에서 발견 시 로그 출력
+       → 침묵하는 데이터 유실 방지 (Stale data 추적 가능)
+    
+    Returns:
+        찾은 값 또는 default
+    """
+    if not isinstance(event, dict):
+        return default
+    
+    state_data = event.get('state_data') or {}
+    bag = (state_data.get('bag') if isinstance(state_data, dict) else {}) or {}
+    
+    # 순차적 시도 (값이 None이 아닌 첫 번째 것을 선택)
+    # 1. bag 내부 -> 2. state_data 내부 -> 3. event 루트
+    source_chain = [
+        (bag, 'bag'),
+        (state_data, 'state_data (unwrapped)'),
+        (event, 'event root')
+    ]
+    
+    for source, source_name in source_chain:
+        if isinstance(source, dict):
+            val = source.get(key)
+            if val is not None:
+                # ⚠️ [Deep Guard] Fallback 경고: bag이 아닌 곳에서 발견 시 로그
+                if source_name != 'bag':
+                    logger.warning(
+                        f"[Deep Guard Warning] Key '{key}' not found in 'bag'. "
+                        f"Falling back to {source_name}."
+                    )
+                return val
+    
+    return default
+
+
 def _safe_get_total_segments(event: Dict[str, Any]) -> int:
     """
     [Guard] [Fix] total_segments를 안전하게 추출
@@ -158,18 +205,8 @@ def _safe_get_total_segments(event: Dict[str, Any]) -> int:
     
     # None이면 State Bag에서 partition_map 추출하여 계산
     if raw_value is None:
-        partition_map = None
-        if isinstance(event.get('state_data'), dict):
-            state_data = event['state_data']
-            # Handle both wrapped (ExecuteSegment) and unwrapped (MAP_REDUCE/Branch) State Bag
-            if 'bag' in state_data and isinstance(state_data['bag'], dict):
-                partition_map = state_data['bag'].get('partition_map')
-            else:
-                partition_map = state_data.get('partition_map')
-        
-        # Fallback to event root
-        if not partition_map:
-            partition_map = event.get('partition_map')
+        # 🛡️ [v3.4] _safe_get_from_bag 사용
+        partition_map = _safe_get_from_bag(event, 'partition_map')
         
         if partition_map and isinstance(partition_map, list):
             return max(1, len(partition_map))
@@ -2551,17 +2588,8 @@ class SegmentRunnerService:
         # [Hydration] [v3.10] Unified State Bag - Single Source of Truth
         # Extract S3 path from state_data BEFORE normalize_inplace removes it
         # ====================================================================
-        config_s3_path = None
-        if isinstance(event.get('state_data'), dict):
-            state_data = event['state_data']
-            # Handle both layer formats:
-            # 1. Direct bag (MAP_REDUCE/Branch): state_data = {...bag...}
-            # 2. Wrapped bag (ExecuteSegment): state_data = {bag: {...}}
-            if 'bag' in state_data and isinstance(state_data['bag'], dict):
-                config_s3_path = state_data['bag'].get('workflow_config_s3_path')
-            else:
-                # Already unwrapped (MAP_REDUCE/Branch mode)
-                config_s3_path = state_data.get('workflow_config_s3_path')
+        # 🛡️ [v3.4] _safe_get_from_bag 사용
+        config_s3_path = _safe_get_from_bag(event, 'workflow_config_s3_path')
         
         # [Fix] [v3.10] Normalize Event AFTER extracting S3 path but BEFORE hydration
         # Remove potentially huge state_data from event to save memory
@@ -2616,25 +2644,11 @@ class SegmentRunnerService:
                 workflow_config = None
         
         # Extract partition_map from State Bag (state_data has partition_map)
-        partition_map = None
-        partition_map_s3_path = None
-        if isinstance(event.get('state_data'), dict):
-            state_data = event['state_data']
-            # Handle both wrapped (ExecuteSegment) and unwrapped (MAP_REDUCE/Branch) State Bag structures
-            if 'bag' in state_data and isinstance(state_data['bag'], dict):
-                partition_map = state_data['bag'].get('partition_map')
-                partition_map_s3_path = state_data['bag'].get('partition_map_s3_path')
-            else:
-                partition_map = state_data.get('partition_map')
-                partition_map_s3_path = state_data.get('partition_map_s3_path')
+        # 🛡️ [v3.4] _safe_get_from_bag 사용 - bag이 None일 때 AttributeError 방지
+        partition_map = _safe_get_from_bag(event, 'partition_map')
+        partition_map_s3_path = _safe_get_from_bag(event, 'partition_map_s3_path')
         
-        # Fallback: Check event root (backward compatibility or MAP_REDUCE direct pass)
-        if not partition_map:
-            partition_map = event.get('partition_map')
-        if not partition_map_s3_path:
-            partition_map_s3_path = event.get('partition_map_s3_path')
-        
-        # � [Critical Fix] Branch Execution: partition_map fallback from branch_config
+        # 👉 [Critical Fix] Branch Execution: partition_map fallback from branch_config
         # ASL의 ProcessParallelSegments에서 branch_config에 전체 브랜치 정보가 전달됨
         # partition_map이 null이면 branch_config.partition_map을 사용
         branch_config = event.get('branch_config')
@@ -2646,18 +2660,10 @@ class SegmentRunnerService:
                            f"segments: {len(branch_partition_map)})")
                 partition_map = branch_partition_map
         
-        # �🚀 [Hybrid Mode] Direct segment_config support for MAP_REDUCE/BATCHED modes
+        # 🚀🚀 [Hybrid Mode] Direct segment_config support for MAP_REDUCE/BATCHED modes
         direct_segment_config = event.get('segment_config')
-        # Extract execution_mode from State Bag first
-        execution_mode = None
-        if isinstance(event.get('state_data'), dict):
-            state_data = event['state_data']
-            if 'bag' in state_data and isinstance(state_data['bag'], dict):
-                execution_mode = state_data['bag'].get('execution_mode')
-            else:
-                execution_mode = state_data.get('execution_mode')
-        if not execution_mode:
-            execution_mode = event.get('execution_mode')
+        # 🛡️ [v3.4] _safe_get_from_bag 사용 - execution_mode 안전 추출
+        execution_mode = _safe_get_from_bag(event, 'execution_mode')
         
         if direct_segment_config and execution_mode in ('MAP_REDUCE', 'BATCHED'):
             logger.info(f"[Hybrid Mode] Using direct segment_config for {execution_mode} mode")
@@ -3276,18 +3282,9 @@ class SegmentRunnerService:
         # 각 iteration 결과가 개별적으로는 작아도 Distributed Map이 모든 결과를
         # 배열로 수집하면 256KB 제한을 초과할 수 있음
         # [Fix] distributed_mode가 null(JSON)/None(Python)일 수 있으므로 명시적 True 체크
-        # Extract from State Bag first
-        is_distributed_mode = None
-        if isinstance(event.get('state_data'), dict):
-            state_data = event['state_data']
-            if 'bag' in state_data and isinstance(state_data['bag'], dict):
-                is_distributed_mode = state_data['bag'].get('distributed_mode')
-            else:
-                is_distributed_mode = state_data.get('distributed_mode')
-        if is_distributed_mode is None:
-            is_distributed_mode = event.get('distributed_mode') is True
-        else:
-            is_distributed_mode = is_distributed_mode is True
+        # 🛡️ [v3.4] _safe_get_from_bag 사용 - distributed_mode 안전 추출
+        is_distributed_mode = _safe_get_from_bag(event, 'distributed_mode')
+        is_distributed_mode = is_distributed_mode is True
         
         # [Critical Fix] Map State 브랜치 실행도 강제 오프로딩 필요
         # Map State가 모든 브랜치 결과를 수집할 때 256KB 제한 초과 방지

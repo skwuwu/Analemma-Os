@@ -362,7 +362,11 @@ class SmartStateBag(dict):
                 # hydrator 없으면 포인터 그대로 반환
                 return pointer.to_dict()
         
-        return super().get(key)
+        # 🛡️ [v3.4 Fix] __getitem__은 KeyError를 발생시켜야 함
+        # super().get()은 None을 반환하여 후속 .get() 호출 시 AttributeError 유발
+        if key in self:
+            return super().__getitem__(key)
+        raise KeyError(key)
     
     def get(self, key: str, default: Any = None) -> Any:
         """Safe get with lazy loading"""

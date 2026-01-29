@@ -495,8 +495,8 @@ class SafeStateOutput(BaseModel):
                 f"These keys will be removed from the dictionary to protect kernel state."
             )
             
-            # 🛡️ [Critical Fix] None 반환이 아닌 키 삭제 (상태 오염 방지)
-            # 예약 키를 딕셔너리에서 제거하여 상태 병합 시 기존 값이 유지되도록 함
+            # 🛡️ [Critical Fix] Remove keys instead of returning None (prevent state corruption)
+            # Remove reserved keys from dict so existing values are preserved during state merge
             cleaned_data = {k: v for k, v in data.items() if k not in RESERVED_STATE_KEYS}
             return cleaned_data
             
