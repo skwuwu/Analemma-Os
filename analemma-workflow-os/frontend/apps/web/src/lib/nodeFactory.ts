@@ -34,8 +34,28 @@ export const createWorkflowNode = (params: NodeCreationParams): Node => {
 
     // 노드별 특성 파라미터 초기화 (data 값 우선, 없으면 기본값)
     if (type === 'aiModel') {
-        defaultData.provider = data.provider || 'openai';
-        defaultData.model = data.model || 'gpt-4';
+        // Determine provider based on model if not explicitly set
+        let provider = data.provider;
+        let modelName = data.model || data.modelName || 'gpt-4';
+        
+        if (!provider) {
+            if (modelName.includes('gemini') || data.modelType === 'gemini') {
+                provider = 'google';
+                modelName = 'gemini-2.0-flash-exp';
+            } else if (modelName.includes('claude') || data.modelType === 'claude') {
+                provider = 'anthropic';
+                modelName = 'claude-3-5-sonnet-20241022';
+            } else if (modelName.includes('gpt') || data.modelType === 'gpt4') {
+                provider = 'openai';
+                modelName = 'gpt-4';
+            } else {
+                provider = 'openai';
+            }
+        }
+        
+        defaultData.provider = provider;
+        defaultData.model = data.modelType || data.model || modelName;
+        defaultData.modelName = modelName;
         defaultData.temperature = data.temperature ?? 0.7;
         defaultData.max_tokens = data.max_tokens ?? 512;
     } else if (type === 'operator') {

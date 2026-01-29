@@ -118,7 +118,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         path = event.get("path") or event.get("rawPath", "")
         path_params = event.get("pathParameters", {}) or {}
         
-        task_id = path_params.get("taskId") or path_params.get("task_id")
+        task_id = path_params.get("id") or path_params.get("taskId") or path_params.get("task_id")
         artifact_id = path_params.get("artifactId") or path_params.get("artifact_id")
         
         # 소유자 ID 추출 (Cognito JWT claims)

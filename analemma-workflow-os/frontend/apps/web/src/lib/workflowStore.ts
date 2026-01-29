@@ -113,19 +113,25 @@ export const useWorkflowStore = create<WorkflowState>()(
               // 플래그 제거
               delete cleanUpdates.nodeTypeChanged;
 
+              // Deep clone nested objects to prevent shared references
+              const deepClonedUpdates = JSON.parse(JSON.stringify(cleanUpdates));
+
               return {
                 ...n,
                 ...changes,
                 type: newType as string,
-                data: { ...n.data, ...cleanUpdates },
+                data: { ...n.data, ...deepClonedUpdates },
               };
             }
+
+            // Deep clone nested objects (tools, conditions, etc.) to prevent shared references
+            const deepClonedUpdates = JSON.parse(JSON.stringify(updates));
 
             // 일반적인 업데이트
             return {
               ...n,
               ...changes,
-              data: { ...n.data, ...updates },
+              data: { ...n.data, ...deepClonedUpdates },
             };
           }),
         })),
@@ -251,6 +257,15 @@ export const useWorkflowStore = create<WorkflowState>()(
                     }
                   };
 
+                  // 🔍 Exit edge 찾기: back-edge source에서 나가는 다른 엣지
+                  // (루프 종료 후 다음 노드로 진행하는 엣지)
+                  const existingEdges = state.edges;
+                  const exitEdges = existingEdges.filter(e => 
+                    e.source === connection.source && 
+                    e.target !== connection.target && // back-edge 제외
+                    !e.data?.isBackEdge
+                  );
+
                   // 원래 back-edge 제거하고 Control Block을 통한 엣지로 교체
                   const newSourceToBlock = {
                     id: `${connection.source}-${controlBlockNode.id}`,
@@ -272,14 +287,30 @@ export const useWorkflowStore = create<WorkflowState>()(
                     }
                   };
 
+                  // 🚪 Exit edge 생성: control block → next node (루프 종료 시)
+                  const exitEdgesFromBlock = exitEdges.map(exitEdge => ({
+                    id: `${controlBlockNode.id}-exit-${exitEdge.target}`,
+                    source: controlBlockNode.id,
+                    target: exitEdge.target,
+                    type: 'smart',
+                    animated: false,
+                    data: {
+                      ...exitEdge.data,
+                      isLoopExit: true // 루프 종료 엣지 표시
+                    }
+                  }));
+
                   set((state) => ({
                     nodes: [...state.nodes, controlBlockNode],
                     edges: [
                       ...state.edges.filter(e => 
-                        !(e.source === connection.source && e.target === connection.target)
+                        // 원래 back-edge와 exit edge들 제거
+                        !(e.source === connection.source && 
+                          (e.target === connection.target || exitEdges.some(exit => exit.id === e.id)))
                       ),
                       newSourceToBlock,
-                      newBlockToTarget
+                      newBlockToTarget,
+                      ...exitEdgesFromBlock
                     ]
                   }));
 

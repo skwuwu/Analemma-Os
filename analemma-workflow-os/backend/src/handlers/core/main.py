@@ -1580,6 +1580,23 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             # [Fix] Extract response_schema for structured output (JSON mode)
             response_schema = actual_config.get("response_schema") or (actual_config.get("llm_config") or {}).get("response_schema")
             
+            # [Fix] Auto-detect provider from model if not set or invalid
+            # This handles legacy workflows saved with incorrect provider mappings
+            configured_provider = actual_config.get("provider", "gemini")
+            if configured_provider == "openai" or configured_provider not in ("gemini", "bedrock", "google"):
+                if "gemini" in model.lower():
+                    logger.info(f"Auto-detected provider 'gemini' from model '{model}' (was: '{configured_provider}')")
+                    actual_config["provider"] = "gemini"
+                elif "claude" in model.lower():
+                    logger.info(f"Auto-detected provider 'bedrock' from model '{model}' (was: '{configured_provider}')")
+                    actual_config["provider"] = "bedrock"
+                elif "gpt" in model.lower():
+                    logger.info(f"Model '{model}' indicates OpenAI/GPT, but system only supports Gemini/Bedrock. Defaulting to Gemini.")
+                    actual_config["provider"] = "gemini"
+                else:
+                    logger.warning(f"Unknown provider '{configured_provider}' for model '{model}', defaulting to Gemini")
+                    actual_config["provider"] = "gemini"
+            
             if should_use_async_llm(actual_config):
                 logger.warning(f"🚨 Async required by heuristic for node {node_id}")
                 raise AsyncLLMRequiredException("Resource-intensive processing required")
@@ -1606,7 +1623,18 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                             pass
 
             # Provider selection: Gemini (default) or Bedrock (fallback)
+            # [Fix] Map unknown providers to Gemini (default)
             provider = actual_config.get("provider", "gemini")
+            if provider not in ("gemini", "bedrock", "google"):
+                logger.warning(f"Unknown provider '{provider}' for node {node_id}, defaulting to Gemini")
+                provider = "gemini"
+            
+            # Normalize google -> gemini
+            if provider == "google":
+                provider = "gemini"
+            
+            # Initialize text variable to prevent UnboundLocalError
+            text = ""
             
             if provider == "gemini":
                 # Use Gemini Service (Native SDK)

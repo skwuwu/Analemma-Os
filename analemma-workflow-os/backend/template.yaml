@@ -3313,7 +3313,7 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Method: GET
-            Path: /tasks/{taskId}/metrics
+            Path: /tasks/{id}/metrics
             Auth:
               Authorizer: CognitoAuthorizer
 
@@ -3429,7 +3429,7 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Method: GET
-            Path: /tasks/{taskId}/outcomes
+            Path: /tasks/{id}/outcomes
             Auth:
               Authorizer: CognitoAuthorizer
         GetReasoningPath:
@@ -3437,7 +3437,7 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Method: GET
-            Path: /tasks/{taskId}/outcomes/{artifactId}/reasoning
+            Path: /tasks/{id}/outcomes/{artifactId}/reasoning
             Auth:
               Authorizer: CognitoAuthorizer
 

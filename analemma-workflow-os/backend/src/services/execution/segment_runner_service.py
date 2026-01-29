@@ -2704,6 +2704,21 @@ class SegmentRunnerService:
         # [Parallel] [Pattern 3] 병렬 스케줄러 적용
         segment_type = segment_config.get('type') if isinstance(segment_config, dict) else None
         
+        # [Fix] HITP Segment Type Check (Priority: segment type > edge type)
+        # If segment itself is marked as 'hitp', pause immediately
+        if segment_type == 'hitp':
+            logger.info(f"[Kernel] 🚨 HITP segment {segment_id} detected. Pausing for human approval.")
+            return _finalize_response({
+                "status": "PAUSED_FOR_HITP",
+                "final_state": mask_pii_in_state(initial_state),
+                "final_state_s3_path": None,
+                "next_segment_to_run": segment_id + 1,
+                "new_history_logs": [],
+                "error_info": None,
+                "branches": None,
+                "segment_type": "hitp"
+            })
+        
         # [Fix] Aggregator Interception (Delayed Check)
         # execute_segment 시작 시점에는 segment_type 파라미터가 없을 수 있음 (partition_map에서 resolve된 경우)
         # 따라서 여기서 resolve된 segment_config를 기반으로 한 번 더 체크해야 함

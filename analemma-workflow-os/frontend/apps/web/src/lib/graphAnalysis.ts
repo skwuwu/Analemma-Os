@@ -148,17 +148,22 @@ export function topologicalSort(
  * 
  * Back-edge를 찾아 반복 실행 구간을 식별합니다.
  * Back-edge: 현재 노드에서 이미 방문 스택에 있는 조상 노드로 가는 엣지
+ * 
+ * [Fix] Control 블록(while, for_each)의 의도적인 back-edge는 cycle로 감지하지 않음
  */
 export function detectCycles(nodes: Node[], edges: Edge[]): CycleInfo[] {
-  // 인접 리스트 생성
+  // 인접 리스트 생성 (control 블록의 back-edge 제외)
   const graph: Map<string, Edge[]> = new Map();
   const nodeIds = new Set(nodes.map(n => n.id));
+  
+  // Filter out intentional back-edges from control blocks
+  const edgesWithoutControlBackEdges = edges.filter(edge => !edge.data?.isBackEdge);
   
   for (const nodeId of nodeIds) {
     graph.set(nodeId, []);
   }
   
-  for (const edge of edges) {
+  for (const edge of edgesWithoutControlBackEdges) {
     if (nodeIds.has(edge.source) && nodeIds.has(edge.target)) {
       graph.get(edge.source)?.push(edge);
     }

@@ -48,6 +48,10 @@ export function detectAndSuggestControlBlock(
 
 /**
  * Conditional Branch Control Block 제안 생성
+ * 
+ * [Fix] 분기 타입 자동 감지:
+ * - 모든 엣지에 condition이 있으면 → conditional
+ * - 그 외 → parallel (사용자가 나중에 for_each로 변경 가능)
  */
 function createConditionalBranchSuggestion(
   sourceNodeId: string,
@@ -56,6 +60,12 @@ function createConditionalBranchSuggestion(
 ): ControlBlockSuggestion {
   const sourceNode = nodes.find(n => n.id === sourceNodeId);
   if (!sourceNode) throw new Error(`Source node ${sourceNodeId} not found`);
+  
+  // 분기 타입 자동 감지
+  const allHaveCondition = outgoingEdges.every(
+    e => e.data?.condition !== undefined && e.data?.condition !== null && e.data?.condition !== ''
+  );
+  const detectedBranchType: ControlBlockType = allHaveCondition ? 'conditional' : 'parallel';
   
   // Control Block 노드 위치 계산 (source 노드 오른쪽)
   const controlBlockPosition = {
@@ -66,8 +76,9 @@ function createConditionalBranchSuggestion(
   // Branches 생성
   const branches: BranchConfig[] = outgoingEdges.map((edge, idx) => ({
     id: `branch_${idx}`,
-    label: `Branch ${idx + 1}`,
-    targetNodeId: edge.target
+    label: edge.data?.condition || `Branch ${idx + 1}`,
+    targetNodeId: edge.target,
+    natural_condition: edge.data?.condition
   }));
   
   // Control Block 노드 생성
@@ -76,8 +87,8 @@ function createConditionalBranchSuggestion(
     type: 'control_block',
     position: controlBlockPosition,
     data: {
-      label: 'Branch Control',
-      blockType: 'conditional',
+      label: detectedBranchType === 'conditional' ? 'Conditional Branch' : 'Parallel Execution',
+      blockType: detectedBranchType,
       branches
     }
   };
@@ -144,6 +155,14 @@ function createWhileLoopSuggestion(
     }
   };
   
+  // 🔍 Exit edge 찾기: back-edge source에서 나가는 다른 엣지
+  // (루프 종료 후 다음 노드로 진행하는 엣지)
+  const exitEdges = edges.filter(e => 
+    e.source === backEdge.source && 
+    e.target !== backEdge.target && // back-edge 제외
+    !e.data?.isBackEdge
+  );
+
   // 새 엣지: Source → Control Block → Target (back-edge 시각화)
   const sourceToBlock: Edge = {
     id: `${backEdge.source}-${controlBlockNode.id}`,
@@ -159,15 +178,28 @@ function createWhileLoopSuggestion(
     type: 'smart',
     data: {
       ...backEdge.data,
-      loopType: 'while' // back-edge 표시
+      loopType: 'while', // back-edge 표시
+      isBackEdge: true
     }
   };
+
+  // 🚪 Exit edge 생성: control block → next node (루프 종료 시)
+  const exitEdgesFromBlock: Edge[] = exitEdges.map(exitEdge => ({
+    id: `${controlBlockNode.id}-exit-${exitEdge.target}`,
+    source: controlBlockNode.id,
+    target: exitEdge.target,
+    type: 'smart',
+    data: {
+      ...exitEdge.data,
+      isLoopExit: true // 루프 종료 엣지 표시
+    }
+  }));
   
   return {
     controlBlockNode,
-    originalEdges: [backEdge],
-    newEdges: [sourceToBlock, blockToTarget],
-    message: `Detected a loop pattern. Would you like to create a While Loop Control Block?`
+    originalEdges: [backEdge, ...exitEdges],
+    newEdges: [sourceToBlock, blockToTarget, ...exitEdgesFromBlock],
+    message: `Detected a loop pattern with ${exitEdges.length} exit path(s). Would you like to create a While Loop Control Block?`
   };
 }
 

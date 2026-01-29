@@ -97,7 +97,7 @@ export const SmartEdge = ({
   markerEnd,
   data,
 }: EdgeProps) => {
-  const { setEdges, getEdges } = useReactFlow();
+  const { setEdges, getEdges, getNodes } = useReactFlow();
   const [isEditing, setIsEditing] = useState(false);
   const [conditionInput, setConditionInput] = useState('');
   const [isEditingLoop, setIsEditingLoop] = useState(false);
@@ -122,6 +122,14 @@ export const SmartEdge = ({
   const isLoopEdge = useMemo(() => {
     if (edgeData?.isBackEdge) return true;
     
+    // Check if target node is a control block (while, for_each)
+    const allNodes = getNodes();
+    const targetNode = allNodes.find(n => n.id === target);
+    if (targetNode?.type === 'control' && 
+        (targetNode.data?.controlType === 'while' || targetNode.data?.controlType === 'for_each')) {
+      return true;
+    }
+    
     // Check if this edge enters or exits a loop (connected to back-edge target/source)
     const allEdges = getEdges();
     const backEdges = allEdges.filter(e => e.data?.isBackEdge);
@@ -134,7 +142,7 @@ export const SmartEdge = ({
     }
     
     return false;
-  }, [source, target, edgeData?.isBackEdge, getEdges]);
+  }, [source, target, edgeData?.isBackEdge, getEdges, getNodes]);
 
   // 엣지 타입 변경 핸들러
   const handleTypeChange = useCallback((newType: BackendEdgeType) => {

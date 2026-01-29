@@ -639,6 +639,22 @@ const NodeForm = ({
         updates.tools = formData.tools || [];
         updates.enable_thinking = formData.enable_thinking || false;
         updates.thinking_budget_tokens = Number(formData.thinking_budget_tokens || 4096);
+        
+        // Map model ID to provider
+        if (formData.model.includes('gemini') || formData.model === 'gemini') {
+          updates.provider = 'google';
+          updates.modelName = 'gemini-2.0-flash-exp';
+        } else if (formData.model.includes('claude') || formData.model === 'claude') {
+          updates.provider = 'anthropic';
+          updates.modelName = 'claude-3-5-sonnet-20241022';
+        } else if (formData.model.includes('gpt') || formData.model === 'gpt4') {
+          updates.provider = 'openai';
+          updates.modelName = 'gpt-4';
+        } else {
+          // Default fallback
+          updates.provider = 'openai';
+          updates.modelName = formData.model;
+        }
         break;
       case 'operator':
         updates.operatorType = formData.operatorType;
@@ -683,7 +699,7 @@ const NodeForm = ({
   };
 
   return (
-    <div className="p-6 space-y-9">
+    <div className="p-6 pb-8 space-y-9">
       {/* Basic Metadata */}
       <div className="space-y-3">
         <div className="flex items-center gap-2 mb-1">
@@ -742,7 +758,7 @@ const NodeForm = ({
       </div>
 
       {/* Persistent Actions */}
-      <div className="pt-6 border-t flex items-center justify-between">
+      <div className="pt-6 border-t flex items-center justify-between mb-4">
         <Button
           variant="ghost"
           size="sm"

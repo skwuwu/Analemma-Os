@@ -209,7 +209,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         # Path Parameter에서 task_id 추출
         path_params = event.get("pathParameters", {}) or {}
-        task_id = path_params.get("task_id") or path_params.get("taskId")
+        task_id = path_params.get("id") or path_params.get("task_id") or path_params.get("taskId")
         
         if not task_id:
             return _error_response(400, "task_id is required")

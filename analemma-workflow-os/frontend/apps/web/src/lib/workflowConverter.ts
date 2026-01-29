@@ -782,7 +782,7 @@ Return format: {"should_exit": true/false, "reason": "brief explanation"}`,
       }
     };
     
-    // Back-edge
+    // Back-edge (루프 시작점으로 돌아가는 엣지)
     const backEdge: BackendEdge = backEdgeTarget ? {
       type: 'edge',
       source: blockId,
@@ -790,7 +790,18 @@ Return format: {"should_exit": true/false, "reason": "brief explanation"}`,
       data: { loopType: 'while' }
     } : { type: 'edge', source: blockId, target: sourceNodeId };
     
-    return { nodes: [loopNode], edges: [backEdge] };
+    // 🚪 Exit edges (루프 종료 후 나가는 엣지들)
+    // Control block에서 나가는 엣지 중 isLoopExit가 표시된 엣지들을 변환
+    const exitEdges: BackendEdge[] = outgoingEdges
+      .filter((edge: any) => edge.data?.isLoopExit === true)
+      .map((edge: any) => ({
+        type: 'edge',
+        source: blockId,  // Control block에서 직접 나감
+        target: edge.target,
+        data: edge.data
+      }));
+    
+    return { nodes: [loopNode], edges: [backEdge, ...exitEdges] };
   }
   
   return { nodes: [], edges: [] };
