@@ -2610,6 +2610,29 @@ Resources:
             Resource:
               - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:*"
 
+  # LLMSimulator Trigger Function
+  LLMSimulatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "LLMSimulator-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.simulator.llm_simulator.lambda_handler"]
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          LLM_SIMULATOR_STATE_MACHINE_ARN: !Ref LLMSimulatorStateMachine
+          WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN: !GetAtt StepFunctionDistributedOrchestrator.Arn
+          WORKFLOW_ORCHESTRATOR_ARN: !GetAtt StepFunctionOrchestrator.Arn
+          METRIC_NAMESPACE: Analemma/LLMSimulator
+          LOG_LEVEL: INFO
+      Policies:
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt LLMSimulatorStateMachine.Name
+        - CloudWatchLogsFullAccess
+
   # LLM Simulator Support Functions
   PrepareLLMTestFunction:
     Type: AWS::Serverless::Function

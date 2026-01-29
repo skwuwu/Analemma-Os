@@ -324,6 +324,15 @@
               }
             ],
             "End": true
+          },
+          "MapReduceSegmentFailed": {
+            "Type": "Pass",
+            "Parameters": {
+              "status": "FAILED",
+              "segment_id": "unknown",
+              "error_info.$": "$.hydrate_error"
+            },
+            "End": true
           }
         }
       },

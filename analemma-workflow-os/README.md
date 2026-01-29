@@ -163,8 +163,27 @@ Want to see Gemini 1.5 Pro in action?
 
 ## 🏆 Project Status
 
-This project is a submission for the **Google Cloud Vertex AI Hackathon**.
+This project is a submission for the **Google Gemini 3 Hackathon**.
 It demonstrates that by combining **Serverless Infrastructure** with **Gemini's Infinite Context**, we can build the first true **Operating System for AI Agents**.
+
+### 📝 Submission Compliance & Originality
+I am fully aware of the new project eligibility rules.
+- **Base Research**: This project is founded on my private personal research into serverless agent control. It has **never been commercially deployed, publicly released, or submitted to any other competitions**.
+- **Gemini Transformation**: During the hackathon period, the codebase was heavily refactored to integrate **Gemini 1.5 Pro**. Key features like *Whole-State Reasoning* and *Visual Debugging* were newly implemented specifically for this event to leverage Gemini's native capabilities.
+
+---
+
+## 🎖️ About the Author: Built under Constraints
+
+> *"Efficiency is the child of constraints."*
+
+This project was architected and developed during my active military service. With severely limited access to development environments and intermittent network connectivity, I could not focus on building a "flashy UI". Instead, I poured every available second into engineering the most robust, crash-proof **Kernel** possible.
+
+-   **Engineering over Aesthetics**: I deprioritized the frontend to build the **Mission Simulator**—a chaos engineering tool designed to validate the system against the harsh realities of production (network failures, data bloat), simulating the very constraints I faced.
+-   **Limitless Passion in Limited Time**: The **Hyper-Context State Bag** and **Time Machine Runtime** (v3.11 Architecture) were conceived and implemented in fragmented blocks of free time, proving that determined engineering can thrive even in the most restrictive environments.
+-   **Note on Commit History**: Irregular or bulk commits are not violations but a direct result of **military network restrictions**. Development often occurred offline, with code pushed only during brief windows of connectivity.
+
+**Analemma OS is the result of focusing on the 'Core' when everything else was stripped away.** It is not just an app; it is a testament to the belief that a solid foundation defines the height of the skyscraper.
 
 <div align="center">
   <sub>Built with ❤️ for the Gemini ecosystem</sub>
