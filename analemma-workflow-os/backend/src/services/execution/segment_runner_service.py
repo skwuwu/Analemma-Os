@@ -2457,6 +2457,11 @@ class SegmentRunnerService:
                 if not isinstance(base_state, dict):
                     base_state = {}
                 
+                # 🔍 [Debug] Log loop_counter value for troubleshooting
+                logger.info(f"[v3.14 Debug] base_state.loop_counter={base_state.get('loop_counter')}, "
+                           f"max_loop_iterations={base_state.get('max_loop_iterations')}, "
+                           f"event_keys={list(event.keys())[:10] if isinstance(event, dict) else 'N/A'}")
+                
                 # Build execution_result for sealing
                 status = res.get('status', 'CONTINUE')
                 execution_result = {
@@ -2695,64 +2700,60 @@ class SegmentRunnerService:
         # 3. Load State (Inline or S3) - Keep as local variable only
         # ⚠️ DO NOT add to event to avoid 256KB limit
         # ====================================================================
-        # 🛡️ [v3.4 Deep Lookup] Hierarchical state search
-        # In v3 ASL, state_data is passed as bag contents
-        # Parallel branch entry: event.state_data = bag_contents (flat)
-        # Normal segment: event.current_state or event.state_data.bag
+        # 🛡️ [v3.14] Kernel Protocol - Use open_state_bag for unified extraction
+        # ASL passes $.state_data.bag (bag contents) directly as Payload
+        # open_state_bag handles all cases: v3 ASL, legacy, direct invocation
         # ====================================================================
         state_s3_path = event.get('state_s3_path')
-        state_data = event.get('state_data', {})
         
-        # 🔍 [v3.5 None Trace] Entry point tracing
-        _trace_none_access('state_data', 'event', event.get('state_data'), 
-                           context=event, caller='ExecuteSegment:Entry')
-        
-        if not isinstance(state_data, dict):
-            state_data = {}
-        
-        # 🛡️ [v3.4] Search Priority (Deep Lookup):
-        # 1. state_data.bag.current_state (v3 standard: bag wrapper exists)
-        # 2. state_data.current_state (v3 unwrapped bag)
-        # 3. event.current_state (legacy)
-        # 4. event.state (legacy)
-        # 5. state_data itself is state (v3 branch: ASL passes $.state_data.bag)
-        bag_in_state_data = state_data.get('bag') if isinstance(state_data.get('bag'), dict) else None
-        
-        # 🔍 [v3.5 None Trace] Bag lookup tracing
-        _trace_none_access('bag', 'state_data', bag_in_state_data, 
-                           context=state_data, caller='ExecuteSegment:BagLookup')
-        
-        # Compute each candidate for tracing
-        candidate_1 = bag_in_state_data.get('current_state') if bag_in_state_data else None
-        candidate_2 = state_data.get('current_state') if state_data else None
-        candidate_3 = event.get('current_state')
-        candidate_4 = event.get('state')
-        candidate_5 = state_data if state_data else None
-        
-        initial_state = (
-            # 1. state_data.bag.current_state (v3 standard)
-            candidate_1 or
-            # 2. state_data.current_state (v3 unwrapped)
-            candidate_2 or
-            # 3. event.current_state (legacy)
-            candidate_3 or
-            # 4. event.state (legacy)
-            candidate_4 or
-            # 5. state_data itself is state (v3 branch: ASL passes $.state_data.bag → state_data IS bag contents)
-            candidate_5 or
-            # 6. Final fallback
-            {}
-        )
-        
-        # 🔍 [v3.5 None Trace] Final state resolution tracing
-        resolved_source = (
-            "bag.current_state" if candidate_1 else
-            "state_data.current_state" if candidate_2 else
-            "event.current_state" if candidate_3 else
-            "event.state" if candidate_4 else
-            "state_data_as_bag" if candidate_5 else
-            "empty_fallback"
-        )
+        # 🎒 [v3.14] Use Kernel Protocol for state extraction
+        if KERNEL_PROTOCOL_AVAILABLE:
+            # open_state_bag handles:
+            # 1. event.state_data.bag (if ASL wraps)
+            # 2. event.state_data (if flat)
+            # 3. event itself (if v3 ASL passes $.state_data.bag directly)
+            initial_state = open_state_bag(event)
+            resolved_source = "kernel_protocol.open_state_bag"
+            logger.debug(f"[v3.14 Kernel Protocol] Used open_state_bag, keys={list(initial_state.keys())[:5] if initial_state else []}")
+        else:
+            # Legacy fallback
+            state_data = event.get('state_data', {})
+            
+            # 🔍 [v3.5 None Trace] Entry point tracing
+            _trace_none_access('state_data', 'event', event.get('state_data'), 
+                               context=event, caller='ExecuteSegment:Entry')
+            
+            if not isinstance(state_data, dict):
+                state_data = {}
+            
+            # 🛡️ [v3.4] Search Priority (Deep Lookup):
+            bag_in_state_data = state_data.get('bag') if isinstance(state_data.get('bag'), dict) else None
+            
+            # 🔍 [v3.5 None Trace] Bag lookup tracing
+            _trace_none_access('bag', 'state_data', bag_in_state_data, 
+                               context=state_data, caller='ExecuteSegment:BagLookup')
+            
+            # Compute each candidate for tracing
+            candidate_1 = bag_in_state_data.get('current_state') if bag_in_state_data else None
+            candidate_2 = state_data.get('current_state') if state_data else None
+            candidate_3 = event.get('current_state')
+            candidate_4 = event.get('state')
+            # 🚨 [v3.14 FIX] If event IS the bag contents (v3 ASL: Payload.$=$.state_data.bag)
+            candidate_5 = event if event and not state_data else state_data
+            
+            initial_state = (
+                candidate_1 or candidate_2 or candidate_3 or candidate_4 or candidate_5 or {}
+            )
+            
+            resolved_source = (
+                "bag.current_state" if candidate_1 else
+                "state_data.current_state" if candidate_2 else
+                "event.current_state" if candidate_3 else
+                "event.state" if candidate_4 else
+                "event_as_bag" if candidate_5 == event else
+                "state_data_as_bag" if candidate_5 else
+                "empty_fallback"
+            )
         if not initial_state or (isinstance(initial_state, dict) and len(initial_state) == 0):
             _trace_none_access('initial_state', 'combined_lookup', None, 
                                context=event, caller='ExecuteSegment:FinalStateResolve')

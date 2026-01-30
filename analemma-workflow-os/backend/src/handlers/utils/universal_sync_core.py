@@ -954,6 +954,10 @@ def universal_sync_core(
     # Step 2: 상태 병합 (Shallow Merge + CoW)
     updated_state = merge_logic(base_state, normalized_delta, context)
     
+    # 🔍 [Debug] Log loop_counter after merge for troubleshooting
+    logger.info(f"[v3.14 Debug] After merge_logic: loop_counter={updated_state.get('loop_counter')}, "
+               f"base_state.loop_counter={base_state.get('loop_counter') if isinstance(base_state, dict) else 'N/A'}")
+    
     # Step 3: 공통 필드 업데이트 (루프 카운터, 세그먼트)
     # 🛡️ [v3.14 Fix] loop_counter 증가는 ASL IncrementLoopCounter에서만 수행
     # USC에서 중복 증가하면 무한 루프 방지 로직이 깨짐
