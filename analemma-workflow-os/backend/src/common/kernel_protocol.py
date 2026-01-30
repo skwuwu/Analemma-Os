@@ -126,10 +126,7 @@ def open_state_bag(event: Dict[str, Any]) -> Dict[str, Any]:
     탐색 순서:
         1. event.state_data.bag (표준 v3.13 경로)
         2. event.state_data (평탄화된 경우)
-        3. event.final_state.current_state (검증기 호출 구조)
-        4. event.final_state (검증기 호출 구조)
-        5. event.current_state (SegmentRunner 결과 구조)
-        6. event 자체 (루트가 데이터인 경우)
+        3. event 자체 (루트가 데이터인 경우)
     
     Args:
         event: Lambda 이벤트 (Step Functions에서 전달)
@@ -161,26 +158,7 @@ def open_state_bag(event: Dict[str, Any]) -> Dict[str, Any]:
             logger.debug(f"[open_state_bag] Using state_data as bag, keys={list(state_data.keys())[:5]}")
             return state_data
     
-    # 3. 검증기 호출 구조: final_state.current_state (LLM 결과 포함)
-    final_state = event.get('final_state')
-    if isinstance(final_state, dict):
-        current_state = final_state.get('current_state')
-        if isinstance(current_state, dict) and current_state:
-            logger.debug(f"[open_state_bag] Found current_state at final_state.current_state, keys={list(current_state.keys())[:5]}")
-            return current_state
-        
-        # 4. final_state 자체 (current_state 없으면)
-        if final_state:
-            logger.debug(f"[open_state_bag] Using final_state as bag, keys={list(final_state.keys())[:5]}")
-            return final_state
-    
-    # 5. SegmentRunner 결과 구조: event.current_state
-    current_state = event.get('current_state')
-    if isinstance(current_state, dict) and current_state:
-        logger.debug(f"[open_state_bag] Found current_state at event.current_state, keys={list(current_state.keys())[:5]}")
-        return current_state
-    
-    # 6. 루트가 데이터인 경우 (legacy 또는 direct invocation)
+    # 3. 루트가 데이터인 경우 (legacy 또는 direct invocation)
     logger.debug(f"[open_state_bag] Using event root as bag, keys={list(event.keys())[:5]}")
     return event
 
