@@ -3713,6 +3713,8 @@ class SegmentRunnerService:
     def _resolve_segment_config(self, workflow_config, partition_map, segment_id):
         """
         Identical logic to original handler for partitioning.
+        
+        [v3.27] Extract segment_config from partition manifest structure
         """
         # [Critical Fix] workflow_config이 None이면 조기 처리
         if not workflow_config:
@@ -3720,9 +3722,17 @@ class SegmentRunnerService:
             # partition_map에서 직접 찾기 시도
             if partition_map:
                 if isinstance(partition_map, list) and 0 <= segment_id < len(partition_map):
-                    return partition_map[segment_id]
+                    segment = partition_map[segment_id]
+                    # [v3.27] Extract segment_config if it's nested
+                    if isinstance(segment, dict) and 'segment_config' in segment:
+                        return segment['segment_config']
+                    return segment
                 elif isinstance(partition_map, dict) and str(segment_id) in partition_map:
-                    return partition_map[str(segment_id)]
+                    segment = partition_map[str(segment_id)]
+                    # [v3.27] Extract segment_config if it's nested
+                    if isinstance(segment, dict) and 'segment_config' in segment:
+                        return segment['segment_config']
+                    return segment
             # 에러 정보를 포함한 기본 segment_config 반환
             return {
                 "type": "error",
@@ -3748,11 +3758,25 @@ class SegmentRunnerService:
             if isinstance(partition_map, list):
                 # list인 경우: 인덱스로 접근
                 if 0 <= segment_id < len(partition_map):
-                    return partition_map[segment_id]
+                    segment = partition_map[segment_id]
+                    # [v3.27 CRITICAL FIX] Extract segment_config from manifest structure
+                    # Partition manifest has: {segment_id, segment_config: {nodes, edges}, type, ...}
+                    # run_workflow expects: {nodes, edges, ...}
+                    if isinstance(segment, dict) and 'segment_config' in segment:
+                        extracted_config = segment['segment_config']
+                        logger.info(f"[v3.27] Extracted segment_config from manifest for segment {segment_id}")
+                        return extracted_config
+                    return segment
             elif isinstance(partition_map, dict):
                 # dict인 경우: 문자열 키로 접근
                 if str(segment_id) in partition_map:
-                    return partition_map[str(segment_id)]
+                    segment = partition_map[str(segment_id)]
+                    # [v3.27] Extract segment_config if it's nested
+                    if isinstance(segment, dict) and 'segment_config' in segment:
+                        extracted_config = segment['segment_config']
+                        logger.info(f"[v3.27] Extracted segment_config from manifest for segment {segment_id}")
+                        return extracted_config
+                    return segment
             
         # Simplified fallback - workflow_config 또는 에러 상태
         if workflow_config:

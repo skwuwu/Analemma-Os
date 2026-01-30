@@ -1919,56 +1919,28 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     verification_type = event.get('verification_type', 'standard')
     
     # ========================================
-    # v3.4: Kernel Protocol - 단순화된 StateBag 추출
+    # v3.26: 포괄적 StateBag 탐색 (모든 가능한 경로)
     # ========================================
-    # 1. S3 포인터 있으면 하이드레이션
-    # 2. open_state_bag으로 StateBag 추출
-    # 3. llm_raw_output 있으면 검증 끝
+    # JSON Path 어긋남 문제 해결: 모든 가능한 위치에서 LLM 출력 탐색
     
     # Step 1: 이벤트 전체 하이드레이션 (S3 포인터 복원)
     hydrated_event = _ensure_hydrated_state(event)
     
     # Step 2: Kernel Protocol로 StateBag 추출
-    # open_state_bag은 state_data.bag → state_data → event 순서로 탐색
-    final_state = open_state_bag(hydrated_event)
+    bag = open_state_bag(hydrated_event)
     state_source = "open_state_bag(event)"
     
-    # v3.25: bag.current_state에서 LLM 결과 추출
-    # universal_sync_core가 final_state를 current_state로 병합하므로
-    # bag.current_state에 LLM 출력이 위치함
-    if isinstance(final_state, dict):
-        current_state = final_state.get('current_state')
-        if isinstance(current_state, dict):
-            # current_state가 있으면 하이드레이션 후 사용
-            current_state = _ensure_hydrated_state(current_state)
-            final_state = current_state
-            state_source = "open_state_bag(event).current_state"
-            logger.info(f"[v3.25] Extracted current_state from bag, keys: {list(current_state.keys())[:10] if current_state else []}")
-        elif final_state.get('execution_result'):
-            # execution_result.final_state에서 추출 (USC flatten 전 구조)
-            exec_result = final_state.get('execution_result', {})
-            exec_final_state = exec_result.get('final_state', {})
-            if isinstance(exec_final_state, dict):
-                exec_final_state = _ensure_hydrated_state(exec_final_state)
-                if exec_final_state:
-                    final_state = exec_final_state
-                    state_source = "open_state_bag(event).execution_result.final_state"
-                    logger.info(f"[v3.25] Extracted from execution_result.final_state, keys: {list(exec_final_state.keys())[:10]}")
-    
-    # v3.6: 모든 Stage에서 사용하는 LLM output_key 목록
-    # Stage 1: llm_raw_output, parsed_summary
-    # Stage 2: item_result, quality_check_result
-    # Stage 3: vision_raw_output
-    # Stage 4: image_analysis
-    # Stage 5: document_analysis_raw, final_report_raw
-    # Stage 6: llm_analysis_raw
-    # Stage 7/8: llm_raw_output
+    # v3.26: 모든 가능한 LLM 출력 위치 탐색
     LLM_OUTPUT_KEYS = [
         'llm_raw_output', 'llm_output', 'llm_result',
         'parsed_summary', 'vision_raw_output', 
         'document_analysis_raw', 'final_report_raw',
         'llm_analysis_raw', 'image_analysis',
-        'item_result', 'quality_check_result'
+        'item_result', 'quality_check_result',
+        'processed_items', 'for_each_results',  # Stage 2, 4
+        'depth_1_results', 'depth_2_results',   # Stage 5
+        'partition_results', 'branch_results',  # Stage 6, 7
+        'usage', 'step_history'                 # 실행 증거
     ]
     
     def _has_llm_output(state: dict) -> bool:
@@ -1976,6 +1948,74 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if not isinstance(state, dict):
             return False
         return any(state.get(key) for key in LLM_OUTPUT_KEYS)
+    
+    def _deep_search_llm_output(root: dict, path: str = "") -> tuple:
+        """
+        v3.26: 재귀적으로 모든 가능한 위치에서 LLM 출력 탐색
+        Returns: (found_state, path_description)
+        """
+        if not isinstance(root, dict):
+            return None, None
+        
+        # 현재 레벨에서 LLM 출력 찾기
+        if _has_llm_output(root):
+            return root, path or "root"
+        
+        # 탐색 우선순위 경로들
+        search_paths = [
+            ('current_state', 'current_state'),
+            ('final_state', 'final_state'),
+            ('execution_result', 'execution_result'),
+            ('result', 'result'),
+            ('output', 'output'),
+            ('bag', 'bag'),
+            ('state_data', 'state_data'),
+        ]
+        
+        for key, desc in search_paths:
+            nested = root.get(key)
+            if isinstance(nested, dict):
+                # 하이드레이션 시도
+                nested = _ensure_hydrated_state(nested)
+                
+                # 현재 중첩 레벨에서 확인
+                if _has_llm_output(nested):
+                    return nested, f"{path}.{desc}" if path else desc
+                
+                # final_state가 중첩된 경우 (execution_result.final_state)
+                if key == 'execution_result':
+                    inner_final = nested.get('final_state', {})
+                    if isinstance(inner_final, dict):
+                        inner_final = _ensure_hydrated_state(inner_final)
+                        if _has_llm_output(inner_final):
+                            return inner_final, f"{path}.execution_result.final_state" if path else "execution_result.final_state"
+                    
+                    # execution_result.result (일부 ASL 구조)
+                    inner_result = nested.get('result', {})
+                    if isinstance(inner_result, dict):
+                        inner_result = _ensure_hydrated_state(inner_result)
+                        if _has_llm_output(inner_result):
+                            return inner_result, f"{path}.execution_result.result" if path else "execution_result.result"
+        
+        return None, None
+    
+    # bag에서 LLM 출력 탐색
+    final_state, found_path = _deep_search_llm_output(bag)
+    
+    if final_state:
+        state_source = f"bag.{found_path}"
+        logger.info(f"[v3.26] Found LLM output at {state_source}, keys: {list(final_state.keys())[:15]}")
+    else:
+        # bag 자체를 사용 (LLM 출력 없어도 다른 검증 진행)
+        final_state = bag
+        logger.warning(f"[v3.26] No LLM output found in bag. Bag keys: {list(bag.keys())[:15] if isinstance(bag, dict) else 'N/A'}")
+        
+        # 추가 디버깅: bag 구조 상세 로깅
+        if isinstance(bag, dict):
+            for key in ['current_state', 'execution_result', 'final_state', 'result']:
+                nested = bag.get(key)
+                if isinstance(nested, dict):
+                    logger.info(f"[v3.26 Debug] bag.{key} keys: {list(nested.keys())[:10]}")
     
     # Step 3: test_result.output에서도 시도 (ASL 출력 구조)
     if not _has_llm_output(final_state):
@@ -1987,28 +2027,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             except:
                 output = {}
         if isinstance(output, dict):
-            # v3.6: output.current_state에서 먼저 찾기 (실제 LLM 결과 위치)
-            # LLM 결과는 output.current_state에 저장됨
-            current_state = output.get('current_state', {})
-            if isinstance(current_state, dict):
-                current_state = _ensure_hydrated_state(current_state)
-                if _has_llm_output(current_state):
-                    final_state = current_state
-                    state_source = "test_result.output.current_state"
-            
-            # 여전히 못 찾았으면 output.final_state 또는 output 자체에서 시도
-            if not _has_llm_output(final_state):
-                candidate = output.get('final_state', output)
-                if isinstance(candidate, dict):
-                    candidate = _ensure_hydrated_state(candidate)
-                    bag = open_state_bag(candidate)
-                    if _has_llm_output(bag):
-                        final_state = bag
-                        state_source = "test_result.output.final_state"
+            found_in_output, output_path = _deep_search_llm_output(output)
+            if found_in_output:
+                final_state = found_in_output
+                state_source = f"test_result.output.{output_path}"
+                logger.info(f"[v3.26] Found LLM output in test_result at {state_source}")
     
     # 어떤 LLM 관련 키가 있는지 로깅
     found_llm_keys = [k for k in LLM_OUTPUT_KEYS if isinstance(final_state, dict) and final_state.get(k)]
-    logger.info(f"[v3.6] StateBag from {state_source}, keys: {list(final_state.keys())[:10] if isinstance(final_state, dict) else 'N/A'}, found_llm_keys: {found_llm_keys}")
+    logger.info(f"[v3.26] StateBag from {state_source}, keys: {list(final_state.keys())[:10] if isinstance(final_state, dict) else 'N/A'}, found_llm_keys: {found_llm_keys}")
     
     # v2.1: Task Abstraction 전용 검증
     if verification_type == 'task_abstraction' or scenario_key == 'TASK_ABSTRACTION':
