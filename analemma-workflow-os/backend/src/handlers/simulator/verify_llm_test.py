@@ -1933,6 +1933,28 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     final_state = open_state_bag(hydrated_event)
     state_source = "open_state_bag(event)"
     
+    # v3.25: bag.current_state에서 LLM 결과 추출
+    # universal_sync_core가 final_state를 current_state로 병합하므로
+    # bag.current_state에 LLM 출력이 위치함
+    if isinstance(final_state, dict):
+        current_state = final_state.get('current_state')
+        if isinstance(current_state, dict):
+            # current_state가 있으면 하이드레이션 후 사용
+            current_state = _ensure_hydrated_state(current_state)
+            final_state = current_state
+            state_source = "open_state_bag(event).current_state"
+            logger.info(f"[v3.25] Extracted current_state from bag, keys: {list(current_state.keys())[:10] if current_state else []}")
+        elif final_state.get('execution_result'):
+            # execution_result.final_state에서 추출 (USC flatten 전 구조)
+            exec_result = final_state.get('execution_result', {})
+            exec_final_state = exec_result.get('final_state', {})
+            if isinstance(exec_final_state, dict):
+                exec_final_state = _ensure_hydrated_state(exec_final_state)
+                if exec_final_state:
+                    final_state = exec_final_state
+                    state_source = "open_state_bag(event).execution_result.final_state"
+                    logger.info(f"[v3.25] Extracted from execution_result.final_state, keys: {list(exec_final_state.keys())[:10]}")
+    
     # v3.6: 모든 Stage에서 사용하는 LLM output_key 목록
     # Stage 1: llm_raw_output, parsed_summary
     # Stage 2: item_result, quality_check_result
