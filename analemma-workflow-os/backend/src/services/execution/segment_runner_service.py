@@ -933,13 +933,27 @@ class SegmentRunnerService:
                 return current_state
         
         # 정상 실행 (분할 불필요)
-        return run_workflow(
+        logger.error(f"[v3.27 AUTO_SPLIT] Calling run_workflow with segment_config keys: {list(segment_config.keys())[:15] if isinstance(segment_config, dict) else 'NOT A DICT'}")
+        logger.error(f"[v3.27 AUTO_SPLIT] segment_config.nodes count: {len(segment_config.get('nodes', [])) if isinstance(segment_config, dict) else 'N/A'}")
+        if isinstance(segment_config, dict) and segment_config.get('nodes'):
+            node_types = [n.get('type', 'unknown') for n in segment_config.get('nodes', [])[:5]]
+            logger.error(f"[v3.27 AUTO_SPLIT] First 5 node types: {node_types}")
+        
+        result = run_workflow(
             config_json=segment_config,
             initial_state=initial_state,
             ddb_table_name=os.environ.get("JOB_TABLE"),
             user_api_keys={},
             run_config={"user_id": auth_user_id}
         )
+        
+        logger.error(f"[v3.27 AUTO_SPLIT] run_workflow returned result keys: {list(result.keys())[:20] if isinstance(result, dict) else 'NOT A DICT'}")
+        if isinstance(result, dict) and 'llm_raw_output' in result:
+            logger.error(f"[v3.27 AUTO_SPLIT] ✅ llm_raw_output FOUND in result!")
+        else:
+            logger.error(f"[v3.27 AUTO_SPLIT] ❌ llm_raw_output NOT FOUND in result")
+        
+        return result
 
     # ========================================================================
     # [Guard] [Pattern 2] Manifest Mutation: S3 Manifest 동적 수정
@@ -2219,6 +2233,8 @@ class SegmentRunnerService:
                     logger.info(f"[v3.27 Debug] Calling run_workflow with segment_config: "
                                f"nodes={len(segment_config.get('nodes', []))}, "
                                f"node_ids={[n.get('id') for n in segment_config.get('nodes', [])]}")
+                    logger.error(f"[v3.27 DEBUG] Calling run_workflow with segment_config keys: {list(segment_config.keys())[:15] if isinstance(segment_config, dict) else 'NOT A DICT'}")
+                    logger.error(f"[v3.27 DEBUG] segment_config.nodes count: {len(segment_config.get('nodes', [])) if isinstance(segment_config, dict) else 'N/A'}")
                     result_state = run_workflow(
                         config_json=segment_config,
                         initial_state=initial_state,
@@ -2226,6 +2242,11 @@ class SegmentRunnerService:
                         user_api_keys={},
                         run_config={"user_id": auth_user_id}
                     )
+                    logger.error(f"[v3.27 DEBUG] run_workflow returned result_state keys: {list(result_state.keys())[:20] if isinstance(result_state, dict) else 'NOT A DICT'}")
+                    if isinstance(result_state, dict) and 'llm_raw_output' in result_state:
+                        logger.error(f"[v3.27 DEBUG] ✅ llm_raw_output FOUND in result_state!")
+                    else:
+                        logger.error(f"[v3.27 DEBUG] ❌ llm_raw_output NOT FOUND in result_state")
                     logger.info(f"[v3.27 Debug] run_workflow returned state with keys: "
                                f"{list(result_state.keys() if isinstance(result_state, dict) else [])[: 15]}")
                 
@@ -3783,8 +3804,9 @@ class SegmentRunnerService:
                     # [v3.27] Extract segment_config if it's nested
                     if isinstance(segment, dict) and 'segment_config' in segment:
                         extracted_config = segment['segment_config']
-                        logger.info(f"[v3.27] Extracted segment_config from manifest for segment {segment_id}")
+                        logger.error(f"[v3.27 DEBUG] Extracted segment_config (dict access) for segment {segment_id}: {list(extracted_config.keys())[:10]}")
                         return extracted_config
+                    logger.error(f"[v3.27 DEBUG] No extraction needed for segment {segment_id}, returning as-is")
                     return segment
             
         # Simplified fallback - workflow_config 또는 에러 상태
