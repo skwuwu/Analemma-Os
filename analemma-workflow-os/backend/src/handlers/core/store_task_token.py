@@ -331,36 +331,53 @@ def lambda_handler(event, context):
             
             logger.info(f"[v3.17] Kernel Protocol: bag keys={list(bag.keys())[:10]}")
             
+            # [v3.18] current_state에서도 필드 추출 (깊은 탐색)
+            current_state = bag.get('current_state', {})
+            if not isinstance(current_state, dict):
+                current_state = {}
+            
             # TaskToken은 payload 최상위에서만 올 수 있음 (SFN이 직접 주입)
             task_token = payload.get('TaskToken') or payload.get('taskToken')
             
-            # 나머지 필드는 bag에서 추출 (payload fallback 포함)
-            conversation_id = (
-                payload.get('conversation_id') or 
-                payload.get('conversationId') or
-                bag.get('conversation_id') or
-                bag.get('conversationId')
-            )
-            
+            # [v3.19] ASL v3에서는 execution_id를 사용 (conversation_id는 legacy)
+            # execution_id가 있으면 그것을 conversation_id로도 사용
             execution_id = (
                 payload.get('execution_id') or 
                 payload.get('executionId') or 
                 bag.get('execution_id') or
-                conversation_id
+                bag.get('executionId') or
+                current_state.get('execution_id')
             )
+            
+            # conversation_id 탐색 (execution_id fallback 포함)
+            conversation_id = (
+                payload.get('conversation_id') or 
+                payload.get('conversationId') or
+                bag.get('conversation_id') or
+                bag.get('conversationId') or
+                current_state.get('conversation_id') or
+                current_state.get('conversationId') or
+                execution_id  # v3에서는 execution_id를 conversation_id로 사용
+            )
+            
+            # execution_id가 없으면 conversation_id로 설정
+            if not execution_id:
+                execution_id = conversation_id
             
             owner_id = (
                 payload.get('ownerId') or 
                 payload.get('owner_id') or
                 bag.get('ownerId') or
-                bag.get('owner_id')
+                bag.get('owner_id') or
+                current_state.get('ownerId') or
+                current_state.get('owner_id')
             )
             
             # 필수 값 검증
             if not task_token or not conversation_id or not owner_id:
                 logger.error(f"Missing required fields: task_token={bool(task_token)}, "
                            f"conversation_id={bool(conversation_id)}, owner_id={bool(owner_id)}, "
-                           f"bag_keys={list(bag.keys())[:15]}")
+                           f"execution_id={bool(execution_id)}, bag_keys={list(bag.keys())[:15]}")
                 raise ValueError('Missing TaskToken, conversation_id or ownerId')
 
             now = int(time.time())

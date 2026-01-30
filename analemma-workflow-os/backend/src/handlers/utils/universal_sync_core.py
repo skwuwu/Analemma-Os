@@ -495,14 +495,30 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['segment_to_run'] = 0
             delta['_status'] = payload.get('status', 'CONTINUE')
             
-            # 🔑 [Critical Fix] Merge final_state.current_state into delta
-            # SegmentRunner stores execution results in final_state.current_state
-            # This must be merged into state_data for subsequent segments
+            # 🔑 [Critical Fix v3.20] Merge final_state into current_state
+            # run_workflow returns results directly (e.g., {'llm_raw_output': '...'})
+            # These should become part of current_state for verification to find them
             final_state = payload.get('final_state')
             if isinstance(final_state, dict):
                 current_state = final_state.get('current_state')
                 if isinstance(current_state, dict):
+                    # final_state.current_state가 있으면 그대로 사용
                     delta['current_state'] = current_state
+                else:
+                    # [v3.20] final_state에 current_state가 없으면 
+                    # final_state 자체를 current_state로 사용 (run_workflow 결과)
+                    # 단, 메타데이터 키는 제외
+                    execution_result_keys = {
+                        'llm_raw_output', 'parsed_summary', 'vision_raw_output',
+                        'vision_results', 'partition_results', 'branch_results',
+                        'test_results', 'slop_detection_results', 'usage',
+                        'step_history', 'execution_logs', '__new_history_logs'
+                    }
+                    has_execution_results = any(k in final_state for k in execution_result_keys)
+                    if has_execution_results or (final_state and '_' not in str(list(final_state.keys())[:1])):
+                        # final_state에 실행 결과가 있으면 current_state로 승격
+                        delta['current_state'] = final_state
+                        _get_logger().info(f"[v3.20] Promoted final_state to current_state, keys: {list(final_state.keys())[:10]}")
             
         elif action == 'aggregate_branches':
             # 병렬 브랜치 결과 (포인터 배열)
