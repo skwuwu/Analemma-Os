@@ -5,6 +5,17 @@ from typing import Dict, Any
 
 from src.services.execution.segment_runner_service import SegmentRunnerService
 
+# 🎒 [v3.13] Kernel Protocol - The Great Seal Pattern
+try:
+    from src.common.kernel_protocol import seal_state_bag, open_state_bag
+    KERNEL_PROTOCOL_AVAILABLE = True
+except ImportError:
+    try:
+        from common.kernel_protocol import seal_state_bag, open_state_bag
+        KERNEL_PROTOCOL_AVAILABLE = True
+    except ImportError:
+        KERNEL_PROTOCOL_AVAILABLE = False
+
 # Set up logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -32,7 +43,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     # Step Functions may pass null event if ASL ResultPath/Payload mapping is misconfigured
     if event is None:
         logger.error("🚨 [CRITICAL] Received NULL event from Step Functions! Check ASL mapping.")
-        return {
+        error_result = {
             "status": "FAILED",
             "error": "Event is None. Check ASL ResultPath/Payload mapping.",
             "error_type": "NullEventError",
@@ -44,6 +55,19 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "segment_type": "ERROR",
             "total_segments": 1,
             "segment_id": 0
+        }
+        # 🎒 [v3.13] Use seal_state_bag for ASL contract compliance
+        if KERNEL_PROTOCOL_AVAILABLE:
+            return seal_state_bag(
+                base_state={},
+                result_delta=error_result,
+                action='error',
+                context={'error_type': 'NullEventError'}
+            )
+        # Fallback: wrap in state_data for ASL compatibility
+        return {
+            "state_data": error_result,
+            "next_action": "FAILED"
         }
     
     try:
@@ -99,7 +123,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     except Exception as e:
         logger.exception("❌ Segment Runner failed")
         # Return error state that Step Functions can catch
-        # [Fix] ASL ResultSelector가 기대하는 모든 필드를 포함해야 JSONPath 에러 방지
+        # 🎒 [v3.13] Use seal_state_bag for ASL contract compliance
         error_info = {
             "error": str(e),
             "error_type": type(e).__name__
@@ -107,8 +131,8 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
         
         # 🛡️ [v3.3] total_segments 추출 로직 강화 (S3 포인터 대응)
         # 우선순위: event.total_segments > partition_map 길이 > 기본값 유지
-        raw_total = event.get('total_segments')
-        p_map = event.get('partition_map')
+        raw_total = event.get('total_segments') if event else None
+        p_map = event.get('partition_map') if event else None
         
         # 1. 숫자로 변환 가능한 경우
         if raw_total is not None:
@@ -129,32 +153,47 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             safe_total_segments = len(p_map)
         
         # 3. 최후의 보루: S3 포인터만 있거나 완전히 없는 경우
-        # Step Functions가 조기 종료하지 않도록 1로 설정
-        # (실제 total_segments는 state_data.bag에 보존되어야 함)
         if safe_total_segments is None:
             safe_total_segments = 1
-            # partition_map_s3_path가 있으면 경고 로깅
-            if event.get('partition_map_s3_path'):
+            if event and event.get('partition_map_s3_path'):
                 logger.warning(
                     f"🛡️ [v3.3] total_segments unknown (partition_map offloaded to S3). "
                     f"Using fallback=1. This may cause premature workflow termination."
                 )
         
-        return {
+        # 🎒 [v3.13] Build error result for seal_state_bag
+        error_result = {
             "status": "FAILED",
             "error": str(e),
             "error_type": type(e).__name__,
-            # ASL이 필수로 요구하는 필드들 - None/빈값으로 제공
-            "final_state": event.get('current_state', {}),  # 마지막 알려진 상태 보존
+            "final_state": event.get('current_state', {}) if event else {},
             "final_state_s3_path": None,
             "next_segment_to_run": None,
             "new_history_logs": [],
             "error_info": error_info,
             "branches": None,
             "segment_type": "ERROR",
-            # 🛡️ [P0 Fix] Step Functions Choice에서 참조하는 필수 필드
             "total_segments": safe_total_segments,
-            "segment_id": event.get('segment_id', 0)
+            "segment_id": event.get('segment_id', 0) if event else 0
+        }
+        
+        # 🎒 [v3.13] Use seal_state_bag for ASL contract compliance
+        if KERNEL_PROTOCOL_AVAILABLE:
+            try:
+                base_state = open_state_bag(event) if event else {}
+            except Exception:
+                base_state = {}
+            return seal_state_bag(
+                base_state=base_state,
+                result_delta=error_result,
+                action='error',
+                context={'error_type': type(e).__name__}
+            )
+        
+        # Fallback: wrap in state_data for ASL compatibility
+        return {
+            "state_data": error_result,
+            "next_action": "FAILED"
         }
 
 # --- Legacy Helper Imports REMOVED (v3.3) ---

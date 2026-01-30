@@ -635,6 +635,8 @@ Resources:
           KERNEL_STATE_TABLE: !Ref KernelStateTable
           # 🗂️ [S3 Offload] State offloading bucket for large payloads (>256KB)
           WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          # 🔍 [v3.5] None Reference Tracing - 디버깅용 (NoneType 에러 추적)
+          NONE_TRACE_ENABLED: "1"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkflowsTableV3
