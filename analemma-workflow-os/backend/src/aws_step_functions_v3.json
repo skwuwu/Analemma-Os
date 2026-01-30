@@ -568,7 +568,7 @@
       "Comment": "🔄 [v3.14] Increment loop_counter before checking limit",
       "Parameters": {
         "state_data": {
-          "bag.$": "States.JsonMerge($.state_data.bag, States.StringToJson(States.Format('{{\"loop_counter\":{}}}', States.MathAdd($.state_data.bag.loop_counter, 1))), false)",
+          "bag.$": "States.JsonMerge($.state_data.bag, States.StringToJson(States.Format('\\{\"loop_counter\":{}\\}', States.MathAdd($.state_data.bag.loop_counter, 1))), false)",
           "next_action.$": "$.state_data.next_action"
         }
       },
