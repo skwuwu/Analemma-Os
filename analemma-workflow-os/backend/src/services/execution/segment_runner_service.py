@@ -1899,7 +1899,8 @@ class SegmentRunnerService:
         
         # [P0 Refactoring] S3 offload via helper function (DRY principle)
         response_final_state = prepare_response_with_offload(final_state, output_s3_path)
-        if response_final_state.get('__s3_offloaded'):
+        # [Critical Fix] Safe check - response_final_state is guaranteed non-None by prepare_response_with_offload
+        if response_final_state and response_final_state.get('__s3_offloaded'):
             logger.info(f"[Aggregator] [S3 Offload] Replaced final_state with metadata reference. "
                        f"Original: {response_final_state.get('__original_size_kb', 0):.1f}KB → Response: ~0.2KB")
         
@@ -3654,7 +3655,8 @@ class SegmentRunnerService:
         # 아직 실행할 세그먼트가 남아있음
         # [P0 Refactoring] S3 offload via helper function (DRY principle)
         response_final_state = prepare_response_with_offload(final_state, output_s3_path)
-        if response_final_state.get('__s3_offloaded'):
+        # [Critical Fix] Safe check - response_final_state is guaranteed non-None by prepare_response_with_offload
+        if response_final_state and response_final_state.get('__s3_offloaded'):
             logger.info(f"[S3 Offload] Replaced final_state with metadata reference. "
                        f"Original: {response_final_state.get('__original_size_kb', 0):.1f}KB → Response: ~0.2KB")
         

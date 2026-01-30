@@ -137,13 +137,13 @@ class StateManager:
             logger.error("❌ Failed to upload raw bytes to %s: %s", bucket, e)
             raise RuntimeError(f"Failed to upload raw bytes to S3: {e}")
 
-    def handle_state_storage(self, state: Dict[str, Any], auth_user_id: str, workflow_id: str, segment_id: int, bucket: Optional[str], threshold: Optional[int] = None, loop_counter: Optional[int] = None) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    def handle_state_storage(self, state: Dict[str, Any], auth_user_id: str, workflow_id: str, segment_id: int, bucket: Optional[str], threshold: Optional[int] = None, loop_counter: Optional[int] = None) -> Tuple[Dict[str, Any], Optional[str]]:
         """
         Decide whether to store state inline or in S3 based on size threshold.
         PII data is masked before storage to ensure privacy compliance.
         
         [Critical] Step Functions has a 256KB payload limit. If state exceeds this:
-        - With bucket: Upload to S3, return (None, s3_path)
+        - With bucket: Upload to S3, return (s3_metadata_dict, s3_path)
         - Without bucket: Return truncated state with error marker to prevent SF failure
         
         [Perf Optimization v2]
@@ -153,6 +153,10 @@ class StateManager:
         
         [v3.10] Loop Support:
         - loop_counter arg added to prevent S3 overwrite during loops
+        
+        [v3.15] Never returns None for state:
+        - Always returns dict (either original state, s3_metadata, or truncated_state)
+        - Prevents AttributeError when calling .get() on result
         """
         try:
             # 🛡️ PII 마스킹 적용 (개인정보 보호) - 대용량 키 우회 적용됨
@@ -223,7 +227,15 @@ class StateManager:
                 # [Perf Optimization] 이미 직렬화된 바이트를 직접 S3에 업로드 (중복 직렬화 제거)
                 s3_path = self._upload_raw_bytes_to_s3(bucket, prefix, serialized_bytes, deterministic_filename="output.json")
                 logger.info("📦 State uploaded to S3: %s (%d bytes, %.1fKB)", s3_path, state_size, state_size/1024)
-                return None, s3_path
+                
+                # [Critical Fix] Return S3 metadata instead of None to prevent AttributeError
+                # downstream when calling .get() on the result
+                s3_metadata = {
+                    "__s3_offloaded": True,
+                    "__s3_path": s3_path,
+                    "__original_size_kb": round(state_size / 1024, 2)
+                }
+                return s3_metadata, s3_path
             else:
                 logger.info("📦 Returning state inline (%d bytes <= %d threshold)", state_size, threshold)
                 return masked_state, None

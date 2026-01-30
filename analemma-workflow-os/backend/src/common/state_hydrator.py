@@ -802,8 +802,21 @@ def prepare_response_with_offload(
         threshold_kb: 오프로드 임계값 (KB)
     
     Returns:
-        Dict: 원본 또는 S3 포인터 메타데이터
+        Dict: 원본 또는 S3 포인터 메타데이터 (never None)
     """
+    # [Critical Fix] Handle None final_state
+    # If output_s3_path exists, state was uploaded to S3 - return metadata pointer
+    # Otherwise return empty dict to prevent AttributeError
+    if final_state is None:
+        if output_s3_path:
+            # State was uploaded to S3, return metadata pointer
+            return {
+                "__s3_offloaded": True,
+                "__s3_path": output_s3_path,
+                "__original_size_kb": 0  # Unknown, state was already None
+            }
+        return {}
+    
     if not output_s3_path:
         return final_state
     

@@ -109,6 +109,120 @@ Analemma-Os includes a built-in **Mission Simulator** that subjects the kernel t
 
 ---
 
+## 🔬 LLM Simulator Test Scenarios
+
+The **LLM Simulator** is a comprehensive test suite that validates the full spectrum of Analemma-Os capabilities with **real LLM calls** (Gemini 1.5 Pro/Flash). Each stage progressively tests more complex features:
+
+### Stage Overview
+
+| Stage | Name | Features Tested | Guardrails |
+|-------|------|-----------------|------------|
+| **1** | Basic LLM | Response Schema, JSON parsing (<500ms) | None |
+| **2** | Flow Control | for_each, HITL, Token limits, State Recovery | COST_GUARDRAIL |
+| **3** | Vision Basic | Multimodal (S3→bytes), Vision JSON extraction | None |
+| **4** | Vision Map | Parallel image analysis (5 images), max_concurrency | SPEED_GUARDRAIL |
+| **5** | Hyper Stress | 3-level recursion, Partial Failure, Context Caching TEI≥50% | ALL_GUARDRAILS |
+| **6** | Distributed MAP_REDUCE | Partition parallel, Loop+LLM, HITL checkpoint | CONCURRENCY |
+| **7** | Parallel Multi-LLM | 5 parallel branches, StateBag merge (0% loss), Branch Loop | COST+SPEED |
+| **8** | Slop Detection | Quality Gate, Precision/Recall (F1≥0.8), Persona Jailbreak | QUALITY |
+
+### Detailed Stage Descriptions
+
+#### Stage 1: Basic LLM Functionality
+**Purpose**: Validate core LLM integration works correctly.
+- ✅ LLM response conforms to JSON schema (`main_topic`, `key_points`, `sentiment`)
+- ✅ JSON parsing completes within 500ms
+- ✅ No MOCK responses (real LLM calls only)
+- ✅ Schema validation passes
+
+#### Stage 2: Flow Control + COST_GUARDRAIL
+**Purpose**: Test workflow control structures and token budget management.
+- ✅ `for_each` parallel processing (3 items)
+- ✅ HITL (Human-in-the-Loop) state preservation
+- ✅ Token accumulation tracking (max 10,000 tokens)
+- ✅ Time Machine rollback with token reset
+- ✅ State Recovery Integrity (0% data loss after HITL)
+
+#### Stage 3: Multimodal Vision Basic
+**Purpose**: Validate image-to-text capabilities.
+- ✅ S3 URI → bytes conversion (hydration)
+- ✅ Vision model JSON extraction and parsing
+- ✅ Slop detection for hallucinated outputs (vendor field >100 chars)
+- ✅ Operator pipeline processing
+
+#### Stage 4: Vision Map + SPEED_GUARDRAIL
+**Purpose**: Test parallel vision processing with concurrency limits.
+- ✅ 5 images processed in parallel
+- ✅ `max_concurrency=3` enforced (timestamp gap analysis)
+- ✅ Category grouping aggregation
+- ✅ StateBag branch merge integrity
+
+#### Stage 5: Hyper Stress + ALL_GUARDRAILS
+**Purpose**: Extreme stress test for recursive workflows.
+- ✅ 3-level nested recursion (Depth 0→1→2→3)
+- ✅ Partial Failure recovery (some branches fail, others continue)
+- ✅ Context Caching efficiency (TEI ≥ 50%)
+- ✅ State isolation (no pollution between recursion levels)
+- ✅ Nested HITL processing
+- ✅ Graceful stop on guardrail trigger
+
+#### Stage 6: Distributed MAP_REDUCE + Loop + HITL
+**Purpose**: Validate distributed processing with loop convergence.
+- ✅ MAP_REDUCE partition strategy (3 partitions parallel)
+- ✅ LLM calls within for_each loops
+- ✅ Loop convergence detection (score ≥ 0.8)
+- ✅ HITL checkpoint at specific partition
+- ✅ Token aggregation across partitions
+- ✅ Partial failure recovery
+
+#### Stage 7: Parallel Multi-LLM + StateBag Merge
+**Purpose**: Test multi-branch parallel execution with state synchronization.
+- ✅ 5 parallel LLM branches
+- ✅ `max_concurrency` enforcement
+- ✅ StateBag merge with **0% data loss**
+- ✅ Per-branch loop execution
+- ✅ HITL at specific branch
+- ✅ Cost aggregation accuracy
+- ✅ Parallel execution latency measurement
+
+#### Stage 8: Slop Detection & Quality Gate
+**Purpose**: Validate LLM output quality filtering.
+- ✅ Test case pass/fail verification
+- ✅ Precision/Recall metrics (F1 ≥ 0.8)
+- ✅ Domain-specific emoji policies
+- ✅ Slop Injector accuracy testing
+- ✅ Persona jailbreak prompt effectiveness
+- ✅ Confusion matrix analysis (TP, TN, FP, FN)
+
+### Running the LLM Simulator
+
+```bash
+# Via AWS Step Functions Console
+# State Machine: LLMSimulatorWorkflow
+
+# Stage 1 (Basic)
+{
+  "test_keyword": "STAGE1_BASIC",
+  "llm_test_scenario": "STAGE1_BASIC"
+}
+
+# Stage 5 (Hyper Stress - Full Validation)
+{
+  "test_keyword": "STAGE5_HYPER_STRESS",
+  "llm_test_scenario": "STAGE5_HYPER_STRESS"
+}
+
+# Stage 8 (Quality Gate)
+{
+  "test_keyword": "STAGE8_SLOP_DETECTION",
+  "llm_test_scenario": "STAGE8_SLOP_DETECTION"
+}
+```
+
+> **Note**: Each stage requires real Gemini API calls. Ensure `GOOGLE_APPLICATION_CREDENTIALS` or `GEMINI_API_KEY` is configured.
+
+---
+
 ## ⚡ Quick Start (Enterprise Deployment)
 
 For a production-ready environment, we recommend deploying via our built-in **GitHub Actions CI/CD Pipeline**. This ensures proper IAM role configuration, secret management, and architectural integrity.
