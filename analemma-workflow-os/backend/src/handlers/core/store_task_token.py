@@ -310,18 +310,36 @@ def lambda_handler(event, context):
 
         try:
             task_token = payload.get('TaskToken') or payload.get('taskToken')
-            conversation_id = payload.get('conversation_id') or payload.get('conversationId')
+            
+            # [Critical Fix v3.15] state_data에서 fallback으로 값 추출
+            # ASL이 state_data만 전달하고 개별 필드는 안 보낼 수 있음
+            state_data = payload.get('state_data') or {}
+            if not isinstance(state_data, dict):
+                state_data = {}
+            
+            conversation_id = (
+                payload.get('conversation_id') or 
+                payload.get('conversationId') or
+                state_data.get('conversation_id') or
+                state_data.get('conversationId')
+            )
             
             # execution_id는 SFN input에서 파싱 (body가 아닌)
-            # (이 람다는 SFN에 의해 호출되므로, SFN 페이로드에서 executionId를 가져와야 함)
-            execution_id = payload.get('execution_id') or payload.get('executionId') or payload.get('conversation_id') # SFN이 conversation_id를 execution_id로 사용함
+            # (SFN이 conversation_id를 execution_id로 사용함)
+            execution_id = (
+                payload.get('execution_id') or 
+                payload.get('executionId') or 
+                state_data.get('execution_id') or
+                conversation_id
+            )
             
-            # --- [수정된 로직] ---
-            
-            # 이 람다는 SFN에 의해 내부적으로 호출되므로,
-            # SFN input(payload)에 포함된 ownerId를 신뢰합니다.
-            # 이 ownerId는 SFN을 시작시킨 run_workflow 람다에 의해 이미 검증되었습니다.
-            owner_id = payload.get('ownerId') or payload.get('owner_id')
+            # [Critical Fix v3.15] ownerId도 state_data에서 fallback
+            owner_id = (
+                payload.get('ownerId') or 
+                payload.get('owner_id') or
+                state_data.get('ownerId') or
+                state_data.get('owner_id')
+            )
 
             
             # 필수 값 검증
