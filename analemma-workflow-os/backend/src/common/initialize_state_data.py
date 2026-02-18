@@ -478,42 +478,29 @@ def lambda_handler(event, context):
     bag = SmartStateBag({}, hydrator=hydrator)
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # [Phase 2] State Storage Strategy - Merkle DAG vs Legacy
+    # [Phase 2] Merkle DAG Content-Addressable Storage
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    if manifest_id:
-        # ✅ [Merkle DAG Mode] Content-Addressable Storage
-        # - workflow_config/partition_map → S3 블록으로 저장됨
-        # - StateBag에는 manifest_id 포인터만 저장 (93% 크기 감소)
-        # - segment_runner는 manifest에서 segment_config 로드
-        bag['manifest_id'] = manifest_id
-        bag['manifest_hash'] = manifest_hash
-        bag['config_hash'] = config_hash
-        
-        logger.info(
-            f"[Merkle DAG] State storage optimized: "
-            f"manifest_id={manifest_id[:8]}..., "
-            f"StateBag reduction: ~93%"
+    if not manifest_id:
+        raise RuntimeError(
+            "Failed to create Merkle DAG manifest. "
+            "StateVersioningService.create_manifest() returned None. "
+            "Check S3/DynamoDB permissions and configuration."
         )
-    else:
-        # ⚠️ [DEPRECATED] Legacy 모드 - 제거 예정 (v4.0)
-        # 
-        # 현재 동작: 기존 실행 중인 워크플로우 호환성 보장
-        # 마이그레이션: 모든 새 워크플로우는 Merkle DAG 사용
-        # 제거 일정: 2026 Q3 (기존 실행 완료 후)
-        # 
-        # ❌ 문제점:
-        # - workflow_config (200KB) + partition_map (50KB) StateBag 포함
-        # - 모든 세그먼트에 전체 그래프 전송 (불필요)
-        # - 네트워크/메모리 비효율
-        # 
-        bag['workflow_config'] = workflow_config
-        bag['partition_map'] = partition_map
-        
-        logger.warning(
-            "[DEPRECATED] Legacy state storage detected. "
-            "workflow_config/partition_map will be removed in v4.0. "
-            "Please migrate to Merkle DAG mode."
-        )
+    
+    # ✅ Merkle DAG Mode: Content-Addressable Storage
+    # - workflow_config/partition_map → S3 블록으로 저장됨
+    # - StateBag에는 manifest_id 포인터만 저장 (93% 크기 감소)
+    # - segment_runner는 manifest에서 segment_config 로드
+    bag['manifest_id'] = manifest_id
+    bag['manifest_hash'] = manifest_hash
+    bag['config_hash'] = config_hash
+    
+    logger.info(
+        f"[Merkle DAG] State storage optimized: "
+        f"manifest_id={manifest_id[:8]}..., "
+        f"hash={manifest_hash[:8]}..., "
+        f"StateBag reduction: ~93%"
+    )
     
     bag['current_state'] = workflow_config.get('initial_state', {})
     

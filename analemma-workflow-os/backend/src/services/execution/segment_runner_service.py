@@ -2849,13 +2849,10 @@ class SegmentRunnerService:
         # ====================================================================
         
         # ====================================================================
-        # [v3.6] Extract ALL bag data BEFORE normalize_inplace removes state_data
-        # StateBag as Single Source of Truth - 모든 데이터는 bag에서 가져옴
-        # 로컬 변수로만 유지 (event에 저장 X - StateBag 오염 방지)
+        # [v3.6] Extract bag data BEFORE normalize_inplace removes state_data
         # ====================================================================
-        workflow_config = _safe_get_from_bag(event, 'workflow_config')
-        partition_map = _safe_get_from_bag(event, 'partition_map')
-        partition_map_s3_path = _safe_get_from_bag(event, 'partition_map_s3_path')
+        # ✅ Merkle DAG Mode: workflow_config/partition_map 제거됨
+        # segment_config는 manifest 또는 ASL에서 직접 전달
         execution_mode = _safe_get_from_bag(event, 'execution_mode')
         distributed_mode = _safe_get_from_bag(event, 'distributed_mode')
         
@@ -2863,8 +2860,9 @@ class SegmentRunnerService:
         # Remove potentially huge state_data from event to save memory
         normalize_inplace(event, remove_state_data=True)
 
-        # 4. Resolve Segment Config - Single Source of Truth
-        # workflow_config는 bag 최상위에 있음 (위에서 이미 추출됨)
+        # ====================================================================
+        # [Phase 0] Segment Config Resolution - Merkle DAG 3-Tier Fallback
+        # ====================================================================
         
         # 👉 [Critical Fix] Branch Execution: partition_map fallback from branch_config
         # ASL의 ProcessParallelSegments에서 branch_config에 전체 브랜치 정보가 전달됨
@@ -2899,52 +2897,13 @@ class SegmentRunnerService:
                 logger.info(f"[Hybrid Mode] Using direct segment_config for {execution_mode} mode")
                 segment_config = event.get('segment_config')
             else:
-                # Fallback 3: Legacy workflow_config + partition_map (호환성)
-                # [Critical Fix] Support S3 Offloaded Partition Map with retry
-                if not partition_map and partition_map_s3_path:
-                    try:
-                        import boto3
-                        s3 = boto3.client('s3')
-                        bucket_name = partition_map_s3_path.replace("s3://", "").split("/")[0]
-                        key_name = "/".join(partition_map_s3_path.replace("s3://", "").split("/")[1:])
-                        
-                        logger.info(f"Loading partition_map from S3: {partition_map_s3_path}")
-                        
-                        # [v2.1] S3 get_object에 재시도 적용
-                        def _get_partition_map():
-                            obj = s3.get_object(Bucket=bucket_name, Key=key_name)
-                            content = obj['Body'].read().decode('utf-8')
-                            return self._safe_json_load(content)  # 🛡️ Use safe loader
-                        
-                        if RETRY_UTILS_AVAILABLE:
-                            partition_map = retry_call(
-                                _get_partition_map,
-                                max_retries=2,
-                                base_delay=0.5,
-                                max_delay=5.0
-                            )
-                        else:
-                            partition_map = _get_partition_map()
-                            
-                    except Exception as e:
-                        logger.error(f"Failed to load partition_map from S3 after retries: {e}")
-                        # Fallback to dynamic partitioning (handled in _resolve_segment_config)
-                
-                # ⚠️ [DEPRECATED] Legacy mode: workflow_config + partition_map
-                # 제거 예정 (v4.0): Merkle DAG manifest로 완전 대체
-                if workflow_config or partition_map:
-                    logger.warning(
-                        "[DEPRECATED] Legacy Mode: Using workflow_config/partition_map fallback. "
-                        "This path will be removed in v4.0. Migrate to manifest_id."
-                    )
-                    segment_config = self._resolve_segment_config(
-                        workflow_config, partition_map, segment_id
-                    )
-                else:
-                    raise ValueError(
-                        "No segment_config source available - all fallbacks failed. "
-                        "Expected: ASL injection, S3 manifest, or legacy workflow_config."
-                    )
+                # ❌ No valid segment_config source
+                raise ValueError(
+                    "No segment_config source available. "
+                    "Expected: ASL injection or S3 manifest. "
+                    f"manifest_id={event.get('manifest_id')}, "
+                    f"manifest_s3_path={manifest_s3_path}"
+                )
         
         # [Phase 0 Complete] 3단계 Fallback으로 점진적 마이그레이션 가능
         # 1. ASL Direct Injection (20% - 작은 manifest)
@@ -3909,111 +3868,13 @@ class SegmentRunnerService:
             logger.error(f"[Failed] Loading segment_config from {manifest_s3_path}: {e}", exc_info=True)
             raise
 
-    def _resolve_segment_config(self, workflow_config, partition_map, segment_id):
-        """
-        ⚠️ [DEPRECATED - v4.0 제거 예정]
-        
-        Legacy 동적 파티션 해석 로직
-        
-        ✅ 대체 방법:
-        - Phase 1: StateVersioningService.load_manifest_segments()
-        - Phase 7: Pre-computed segment_config from manifest
-        - ASL Direct Injection: event.get('segment_config')
-        
-        ❌ 문제점:
-        - workflow_config/partition_map 의존성 (StateBag 비대화)
-        - 동적 파싱 오버헤드
-        - manifest 기반 접근으로 완전 대체 가능
-        
-        현재 유지 이유: 기존 실행 중인 워크플로우 호환성
-        
-        Original Docstring:
-        Identical logic to original handler for partitioning.
-        [v3.27] Extract segment_config from partition manifest structure
-        """
-        logger.debug(
-            f"[DEPRECATED] _resolve_segment_config called for segment {segment_id}. "
-            "Consider migrating to manifest-based segment loading."
-        )
-        # [Critical Fix] workflow_config이 None이면 조기 처리
-        if not workflow_config:
-            logger.error(f"[_resolve_segment_config] [Warning] workflow_config is None! segment_id={segment_id}")
-            # partition_map에서 직접 찾기 시도
-            if partition_map:
-                if isinstance(partition_map, list) and 0 <= segment_id < len(partition_map):
-                    segment = partition_map[segment_id]
-                    # [v3.27] Extract segment_config if it's nested
-                    if isinstance(segment, dict) and 'segment_config' in segment:
-                        return segment['segment_config']
-                    return segment
-                elif isinstance(partition_map, dict) and str(segment_id) in partition_map:
-                    segment = partition_map[str(segment_id)]
-                    # [v3.27] Extract segment_config if it's nested
-                    if isinstance(segment, dict) and 'segment_config' in segment:
-                        return segment['segment_config']
-                    return segment
-            # 에러 정보를 포함한 기본 segment_config 반환
-            return {
-                "type": "error",
-                "error": "workflow_config is None",
-                "segment_id": segment_id,
-                "nodes": [],
-                "edges": []
-            }
-        
-        # Basic full workflow or pre-chunked
-        # If we are strictly running a segment, we might need to simulate partitioning if map is missing
-        # For simplicity, we assume workflow_config IS the segment config if partition_map is missing
-        # OR we call the dynamic partitioner.
-        if not partition_map:
-            # Fallback to dynamic partitioning logic
-            parts = _partition_workflow_dynamically(workflow_config) # arbitrary chunks removed
-            if 0 <= segment_id < len(parts):
-                return parts[segment_id]
-            return workflow_config # Fallback
-
-        # [Critical Fix] partition_map이 list 또는 dict일 수 있음
-        if partition_map:
-            if isinstance(partition_map, list):
-                # list인 경우: 인덱스로 접근
-                if 0 <= segment_id < len(partition_map):
-                    segment = partition_map[segment_id]
-                    # [v3.27 CRITICAL FIX] Extract segment_config from manifest structure
-                    # Partition manifest has: {segment_id, segment_config: {nodes, edges}, type, ...}
-                    # run_workflow expects: {nodes, edges, ...}
-                    if isinstance(segment, dict) and 'segment_config' in segment:
-                        extracted_config = segment['segment_config']
-                        logger.info(f"[v3.27] ✓ Extracted segment_config from manifest for segment {segment_id}")
-                        logger.info(f"[v3.27] Config has {len(extracted_config.get('nodes', []))} nodes: "
-                                   f"{[n.get('id') for n in extracted_config.get('nodes', [])]}")
-                        return extracted_config
-                    logger.warning(f"[v3.27] ✗ No segment_config key found in manifest segment {segment_id}, "
-                                 f"available keys: {list(segment.keys() if isinstance(segment, dict) else [])}")
-                    return segment
-            elif isinstance(partition_map, dict):
-                # dict인 경우: 문자열 키로 접근
-                if str(segment_id) in partition_map:
-                    segment = partition_map[str(segment_id)]
-                    # [v3.27] Extract segment_config if it's nested
-                    if isinstance(segment, dict) and 'segment_config' in segment:
-                        extracted_config = segment['segment_config']
-                        logger.error(f"[v3.27 DEBUG] Extracted segment_config (dict access) for segment {segment_id}: {list(extracted_config.keys())[:10]}")
-                        return extracted_config
-                    logger.error(f"[v3.27 DEBUG] No extraction needed for segment {segment_id}, returning as-is")
-                    return segment
-            
-        # Simplified fallback - workflow_config 또는 에러 상태
-        if workflow_config:
-            logger.warning(f"[_resolve_segment_config] [Warning] partition_map unavailable, falling back to workflow_config. "
-                          f"This may cause issues for large/complex workflows. segment_id={segment_id}")
-            return workflow_config
-        
-        # [Critical Fix] 모든 fallback 실패 시 에러 상태 반환 (None 반환 방지)
-        logger.error(f"[_resolve_segment_config] [Alert] All fallbacks failed! segment_id={segment_id}")
-        return {
-            "type": "error",
-            "error": "Failed to resolve segment config - both workflow_config and partition_map are invalid",
-            "segment_id": segment_id,
-            "nodes": [],
-            "edges": []
-        }
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # [REMOVED] _resolve_segment_config() - Legacy 동적 파티션 해석
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 
+    # 제거 사유: Merkle DAG 전환으로 workflow_config/partition_map 불필요
+    # 대체 방법: StateVersioningService.load_manifest_segments()
+    # 
+    # 기존 코드 길이: ~120 lines
+    # 제거 일자: 2026-02-18
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
