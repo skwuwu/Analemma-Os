@@ -237,16 +237,23 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
                 # [v2.1] S3 GC Integration: Mark Rollback Orphans (HARD_ROLLBACK only)
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 if current_manifest_id and current_manifest_id != last_safe_manifest["manifest_id"]:
-                try:
-                    from services.state.merkle_gc_service import mark_rollback_orphans
-                    
-                    orphan_stats = mark_rollback_orphans(
-                        rollback_manifest_id=last_safe_manifest["manifest_id"],
-                        abandoned_branch_root=current_manifest_id,
+                    try:
+                        from services.state.merkle_gc_service import mark_rollback_orphans
+                        
+                        orphan_stats = mark_rollback_orphans(
+                            rollback_manifest_id=last_safe_manifest["manifest_id"],
+                            abandoned_branch_root=current_manifest_id,
                             grace_period_days=7  # Shorter grace period for HARD_ROLLBACK (data corruption risk)
-                except Exception as e:
-                    logger.error(f"[GC] Failed to mark rollback orphans: {e}")
-                    # Continue execution (don't block rollback)
+                        )
+                        
+                        logger.warning(
+                            f"🗑️ [GC] [Rollback Orphans] Marked {orphan_stats['orphaned_manifests']} "
+                            f"manifests and {orphan_stats['orphaned_blocks']} blocks for deletion. "
+                            f"Expires: {orphan_stats['grace_period_expires_at']}"
+                        )
+                    except Exception as e:
+                        logger.error(f"[GC] Failed to mark rollback orphans: {e}")
+                        # Continue execution (don't block rollback)
     
     # ────────────────────────────────────────────────────────────────────
     # 6. Persist Audit Log (DynamoDB)
