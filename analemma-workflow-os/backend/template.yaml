@@ -3429,6 +3429,44 @@ Resources:
         - Key: DataClassification
           Value: Sensitive  # 보안 위반 정보 포함
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🛡️ [v3.0] Trust Score Metrics Table
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Purpose: Trust Score 히스토리 DB 플러시 저장소 (메모리 관리)
+  # Schema:
+  #   - PK: agent_id (에이전트별 신뢰도 추적)
+  #   - SK: manifest_id (워크플로우 실행 단위)
+  #   - Attributes: trust_score, timestamp, ttl
+  # Use Cases:
+  #   - Trust Score 히스토리 압축 (20개 초과 시 10개 플러시)
+  #   - 장기 트렌드 분석 (Frontend Dashboard)
+  #   - Anomaly Detection 학습 데이터
+  GovernanceTrustScoreMetrics:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "GovernanceTrustScoreMetrics-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: agent_id
+          AttributeType: S
+        - AttributeName: manifest_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: agent_id
+          KeyType: HASH
+        - AttributeName: manifest_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true  # 90일 후 자동 삭제
+      Tags:
+        - Key: Purpose
+          Value: TrustScoreHistory
+        - Key: Component
+          Value: GovernanceV3
+        - Key: Phase
+          Value: "3.0"
+
   # --- NodeStats Collector Lambda ---
   # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트
   NodeStatsCollectorFunction:
@@ -4005,6 +4043,112 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt WorkflowLifecycleRule.Arn
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🛡️ [v3.0] Async Rationale Generation Infrastructure
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Architecture: SNS → SQS → Lambda (Fire-and-Forget Pattern)
+  # Purpose: Tier 2 위반 설명 생성 (Bedrock Haiku 기반)
+  # Latency Impact: 메인 워크플로우와 분리되어 0ms 추가 지연
+
+  # SNS Topic for governance violations
+  GovernanceViolationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Governance Violation Events"
+      TopicName: !Sub "governance-violations-${StageName}"
+      Tags:
+        - Key: Purpose
+          Value: AsyncRationaleGeneration
+        - Key: Component
+          Value: GovernanceV3
+
+  # SQS Queue for async rationale generation
+  GovernanceRationaleQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "governance-rationale-${StageName}"
+      MessageRetentionPeriod: 86400  # 24 hours
+      VisibilityTimeout: 900  # 15 minutes (Lambda timeout)
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt GovernanceRationaleDLQ.Arn
+        maxReceiveCount: 3
+      Tags:
+        - Key: Purpose
+          Value: AsyncRationaleGeneration
+        - Key: Component
+          Value: GovernanceV3
+
+  # DLQ for failed rationale generation
+  GovernanceRationaleDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "governance-rationale-dlq-${StageName}"
+      MessageRetentionPeriod: 1209600  # 14 days
+      Tags:
+        - Key: Purpose
+          Value: AsyncRationaleGenerationDLQ
+        - Key: Component
+          Value: GovernanceV3
+
+  # SNS subscription to SQS
+  GovernanceQueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      TopicArn: !Ref GovernanceViolationTopic
+      Endpoint: !GetAtt GovernanceRationaleQueue.Arn
+
+  # SQS Queue Policy (allow SNS to send messages)
+  GovernanceRationaleQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref GovernanceRationaleQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt GovernanceRationaleQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref GovernanceViolationTopic
+
+  # Lambda function for async rationale generation (Tier 2 violations)
+  RationaleGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "rationale-generator-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.governance.rationale_generator_lambda.lambda_handler"]
+      Timeout: 900  # 15 minutes
+      MemorySize: 512
+      Environment:
+        Variables:
+          MANIFEST_TABLE: !Ref WorkflowsTableV3
+          AUDIT_LOG_TABLE: !Ref GovernanceAuditLogV3
+          BEDROCK_REGION: !Ref AWS::Region
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceAuditLogV3
+        - Statement:
+          - Effect: Allow
+            Action:
+              - bedrock:InvokeModel
+            Resource: 
+              - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt GovernanceRationaleQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+
   # --- Optional S3 bucket for workflow state (created when WorkflowStateBucket param is empty) ---
   # 🔧 수명 주기 정책 최적화: Outcome Manager 접근성 고려
   WorkflowStateBucketResource:
@@ -4324,6 +4468,10 @@ Resources:
           # Cognito 설정 (배포 시 SSM Parameter에서 자동 생성)
           COGNITO_USER_POOL_ID: !GetAtt CognitoUserPoolIdParameter.Value
           COGNITO_CLIENT_ID: !Ref CognitoAudience
+          # 🛡️ [v3.0] Governance Tables
+          GOVERNANCE_TRUST_SCORE_TABLE: !Ref GovernanceTrustScoreMetrics
+          GOVERNANCE_AUDIT_LOG_TABLE: !Ref GovernanceAuditLogV3
+          GOVERNANCE_VIOLATION_TOPIC_ARN: !Ref GovernanceViolationTopic
       Policies:
         - Statement:
           - Effect: Allow
@@ -4368,6 +4516,17 @@ Resources:
               - cognito-idp:RespondToAuthChallenge
             Resource:
               - !Sub "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*"
+        # 🛡️ [v3.0] Governance Tables
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceTrustScoreMetrics
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceAuditLogV3
+        # 🛡️ [v3.0] SNS Publish for Async Rationale
+        - Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref GovernanceViolationTopic
 
   # --- InfraSmokeTester: 5분마다 인프라 + 로직 헬스체크 ---
   InfraSmokeTesterFunction:
