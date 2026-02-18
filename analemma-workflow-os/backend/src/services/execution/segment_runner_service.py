@@ -1230,14 +1230,40 @@ class SegmentRunnerService:
         사용 시나리오:
         - API 실패 후 백업 경로 삽입
         - 에러 핸들링 세그먼트 동적 추가
+        - 에이전트 계획 수정 (Agent Re-planning)
         
         아키텍처 변경 (Phase 8):
         - ❌ 기존: S3 manifest 직접 수정 (Merkle DAG 무효화)
         - ✅ 개선: Manifest 재생성 + Hash Chain 연결
+        
+        [NEW] 동적 Re-partitioning 지원:
+        - 대규모 수정 시 ManifestRegenerator Lambda 비동기 호출
+        - 재파티셔닝 필요 조건: 3개 이상 세그먼트 삽입 or AGENT_REPLAN
         """
         manifest = self._load_manifest_from_s3(manifest_s3_path)
         if not manifest:
             return False
+        
+        # [NEW] 재파티셔닝 트리거 조건
+        needs_repartition = (
+            len(recovery_segments) > 3 or  # 많은 세그먼트 삽입
+            reason == "AGENT_REPLAN" or    # 에이전트가 계획 변경
+            self._check_structural_change(recovery_segments, workflow_config)
+        )
+        
+        if needs_repartition and bag and workflow_config:
+            logger.info(f"[Manifest] 🔄 Re-partitioning required: {reason}")
+            return self._trigger_manifest_regeneration(
+                manifest_s3_path=manifest_s3_path,
+                workflow_id=bag.get('workflowId'),
+                owner_id=bag.get('ownerId'),
+                recovery_segments=recovery_segments,
+                reason=reason,
+                workflow_config=workflow_config
+            )
+        
+        # [Legacy Mode] 소규모 수정: 기존 방식으로 처리
+        logger.info(f"[Manifest] Using legacy injection mode (< 3 segments)")
         
         # 삽입 위치 찾기
         insert_index = None
@@ -1309,6 +1335,110 @@ class SegmentRunnerService:
             # bag/workflow_config 없으면 레거시 모드
             logger.warning("[Legacy Mode] Manifest regeneration skipped - using direct S3 save")
             return self._save_manifest_to_s3(new_manifest, manifest_s3_path)
+    
+    def _check_structural_change(
+        self,
+        recovery_segments: List[Dict[str, Any]],
+        workflow_config: dict
+    ) -> bool:
+        """
+        구조적 변경 감지: 재파티셔닝이 필요한지 판단
+        
+        재파티셔닝 필요 조건:
+        - 새 LLM 노드 추가
+        - 새 parallel_group 추가
+        - 기존 노드 타입 변경
+        """
+        if not recovery_segments or not workflow_config:
+            return False
+        
+        # 새 노드에 LLM이나 parallel_group이 있는지 확인
+        for segment in recovery_segments:
+            nodes = segment.get('nodes', [])
+            for node in nodes:
+                if not isinstance(node, dict):
+                    continue
+                
+                node_type = node.get('type', '')
+                
+                # LLM 노드 감지
+                if node_type in ('llm_chat', 'aiModel', 'llm'):
+                    logger.info(f"[Structural Change] LLM node detected: {node.get('id')}")
+                    return True
+                
+                # Parallel Group 감지
+                if node_type == 'parallel_group':
+                    logger.info(f"[Structural Change] Parallel group detected: {node.get('id')}")
+                    return True
+                
+                # Branches 속성이 있는 노드 (인라인 parallel)
+                if node.get('branches'):
+                    logger.info(f"[Structural Change] Inline parallel detected: {node.get('id')}")
+                    return True
+        
+        return False
+    
+    def _trigger_manifest_regeneration(
+        self,
+        manifest_s3_path: str,
+        workflow_id: str,
+        owner_id: str,
+        recovery_segments: List[Dict[str, Any]],
+        reason: str,
+        workflow_config: dict
+    ) -> bool:
+        """
+        ManifestRegenerator Lambda 비동기 호출
+        
+        Step Functions가 Task Token으로 대기하도록 설계
+        """
+        try:
+            import boto3
+            lambda_client = boto3.client('lambda')
+            
+            # 복구 세그먼트를 modifications 형식으로 변환
+            new_nodes = []
+            new_edges = []
+            
+            for segment in recovery_segments:
+                segment_nodes = segment.get('nodes', [])
+                segment_edges = segment.get('edges', [])
+                
+                new_nodes.extend(segment_nodes)
+                new_edges.extend(segment_edges)
+            
+            payload = {
+                'manifest_s3_path': manifest_s3_path,
+                'workflow_id': workflow_id,
+                'owner_id': owner_id,
+                'modification_type': 'RECOVERY_INJECT',
+                'modifications': {
+                    'new_nodes': new_nodes,
+                    'new_edges': new_edges,
+                    'reason': reason
+                }
+            }
+            
+            # 비동기 호출
+            function_name = os.environ.get(
+                'MANIFEST_REGENERATOR_FUNCTION',
+                'ManifestRegeneratorFunction'
+            )
+            
+            logger.info(f"[Manifest Regeneration] Invoking {function_name} asynchronously")
+            
+            response = lambda_client.invoke(
+                FunctionName=function_name,
+                InvocationType='Event',  # 비동기
+                Payload=json.dumps(payload)
+            )
+            
+            logger.info(f"[Manifest Regeneration] ✅ Invoked successfully: {response['StatusCode']}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"[Manifest Regeneration] ❌ Failed to invoke: {e}")
+            return False
 
     # ========================================================================
     # [Parallel] [Pattern 3] Parallel Scheduler: 인프라 인지형 병렬 스케줄링

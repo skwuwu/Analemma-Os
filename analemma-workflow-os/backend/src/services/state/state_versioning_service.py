@@ -736,3 +736,52 @@ class StateVersioningService:
                 logger.error(f"Block not found: {block_path}")
                 return None
             raise
+    
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # [NEW] Dynamic Re-partitioning Support
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    def invalidate_manifest(self, manifest_id: str, reason: str) -> bool:
+        """
+        매니페스트 무효화 (동적 재파티셔닝 시)
+        
+        기존 매니페스트를 INVALIDATED 상태로 표시하여
+        새로운 매니페스트가 생성되었음을 표시.
+        
+        Args:
+            manifest_id: 무효화할 매니페스트 ID
+            reason: 무효화 사유
+        
+        Returns:
+            성공 여부
+        """
+        try:
+            self.table.update_item(
+                Key={'manifest_id': manifest_id},
+                UpdateExpression=(
+                    'SET #status = :status, '
+                    'invalidation_reason = :reason, '
+                    'invalidated_at = :timestamp'
+                ),
+                ExpressionAttributeNames={
+                    '#status': 'status'
+                },
+                ExpressionAttributeValues={
+                    ':status': 'INVALIDATED',
+                    ':reason': reason,
+                    ':timestamp': datetime.utcnow().isoformat()
+                },
+                # 이미 무효화된 경우 예외 발생하지 않도록
+                ConditionExpression='attribute_exists(manifest_id)'
+            )
+            
+            logger.info(f"[Manifest Invalidation] ✅ {manifest_id} invalidated: {reason}")
+            return True
+            
+        except ConditionalCheckFailedException:
+            logger.warning(f"[Manifest Invalidation] Manifest not found: {manifest_id}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"[Manifest Invalidation] ❌ Failed: {e}")
+            return False

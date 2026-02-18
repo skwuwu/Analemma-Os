@@ -2393,6 +2393,35 @@ Resources:
               - states:SendTaskFailure
             Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
 
+  # --- Manifest Regenerator Function (Dynamic Re-partitioning) ---
+  ManifestRegeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.manifest_regenerator.lambda_handler"]
+      MemorySize: 1024
+      Timeout: 300  # 5분 (대규모 워크플로우 re-partitioning)
+      Environment:
+        Variables:
+          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          MANIFESTS_TABLE: !Ref WorkflowManifests
+          WORKFLOW_STATE_BUCKET: !Ref WorkflowStateBucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowManifests
+        - S3CrudPolicy:
+            BucketName: !Ref WorkflowStateBucket
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+
   # --- Scheduler Function (EventBridge Scheduled Trigger) ---
   SchedulerFunction:
     Type: AWS::Serverless::Function
