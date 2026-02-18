@@ -67,6 +67,23 @@ def mask_pii_in_state(state: Any, skip_keys: Set[str] = SKIP_MASKING_KEYS, depth
 
 
 class StateManager:
+    """
+    [LEGACY] State Management Utilities
+    
+    ⚠️ 역할 명확화:
+    - PII 마스킹: mask_pii_in_state() (✅ 계속 사용)
+    - S3 업로드/다운로드: download_state_from_s3(), upload_state_to_s3()
+      → StateVersioningService로 점진적 마이그레이션 권장
+    
+    ✅ 유지 기능:
+    - PII 마스킹은 보안 요구사항으로 별도 유틸리티로 분리 예정
+    - 기존 실행 중 워크플로우는 계속 이 클래스 사용
+    
+    🔄 마이그레이션:
+    - 새 워크플로우: StateVersioningService 사용
+    - 상태 저장: create_manifest() → Merkle DAG
+    - 상태 로드: load_manifest_segments() → Content-Addressable
+    """
     def __init__(self, s3_client=None):
         self.s3_client = s3_client or boto3.client("s3")
 

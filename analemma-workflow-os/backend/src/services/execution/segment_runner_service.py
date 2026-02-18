@@ -2930,14 +2930,21 @@ class SegmentRunnerService:
                         logger.error(f"Failed to load partition_map from S3 after retries: {e}")
                         # Fallback to dynamic partitioning (handled in _resolve_segment_config)
                 
-                # Legacy mode: workflow_config + partition_map
+                # ⚠️ [DEPRECATED] Legacy mode: workflow_config + partition_map
+                # 제거 예정 (v4.0): Merkle DAG manifest로 완전 대체
                 if workflow_config or partition_map:
-                    logger.warning("[Legacy Mode] Using workflow_config/partition_map fallback")
+                    logger.warning(
+                        "[DEPRECATED] Legacy Mode: Using workflow_config/partition_map fallback. "
+                        "This path will be removed in v4.0. Migrate to manifest_id."
+                    )
                     segment_config = self._resolve_segment_config(
                         workflow_config, partition_map, segment_id
                     )
                 else:
-                    raise ValueError("No segment_config source available - all fallbacks failed")
+                    raise ValueError(
+                        "No segment_config source available - all fallbacks failed. "
+                        "Expected: ASL injection, S3 manifest, or legacy workflow_config."
+                    )
         
         # [Phase 0 Complete] 3단계 Fallback으로 점진적 마이그레이션 가능
         # 1. ASL Direct Injection (20% - 작은 manifest)
@@ -3904,10 +3911,30 @@ class SegmentRunnerService:
 
     def _resolve_segment_config(self, workflow_config, partition_map, segment_id):
         """
-        Identical logic to original handler for partitioning.
+        ⚠️ [DEPRECATED - v4.0 제거 예정]
         
+        Legacy 동적 파티션 해석 로직
+        
+        ✅ 대체 방법:
+        - Phase 1: StateVersioningService.load_manifest_segments()
+        - Phase 7: Pre-computed segment_config from manifest
+        - ASL Direct Injection: event.get('segment_config')
+        
+        ❌ 문제점:
+        - workflow_config/partition_map 의존성 (StateBag 비대화)
+        - 동적 파싱 오버헤드
+        - manifest 기반 접근으로 완전 대체 가능
+        
+        현재 유지 이유: 기존 실행 중인 워크플로우 호환성
+        
+        Original Docstring:
+        Identical logic to original handler for partitioning.
         [v3.27] Extract segment_config from partition manifest structure
         """
+        logger.debug(
+            f"[DEPRECATED] _resolve_segment_config called for segment {segment_id}. "
+            "Consider migrating to manifest-based segment loading."
+        )
         # [Critical Fix] workflow_config이 None이면 조기 처리
         if not workflow_config:
             logger.error(f"[_resolve_segment_config] [Warning] workflow_config is None! segment_id={segment_id}")
