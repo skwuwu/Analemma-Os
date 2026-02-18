@@ -984,12 +984,3 @@ class CorrectionLogRequest(BaseModel):
             "사용자 친화적 에러 메시지"
         ]
     }
-
-# 레거시 함수 (하위 호환성)
-def extract_user_id_from_headers(headers: Dict[str, str]) -> Optional[str]:
-    """
-    레거시 함수 - 하위 호환성을 위해 유지
-    새로운 코드는 extract_and_verify_user_id 사용 권장
-    """
-    logger.warning("Using legacy extract_user_id_from_headers - consider upgrading to extract_and_verify_user_id")
-    return extract_and_verify_user_id(headers)

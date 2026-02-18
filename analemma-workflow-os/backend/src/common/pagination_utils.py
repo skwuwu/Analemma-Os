@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # 환경 변수에서 HMAC 시크릿 로드 (없으면 기본값 사용, 프로덕션에서는 반드시 설정)
 _HMAC_SECRET_KEY = os.environ.get("PAGINATION_HMAC_SECRET", "analemma-default-pagination-secret").encode('utf-8')
 
-# 토큰 기본 TTL (초) - 0이면 만료 없음
+
 DEFAULT_TOKEN_TTL_SECONDS = 0
 
 
@@ -219,44 +219,4 @@ def decode_pagination_token(
         return None
     except Exception as e:
         logger.warning(f"Unexpected error decoding pagination token: {e}")
-        return None
-
-
-# ============================================================================
-# 레거시 호환성 함수 (Deprecated - 기존 코드 호환용)
-# ============================================================================
-
-def encode_pagination_token_legacy(obj: Optional[Dict[str, Any]]) -> Optional[str]:
-    """
-    [Deprecated] 레거시 Base64 인코딩 (URL-unsafe, 무결성 없음)
-    
-    기존 코드 호환성을 위해 유지. 새 코드에서는 encode_pagination_token 사용 권장.
-    """
-    if not obj:
-        return None
-    
-    try:
-        json_str = json.dumps(obj, cls=DynamoDBEncoder, ensure_ascii=False)
-        encoded_bytes = base64.b64encode(json_str.encode('utf-8'))
-        return encoded_bytes.decode('utf-8')
-    except Exception as e:
-        logger.debug(f"Failed to encode legacy pagination token: {e}")
-        return None
-
-
-def decode_pagination_token_legacy(token: Optional[str]) -> Optional[Dict[str, Any]]:
-    """
-    [Deprecated] 레거시 Base64 디코딩
-    
-    기존 코드 호환성을 위해 유지. 새 코드에서는 decode_pagination_token 사용 권장.
-    """
-    if not token:
-        return None
-    
-    try:
-        decoded_bytes = base64.b64decode(token)
-        decoded_str = decoded_bytes.decode('utf-8')
-        return json.loads(decoded_str)
-    except Exception as e:
-        logger.debug(f"Failed to decode legacy pagination token: {e}")
         return None

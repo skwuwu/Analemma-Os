@@ -164,17 +164,6 @@ def _save_to_webhook_dlq(
         return False
 
 
-def _post_json(url, payload, timeout=30, headers=None):
-    """
-    [Legacy] 기존 호환성 유지를 위한 래퍼.
-    새 코드는 _post_json_with_retry 사용 권장.
-    """
-    success, status_code, _ = _post_json_with_retry(url, payload, timeout, headers, max_retries=0)
-    if success:
-        return status_code
-    raise Exception(f"Failed to POST to {url}")
-
-
 def _update_db_status(owner_id, execution_arn, status, error=None):
     """
     ExecutionsTable에 최종 상태를 업데이트합니다.
