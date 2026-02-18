@@ -618,6 +618,8 @@ Resources:
           # 기존 환경 변수
           # ============================================
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          MANIFESTS_TABLE: !Ref WorkflowManifestsV3
+          BLOCK_REFERENCES_TABLE: !Ref WorkflowBlockReferencesV3
           USERS_TABLE: !Ref UsersTableV3
           IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
           SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
@@ -641,6 +643,10 @@ Resources:
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkflowsTableV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowManifestsV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowBlockReferencesV3
         - DynamoDBCrudPolicy:
             TableName: !Ref IdempotencyTableV3
         - DynamoDBCrudPolicy:
@@ -675,6 +681,12 @@ Resources:
             Action:
               - cloudwatch:PutMetricData
             Resource: "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:TransactWriteItems
+            Resource:
+              - !GetAtt WorkflowManifestsV3.Arn
+              - !GetAtt WorkflowBlockReferencesV3.Arn
 
   # 🛡️ [Reserved Concurrency] 디자인 어시스턴트 동시성 제한
   # - 계정 한도 1000 중 50개 예약
@@ -2406,21 +2418,30 @@ Resources:
       Environment:
         Variables:
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
-          MANIFESTS_TABLE: !Ref WorkflowManifests
-          WORKFLOW_STATE_BUCKET: !Ref WorkflowStateBucket
+          MANIFESTS_TABLE: !Ref WorkflowManifestsV3
+          BLOCK_REFERENCES_TABLE: !Ref WorkflowBlockReferencesV3
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkflowsTableV3
         - DynamoDBCrudPolicy:
-            TableName: !Ref WorkflowManifests
+            TableName: !Ref WorkflowManifestsV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowBlockReferencesV3
         - S3CrudPolicy:
-            BucketName: !Ref WorkflowStateBucket
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
         - Statement:
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
               - states:SendTaskFailure
             Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+          - Effect: Allow
+            Action:
+              - dynamodb:TransactWriteItems
+            Resource:
+              - !GetAtt WorkflowManifestsV3.Arn
+              - !GetAtt WorkflowBlockReferencesV3.Arn
 
   # --- Scheduler Function (EventBridge Scheduled Trigger) ---
   SchedulerFunction:
