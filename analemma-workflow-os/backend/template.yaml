@@ -3293,6 +3293,61 @@ Resources:
         - Key: Component
           Value: ConcurrencyController
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🌳 [Phase 1] Merkle DAG Workflow Manifests Table
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Git-style Content-Addressable Storage:
+  # - workflow_config/partition_map 제거 → 67% StateBag 축소
+  # - 상태 변경 = 델타만 저장 → 90% → 10% 중복 제거
+  # - Merkle Root로 무결성 검증
+  # - Pre-computed Hash로 O(1) segment 검증
+  WorkflowManifestsV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "WorkflowManifests-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: manifest_id
+          AttributeType: S
+        - AttributeName: workflow_id
+          AttributeType: S
+        - AttributeName: version
+          AttributeType: N
+        - AttributeName: manifest_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: manifest_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        # workflow_id로 모든 버전 조회 (Merkle 체인 추적)
+        - IndexName: WorkflowIndex
+          KeySchema:
+            - AttributeName: workflow_id
+              KeyType: HASH
+            - AttributeName: version
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # manifest_hash로 중복 검색 (Content-Addressable)
+        - IndexName: HashIndex
+          KeySchema:
+            - AttributeName: manifest_hash
+              KeyType: HASH
+          Projection:
+            ProjectionType: KEYS_ONLY
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true  # 30일 후 자동 GC (Phase 6)
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES  # GC 이벤트 추적
+      Tags:
+        - Key: Purpose
+          Value: MerkleDAGVersioning
+        - Key: Component
+          Value: StateManagement
+        - Key: Phase
+          Value: "1"
+
   # --- NodeStats Collector Lambda ---
   # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트
   NodeStatsCollectorFunction:

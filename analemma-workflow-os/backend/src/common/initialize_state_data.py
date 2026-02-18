@@ -64,6 +64,18 @@ logger.setLevel(logging.INFO)
 # [v3.11] Unified State Hydration Strategy
 from src.common.state_hydrator import StateHydrator, SmartStateBag
 
+# [Phase 1] Merkle DAG State Versioning
+try:
+    from src.services.state.state_versioning_service import StateVersioningService
+    _HAS_VERSIONING = True
+except ImportError:
+    _HAS_VERSIONING = False
+    StateVersioningService = None
+
+# Environment variables for Merkle DAG
+MANIFESTS_TABLE = os.environ.get('MANIFESTS_TABLE', 'WorkflowManifests-v3-dev')
+STATE_BUCKET = os.environ.get('WORKFLOW_STATE_BUCKET', 'analemma-workflow-state-dev')
+
 def _calculate_distributed_strategy(
     total_segments: int,
     llm_segments: int,
@@ -414,13 +426,71 @@ def lambda_handler(event, context):
     max_concurrency = distributed_strategy.get('max_concurrency', 1)
     is_distributed_mode = distributed_strategy['strategy'] in ["MAP_REDUCE", "BATCHED"]
     
-    # 4. State Bag Construction
-    # We populate the bag with all data that needs to be passed down
+    # 4. [Phase 1] Merkle DAG Manifest Creation
+    # 이전: workflow_config + partition_map 저장 (전체 StateBag의 67%)
+    # 현재: Merkle manifest_id + hash만 저장 (참조 포인터)
+    
+    manifest_id = None
+    manifest_hash = None
+    config_hash = None
+    
+    if _HAS_VERSIONING and workflow_config and partition_map:
+        try:
+            versioning_service = StateVersioningService(
+                dynamodb_table=MANIFESTS_TABLE,
+                s3_bucket=STATE_BUCKET
+            )
+            
+            # segment_manifest 생성 (먼저 계산)
+            segment_manifest = []
+            for idx, segment in enumerate(partition_map):
+                segment_manifest.append({
+                    "segment_id": idx,
+                    "segment_config": segment,
+                    "execution_order": idx,
+                    "dependencies": segment.get("dependencies", []),
+                    "type": segment.get("type", "normal")
+                })
+            
+            # Merkle Manifest 생성
+            manifest_pointer = versioning_service.create_manifest(
+                workflow_id=workflow_id,
+                workflow_config=workflow_config,
+                segment_manifest=segment_manifest,
+                parent_manifest_id=None  # 최초 버전
+            )
+            
+            manifest_id = manifest_pointer.manifest_id
+            manifest_hash = manifest_pointer.manifest_hash
+            config_hash = manifest_pointer.config_hash
+            
+            logger.info(
+                f"[Merkle DAG] Created manifest {manifest_id[:8]}... "
+                f"(hash={manifest_hash[:8]}..., {total_segments} segments)"
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to create Merkle manifest: {e}", exc_info=True)
+            # Fallback to legacy mode
+            manifest_id = None
+    
+    # State Bag Construction
     bag = SmartStateBag({}, hydrator=hydrator)
     
-    bag['workflow_config'] = workflow_config
+    # [Phase 2] workflow_config/partition_map 제거 예정
+    # 현재: 호환성을 위해 유지, manifest_id 존재 시 우선 사용
+    if manifest_id:
+        # Merkle DAG 모드: 포인터만 저장
+        bag['manifest_id'] = manifest_id
+        bag['manifest_hash'] = manifest_hash
+        bag['config_hash'] = config_hash
+        # workflow_config/partition_map은 S3에 저장됨 (참조만 통과)
+    else:
+        # Legacy 모드: 기존 방식 (후방 호환성)
+        bag['workflow_config'] = workflow_config
+        bag['partition_map'] = partition_map
+    
     bag['current_state'] = workflow_config.get('initial_state', {})
-    bag['partition_map'] = partition_map
     
     # Metadata
     bag['ownerId'] = owner_id
@@ -451,13 +521,21 @@ def lambda_handler(event, context):
     if raw_input.get('MOCK_MODE'):
         bag['MOCK_MODE'] = raw_input['MOCK_MODE']
     
-    # 5. Segment Manifest & Pointer Strategy
-    # Segment manifest is critical for Map execution.
-    # We offload the FULL manifest to S3, but pass a LIST OF POINTERS to Step Functions
-    # so the Map state can iterate over them.
+    # 5. [Phase 1/2] Segment Manifest Strategy
+    # Merkle DAG 모드: segment_manifest는 이미 S3에 저장됨 (StateVersioningService)
+    # Legacy 모드: 기존 방식으로 S3에 업로드
     
-    segment_manifest = []
-    if partition_map:
+    manifest_s3_path = ""
+    
+    if manifest_id:
+        # Merkle DAG: Manifest는 이미 Content-Addressable 블록으로 저장됨
+        # manifest_id로 segment_manifest 접근 가능
+        manifest_s3_path = f"s3://{STATE_BUCKET}/manifests/{manifest_id}.json"
+        logger.info(f"[Merkle DAG] Using manifest: {manifest_s3_path}")
+        
+    elif partition_map and hydrator.s3_client and bucket:
+        # Legacy 모드: 기존 방식으로 segment_manifest 생성/저장
+        segment_manifest = []
         for idx, segment in enumerate(partition_map):
             segment_manifest.append({
                 "segment_id": idx,
@@ -466,10 +544,8 @@ def lambda_handler(event, context):
                 "dependencies": segment.get("dependencies", []),
                 "type": segment.get("type", "normal")
             })
-            
-    # Offload Manifest Manually (to get the S3 path for all pointers)
-    manifest_s3_path = ""
-    if hydrator.s3_client and bucket:
+        
+        # Legacy manifest upload
         try:
             manifest_key = f"workflow-manifests/{owner_id}/{workflow_id}/segment_manifest.json"
             hydrator.s3_client.put_object(
@@ -479,25 +555,59 @@ def lambda_handler(event, context):
                 ContentType='application/json'
             )
             manifest_s3_path = f"s3://{bucket}/{manifest_key}"
-            logger.info(f"🌿 [State Bag] Segment manifest uploaded: {manifest_s3_path}")
+            logger.info(f"[Legacy] Segment manifest uploaded: {manifest_s3_path}")
         except Exception as e:
             logger.warning(f"Failed to upload manifest: {e}")
             
-    # Create Pointers List for ItemProcessor
+    # Create Pointers List for ItemProcessor (Map state에서 사용)
     segment_manifest_pointers = []
     if manifest_s3_path:
-        # Pointers only
-        for idx, seg in enumerate(segment_manifest):
-            segment_manifest_pointers.append({
-                'segment_index': idx,
-                'segment_id': seg.get('segment_id', idx),
-                'segment_type': seg.get('type', 'normal'),
-                'manifest_s3_path': manifest_s3_path,
-                'total_segments': len(segment_manifest)
-            })
+        # S3 경로만 참조하는 경량 포인터
+        # Merkle DAG 모드에서는 segment_index로 S3 Select 쿼리
+        if manifest_id:
+            # Merkle DAG: manifest_id + segment_index로 블록 접근
+            for idx in range(total_segments):
+                segment_manifest_pointers.append({
+                    'segment_index': idx,
+                    'segment_id': idx,
+                    'segment_type': 'computed',  # Merkle DAG에서 타입 추론
+                    'manifest_id': manifest_id,
+                    'manifest_s3_path': manifest_s3_path,
+                    'total_segments': total_segments
+                })
+        else:
+            # Legacy: 기존 방식
+            segment_manifest = []
+            if partition_map:
+                for idx, segment in enumerate(partition_map):
+                    segment_manifest.append({
+                        "segment_id": idx,
+                        "segment_config": segment,
+                        "execution_order": idx,
+                        "dependencies": segment.get("dependencies", []),
+                        "type": segment.get("type", "normal")
+                    })
+            
+            for idx, seg in enumerate(segment_manifest):
+                segment_manifest_pointers.append({
+                    'segment_index': idx,
+                    'segment_id': seg.get('segment_id', idx),
+                    'segment_type': seg.get('type', 'normal'),
+                    'manifest_s3_path': manifest_s3_path,
+                    'total_segments': len(segment_manifest)
+                })
     else:
         # Fallback to inline (only if S3 failed/missing)
-        segment_manifest_pointers = segment_manifest
+        if partition_map:
+            segment_manifest_pointers = []
+            for idx, segment in enumerate(partition_map):
+                segment_manifest_pointers.append({
+                    "segment_id": idx,
+                    "segment_config": segment,
+                    "execution_order": idx,
+                    "dependencies": segment.get("dependencies", []),
+                    "type": segment.get("type", "normal")
+                })
 
     # Add to bag (will be overwritten by pointers in final step)
     # [Zero-Payload-Limit] Do NOT add full manifest to bag inline. Relies on S3 path.
