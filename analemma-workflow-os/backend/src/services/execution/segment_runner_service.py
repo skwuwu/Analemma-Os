@@ -1253,14 +1253,34 @@ class SegmentRunnerService:
         
         if needs_repartition and bag and workflow_config:
             logger.info(f"[Manifest] 🔄 Re-partitioning required: {reason}")
-            return self._trigger_manifest_regeneration(
+            
+            # [FIX] Task Token 전달 (Step Functions 대기)
+            task_token = bag.get('task_token')  # ASL에서 주입된 토큰
+            
+            regen_result = self._trigger_manifest_regeneration(
                 manifest_s3_path=manifest_s3_path,
                 workflow_id=bag.get('workflowId'),
                 owner_id=bag.get('ownerId'),
                 recovery_segments=recovery_segments,
                 reason=reason,
-                workflow_config=workflow_config
+                workflow_config=workflow_config,
+                task_token=task_token
             )
+            
+            # 동기 모드: 즉시 완료
+            if regen_result.get('sync_mode'):
+                logger.info(f"[Manifest] ✅ Synchronous regeneration completed")
+                return True
+            
+            # 비동기 모드 + Task Token: Step Functions가 대기
+            if regen_result.get('wait_for_task_token'):
+                logger.info(f"[Manifest] ⏳ Asynchronous regeneration in progress (Step Functions waiting)")
+                # SegmentRunner는 여기서 종료 (Step Functions는 Task Token 콜백 대기)
+                return True
+            
+            # 비동기 모드 (Task Token 없음): 백그라운드 실행
+            logger.warning(f"[Manifest] ⚠️ Asynchronous regeneration without Task Token (no wait)")
+            return regen_result.get('status') == 'MANIFEST_REGENERATING'
         
         # [Legacy Mode] 소규모 수정: 기존 방식으로 처리
         logger.info(f"[Manifest] Using legacy injection mode (< 3 segments)")
@@ -1385,12 +1405,19 @@ class SegmentRunnerService:
         owner_id: str,
         recovery_segments: List[Dict[str, Any]],
         reason: str,
-        workflow_config: dict
-    ) -> bool:
+        workflow_config: dict,
+        task_token: str = None
+    ) -> Dict[str, Any]:
         """
-        ManifestRegenerator Lambda 비동기 호출
+        ManifestRegenerator Lambda 호출 (동기 or 비동기)
         
-        Step Functions가 Task Token으로 대기하도록 설계
+        [FIX] Race Condition 해결:
+        - task_token이 있으면 비동기 + WaitForTaskToken 패턴
+        - task_token이 없으면 동기 호출 (즉시 결과 반환)
+        
+        [FIX] 적응형 위임 정책:
+        - 예상 처리 시간 > 3초면 무조건 비동기
+        - 대규모 워크플로우 타임아웃 방지
         """
         try:
             import boto3
@@ -1407,6 +1434,17 @@ class SegmentRunnerService:
                 new_nodes.extend(segment_nodes)
                 new_edges.extend(segment_edges)
             
+            # [NEW] 적응형 위임 정책: 처리 시간 예측
+            total_nodes = len(workflow_config.get('nodes', []))
+            total_edges = len(workflow_config.get('edges', []))
+            estimated_time = (total_nodes * 0.01) + (total_edges * 0.005)  # 대략적 추정
+            
+            force_async = (
+                estimated_time > 3.0 or  # 3초 초과 예상
+                total_nodes > 100 or     # 대규모 워크플로우
+                len(recovery_segments) > 5  # 많은 세그먼트 삽입
+            )
+            
             payload = {
                 'manifest_s3_path': manifest_s3_path,
                 'workflow_id': workflow_id,
@@ -1419,26 +1457,58 @@ class SegmentRunnerService:
                 }
             }
             
-            # 비동기 호출
+            # [FIX] Task Token 패턴
+            if task_token:
+                payload['task_token'] = task_token
+                invocation_type = 'Event'  # 비동기 (Step Functions가 대기)
+                logger.info(f"[Manifest Regeneration] Using Task Token pattern (async)")
+            elif force_async:
+                invocation_type = 'Event'
+                logger.warning(
+                    f"[Manifest Regeneration] Forcing async due to estimated time {estimated_time:.2f}s "
+                    f"(nodes={total_nodes}, edges={total_edges})"
+                )
+            else:
+                invocation_type = 'RequestResponse'  # 동기
+                logger.info(f"[Manifest Regeneration] Using synchronous invocation")
+            
             function_name = os.environ.get(
                 'MANIFEST_REGENERATOR_FUNCTION',
                 'ManifestRegeneratorFunction'
             )
             
-            logger.info(f"[Manifest Regeneration] Invoking {function_name} asynchronously")
+            logger.info(f"[Manifest Regeneration] Invoking {function_name} ({invocation_type})")
             
             response = lambda_client.invoke(
                 FunctionName=function_name,
-                InvocationType='Event',  # 비동기
+                InvocationType=invocation_type,
                 Payload=json.dumps(payload)
             )
             
-            logger.info(f"[Manifest Regeneration] ✅ Invoked successfully: {response['StatusCode']}")
-            return True
+            # 동기 호출: 즉시 결과 파싱
+            if invocation_type == 'RequestResponse':
+                response_payload = json.loads(response['Payload'].read())
+                logger.info(f"[Manifest Regeneration] ✅ Completed synchronously: {response_payload.get('status')}")
+                return {
+                    'status': 'MANIFEST_REGENERATED',
+                    'sync_mode': True,
+                    'result': response_payload
+                }
+            
+            # 비동기 호출: Step Functions가 Task Token으로 대기
+            logger.info(f"[Manifest Regeneration] ✅ Invoked asynchronously: {response['StatusCode']}")
+            return {
+                'status': 'MANIFEST_REGENERATING',
+                'sync_mode': False,
+                'wait_for_task_token': bool(task_token)
+            }
             
         except Exception as e:
             logger.error(f"[Manifest Regeneration] ❌ Failed to invoke: {e}")
-            return False
+            return {
+                'status': 'REGENERATION_FAILED',
+                'error': str(e)
+            }
 
     # ========================================================================
     # [Parallel] [Pattern 3] Parallel Scheduler: 인프라 인지형 병렬 스케줄링
@@ -4233,7 +4303,8 @@ class SegmentRunnerService:
         self,
         manifest_s3_path: str,
         segment_index: int,
-        cache_ttl: int = 300  # 5분 캐시
+        cache_ttl: int = 300,  # 5분 캐시
+        owner_id: str = None   # [FIX] 테넌트 격리용
     ) -> dict:
         """
         [Phase 0.1] S3에서 segment_manifest를 로드하고 특정 segment_config를 추출
@@ -4249,14 +4320,24 @@ class SegmentRunnerService:
         """
         import boto3
         
+        # [FIX] 테넌트 격리: owner_id 포함한 캐시 키
         cache_key = f"{manifest_s3_path}:{segment_index}"
+        secure_cache_key = f"{owner_id}:{cache_key}" if owner_id else cache_key
         
         # 1. 캐시 확인 (Lambda warm start 시 재사용)
         if hasattr(self, '_manifest_cache'):
-            cached = self._manifest_cache.get(cache_key)
-            if cached and time.time() - cached['timestamp'] < cache_ttl:
-                logger.info(f"[Cache Hit] segment_config: {cache_key}")
-                return cached['config']
+            cached = self._manifest_cache.get(secure_cache_key)
+            if cached:
+                # [SECURITY] owner_id 검증 (테넌트 간 데이터 누출 방지)
+                if owner_id and cached.get('owner_id') != owner_id:
+                    logger.error(
+                        f"[SECURITY] Cache key collision detected! "
+                        f"Requested owner_id={owner_id}, cached owner_id={cached.get('owner_id')}. "
+                        f"Rejecting cache hit to prevent privilege escalation."
+                    )
+                elif time.time() - cached['timestamp'] < cache_ttl:
+                    logger.info(f"[Cache Hit] segment_config: {cache_key} (owner: {owner_id or 'unknown'})")
+                    return cached['config']
         
         # 2. S3 경로 파싱
         bucket_name = manifest_s3_path.replace("s3://", "").split("/")[0]
@@ -4308,12 +4389,29 @@ class SegmentRunnerService:
                 segment_config = segment_entry
             
             # 6. 캐시 저장 (LRU 권장, 최대 100개 항목)
+            # [FIX] 테넌트 격리: owner_id 포함한 캐시 키
             if not hasattr(self, '_manifest_cache'):
                 self._manifest_cache = {}
-            self._manifest_cache[cache_key] = {
+            
+            # [SECURITY] 캐시 키에 owner_id 추가 (권한 월권 방지)
+            secure_cache_key = f"{cache_key}:{owner_id}" if owner_id else cache_key
+            
+            self._manifest_cache[secure_cache_key] = {
                 'config': segment_config,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'owner_id': owner_id  # 검증용
             }
+            
+            # [Cleanup] LRU 정책: 100개 초과 시 오래된 항목 삭제
+            if len(self._manifest_cache) > 100:
+                # 타임스탬프 기준 정렬 후 오래된 10개 삭제
+                sorted_keys = sorted(
+                    self._manifest_cache.keys(),
+                    key=lambda k: self._manifest_cache[k]['timestamp']
+                )
+                for old_key in sorted_keys[:10]:
+                    del self._manifest_cache[old_key]
+                logger.info(f"[Cache Cleanup] Removed 10 oldest entries (total: {len(self._manifest_cache)})")
             
             logger.info(f"[Loaded] segment_config: type={segment_config.get('type')}, "
                        f"nodes={len(segment_config.get('nodes', []))}")
