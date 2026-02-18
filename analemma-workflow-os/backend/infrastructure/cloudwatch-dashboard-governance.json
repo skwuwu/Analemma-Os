@@ -1,0 +1,126 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Governance Anomaly Score (by Agent)",
+        "metrics": [
+          [ "Analemma/Governance", "AnomalyScore", { "stat": "Average" } ]
+        ],
+        "view": "timeSeries",
+        "stacked": false,
+        "region": "us-east-1",
+        "yAxis": {
+          "left": {
+            "min": 0,
+            "max": 1
+          }
+        },
+        "period": 300,
+        "annotations": {
+          "horizontal": [
+            {
+              "label": "Optimistic Rollback Threshold",
+              "value": 0.5,
+              "fill": "above",
+              "color": "#ff7f0e"
+            },
+            {
+              "label": "Critical Alert Threshold",
+              "value": 0.8,
+              "fill": "above",
+              "color": "#d62728"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Governance Decisions (APPROVED/REJECTED/ROLLBACK)",
+        "metrics": [
+          [ "Analemma/Governance", "GovernanceDecision", { "stat": "Sum" } ]
+        ],
+        "view": "timeSeries",
+        "stacked": true,
+        "region": "us-east-1",
+        "period": 300
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Violation Distribution (by Type)",
+        "metrics": [
+          [ "Analemma/Governance", "ViolationCount", { "stat": "Sum" } ]
+        ],
+        "view": "pie",
+        "region": "us-east-1",
+        "period": 3600,
+        "setPeriodToTimeRange": true
+      }
+    },
+    {
+      "type": "metric",
+      "x": 12,
+      "y": 6,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "title": "Kernel Commands Issued (by Command Type)",
+        "metrics": [
+          [ "Analemma/Governance", "KernelCommandIssued", { "stat": "Sum" } ]
+        ],
+        "view": "bar",
+        "region": "us-east-1",
+        "period": 3600,
+        "setPeriodToTimeRange": true
+      }
+    },
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 12,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "title": "Governance Health Overview",
+        "metrics": [
+          [ "Analemma/Governance", "AnomalyScore", { "stat": "Maximum", "label": "Max Anomaly Score" } ],
+          [ ".", "ViolationCount", { "stat": "Sum", "label": "Total Violations" } ],
+          [ ".", "GovernanceDecision", { "stat": "Sum", "label": "Total Decisions" } ]
+        ],
+        "view": "singleValue",
+        "region": "us-east-1",
+        "period": 300
+      }
+    },
+    {
+      "type": "log",
+      "x": 0,
+      "y": 18,
+      "width": 24,
+      "height": 6,
+      "properties": {
+        "title": "Recent Governance Rejections (CloudWatch Logs Insights)",
+        "query": "SOURCE '/aws/lambda/SegmentRunnerFunction-dev'\n| fields @timestamp, @message\n| filter @message like /GOVERNANCE_REJECTED/\n| sort @timestamp desc\n| limit 50",
+        "region": "us-east-1",
+        "stacked": false,
+        "view": "table"
+      }
+    }
+  ]
+}

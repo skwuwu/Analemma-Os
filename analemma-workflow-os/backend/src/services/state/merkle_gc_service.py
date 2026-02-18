@@ -223,7 +223,7 @@ class MerkleGarbageCollector:
         
         return deleted, skipped
     
-    def _decrement_and_check_zero(self, block_id: str) -> bool:
+    def _decrement_and_check_zero(self, block_id: str, graceful_wait_seconds: int = 300) -> bool:
         """
         [핵심 로직] Atomic Reference Counting - Dangling Block 완전 차단
         
@@ -233,30 +233,42 @@ class MerkleGarbageCollector:
         - DynamoDB UpdateItem의 ADD 연산으로 Race Condition 방지
         - ref_count <= 0인 경우에만 True 반환 (실제 삭제 가능)
         - is_frozen=True인 블록은 강제로 False 반환 (Safe Chain Protection)
+        - [v2.1.1] ConditionExpression으로 음수 카운트 방지
+        - [v2.1.1] graceful_wait_seconds로 생성/삭제 Race Condition 방지
         
         Args:
             block_id: 블록 ID (SHA256 해시)
+            graceful_wait_seconds: 카운트 0 도달 후 대기 시간 (기본 5분)
         
         Returns:
-            True: 삭제 가능 (ref_count = 0, not frozen)
-            False: 삭제 불가 (ref_count > 0 또는 frozen)
+            True: 삭제 가능 (ref_count = 0, not frozen, graceful_wait 경과)
+            False: 삭제 불가 (ref_count > 0 또는 frozen 또는 대기 중)
         """
         try:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # [Atomic Update] DynamoDB ADD로 ref_count -1 수행
+            # [Atomic Update] DynamoDB ADD로 ref_count -1 수행 (음수 방지)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            import time
             response = self.ref_table.update_item(
                 Key={'block_id': block_id},
-                UpdateExpression="ADD ref_count :dec SET last_accessed = :now",
+                UpdateExpression="""
+                    SET ref_count = if_not_exists(ref_count, :zero) - :dec,
+                        last_accessed = :now,
+                        zero_reached_at = if_not_exists(zero_reached_at, :null)
+                """,
+                ConditionExpression="attribute_not_exists(ref_count) OR ref_count > :zero",
                 ExpressionAttributeValues={
-                    ':dec': -1,
-                    ':now': datetime.utcnow().isoformat()
+                    ':dec': 1,
+                    ':zero': 0,
+                    ':now': datetime.utcnow().isoformat(),
+                    ':null': None
                 },
                 ReturnValues="ALL_NEW"
             )
             
             new_count = response.get('Attributes', {}).get('ref_count', 0)
             is_frozen = response.get('Attributes', {}).get('is_frozen', False)
+            zero_reached_at = response.get('Attributes', {}).get('zero_reached_at')
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # [Safe Chain Protection] 보안 사고 발생 시 Freeze된 블록
@@ -269,22 +281,66 @@ class MerkleGarbageCollector:
                 return False
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # [Deletion Criterion] ref_count <= 0이면 삭제 가능
+            # [Deletion Criterion] ref_count = 0 AND graceful_wait 경과
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            can_delete = new_count <= 0
-            
-            if can_delete:
-                logger.debug(f"[GC] Block {block_id[:8]}... ref_count=0, marking for deletion")
+            if new_count == 0:
+                # 카운트가 0이 된 시점 기록 (첫 번째 도달 시만)
+                if not zero_reached_at:
+                    self.ref_table.update_item(
+                        Key={'block_id': block_id},
+                        UpdateExpression="SET zero_reached_at = :now",
+                        ExpressionAttributeValues={':now': datetime.utcnow().isoformat()}
+                    )
+                    logger.debug(
+                        f"[GC] Block {block_id[:8]}... ref_count=0 (first time), "
+                        f"entering graceful_wait ({graceful_wait_seconds}s)"
+                    )
+                    return False  # 아직 삭제하지 않음 (graceful_wait 시작)
+                
+                # graceful_wait 경과 확인
+                zero_time = datetime.fromisoformat(zero_reached_at)
+                elapsed = (datetime.utcnow() - zero_time).total_seconds()
+                
+                if elapsed >= graceful_wait_seconds:
+                    logger.debug(
+                        f"[GC] Block {block_id[:8]}... ref_count=0, graceful_wait elapsed "
+                        f"({elapsed:.0f}s), marking for deletion"
+                    )
+                    return True  # 삭제 가능
+                else:
+                    logger.debug(
+                        f"[GC] Block {block_id[:8]}... ref_count=0, graceful_wait in progress "
+                        f"({elapsed:.0f}s / {graceful_wait_seconds}s)"
+                    )
+                    return False  # 아직 대기 중
             else:
                 logger.debug(
                     f"[GC] Block {block_id[:8]}... still referenced "
                     f"(ref_count={new_count}), skipping"
                 )
-            
-            return can_delete
+                return False
             
         except ClientError as e:
-            if e.response['Error']['Code'] == 'ResourceNotFoundException':
+            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                # ref_count가 이미 0이거나 존재하지 않음 (음수 방지 조건 실패)
+                logger.debug(
+                    f"[GC] Block {block_id[:8]}... already at ref_count=0, "
+                    f"checking graceful_wait eligibility"
+                )
+                # 현재 상태 조회하여 graceful_wait 확인
+                try:
+                    item_response = self.ref_table.get_item(Key={'block_id': block_id})
+                    item = item_response.get('Item', {})
+                    zero_reached_at = item.get('zero_reached_at')
+                    
+                    if zero_reached_at:
+                        zero_time = datetime.fromisoformat(zero_reached_at)
+                        elapsed = (datetime.utcnow() - zero_time).total_seconds()
+                        return elapsed >= graceful_wait_seconds
+                except Exception:
+                    pass
+                return False
+            elif e.response['Error']['Code'] == 'ResourceNotFoundException':
                 # Reference Table에 항목이 없음 (이미 삭제됨 또는 초기화 안 됨)
                 logger.warning(
                     f"[GC] Block {block_id[:8]}... not found in RefTable, "
@@ -485,3 +541,234 @@ def lambda_handler(event, context):
         'statusCode': 200,
         'body': stats
     }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [v2.1] Rollback Orphaned Blocks Detection (Agent Governance)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def mark_rollback_orphans(
+    rollback_manifest_id: str,
+    abandoned_branch_root: str,
+    grace_period_days: int = 30
+) -> Dict[str, Any]:
+    """
+    [Agent Governance v2.1] Optimistic Rollback 시 버려진 상태 블록 탐지
+    
+    Optimistic Rollback Policy 연동:
+    - Governor가 AnomalyScore > 0.5 감지 시 _kernel_rollback_to_manifest 실행
+    - Rollback으로 버려진 브랜치의 모든 블록을 "rollback_orphaned" 태그
+    - 30일 grace period 후 자동 삭제 (TTL 설정)
+    
+    동작 원리:
+    1. rollback_manifest_id부터 parent_hash 체인 역추적
+    2. abandoned_branch_root부터 시작된 분기점 찾기
+    3. 분기된 브랜치의 모든 매니페스트 및 블록 태그
+    4. 30일 후 TTL 만료로 자동 GC
+    
+    Args:
+        rollback_manifest_id: Rollback 대상 매니페스트 ID (Safe Manifest)
+        abandoned_branch_root: 버려진 브랜치의 시작 매니페스트 ID
+        grace_period_days: 삭제 유예 기간 (기본 30일)
+    
+    Returns:
+        처리 통계 딕셔너리
+        {
+            'orphaned_manifests': int,
+            'orphaned_blocks': int,
+            'grace_period_expires_at': str (ISO timestamp)
+        }
+    """
+    import time
+    
+    dynamodb = boto3.resource('dynamodb')
+    manifest_table_name = os.environ.get(
+        'WORKFLOW_MANIFESTS_TABLE', 'WorkflowManifests-v3-dev'
+    )
+    ref_table_name = os.environ.get(
+        'BLOCK_REF_COUNT_TABLE', 'BlockReferenceCounts-dev'
+    )
+    
+    manifest_table = dynamodb.Table(manifest_table_name)
+    ref_table = dynamodb.Table(ref_table_name)
+    
+    stats = {
+        'orphaned_manifests': 0,
+        'orphaned_blocks': 0,
+        'grace_period_expires_at': None
+    }
+    
+    try:
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 1. 버려진 브랜치 탐색 (DFS로 parent_hash 체인 추적)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        orphaned_manifests = _traverse_orphaned_branch(
+            manifest_table,
+            abandoned_branch_root,
+            rollback_manifest_id
+        )
+        
+        if not orphaned_manifests:
+            logger.info(
+                f"[GC] [Rollback Orphans] No orphaned manifests found "
+                f"(branch_root={abandoned_branch_root[:8]}...)"
+            )
+            return stats
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 2. TTL 설정 (grace_period_days 후 자동 삭제)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        expiry_timestamp = int(time.time()) + (grace_period_days * 24 * 3600)
+        expiry_iso = datetime.fromtimestamp(expiry_timestamp).isoformat()
+        stats['grace_period_expires_at'] = expiry_iso
+        
+        orphaned_blocks_set = set()
+        
+        for manifest_id in orphaned_manifests:
+            try:
+                # 매니페스트 태그 및 TTL 설정
+                response = manifest_table.update_item(
+                    Key={'manifest_id': manifest_id},
+                    UpdateExpression="""
+                        SET rollback_orphaned = :true,
+                            rollback_reason = :reason,
+                            orphaned_at = :now,
+                            ttl = :ttl
+                    """,
+                    ExpressionAttributeValues={
+                        ':true': True,
+                        ':reason': f"Optimistic Rollback to {rollback_manifest_id[:8]}...",
+                        ':now': datetime.utcnow().isoformat(),
+                        ':ttl': expiry_timestamp
+                    },
+                    ReturnValues='ALL_NEW'
+                )
+                
+                stats['orphaned_manifests'] += 1
+                
+                # 블록 ID 추출 및 태그
+                item = response.get('Attributes', {})
+                block_paths = item.get('s3_pointers', {}).get('state_blocks', [])
+                
+                for block_path in block_paths:
+                    block_id = block_path.split('/')[-1].replace('.json', '')
+                    orphaned_blocks_set.add(block_id)
+                    
+                    # Reference Table에 orphaned 태그
+                    ref_table.update_item(
+                        Key={'block_id': block_id},
+                        UpdateExpression="""
+                            SET rollback_orphaned = :true,
+                                orphaned_manifest_id = :manifest_id,
+                                orphaned_at = :now
+                        """,
+                        ExpressionAttributeValues={
+                            ':true': True,
+                            ':manifest_id': manifest_id,
+                            ':now': datetime.utcnow().isoformat()
+                        }
+                    )
+                
+            except Exception as e:
+                logger.error(
+                    f"[GC] [Rollback Orphans] Failed to tag manifest {manifest_id[:8]}...: {e}"
+                )
+        
+        stats['orphaned_blocks'] = len(orphaned_blocks_set)
+        
+        logger.warning(
+            f"🗑️ [GC] [Rollback Orphans] Marked {stats['orphaned_manifests']} manifests "
+            f"and {stats['orphaned_blocks']} blocks for deletion. "
+            f"Grace period: {grace_period_days} days (expires {expiry_iso})"
+        )
+        
+    except Exception as e:
+        logger.error(f"[GC] [Rollback Orphans] Failed to mark orphans: {e}", exc_info=True)
+    
+    return stats
+
+
+def _traverse_orphaned_branch(
+    manifest_table,
+    branch_root: str,
+    safe_manifest: str
+) -> List[str]:
+    """
+    버려진 브랜치의 모든 매니페스트 탐색 (DFS with ParentHashIndex GSI)
+    
+    [v2.1.1] Performance: O(Depth) instead of O(N) full table scan
+    - ParentHashIndex GSI를 사용하여 parent_hash로 자식 매니페스트 조회
+    - DFS로 버려진 브랜치 전체를 재귀적으로 탐색
+    - 수만 개의 매니페스트가 있어도 빠르게 처리 가능
+    
+    Args:
+        manifest_table: DynamoDB 매니페스트 테이블
+        branch_root: 버려진 브랜치의 시작점
+        safe_manifest: Rollback 대상 (안전한 매니페스트)
+    
+    Returns:
+        버려진 매니페스트 ID 리스트
+    """
+    orphaned = []
+    visited = set()
+    stack = [branch_root]
+    
+    while stack:
+        manifest_id = stack.pop()
+        
+        if manifest_id in visited or manifest_id == safe_manifest:
+            continue
+        
+        visited.add(manifest_id)
+        
+        try:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 1. 현재 매니페스트 로드
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            response = manifest_table.get_item(Key={'manifest_id': manifest_id})
+            
+            if 'Item' not in response:
+                continue
+            
+            item = response['Item']
+            orphaned.append(manifest_id)
+            
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 2. ParentHashIndex GSI로 자식 매니페스트 조회 (O(1) query)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            current_hash = item.get('manifest_hash', '')
+            
+            if not current_hash:
+                continue
+            
+            try:
+                # ParentHashIndex GSI를 사용하여 현재 매니페스트를 부모로 하는 자식들 찾기
+                children_response = manifest_table.query(
+                    IndexName='ParentHashIndex',
+                    KeyConditionExpression='parent_hash = :hash',
+                    ExpressionAttributeValues={':hash': current_hash},
+                    ProjectionExpression='manifest_id'
+                )
+                
+                # 자식 매니페스트들을 스택에 추가 (DFS 계속)
+                for child_item in children_response.get('Items', []):
+                    child_id = child_item.get('manifest_id')
+                    if child_id and child_id not in visited:
+                        stack.append(child_id)
+                        logger.debug(
+                            f"[GC] [Orphan Traversal] Found child {child_id[:8]}... "
+                            f"of parent {manifest_id[:8]}..."
+                        )
+            
+            except ClientError as gsi_error:
+                # GSI가 아직 생성되지 않았거나 에러 발생 시 로깅만
+                logger.warning(
+                    f"[GC] [Orphan Traversal] ParentHashIndex query failed for "
+                    f"{manifest_id[:8]}...: {gsi_error}. "
+                    f"GSI may not be deployed yet."
+                )
+                # 자식 탐색 실패 시에도 현재 매니페스트는 orphaned 리스트에 추가됨
+            
+        except Exception as e:
+            logger.error(f"[GC] Failed to traverse manifest {manifest_id[:8]}...: {e}")
+    
+    return orphaned

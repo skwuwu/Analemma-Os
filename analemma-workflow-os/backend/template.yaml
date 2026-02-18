@@ -131,6 +131,7 @@ Globals:
         TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
         IDEMPOTENCY_TABLE: !Ref IdempotencyTableV3
         USERS_TABLE: !Ref UsersTableV3
+        GOVERNANCE_AUDIT_LOG_TABLE: !Ref GovernanceAuditLogV3  # [v2.1] Agent Governance
         WORKFLOWS_OWNER_INDEX: OwnerIdNameIndex
         CLOUDFRONT_DOMAIN: !Ref AllowedOrigins
         WORKFLOW_ORCHESTRATOR_ARN: !Sub
@@ -647,6 +648,9 @@ Resources:
         # 🛡️ [Quality Kernel] Distributed state synchronization
         - DynamoDBCrudPolicy:
             TableName: !Ref KernelStateTable
+        # 🛡️ [v2.1] Agent Governance - Audit Log Write Permission
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GovernanceAuditLogV3
         - S3CrudPolicy:
              BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
         # 🧪 [LLM Simulator] Vision 테스트용 S3 이미지 접근 권한
@@ -3315,6 +3319,10 @@ Resources:
           AttributeType: N
         - AttributeName: manifest_hash
           AttributeType: S
+        - AttributeName: governance_decision  # [v2.1.1] For optimistic rollback query
+          AttributeType: S
+        - AttributeName: parent_hash  # [v2.1.1] For efficient orphan branch traversal
+          AttributeType: S
       KeySchema:
         - AttributeName: manifest_id
           KeyType: HASH
@@ -3335,6 +3343,25 @@ Resources:
               KeyType: HASH
           Projection:
             ProjectionType: KEYS_ONLY
+        # [v2.1.1] governance_decision으로 last safe manifest 조회 (Optimistic Rollback)
+        - IndexName: GovernanceDecisionIndex
+          KeySchema:
+            - AttributeName: workflow_id
+              KeyType: HASH
+            - AttributeName: governance_decision
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        # [v2.1.1] parent_hash로 자식 매니페스트 조회 (Rollback Orphan Traversal)
+        # Performance: O(Depth) instead of O(N) full table scan
+        - IndexName: ParentHashIndex
+          KeySchema:
+            - AttributeName: parent_hash
+              KeyType: HASH
+            - AttributeName: version
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true  # 30일 후 자동 GC (Phase 6)
@@ -3347,6 +3374,60 @@ Resources:
           Value: StateManagement
         - Key: Phase
           Value: "1"
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # 🛡️ [v2.1] Agent Governance - Audit Log Table
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Purpose: Governor 노드의 결정 기록 (위반 사항, _kernel 명령, Anomaly Score)
+  # Schema:
+  #   - PK: workflow_id (워크플로우별 audit trail)
+  #   - SK: timestamp (시간순 조회)
+  #   - GSI: agent_id (에이전트별 행동 패턴 분석)
+  # Use Cases:
+  #   - Security Incident Investigation (보안 사고 조사)
+  #   - Agent Behavior Analysis (에이전트 행동 패턴 학습)
+  #   - Governor Effectiveness Metrics (Governor 효과성 측정)
+  GovernanceAuditLogV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "GovernanceAuditLog-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: workflow_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+        - AttributeName: agent_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workflow_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        # agent_id로 특정 에이전트의 모든 거버넌스 결정 조회
+        - IndexName: AgentIdIndex
+          KeySchema:
+            - AttributeName: agent_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true  # 90일 후 자동 삭제 (보안 감사 기록 보존 기간)
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES  # CloudWatch 메트릭 집계용
+      Tags:
+        - Key: Purpose
+          Value: AgentGovernance
+        - Key: Component
+          Value: SecurityAudit
+        - Key: Phase
+          Value: "2.1"
+        - Key: DataClassification
+          Value: Sensitive  # 보안 위반 정보 포함
 
   # --- NodeStats Collector Lambda ---
   # EventBridge에서 Step Functions 상태 변화를 수신하여 노드별 실행 시간 통계 업데이트

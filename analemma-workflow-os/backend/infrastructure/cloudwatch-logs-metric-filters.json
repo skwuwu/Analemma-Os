@@ -1,0 +1,99 @@
+{
+  "MetricFilters": [
+    {
+      "FilterName": "GovernanceAnomalyScore",
+      "FilterPattern": "[timestamp, request_id, level, GOVERNANCE_METRIC, metric_name=AnomalyScore, metric_value, agent_id_label, agent_id, ring_label, ring, decision_label, decision]",
+      "MetricTransformations": [
+        {
+          "MetricName": "AnomalyScore",
+          "MetricNamespace": "Analemma/Governance",
+          "MetricValue": "$metric_value",
+          "DefaultValue": 0,
+          "Dimensions": {
+            "AgentId": "$agent_id",
+            "Ring": "$ring",
+            "Decision": "$decision"
+          }
+        }
+      ]
+    },
+    {
+      "FilterName": "GovernanceViolationCount",
+      "FilterPattern": "[timestamp, request_id, level, GOVERNANCE_METRIC, metric_name=ViolationCount, metric_value, violation_type_label, violation_type, agent_id_label, agent_id]",
+      "MetricTransformations": [
+        {
+          "MetricName": "ViolationCount",
+          "MetricNamespace": "Analemma/Governance",
+          "MetricValue": "$metric_value",
+          "DefaultValue": 0,
+          "Dimensions": {
+            "ViolationType": "$violation_type",
+            "AgentId": "$agent_id"
+          },
+          "Unit": "Count"
+        }
+      ]
+    },
+    {
+      "FilterName": "GovernanceKernelCommandIssued",
+      "FilterPattern": "[timestamp, request_id, level, GOVERNANCE_METRIC, metric_name=KernelCommandIssued, metric_value, command_label, command, agent_id_label, agent_id]",
+      "MetricTransformations": [
+        {
+          "MetricName": "KernelCommandIssued",
+          "MetricNamespace": "Analemma/Governance",
+          "MetricValue": "$metric_value",
+          "DefaultValue": 0,
+          "Dimensions": {
+            "Command": "$command",
+            "AgentId": "$agent_id"
+          },
+          "Unit": "Count"
+        }
+      ]
+    },
+    {
+      "FilterName": "GovernanceDecisionRate",
+      "FilterPattern": "[timestamp, request_id, level, GOVERNANCE_METRIC, metric_name=GovernanceDecision, metric_value, decision_label, decision, agent_id_label, agent_id, ring_label, ring]",
+      "MetricTransformations": [
+        {
+          "MetricName": "GovernanceDecision",
+          "MetricNamespace": "Analemma/Governance",
+          "MetricValue": "$metric_value",
+          "DefaultValue": 0,
+          "Dimensions": {
+            "Decision": "$decision",
+            "AgentId": "$agent_id",
+            "Ring": "$ring"
+          },
+          "Unit": "Count"
+        }
+      ]
+    }
+  ],
+  "Deployment": {
+    "LogGroupName": "/aws/lambda/segment-runner-v3-dev",
+    "Instructions": [
+      "1. Deploy metric filters using AWS CLI:",
+      "   aws logs put-metric-filter --log-group-name /aws/lambda/segment-runner-v3-dev \\",
+      "     --filter-name GovernanceAnomalyScore \\",
+      "     --filter-pattern '[timestamp, request_id, level, GOVERNANCE_METRIC, metric_name=AnomalyScore, metric_value, agent_id_label, agent_id, ring_label, ring, decision_label, decision]' \\",
+      "     --metric-transformations metricName=AnomalyScore,metricNamespace=Analemma/Governance,metricValue=$metric_value",
+      "",
+      "2. Verify metric filters:",
+      "   aws logs describe-metric-filters --log-group-name /aws/lambda/segment-runner-v3-dev",
+      "",
+      "3. Test with sample log entry:",
+      "   [GOVERNANCE_METRIC] metric_name=AnomalyScore metric_value=0.75 agent_id=manus_planner ring=3 decision=APPROVED",
+      "",
+      "4. Create CloudWatch Dashboard:",
+      "   - Use cloudwatch-dashboard-governance.json template",
+      "   - Metrics will auto-populate after first log entry"
+    ]
+  },
+  "Benefits": {
+    "NoAPIThrottling": "Logs are async, no put_metric_data rate limits",
+    "CostEffective": "Metric filters are free, only pay for storage",
+    "Automatic": "No boto3 client overhead in Lambda",
+    "Scalable": "Handles 1000+ parallel governors without throttling"
+  }
+}

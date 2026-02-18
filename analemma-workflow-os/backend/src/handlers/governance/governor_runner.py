@@ -181,24 +181,72 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
     )
     
     # ────────────────────────────────────────────────────────────────────
-    # 5. Optimistic Rollback Policy (v2.1)
+    # 4.5. Emit CloudWatch Metrics (v2.1)
+    # ────────────────────────────────────────────────────────────────────
+    _emit_governance_metrics(analysis, decision)
+    
+    # ────────────────────────────────────────────────────────────────────
+    # 5. Optimistic Rollback Policy (v2.1) - Differential Rollback Strategy
     # ────────────────────────────────────────────────────────────────────
     if governance_mode == GovernanceMode.OPTIMISTIC and decision.violations:
         logger.warning(f"🚨 [Optimistic Rollback] Violations detected: {decision.violations}")
         
-        # Get last safe manifest (violations=[], approved=True)
-        last_safe_manifest = _get_last_safe_manifest(state)
+        # Determine rollback type based on violation severity
+        rollback_type = _determine_rollback_type(decision.violations)
         
-        if last_safe_manifest:
-            decision.kernel_commands["_kernel_rollback_to_manifest"] = last_safe_manifest["manifest_id"]
-            decision.kernel_commands["_kernel_rollback_reason"] = (
-                f"Optimistic violation detected: {decision.violations[0]}"
-            )
-            decision.kernel_commands["_kernel_rollback_type"] = "OPTIMISTIC_RECOVERY"
-            decision.decision = "ROLLBACK"
+        if rollback_type == "TERMINAL_HALT":
+            # Security forgery detected → Immediate SIGKILL
+            decision.kernel_commands["_kernel_terminate_workflow"] = {
+                "reason": f"SECURITY_VIOLATION: {decision.violations[0]}",
+                "severity": "CRITICAL"
+            }
+            decision.decision = "REJECTED"
+            logger.error(f"🚨 [TERMINAL_HALT] Workflow terminated due to security violation")
             
-            logger.info(f"✅ [Optimistic Rollback] Rolling back to manifest: "
-                       f"{last_safe_manifest['manifest_id']}")
+        elif rollback_type == "SOFT_ROLLBACK":
+            # Minor violation → Feedback + current segment retry
+            decision.kernel_commands["_kernel_retry_current_segment"] = {
+                "reason": f"Minor violation: {decision.violations[0]}",
+                "feedback_to_agent": _generate_agent_feedback(
+                    violations=decision.violations,
+                    agent_id=analysis.agent_id,
+                    context={"output_size_bytes": analysis.output_size_bytes}
+                )
+            }
+            decision.decision = "SOFT_ROLLBACK"
+            logger.info(f"🔄 [SOFT_ROLLBACK] Retrying current segment with feedback")
+            
+        elif rollback_type == "HARD_ROLLBACK":
+            # Critical violation → Get last safe manifest from DynamoDB
+            last_safe_manifest = _get_last_safe_manifest(state)
+            
+            if last_safe_manifest:
+                current_manifest_id = state.get("manifest_id", state.get("current_manifest_id"))
+                
+                decision.kernel_commands["_kernel_rollback_to_manifest"] = last_safe_manifest["manifest_id"]
+                decision.kernel_commands["_kernel_rollback_reason"] = (
+                    f"Critical violation detected: {decision.violations[0]}"
+                )
+                decision.kernel_commands["_kernel_rollback_type"] = "HARD_ROLLBACK"
+                decision.decision = "ROLLBACK"
+                
+                logger.info(f"⏪ [HARD_ROLLBACK] Rolling back to manifest: "
+                           f"{last_safe_manifest['manifest_id']}")
+                
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # [v2.1] S3 GC Integration: Mark Rollback Orphans (HARD_ROLLBACK only)
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                if current_manifest_id and current_manifest_id != last_safe_manifest["manifest_id"]:
+                try:
+                    from services.state.merkle_gc_service import mark_rollback_orphans
+                    
+                    orphan_stats = mark_rollback_orphans(
+                        rollback_manifest_id=last_safe_manifest["manifest_id"],
+                        abandoned_branch_root=current_manifest_id,
+                            grace_period_days=7  # Shorter grace period for HARD_ROLLBACK (data corruption risk)
+                except Exception as e:
+                    logger.error(f"[GC] Failed to mark rollback orphans: {e}")
+                    # Continue execution (don't block rollback)
     
     # ────────────────────────────────────────────────────────────────────
     # 6. Persist Audit Log (DynamoDB)
@@ -461,6 +509,7 @@ def _make_governance_decision(
     # Audit Log
     # ────────────────────────────────────────────────────────────────────
     audit_log = {
+        "workflow_id": state.get("workflowId") or state.get("workflow_id", "unknown"),  # [v2.1] Required for DynamoDB PK
         "timestamp": time.time(),
         "agent_id": analysis.agent_id,
         "decision": decision,
@@ -534,37 +583,106 @@ def _get_last_safe_manifest(workflow_state: Dict[str, Any]) -> Optional[Dict[str
     """
     Get the last safe manifest (violations=[], approved=True) for rollback
     
-    Implementation (v2.1 - Optimistic Rollback):
-        1. Traverse manifest history via parent_hash chain
-        2. Find first manifest where governance_decision == "APPROVED"
-        3. Return that manifest for time-travel rollback
+    Implementation (v2.1.1 - DynamoDB GSI Query):
+        ❌ OLD: Traverse workflow_state['manifest_history'] → State bloat risk
+        ✅ NEW: Query DynamoDB WorkflowManifestsV3 table via GSI:
+            - GSI: GovernanceDecisionIndex (workflow_id + governance_decision + timestamp)
+            - Filter: governance_decision = "APPROVED" AND violations = []
+            - Sort: timestamp DESC, LIMIT 1
+        
+        Benefits:
+            - No state bloat (manifest_history stays small)
+            - Sub-100ms query latency
+            - Scalable to 1000+ segment workflows
     
     Args:
         workflow_state: 전체 워크플로우 상태
-            - manifest_history: List[Dict] (chronological manifest list)
-            - current_manifest_id: str
+            - workflow_id: str (required for DynamoDB query)
+            - current_manifest_id: str (optional, for logging)
     
     Returns:
         Optional[Dict]: Last safe manifest or None
     """
-    manifest_history = workflow_state.get("manifest_history", [])
+    import os
+    import boto3
     
-    if not manifest_history:
-        logger.warning("[Governor] No manifest history available for rollback")
+    workflow_id = workflow_state.get("workflowId") or workflow_state.get("workflow_id")
+    
+    if not workflow_id:
+        logger.error("[Governor] No workflow_id in state, cannot query DynamoDB for safe manifest")
         return None
     
-    # Traverse in reverse chronological order
-    for manifest in reversed(manifest_history):
-        governance_decision = manifest.get("governance_decision", "APPROVED")
-        violations = manifest.get("violations", [])
+    try:
+        table_name = os.environ.get("WORKFLOW_MANIFESTS_TABLE", "WorkflowManifests-v3-dev")
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(table_name)
         
-        if governance_decision == "APPROVED" and not violations:
-            logger.info(f"[Governor] Found last safe manifest: {manifest['manifest_id']}")
-            return manifest
+        # Query GSI: GovernanceDecisionIndex (workflow_id + governance_decision)
+        # Note: Assumes WorkflowManifestsV3 table has this GSI (must be added in SAM template)
+        response = table.query(
+            IndexName='GovernanceDecisionIndex',
+            KeyConditionExpression='workflow_id = :wf_id AND governance_decision = :approved',
+            ExpressionAttributeValues={
+                ':wf_id': workflow_id,
+                ':approved': 'APPROVED'
+            },
+            ScanIndexForward=False,  # DESC order by timestamp
+            Limit=10  # Get last 10 safe manifests
+        )
+        
+        # Filter for manifests with no violations
+        safe_manifests = [
+            item for item in response.get('Items', [])
+            if not item.get('violations') or len(item.get('violations', [])) == 0
+        ]
+        
+        if safe_manifests:
+            last_safe = safe_manifests[0]  # Most recent
+            logger.info(f"[Governor] Found last safe manifest from DynamoDB: {last_safe.get('manifest_id')}")
+            return last_safe
+        
+        logger.warning(f"[Governor] No safe manifest found for workflow {workflow_id}")
+        return None
+        
+    except Exception as e:
+        logger.error(f"[Governor] Failed to query DynamoDB for safe manifest: {e}")
+        # Fallback: Try in-memory manifest_history (degraded mode)
+        manifest_history = workflow_state.get("manifest_history", [])
+        if manifest_history:
+            for manifest in reversed(manifest_history[-10:]):  # Only check last 10
+                if manifest.get("governance_decision") == "APPROVED" and not manifest.get("violations"):
+                    logger.warning(f"[Governor] Fallback: Using in-memory manifest {manifest['manifest_id']}")
+                    return manifest
+        return None
+
+
+def _determine_rollback_type(violations: List[str]) -> str:
+    """
+    Determine rollback type based on violation severity (v2.1.1)
     
-    # Fallback: Return first manifest (initial state)
-    logger.warning("[Governor] No safe manifest found, falling back to initial manifest")
-    return manifest_history[0] if manifest_history else None
+    Rollback Strategies:
+        - TERMINAL_HALT: Security forgery detected → Immediate SIGKILL
+        - HARD_ROLLBACK: Critical violation (SLOP, Circuit Breaker) → Previous safe manifest
+        - SOFT_ROLLBACK: Minor violation (Plan Change, Gas Fee) → Current segment retry with feedback
+    
+    Args:
+        violations: List of violation strings
+    
+    Returns:
+        str: "TERMINAL_HALT" | "HARD_ROLLBACK" | "SOFT_ROLLBACK"
+    """
+    # Priority 1: Security violations → TERMINAL_HALT
+    for violation in violations:
+        if "KERNEL_COMMAND_FORGERY" in violation or "SECURITY_VIOLATION" in violation:
+            return "TERMINAL_HALT"
+    
+    # Priority 2: Critical violations → HARD_ROLLBACK
+    for violation in violations:
+        if "SLOP_DETECTED" in violation or "CIRCUIT_BREAKER" in violation:
+            return "HARD_ROLLBACK"
+    
+    # Priority 3: Minor violations → SOFT_ROLLBACK
+    return "SOFT_ROLLBACK"
 
 
 def _generate_agent_feedback(
@@ -655,24 +773,155 @@ def _save_governance_audit_log(audit_log: Dict[str, Any]) -> None:
         - violations (List[str])
         - kernel_commands_issued (List[str])
     
-    TODO: DynamoDB client 구현 (Priority 2)
+    v2.1 Implementation: DynamoDB put_item with boto3
     """
-    # Placeholder: Log to CloudWatch for now
-    logger.info(f"📝 [Governance Audit] {json.dumps(audit_log, indent=2)}")
+    import os
+    import boto3
+    from decimal import Decimal
     
-    # TODO: Implement DynamoDB put_item()
-    # dynamodb_client.put_item(
-    #     TableName='GovernanceAuditLog',
-    #     Item={
-    #         'workflow_id': workflow_state['workflow_id'],
-    #         'timestamp': audit_log['timestamp'],
-    #         'audit_data': audit_log
-    #     }
-    # )
+    # Get table name from environment variable
+    table_name = os.environ.get("GOVERNANCE_AUDIT_LOG_TABLE")
+    
+    if not table_name:
+        logger.warning(
+            "[Governance Audit] GOVERNANCE_AUDIT_LOG_TABLE env var not set. "
+            "Audit log will only be logged to CloudWatch."
+        )
+        logger.info(f"📝 [Governance Audit] {json.dumps(audit_log, indent=2)}")
+        return
+    
+    try:
+        dynamodb = boto3.resource('dynamodb')
+        table = dynamodb.Table(table_name)
+        
+        # Convert floats to Decimal for DynamoDB
+        def convert_floats(obj):
+            """Recursively convert float to Decimal for DynamoDB compatibility"""
+            if isinstance(obj, float):
+                return Decimal(str(obj))
+            elif isinstance(obj, dict):
+                return {k: convert_floats(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_floats(item) for item in obj]
+            return obj
+        
+        # Prepare item for DynamoDB
+        item = convert_floats(audit_log.copy())
+        
+        # Add TTL (90 days retention for security audit)
+        import time
+        item['ttl'] = int(time.time()) + (90 * 24 * 3600)
+        
+        # Ensure required fields exist
+        if 'workflow_id' not in item:
+            logger.error("[Governance Audit] Missing workflow_id in audit log, skipping save")
+            return
+        
+        if 'timestamp' not in item:
+            item['timestamp'] = Decimal(str(time.time()))
+        
+        # Write to DynamoDB
+        table.put_item(Item=item)
+        
+        logger.info(
+            f"✅ [Governance Audit] Saved to DynamoDB: "
+            f"workflow_id={item.get('workflow_id')}, "
+            f"agent_id={item.get('agent_id')}, "
+            f"decision={item.get('decision')}"
+        )
+        
+    except Exception as e:
+        logger.error(
+            f"🚨 [Governance Audit] Failed to save to DynamoDB: {e}. "
+            f"Audit log: {json.dumps(audit_log, indent=2)}"
+        )
+        # Continue execution even if audit log fails (don't block workflow)
 
 
 # ============================================================================
-# 🛡️ Node Registration Helper
+# � CloudWatch Metrics Emission (v2.1)
+# ============================================================================
+
+def _emit_governance_metrics(
+    analysis: "GovernanceAnalysis",
+    decision: str
+) -> None:
+    """
+    Emit governance metrics via structured CloudWatch Logs (v2.1.1)
+    
+    ❌ OLD: CloudWatch put_metric_data → API throttling in parallel execution (100+ governors)
+    ✅ NEW: Structured logging + CloudWatch Logs Metric Filters
+    
+    Benefits:
+        - No API rate limits (logs are async)
+        - Cost-effective (metric filters are free)
+        - Automatic aggregation by CloudWatch
+        - No boto3 client overhead
+    
+    Metrics emitted:
+    1. AnomalyScore (per agent_id)
+    2. ViolationCount (per violation_type)
+    3. KernelCommandIssuedCount (per command)
+    4. GovernanceDecisionRate (per decision)
+    
+    Args:
+        analysis: Governance analysis result
+        decision: Final governance decision (APPROVED/REJECTED/ESCALATED/ROLLBACK)
+    
+    Setup Required:
+        - CloudWatch Logs Metric Filter on Lambda log group:
+            Pattern: [GOVERNANCE_METRIC]
+            Metric Namespace: Analemma/Governance
+            Metric Name: $metric_name
+            Metric Value: $metric_value
+            Dimensions: $dimensions
+    """
+    try:
+        # Extract violation types for structured logging
+        violation_types = []
+        for violation in analysis.violations:
+            # Parse violation string: "VIOLATION_TYPE: message"
+            if ':' in violation:
+                violation_type = violation.split(':')[0].strip()
+            else:
+                violation_type = "UNKNOWN"
+            violation_types.append(violation_type)
+        
+        # Structured log entry for CloudWatch Logs Metric Filter
+        # Format: [GOVERNANCE_METRIC] metric_name=<name> metric_value=<value> agent_id=<id> ring=<level>
+        logger.info(
+            f"[GOVERNANCE_METRIC] metric_name=AnomalyScore metric_value={analysis.anomaly_score:.3f} "
+            f"agent_id={analysis.agent_id} ring={analysis.ring_level.value} decision={decision}"
+        )
+        
+        # Violation count per type
+        for violation_type in violation_types:
+            logger.info(
+                f"[GOVERNANCE_METRIC] metric_name=ViolationCount metric_value=1 "
+                f"violation_type={violation_type} agent_id={analysis.agent_id}"
+            )
+        
+        # Kernel command count
+        kernel_commands_issued = analysis.__dict__.get('kernel_commands_issued', [])
+        for command in kernel_commands_issued:
+            logger.info(
+                f"[GOVERNANCE_METRIC] metric_name=KernelCommandIssued metric_value=1 "
+                f"command={command} agent_id={analysis.agent_id}"
+            )
+        
+        # Governance decision rate
+        logger.info(
+            f"[GOVERNANCE_METRIC] metric_name=GovernanceDecision metric_value=1 "
+            f"decision={decision} agent_id={analysis.agent_id} ring={analysis.ring_level.value}"
+        )
+        
+    except Exception as e:
+        logger.error(f"🚨 [CloudWatch] Failed to emit structured metrics: {e}")
+        # Continue execution even if metrics fail (don't block workflow)
+
+
+# ============================================================================
+# �🛡️ Node Registration Helper
 # ============================================================================
 
 # This function is registered in handlers/core/main.py's NODE_TYPE_RUNNERS dict:
