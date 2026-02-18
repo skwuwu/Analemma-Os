@@ -1096,11 +1096,6 @@ class SegmentRunnerService:
             return self._save_manifest_to_s3(manifest, manifest_s3_path)
         
         return False
-        
-        if modified:
-            return self._save_manifest_to_s3(manifest, manifest_s3_path)
-        
-        return False
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # [Phase 8.2 & 8.3] Manifest Mutation Detection & Regeneration
