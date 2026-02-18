@@ -61,7 +61,16 @@ class TrustScoreManager:
     VIOLATION_MULTIPLIER = 0.5
     STRICT_MODE_THRESHOLD = 0.4
     EMA_ACCELERATION = 2.0
-    RECENT_WINDOW = 10  # Last 10 decisions
+    RECENT_WINDOW = 10
+    WARMUP_THRESHOLD = 3
+    HISTORY_MAX_SIZE = 20
+    
+    RING_PENALTY_MULTIPLIERS = {
+        0: 2.0,
+        1: 1.5,
+        2: 0.8,
+        3: 0.5
+    }  # Last 10 decisions
     
     def __init__(self):
         self.agent_scores: Dict[str, TrustScoreState] = {}
@@ -70,7 +79,8 @@ class TrustScoreManager:
         self,
         agent_id: str,
         manifest_id: str,
-        governance_result: Dict[str, any]
+        governance_result: Dict[str, any],
+        agent_ring_level: int = 3
     ) -> float:
         """
         Update trust score based on governance decision
@@ -132,9 +142,9 @@ class TrustScoreManager:
             )
             
         elif decision in ["REJECTED", "ESCALATED", "ROLLBACK"]:
-            # Violation detected (asymmetric penalty)
             anomaly_score = governance_result.get("audit_log", {}).get("anomaly_score", 0.5)
-            penalty = anomaly_score * self.VIOLATION_MULTIPLIER
+            ring_multiplier = self.RING_PENALTY_MULTIPLIERS.get(agent_ring_level, 0.5)
+            penalty = anomaly_score * ring_multiplier
             new_score = max(old_score - penalty, 0.0)
             trust_state.violation_count += 1
         
@@ -146,9 +156,10 @@ class TrustScoreManager:
         trust_state.score_history.append((manifest_id, new_score))
         trust_state.last_updated = datetime.utcnow().isoformat() + "Z"
         
-        # Keep only last 20 scores
-        if len(trust_state.score_history) > 20:
-            trust_state.score_history = trust_state.score_history[-20:]
+        if len(trust_state.score_history) > self.HISTORY_MAX_SIZE:
+            to_flush = trust_state.score_history[:self.HISTORY_MAX_SIZE // 2]
+            self._flush_history_to_metrics(agent_id, to_flush)
+            trust_state.score_history = trust_state.score_history[self.HISTORY_MAX_SIZE // 2:]
         
         logger.info(
             f"[TrustScore] {agent_id}: {old_score:.3f} → {new_score:.3f} "
@@ -244,4 +255,26 @@ class TrustScoreManager:
         Returns:
             TrustScoreState or None
         """
+    
+    def _flush_history_to_metrics(self, agent_id: str, history_records: List[Tuple[str, float]]) -> None:
+        try:
+            import boto3
+            from decimal import Decimal
+            
+            dynamodb = boto3.resource('dynamodb')
+            metrics_table = dynamodb.Table('GovernanceTrustScoreMetrics')
+            
+            with metrics_table.batch_writer() as batch:
+                for manifest_id, score in history_records:
+                    batch.put_item(Item={
+                        'agent_id': agent_id,
+                        'manifest_id': manifest_id,
+                        'trust_score': Decimal(str(score)),
+                        'timestamp': datetime.utcnow().isoformat() + 'Z',
+                        'ttl': int(datetime.utcnow().timestamp()) + (90 * 24 * 3600)
+                    })
+            
+            logger.info(f"[TrustScore Flush] Flushed {len(history_records)} records for {agent_id}")
+        except Exception as e:
+            logger.error(f"[TrustScore Flush] Failed: {e}")
         return self.agent_scores.get(agent_id)
