@@ -168,6 +168,16 @@ RETRYABLE_ERROR_PATTERNS = [
     'ResourceNotFoundException',  # S3 eventual consistency
 ]
 # Enable Partial Success (Continue workflow even if segment fails)
+
+# ============================================================================
+# [Phase 8.3] Manifest Mutation Detection Constants
+# ============================================================================
+# Manifest mutation triggers manifest regeneration to maintain Merkle integrity
+MUTATION_TRIGGERS = {
+    'SEGMENT_SKIP': 'Segments marked for skip',
+    'RECOVERY_INJECT': 'Recovery segments injected',
+    'DYNAMIC_MODIFICATION': 'Dynamic segment modification'
+}
 ENABLE_PARTIAL_SUCCESS = True
 
 # ============================================================================
@@ -1015,14 +1025,20 @@ class SegmentRunnerService:
         self, 
         manifest_s3_path: str, 
         segment_ids_to_skip: List[int], 
-        reason: str
+        reason: str,
+        bag: 'SmartStateBag' = None,
+        workflow_config: dict = None
     ) -> bool:
         """
-        [Guard] [Pattern 2] 특정 세그먼트를 SKIP으로 마킹
+        [Phase 8.3] 특정 세그먼트를 SKIP으로 마킹 + Manifest 재생성
         
         사용 시나리오:
         - 조건 분기에서 특정 경로 불필요
         - 선행 세그먼트 실패로 후속 세그먼트 실행 불가
+        
+        아키텍처 변경 (Phase 8):
+        - ❌ 기존: S3 manifest 직접 수정 (Merkle DAG 무효화)
+        - ✅ 개선: Manifest 재생성 + Hash Chain 연결
         """
         manifest = self._load_manifest_from_s3(manifest_s3_path)
         if not manifest:
@@ -1038,24 +1054,191 @@ class SegmentRunnerService:
                 modified = True
                 logger.info(f"[Kernel] Marked segment {segment.get('segment_id')} for skip: {reason}")
         
+        if modified and bag and workflow_config:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [Phase 8.3] Merkle DAG 재생성 (S3 직접 수정 금지)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            try:
+                new_manifest_id, new_hash, config_hash = self._invalidate_and_regenerate_manifest(
+                    workflow_id=bag.get('workflowId'),
+                    workflow_config=workflow_config,
+                    modified_segments=manifest,
+                    execution_id=bag.get('executionId', 'unknown'),
+                    parent_manifest_id=bag.get('manifest_id'),
+                    parent_manifest_hash=bag.get('manifest_hash'),
+                    reason=f"{MUTATION_TRIGGERS['SEGMENT_SKIP']}: {segment_ids_to_skip}"
+                )
+                
+                # StateBag 갱신
+                bag['manifest_id'] = new_manifest_id
+                bag['manifest_hash'] = new_hash
+                bag['config_hash'] = config_hash
+                
+                logger.info(
+                    f"[Manifest Mutation] StateBag updated after skip\n"
+                    f"  New manifest_id: {new_manifest_id[:8]}..."
+                )
+                
+                return True
+                
+            except Exception as regen_error:
+                logger.error(
+                    f"[Manifest Regeneration] Failed after skip: {regen_error}",
+                    exc_info=True
+                )
+                # Fallback: S3 직접 저장 (레거시 모드)
+                logger.warning("[Fallback] Using legacy S3 direct save (Merkle integrity lost)")
+                return self._save_manifest_to_s3(manifest, manifest_s3_path)
+        
+        elif modified:
+            # bag/workflow_config 없으면 레거시 모드
+            logger.warning("[Legacy Mode] Manifest regeneration skipped - using direct S3 save")
+            return self._save_manifest_to_s3(manifest, manifest_s3_path)
+        
+        return False
+        
         if modified:
             return self._save_manifest_to_s3(manifest, manifest_s3_path)
         
         return False
+    
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # [Phase 8.2 & 8.3] Manifest Mutation Detection & Regeneration
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    def _invalidate_and_regenerate_manifest(
+        self,
+        workflow_id: str,
+        workflow_config: dict,
+        modified_segments: List[Dict[str, Any]],
+        execution_id: str,
+        parent_manifest_id: str,
+        parent_manifest_hash: str,
+        reason: str
+    ) -> tuple:
+        """
+        [Phase 8.2 & 8.3] Manifest 변조 감지 시 재생성
+        
+        아키텍처 원칙 (Phase 8 Guideline):
+        - Git Rebase와 유사: 새 매니페스트 = 이전 매니페스트 기반 새 해시
+        - parent_hash로 Merkle Chain 연결 → 역사적 무결성 보장
+        - 에이전트의 사후 조작 시도 시 해시 체인 깨짐으로 즉시 감지
+        
+        트리거 시나리오:
+        - _mark_segments_for_skip() 호출
+        - _inject_recovery_segments() 호출
+        - 동적 세그먼트 수정
+        
+        Args:
+            workflow_id: 워크플로우 ID
+            workflow_config: 워크플로우 설정
+            modified_segments: 수정된 세그먼트 목록
+            execution_id: 실행 ID
+            parent_manifest_id: 이전 매니페스트 ID
+            parent_manifest_hash: 이전 매니페스트 해시
+            reason: 재생성 사유
+        
+        Returns:
+            (new_manifest_id, new_manifest_hash, config_hash)
+        """
+        try:
+            from src.services.state.state_versioning_service import StateVersioningService
+            from src.services.state.async_commit_service import get_async_commit_service
+            
+            logger.warning(
+                f"[Manifest Mutation] Regenerating manifest\n"
+                f"  Reason: {reason}\n"
+                f"  Parent: {parent_manifest_id[:8]}...\n"
+                f"  Segments: {len(modified_segments)}"
+            )
+            
+            # 1. StateVersioningService로 새 Manifest 생성
+            versioning_service = StateVersioningService(
+                dynamodb_table=os.environ.get('WORKFLOW_MANIFESTS_TABLE', 'WorkflowManifestsV3'),
+                s3_bucket=os.environ.get('S3_BUCKET', 'analemma-state-dev')
+            )
+            
+            # 2. 새 manifest 생성 (parent_hash = 이전 manifest의 hash)
+            manifest_pointer = versioning_service.create_manifest(
+                workflow_id=workflow_id,
+                workflow_config=workflow_config,
+                segment_manifest=modified_segments,
+                parent_manifest_id=parent_manifest_id  # Merkle Chain 연결
+            )
+            
+            new_manifest_id = manifest_pointer.manifest_id
+            new_hash = manifest_pointer.manifest_hash
+            config_hash = manifest_pointer.config_hash
+            
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [Phase 8.1] Pre-flight Check: S3 Strong Consistency 검증
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            async_commit = get_async_commit_service()
+            manifest_s3_key = f"manifests/{new_manifest_id}.json"
+            
+            commit_status = async_commit.verify_commit_with_retry(
+                execution_id=execution_id,
+                s3_bucket=os.environ.get('S3_BUCKET', 'analemma-state-dev'),
+                s3_key=manifest_s3_key,
+                redis_key=None  # S3 검증만
+            )
+            
+            if not commit_status.s3_available:
+                raise RuntimeError(
+                    f"[Manifest Regeneration Failed] New manifest S3 unavailable "
+                    f"after {commit_status.retry_count} attempts "
+                    f"(wait={commit_status.total_wait_ms:.1f}ms): {new_manifest_id[:8]}..."
+                )
+            
+            logger.info(
+                f"[Manifest Mutation] ✅ New manifest created and verified\n"
+                f"  New ID: {new_manifest_id[:8]}...\n"
+                f"  Parent: {parent_manifest_id[:8]}...\n"
+                f"  Hash Chain: {parent_manifest_hash[:8]}... → {new_hash[:8]}...\n"
+                f"  S3 Verification: {commit_status.retry_count} retries, "
+                f"{commit_status.total_wait_ms:.1f}ms"
+            )
+            
+            return new_manifest_id, new_hash, config_hash
+            
+        except ImportError as import_err:
+            logger.error(
+                f"[Manifest Regeneration] Import failed: {import_err}\n"
+                f"StateVersioningService or AsyncCommitService not available"
+            )
+            raise RuntimeError(
+                f"Manifest regeneration failed - required services unavailable: {import_err}"
+            ) from import_err
+            
+        except Exception as regen_error:
+            logger.error(
+                f"[Manifest Regeneration] Failed: {regen_error}",
+                exc_info=True
+            )
+            raise RuntimeError(
+                f"Manifest regeneration failed for parent {parent_manifest_id[:8]}...: "
+                f"{str(regen_error)}"
+            ) from regen_error
 
     def _inject_recovery_segments(
         self,
         manifest_s3_path: str,
         after_segment_id: int,
         recovery_segments: List[Dict[str, Any]],
-        reason: str
+        reason: str,
+        bag: 'SmartStateBag' = None,
+        workflow_config: dict = None
     ) -> bool:
         """
-        [Guard] [Pattern 2] 복구 세그먼트 삽입
+        [Phase 8.3] 복구 세그먼트 삽입 + Manifest 재생성
         
         사용 시나리오:
         - API 실패 후 백업 경로 삽입
         - 에러 핸들링 세그먼트 동적 추가
+        
+        아키텍처 변경 (Phase 8):
+        - ❌ 기존: S3 manifest 직접 수정 (Merkle DAG 무효화)
+        - ✅ 개선: Manifest 재생성 + Hash Chain 연결
         """
         manifest = self._load_manifest_from_s3(manifest_s3_path)
         if not manifest:
@@ -1091,7 +1274,46 @@ class SegmentRunnerService:
         
         logger.info(f"[Kernel] [System] Injected {len(recovery_segments)} recovery segments after segment {after_segment_id}")
         
-        return self._save_manifest_to_s3(new_manifest, manifest_s3_path)
+        if bag and workflow_config:
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [Phase 8.3] Merkle DAG 재생성
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            try:
+                new_manifest_id, new_hash, config_hash = self._invalidate_and_regenerate_manifest(
+                    workflow_id=bag.get('workflowId'),
+                    workflow_config=workflow_config,
+                    modified_segments=new_manifest,
+                    execution_id=bag.get('executionId', 'unknown'),
+                    parent_manifest_id=bag.get('manifest_id'),
+                    parent_manifest_hash=bag.get('manifest_hash'),
+                    reason=f"{MUTATION_TRIGGERS['RECOVERY_INJECT']}: {len(recovery_segments)} segments"
+                )
+                
+                # StateBag 갱신
+                bag['manifest_id'] = new_manifest_id
+                bag['manifest_hash'] = new_hash
+                bag['config_hash'] = config_hash
+                
+                logger.info(
+                    f"[Manifest Mutation] StateBag updated after recovery injection\n"
+                    f"  New manifest_id: {new_manifest_id[:8]}..."
+                )
+                
+                return True
+                
+            except Exception as regen_error:
+                logger.error(
+                    f"[Manifest Regeneration] Failed after injection: {regen_error}",
+                    exc_info=True
+                )
+                # Fallback: S3 직접 저장 (레거시 모드)
+                logger.warning("[Fallback] Using legacy S3 direct save (Merkle integrity lost)")
+                return self._save_manifest_to_s3(new_manifest, manifest_s3_path)
+        
+        else:
+            # bag/workflow_config 없으면 레거시 모드
+            logger.warning("[Legacy Mode] Manifest regeneration skipped - using direct S3 save")
+            return self._save_manifest_to_s3(new_manifest, manifest_s3_path)
 
     # ========================================================================
     # [Parallel] [Pattern 3] Parallel Scheduler: 인프라 인지형 병렬 스케줄링
@@ -2912,50 +3134,149 @@ class SegmentRunnerService:
 
         # [Option A] 세그먼트 config 정규화 - None 값을 빈 dict/list로 변환
         segment_config = _normalize_segment_config(segment_config)
+        
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # [Phase 8.4] Extract Context for Trust Chain Gatekeeper
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        owner_id = event.get('ownerId') or event.get('owner_id', 'unknown')
+        execution_id = event.get('execution_id', 'unknown')
+        
+        # workflow_config 추출 (bag hydration에서 로드됨)
+        try:
+            from src.common.statebag import SmartStateBag
+            bag = SmartStateBag(initial_state, hydrator=self.hydrator)
+            workflow_config = bag.get('workflow_config')
+        except:
+            workflow_config = None
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # [Phase 7] Security: Pre-computed Hash 검증 (1-5ms)
+        # [Phase 8.4] Trust Chain Gatekeeper: Kernel Panic on Hash Mismatch
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 아키텍처 원칙 (Phase 8 Guideline):
+        # - verify_segment_config = 실행 직전의 최종 관문 (Gatekeeper)
+        # - 해시 검증 실패 = Kernel Panic (즉시 중단, 관리자 경보)
+        # - Zero Trust: 모든 segment_config는 검증 필수
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
         manifest_id = event.get('manifest_id')
+        
         if manifest_id and segment_config:
             try:
                 from src.services.state.state_versioning_service import StateVersioningService
                 
                 versioning_service = StateVersioningService(
-                    dynamodb_table=os.environ.get('WORKFLOW_MANIFESTS_TABLE', 'WorkflowManifests-v3-dev'),
-                    s3_bucket=s3_bucket or os.environ.get('S3_BUCKET', 'analemma-workflow-state-dev')
+                    dynamodb_table=os.environ.get('WORKFLOW_MANIFESTS_TABLE', 'WorkflowManifestsV3'),
+                    s3_bucket=os.environ.get('S3_BUCKET', 'analemma-state-dev')
+                )
+                
+                segment_index = event.get('segment_index', segment_id)
+                
+                logger.info(
+                    f"[Phase 8.4 Gatekeeper] Verifying segment_config integrity\n"
+                    f"  Manifest: {manifest_id[:8]}...\n"
+                    f"  Segment: {segment_index}\n"
+                    f"  Mode: KERNEL_PANIC (Zero Trust)"
                 )
                 
                 is_valid = versioning_service.verify_segment_config(
                     segment_config=segment_config,
                     manifest_id=manifest_id,
-                    segment_index=segment_id
+                    segment_index=segment_index
                 )
                 
                 if not is_valid:
-                    logger.error(
-                        f"[Phase 7] [Security Violation] segment_config hash mismatch! "
-                        f"manifest_id={manifest_id}, segment_id={segment_id}"
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # [KERNEL PANIC] Hash Mismatch Detected
+                    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                    # 시스템 즉시 중단 (Halt)
+                    # 관리자 경보 발송 (CloudWatch Alarm 트리거)
+                    # 보안 사고 로그 기록
+                    logger.critical(
+                        f"🚨 [KERNEL PANIC] [SECURITY ALERT] 🚨\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"segment_config INTEGRITY VIOLATION DETECTED!\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Manifest ID: {manifest_id}\n"
+                        f"Segment Index: {segment_index}\n"
+                        f"Execution ID: {execution_id}\n"
+                        f"Workflow ID: {workflow_id}\n"
+                        f"Owner ID: {owner_id}\n"
+                        f"\n"
+                        f"POSSIBLE CAUSES:\n"
+                        f"  1. Man-in-the-Middle (MITM) Attack\n"
+                        f"  2. S3 Object Tampering (Agent Privilege Escalation)\n"
+                        f"  3. Manifest Corruption (Data Integrity Failure)\n"
+                        f"  4. Hash Collision (Extremely Rare)\n"
+                        f"\n"
+                        f"SYSTEM ACTION: HALTING EXECUTION IMMEDIATELY\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
                     )
+                    
+                    # CloudWatch Alarm 트리거를 위한 ERROR 레벨 로그
+                    logger.error(
+                        f"[SECURITY_ALERT] INTEGRITY_VIOLATION "
+                        f"manifest_id={manifest_id} segment_index={segment_index} "
+                        f"execution_id={execution_id}"
+                    )
+                    
+                    # 즉시 실행 중단 (SecurityError)
                     return _finalize_response({
                         "status": "FAILED",
-                        "error": "segment_config integrity violation - hash mismatch",
+                        "error": "KERNEL_PANIC: segment_config integrity verification failed",
                         "error_type": "SecurityError",
                         "final_state": initial_state,
                         "new_history_logs": [],
                         "error_info": {
-                            "error": "Segment config hash verification failed",
+                            "error": "Segment config hash verification failed (Kernel Panic)",
                             "error_type": "IntegrityViolation",
+                            "severity": "CRITICAL",
                             "manifest_id": manifest_id,
-                            "segment_id": segment_id
+                            "segment_index": segment_index,
+                            "execution_id": execution_id,
+                            "workflow_id": workflow_id,
+                            "security_alert": True,
+                            "recommended_action": "INVESTIGATE_IMMEDIATELY"
                         }
                     })
                 
-                logger.info(f"[Phase 7] ✅ segment_config verified: segment_id={segment_id}")
+                logger.info(
+                    f"[Phase 8.4 Gatekeeper] ✅ Integrity verified: segment_index={segment_index}\n"
+                    f"  Trust Chain: INTACT"
+                )
                 
+            except ImportError:
+                logger.warning(
+                    "[Phase 8.4 Gatekeeper] StateVersioningService not available "
+                    "(development mode) - skipping verification"
+                )
             except Exception as verify_error:
-                # Non-blocking: 검증 실패는 경고만 (운영 안정성)
-                logger.warning(f"[Phase 7] segment_config verification failed (non-blocking): {verify_error}")
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # [CRITICAL ERROR] Verification Process Failed
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # Phase 8 Guideline: 검증 자체의 실패도 시스템 장애로 간주
+                logger.error(
+                    f"🚨 [KERNEL PANIC] [SYSTEM FAULT] 🚨\n"
+                    f"segment_config verification PROCESS failed: {verify_error}\n"
+                    f"Manifest: {manifest_id[:8]}..., Segment: {segment_index}\n"
+                    f"HALTING EXECUTION",
+                    exc_info=True
+                )
+                
+                return _finalize_response({
+                    "status": "FAILED",
+                    "error": f"KERNEL_PANIC: Verification process failed - {str(verify_error)}",
+                    "error_type": "SystemFault",
+                    "final_state": initial_state,
+                    "new_history_logs": [],
+                    "error_info": {
+                        "error": f"Integrity verification failed: {str(verify_error)}",
+                        "error_type": "SystemFault",
+                        "severity": "CRITICAL",
+                        "manifest_id": manifest_id,
+                        "segment_index": segment_index,
+                        "execution_id": execution_id
+                    }
+                })
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
         # [Guard] [v2.6 P0 Fix] 'code' 타입 오염 방지 Self-Healing
@@ -3492,17 +3813,27 @@ class SegmentRunnerService:
             skip_next_segments = result_state.get('_kernel_skip_segments', [])
             if skip_next_segments:
                 skip_reason = result_state.get('_kernel_skip_reason', 'Condition not met')
-                self._mark_segments_for_skip(manifest_s3_path, skip_next_segments, skip_reason)
+                # [Phase 8.3] Pass bag & workflow_config for manifest regeneration
+                self._mark_segments_for_skip(
+                    manifest_s3_path, 
+                    skip_next_segments, 
+                    skip_reason,
+                    bag=bag,
+                    workflow_config=workflow_config
+                )
                 logger.info(f"[Kernel] Marked {len(skip_next_segments)} segments for skip: {skip_reason}")
             
             # 복구 세그먼트 삽입 요청 처리
             recovery_request = result_state.get('_kernel_inject_recovery')
             if recovery_request:
+                # [Phase 8.3] Pass bag & workflow_config for manifest regeneration
                 self._inject_recovery_segments(
                     manifest_s3_path=manifest_s3_path,
                     after_segment_id=segment_id,
                     recovery_segments=recovery_request.get('segments', []),
-                    reason=recovery_request.get('reason', 'Recovery injection')
+                    reason=recovery_request.get('reason', 'Recovery injection'),
+                    bag=bag,
+                    workflow_config=workflow_config
                 )
         
         # 8. Handle Output State Storage

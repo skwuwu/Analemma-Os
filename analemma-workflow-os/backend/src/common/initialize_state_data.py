@@ -469,6 +469,61 @@ def lambda_handler(event, context):
                 f"(hash={manifest_hash[:8]}..., {total_segments} segments)"
             )
             
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [Phase 8.1] Pre-flight Check: S3 Strong Consistency 검증
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # "데이터가 준비되지 않았다면 실행조차 하지 않는다"
+            # - S3 Propagation Delay 방어
+            # - Fail-fast: 700ms 내 검증 완료 (3회 재시도)
+            # - Trust Chain의 첫 번째 검증 지점
+            try:
+                from src.services.state.async_commit_service import get_async_commit_service
+                
+                async_commit = get_async_commit_service()
+                manifest_s3_key = f"manifests/{manifest_id}.json"
+                
+                logger.info(
+                    f"[Pre-flight Check] Verifying manifest availability: "
+                    f"{manifest_id[:8]}..."
+                )
+                
+                commit_status = async_commit.verify_commit_with_retry(
+                    execution_id=execution_id,
+                    s3_bucket=STATE_BUCKET,
+                    s3_key=manifest_s3_key,
+                    redis_key=None  # Redis 없이 S3만 검증
+                )
+                
+                if not commit_status.s3_available:
+                    raise RuntimeError(
+                        f"[System Fault] Manifest S3 availability verification failed "
+                        f"after {commit_status.retry_count} attempts "
+                        f"(total_wait={commit_status.total_wait_ms:.1f}ms). "
+                        f"S3 Strong Consistency violation! "
+                        f"Manifest: {manifest_id[:8]}..."
+                    )
+                
+                logger.info(
+                    f"[Pre-flight Check] ✅ Manifest verified: {manifest_id[:8]}... "
+                    f"(retries={commit_status.retry_count}, "
+                    f"wait={commit_status.total_wait_ms:.1f}ms)"
+                )
+                
+            except ImportError:
+                logger.warning(
+                    "[Pre-flight Check] AsyncCommitService not available, "
+                    "skipping S3 verification (development mode)"
+                )
+            except Exception as verify_error:
+                logger.error(
+                    f"[Pre-flight Check] Manifest verification failed: {verify_error}",
+                    exc_info=True
+                )
+                raise RuntimeError(
+                    f"Pre-flight Check failed for manifest {manifest_id[:8]}...: "
+                    f"{str(verify_error)}"
+                ) from verify_error
+            
         except Exception as e:
             logger.error(f"Failed to create Merkle manifest: {e}", exc_info=True)
             # Fallback to legacy mode
