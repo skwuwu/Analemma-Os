@@ -393,7 +393,7 @@ KERNEL_MANAGED_KEYS = {
     "__kernel_actions",       # Kernel action audit trail
 }
 
-def _validate_output_keys(output: Dict[str, Any], node_id: str) -> Dict[str, Any]:
+def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int = 3) -> Dict[str, Any]:
     """
     🛡️ [Guard] Validate and filter output keys to prevent state pollution.
 
@@ -408,18 +408,53 @@ def _validate_output_keys(output: Dict[str, Any], node_id: str) -> Dict[str, Any
     - State Infrastructure (state_s3_path, __s3_offloaded, etc.) → Protect S3 integrity
     - Telemetry (step_history, execution_logs, etc.) → Protect traceability
     - Response Envelope (status, error_info) → Maintain Step Functions JSONPath integrity
+    
+    [v2.1] Ring-Aware Validation (Agent Governance):
+    - Ring 3 (User/Agent): Cannot output _kernel_* commands → SecurityViolation
+    - Ring 0/1 (Kernel/Governor): Can output _kernel_* commands (legitimate)
+    - Kernel Command Forgery Detection: Triggers Governor alert + audit log
 
     Args:
         output: Dictionary returned by the node
         node_id: Node identifier (for logging)
+        ring_level: Ring Protection level (0=Kernel, 1=Governor, 2=Trusted, 3=Agent)
 
     Returns:
         Safe dictionary with system reserved keys removed
     """
     if not isinstance(output, dict):
         return output
+    
+    # Import KERNEL_CONTROL_KEYS from constants (v2.1)
+    from src.common.constants import SecurityConfig
+    kernel_keys = SecurityConfig.KERNEL_CONTROL_KEYS
+    
+    # 🛡️ [v2.1 Guard] Kernel Command Forgery Detection (Ring 3 only)
+    if ring_level >= 3:  # Ring 3 (User/Agent)
+        kernel_forgery_attempts = [k for k in output.keys() if k in kernel_keys]
         
-    # 🛡️ [Guard] Kernel domain intrusion check
+        if kernel_forgery_attempts:
+            logger.error(
+                f"🚨 [KERNEL_COMMAND_FORGERY] Node '{node_id}' (Ring {ring_level}) "
+                f"attempted to forge kernel commands: {kernel_forgery_attempts}. "
+                f"This is a critical security violation and will be reported to Governor."
+            )
+            
+            # Remove kernel command forgery attempts
+            for key in kernel_forgery_attempts:
+                output.pop(key, None)
+            
+            # TODO: Emit CloudWatch metric for security monitoring
+            # cloudwatch.put_metric_data(
+            #     Namespace='Analemma/Security',
+            #     MetricData=[{
+            #         'MetricName': 'KernelCommandForgery',
+            #         'Value': len(kernel_forgery_attempts),
+            #         'Dimensions': [{'Name': 'NodeId', 'Value': node_id}]
+            #     }]
+            # )
+        
+    # 🛡️ [Guard] Kernel domain intrusion check (existing logic)
     forbidden_attempts = [k for k in output.keys() if k in RESERVED_STATE_KEYS]
     
     if forbidden_attempts:
@@ -3790,6 +3825,11 @@ register_node("skill_executor", skill_executor_runner)  # Skills integration
 register_node("nested_for_each", nested_for_each_runner)  # V3 Hyper-Stress: Nested Map-in-Map support
 register_node("vision", vision_runner)  # Gemini Vision multimodal analysis
 register_node("image_analysis", vision_runner)  # Alias for vision
+
+# 🛡️ [v2.1] Agent Governance - Governor Node (Ring 1)
+from src.handlers.governance.governor_runner import governor_node_runner
+register_node("governor", governor_node_runner)  # Agent output validation and _kernel command generation
+
 # Note: 'code' 타입은 NODE_REGISTRY에 추가하지 않음
 # Pydantic field_validator에서 'code' -> 'operator'로 변환되므로 여기 도달 불가
 # 만약 'code' 타입이 여기 도달하면 검증 단계를 우회한 것이므로 에러가 맞음

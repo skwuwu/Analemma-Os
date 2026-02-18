@@ -267,6 +267,35 @@ class SecurityConfig:
     
     # 보안 위반 시 자동 SIGKILL 활성화
     ENABLE_AUTO_SIGKILL = os.environ.get('ENABLE_AUTO_SIGKILL', 'true').lower() == 'true'
+    
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 🛡️ Kernel Control Interface (v2.1 - Agent Governance)
+    # ═══════════════════════════════════════════════════════════════════════════
+    
+    # Reserved _kernel commands (Ring 0/1 only)
+    # Ring 3 agents attempting to output these keys will trigger SecurityViolation
+    KERNEL_CONTROL_KEYS = frozenset({
+        "_kernel_skip_segments",
+        "_kernel_skip_reason",
+        "_kernel_inject_recovery",
+        "_kernel_rollback_to_manifest",
+        "_kernel_rollback_reason",
+        "_kernel_rollback_type",
+        "_kernel_modify_parallelism",
+        "_kernel_request_human_approval"
+    })
+    
+    # Governance Mode Selection (Ring-based)
+    GOVERNANCE_MODE = {
+        RING_0_KERNEL: "STRICT",      # Kernel: Always synchronous validation
+        RING_1_DRIVER: "STRICT",      # Governor: Synchronous validation
+        RING_2_SERVICE: "OPTIMISTIC",  # Trusted: Async validation + rollback
+        RING_3_USER: "OPTIMISTIC"      # Agents: Async validation + rollback
+    }
+    
+    # Optimistic Rollback Trigger Threshold
+    # If violations exceed this score in OPTIMISTIC mode, trigger rollback
+    OPTIMISTIC_ROLLBACK_THRESHOLD = 0.5  # 0.0 (safe) ~ 1.0 (critical)
 
 
 class EnvironmentVariables:
