@@ -4794,10 +4794,12 @@ Resources:
 
 
   # --- SNS Topic for Critical Alerts ---
-  MonitoringSNSTopic:
-    Type: AWS::SNS::Topic
-    Properties:
-      DisplayName: "Analemma Infrastructure Alerts"
+  # [TEMPORARILY DISABLED] Requires SNS:TagResource permission in GitHubActions-ServerlessDeployRole
+  # TODO: Re-enable after adding SNS permissions to IAM role
+  # MonitoringSNSTopic:
+  #   Type: AWS::SNS::Topic
+  #   Properties:
+  #     DisplayName: "Analemma Infrastructure Alerts"
 
   # --- CloudWatch Dashboard: Single Pane of Glass ---
   AnalemmaDashboard:
