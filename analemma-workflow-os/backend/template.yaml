@@ -3426,6 +3426,43 @@ Resources:
           Value: "1"
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # 🌳 [Phase 1] Workflow Block References Table
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Purpose: Block-level dependency tracking for Merkle DAG
+  # Schema:
+  #   - PK: workflow_id (workflow identifier)
+  #   - SK: block_id (block identifier)
+  # Use Cases:
+  #   - Track block dependencies and references
+  #   - Support graph traversal and validation
+  #   - Enable efficient block-level operations
+  WorkflowBlockReferencesV3:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "WorkflowBlockReferences-v3-${StageName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: workflow_id
+          AttributeType: S
+        - AttributeName: block_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workflow_id
+          KeyType: HASH
+        - AttributeName: block_id
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Purpose
+          Value: BlockReferences
+        - Key: Component
+          Value: StateManagement
+        - Key: Phase
+          Value: "1"
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # 🛡️ [v2.1] Agent Governance - Audit Log Table
   # ═══════════════════════════════════════════════════════════════════════════
   # Purpose: Governor 노드의 결정 기록 (위반 사항, _kernel 명령, Anomaly Score)
