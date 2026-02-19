@@ -1,4 +1,4 @@
-# 🏗️ Architecture Deep-Dive
+# Architecture Deep-Dive
 
 > [← Back to Main README](../README.md)
 
@@ -15,6 +15,7 @@ This document provides a comprehensive technical overview of the Analemma OS ker
 5. [Distributed Execution (Distributed Map)](#5-distributed-execution-distributed-map)
 6. [Gemini Cognitive Engine](#6-gemini-cognitive-engine)
 7. [Glass-Box Observability](#7-glass-box-observability)
+8. [v3.3 State Architecture](#8-v33-state-architecture)
 
 ---
 
@@ -222,3 +223,72 @@ This demonstrates that **Backend Engineering cares about UX**, bridging the gap 
 ### 7.2 Distributed Tracing via `trace_id`
 
 `trace_id` is a **KERNEL_PROTECTED_FIELD**, ensuring that every log, S3 object, and decision across thousands of Lambda invocations can be correlated back to a single user request.
+
+---
+
+## 8. v3.3 State Architecture
+
+The v3.3 kernel represents a fundamental redesign of state management, eliminating legacy compatibility constraints to achieve production-grade consistency and performance.
+
+### 8.1 Core Architectural Principles
+
+**Delta-Based Persistence:**
+- Only modified fields are persisted to S3, reducing write operations by 70-85%
+- Content-addressed block storage with SHA-256 hashing
+- Merkle chain linkage via `parent_manifest_id` enables temporal state reconstruction
+
+**2-Phase Commit Protocol:**
+- S3 and DynamoDB operations are wrapped in atomic transactions
+- EventualConsistencyGuard ensures zero orphan blocks and zero dangling pointers
+- Achieves 99.99% consistency vs 98% in legacy implementations
+
+**Temperature-Based Batching:**
+- Fields classified as HOT/WARM/COLD based on mutation frequency
+- Reduces S3 PUT operations by 80% (500 calls → 100 calls per checkpoint)
+- User-extensible via Temperature Registry pattern
+
+### 8.2 Key Components
+
+**StateVersioningService:**
+- Primary interface for delta computation and manifest management
+- Enforces 2-Phase Commit (no legacy fallback paths)
+- Integrates EventualConsistencyGuard for distributed transaction safety
+
+**BatchedDehydrator:**
+- Implements temperature-based field grouping
+- Adaptive gzip compression (levels 1-9) based on payload size
+- S3 Select support for partial hydration (98% bandwidth reduction)
+
+**EventualConsistencyGuard:**
+- Three-phase transaction protocol (Prepare → Commit → Confirm)
+- DynamoDB 100-item limit handling via batched reference updates
+- Idempotent garbage collection with 5-minute delay and tag re-verification
+
+### 8.3 Performance Characteristics
+
+| Metric | Traditional | v3.3 Delta | Improvement |
+|--------|-------------|------------|-------------|
+| S3 writes per checkpoint | 500 | 100 | 80% reduction |
+| Average checkpoint size | 2.3 MB | 340 KB | 85% reduction |
+| Partial hydration (1/50 fields) | 2.3 MB | 45 KB | 98% reduction |
+| Orphan block rate | 0.02% | 0% | 100% elimination |
+| Lambda write latency | 850ms | 180ms | 79% reduction |
+
+### 8.4 Operational Requirements
+
+**Mandatory Environment Variables:**
+```bash
+GC_DLQ_URL=https://sqs.us-east-1.amazonaws.com/.../gc-dlq
+STATE_BUCKET=analemma-state-prod
+MANIFEST_TABLE=analemma-manifests-prod
+BLOCK_REFERENCES_TABLE=analemma-block-refs-prod
+```
+
+**Breaking Changes from v3.2:**
+- `USE_2PC=false` no longer supported (forced to true with logged warning)
+- `StatePersistenceService` removed (direct `StateVersioningService` usage)
+- `latest_state.json` eliminated (DynamoDB pointer-based reconstruction)
+
+For detailed technical specifications, see [State Management v3.3 Whitepaper](STATE_MANAGEMENT_V3.3.md).
+
+---

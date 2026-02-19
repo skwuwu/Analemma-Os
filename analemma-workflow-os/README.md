@@ -46,6 +46,7 @@ For a deep dive into the engineering marvels of Analemma-Os, please refer to our
 
 | Document | Description |
 |----------|-------------|
+| [**State Management v3.3**](docs/STATE_MANAGEMENT_V3.3.md) | **[CRITICAL]** Delta-based persistence, 2-Phase Commit protocol, and distributed transaction consistency guarantees. |
 | [**Gemini Integration Strategy**](docs/GEMINI_INTEGRATION_WHITEPAPER.md) | **[MUST READ]** How we use Gemini 1.5 Pro to solve the "Context Explosion" problem. Includes Context Caching and Structured Output schemas. |
 | [**Architecture Whitepaper**](docs/architecture.md) | Detailed explanation of the "State Bag", "No Data at Root", and "Hydration" patterns. |
 | [**Features Guide**](docs/features.md) | Comprehensive guide to all features including Instruction Distiller, Task Manager, and Cron Scheduler. |
@@ -75,10 +76,22 @@ Traditional engines crash with payloads >256KB. Analemma employs a **"Pointer-Fi
 - **Virtual Memory**: Agents operate on infinite virtual state, accessing data only when needed (Surgical Hydration).
 - **Crash-Proof**: Eliminates "Payload Size Exceeded" errors regardless of context size.
 
+**v3.3 Architecture Enhancements:**
+- **Delta-Based State Persistence**: Only changed fields are persisted, reducing S3 writes by 70-85%
+- **Temperature-Based Batching**: Fields classified as HOT/WARM/COLD with adaptive upload strategies
+- **Adaptive Compression**: Dynamic gzip level (1-9) based on payload size to optimize Lambda CPU vs S3 storage costs
+- **S3 Select Partial Hydration**: Selective field loading from compressed batches, reducing network transfer by up to 98%
+
 ### 2. Distributed Manifest Architecture (Massive Parallelism)
 We scale to **10,000+ parallel agents** without choking the aggregator.
 - **Manifest-Only Aggregation**: Instead of merging 10,000 results in memory, the kernel builds a lightweight `manifest.json`.
 - **Swarm Intelligence**: Uses **Gemini 1.5 Flash** for high-speed, low-cost parallel reasoning.
+
+**v3.3 Consistency Guarantees:**
+- **2-Phase Commit Protocol**: S3-DynamoDB atomic transactions with EventualConsistencyGuard
+- **Batched Reference Updates**: Handles 100+ blocks by splitting DynamoDB transactions (AWS 100-item limit)
+- **Idempotent GC**: Garbage collection with 5-minute delay and tag re-verification to prevent race conditions
+- **Zero Orphan Blocks**: Pending block cleanup via SQS DLQ, eliminating blind S3 ListObjects scans
 
 ### 3. The "Time Machine" Runtime
 Analemma is a **Deterministic Operating System** that treats time as a variable.

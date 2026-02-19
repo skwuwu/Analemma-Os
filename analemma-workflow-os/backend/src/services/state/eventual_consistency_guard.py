@@ -161,55 +161,40 @@ class EventualConsistencyGuard:
         
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Phase 2: Commit (DynamoDB 원자적 트랜잭션)
+        # ⚠️ TransactWriteItems 최대 100 아이템 제한 고려
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         try:
-            transact_items = [
-                # 매니페스트 저장
-                {
-                    'Put': {
-                        'TableName': self.dynamodb_table,
-                        'Item': {
-                            'manifest_id': {'S': manifest_id},
-                            'version': {'N': str(version)},
-                            'workflow_id': {'S': workflow_id},
-                            'manifest_hash': {'S': manifest_hash},
-                            'config_hash': {'S': config_hash},
-                            'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
-                            'transaction_id': {'S': transaction_id},
-                            'metadata': {'M': {
-                                k: {'S': str(v)} for k, v in metadata.items()
-                            }},
-                            'created_at': {'S': datetime.utcnow().isoformat()},
-                            'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
-                        },
-                        'ConditionExpression': 'attribute_not_exists(manifest_id)'
-                    }
+            # Step 1: 블록 참조 카운트 배치 업데이트 (100개 초과 시 분할)
+            if len(block_uploads) > 0:
+                self._batch_update_block_references(workflow_id, block_uploads, transaction_id)
+            
+            # Step 2: 매니페스트 등록 (최종 원자적 트랜잭션)
+            manifest_item = {
+                'Put': {
+                    'TableName': self.dynamodb_table,
+                    'Item': {
+                        'manifest_id': {'S': manifest_id},
+                        'version': {'N': str(version)},
+                        'workflow_id': {'S': workflow_id},
+                        'manifest_hash': {'S': manifest_hash},
+                        'config_hash': {'S': config_hash},
+                        'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
+                        'transaction_id': {'S': transaction_id},
+                        'metadata': {'M': {
+                            k: {'S': str(v)} for k, v in metadata.items()
+                        }},
+                        'created_at': {'S': datetime.utcnow().isoformat()},
+                        'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
+                    },
+                    'ConditionExpression': 'attribute_not_exists(manifest_id)'
                 }
-            ]
+            }
             
-            # 블록 참조 카운트 증가
-            for block_upload in block_uploads:
-                transact_items.append({
-                    'Update': {
-                        'TableName': self.block_references_table,
-                        'Key': {
-                            'workflow_id': {'S': workflow_id},
-                            'block_id': {'S': block_upload['block_id']}
-                        },
-                        'UpdateExpression': 'ADD reference_count :inc SET last_referenced = :now',
-                        'ExpressionAttributeValues': {
-                            ':inc': {'N': '1'},
-                            ':now': {'S': datetime.utcnow().isoformat()}
-                        }
-                    }
-                })
-            
-            # 원자적 트랜잭션 실행
-            self.dynamodb_client.transact_write_items(TransactItems=transact_items)
+            self.dynamodb_client.transact_write_items(TransactItems=[manifest_item])
             
             logger.info(
                 f"Phase 2 Complete: Committed manifest {manifest_id} + "
-                f"{len(block_uploads)} block references"
+                f"{len(block_uploads)} block references (batched updates)"
             )
             
             transaction.status = "committed"
@@ -253,6 +238,55 @@ class EventualConsistencyGuard:
         
         return manifest_id
     
+    def _batch_update_block_references(
+        self,
+        workflow_id: str,
+        block_uploads: List[Dict[str, Any]],
+        transaction_id: str
+    ) -> None:
+        """
+        블록 참조 카운트 배치 업데이트 (100개 제한 고려)
+        
+        ⚠️ TransactWriteItems는 최대 100개 아이템만 처리 가능
+        → 99개씩 배치로 분할 (매니페스트 1개 + 참조 99개)
+        
+        Args:
+            workflow_id: 워크플로우 ID
+            block_uploads: 업로드된 블록 목록
+            transaction_id: 트랜잭션 ID
+        """
+        batch_size = 99  # 매니페스트 1개 + 참조 99개 = 100개
+        total_blocks = len(block_uploads)
+        
+        for i in range(0, total_blocks, batch_size):
+            batch = block_uploads[i:i+batch_size]
+            transact_items = []
+            
+            for block_upload in batch:
+                transact_items.append({
+                    'Update': {
+                        'TableName': self.block_references_table,
+                        'Key': {
+                            'workflow_id': {'S': workflow_id},
+                            'block_id': {'S': block_upload['block_id']}
+                        },
+                        'UpdateExpression': 'ADD reference_count :inc SET last_referenced = :now, transaction_id = :txn',
+                        'ExpressionAttributeValues': {
+                            ':inc': {'N': '1'},
+                            ':now': {'S': datetime.utcnow().isoformat()},
+                            ':txn': {'S': transaction_id}
+                        }
+                    }
+                })
+            
+            # 배치 실행
+            self.dynamodb_client.transact_write_items(TransactItems=transact_items)
+            
+            logger.info(
+                f"Updated block references: {len(batch)} blocks "
+                f"(batch {i//batch_size + 1}/{(total_blocks + batch_size - 1)//batch_size})"
+            )
+    
     def _rollback_s3_uploads(
         self,
         block_uploads: List[Dict[str, Any]],
@@ -290,6 +324,11 @@ class EventualConsistencyGuard:
         - Before: 5분마다 전체 S3 버킷 스캔 → 수백만 객체 시 비용/시간 폭증
         - After: SQS DLQ 기반 이벤트 드리븐 → 스캔 비용 $0
         
+        🛡️ Idempotent Guard 지침:
+        - GC Lambda는 삭제 전 반드시 S3 태그를 재확인
+        - status=committed이면 삭제하지 않고 조용히 종료
+        - 5분 지연 시간 동안 Phase 3 성공 가능성 대비
+        
         Args:
             blocks: 블록 목록
             transaction_id: 트랜잭션 ID
@@ -307,9 +346,10 @@ class EventualConsistencyGuard:
                         'bucket': block.get('bucket', self.bucket),
                         'reason': reason,
                         'scheduled_at': datetime.utcnow().isoformat(),
-                        'transaction_id': transaction_id
+                        'transaction_id': transaction_id,
+                        'idempotent_check': True  # GC Lambda가 태그 재확인 필수
                     }),
-                    'DelaySeconds': 300  # 5분 후 처리 (롤백 여유 시간)
+                    'DelaySeconds': 300  # 5분 후 처리 (Phase 3 완료 여유 시간)
                 }
                 for idx, block in enumerate(batch)
             ]
@@ -320,7 +360,7 @@ class EventualConsistencyGuard:
                     Entries=entries
                 )
                 logger.info(
-                    f"Scheduled {len(entries)} blocks for GC "
+                    f"Scheduled {len(entries)} blocks for GC with idempotent guard "
                     f"(reason: {reason}, transaction: {transaction_id})"
                 )
             except Exception as e:
