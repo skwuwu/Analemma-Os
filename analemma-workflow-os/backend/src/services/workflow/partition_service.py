@@ -65,6 +65,19 @@ class BranchTerminationError(Exception):
         super().__init__(f"Branch '{branch_id}' termination error: {message}")
 
 
+class AtomicGroupTimeoutError(Exception):
+    """Atomic Group의 예상 실행 시간이 Lambda 제한을 초과할 때 발생하는 예외"""
+    def __init__(self, group_id: str, estimated_duration: float, lambda_timeout: float):
+        self.group_id = group_id
+        self.estimated_duration = estimated_duration
+        self.lambda_timeout = lambda_timeout
+        super().__init__(
+            f"Atomic Group '{group_id}' estimated duration ({estimated_duration:.1f}s) "
+            f"exceeds safe limit ({lambda_timeout * 0.7:.1f}s = 70% of Lambda timeout {lambda_timeout}s). "
+            f"Consider splitting the group or reducing node execution times."
+        )
+
+
 def validate_dag(
     nodes: Dict[str, Any], 
     outgoing_edges: Dict[str, List[Dict[str, Any]]]
@@ -155,6 +168,251 @@ def _find_cycle_path(
     return ["unknown_cycle"]  # 폴백
 
 
+# ============================================================================
+# [Critical Fix #3] Atomic Group 타임아웃 검증
+# ============================================================================
+
+# Lambda 제한 (초)
+LAMBDA_TIMEOUT_SECONDS = int(os.environ.get("LAMBDA_TIMEOUT_SECONDS", "900"))  # 15분
+
+# 노드 타입별 평균 실행 시간 (초)
+NODE_EXECUTION_ESTIMATES = {
+    "llm_chat": 10.0,       # LLM 호출: 평균 10초
+    "aiModel": 10.0,        # AI 모델: 평균 10초
+    "api_call": 2.0,        # API 호출: 평균 2초
+    "db_query": 1.0,        # DB 쿼리: 평균 1초
+    "operator": 0.5,        # Operator: 평균 0.5초
+    "safe_operator": 0.5,   # Safe Operator: 평균 0.5초
+    "loop": 5.0,            # Loop: 평균 5초 (내부 노드 별도 계산)
+    "for_each": 8.0,        # For Each: 평균 8초 (병렬 처리)
+    "parallel_group": 5.0,  # Parallel Group: 평균 5초
+    "aggregator": 0.3,      # Aggregator: 평균 0.3초
+    "route_condition": 0.2, # Route Condition: 평균 0.2초
+    "default": 1.0          # 기타: 평균 1초
+}
+
+
+def estimate_node_duration(node: Dict[str, Any]) -> float:
+    """
+    노드의 예상 실행 시간 추정
+    
+    Args:
+        node: 노드 설정
+    
+    Returns:
+        예상 실행 시간 (초)
+    """
+    node_type = node.get("type", "default")
+    config = node.get("config", {})
+    
+    # 기본 실행 시간
+    base_duration = NODE_EXECUTION_ESTIMATES.get(node_type, NODE_EXECUTION_ESTIMATES["default"])
+    
+    # 타입별 보정
+    if node_type == "loop":
+        # Loop: max_iterations 고려
+        max_iterations = config.get("max_iterations", 5)
+        sub_nodes = config.get("nodes", [])
+        sub_duration = sum(estimate_node_duration(n) for n in sub_nodes)
+        return max_iterations * sub_duration
+    
+    elif node_type == "for_each":
+        # For Each: max_iterations 고려 (병렬 처리)
+        max_iterations = config.get("max_iterations", 20)
+        sub_workflow = config.get("sub_workflow", {})
+        sub_nodes = sub_workflow.get("nodes", [])
+        sub_duration = max(
+            (estimate_node_duration(n) for n in sub_nodes),
+            default=1.0
+        )
+        # 병렬 처리이므로 가장 긴 노드 시간만 고려
+        return sub_duration
+    
+    elif node_type in ("llm_chat", "aiModel"):
+        # LLM: max_tokens 기반 보정
+        max_tokens = config.get("max_tokens", 256)
+        # 토큰당 ~0.01초 추정 (GPT-4 기준)
+        token_penalty = max_tokens * 0.01
+        
+        # Extended Thinking 활성화 시 추가 시간
+        if config.get("enable_thinking", False):
+            thinking_budget = config.get("thinking_budget_tokens", 4096)
+            token_penalty += thinking_budget * 0.01
+        
+        return base_duration + token_penalty
+    
+    elif node_type == "api_call":
+        # API Call: timeout 설정 고려
+        timeout = config.get("timeout", 10)
+        return min(timeout, base_duration)
+    
+    return base_duration
+
+
+def validate_atomic_group_timeout(
+    group_id: str,
+    nodes: List[Dict[str, Any]],
+    lambda_timeout: float = LAMBDA_TIMEOUT_SECONDS
+) -> None:
+    """
+    Atomic Group의 예상 실행 시간 검증
+    
+    Args:
+        group_id: 그룹 ID
+        nodes: 그룹 내 노드 목록
+        lambda_timeout: Lambda 타임아웃 (초)
+    
+    Raises:
+        AtomicGroupTimeoutError: 예상 시간이 안전 제한(70%)을 초과하는 경우
+    """
+    # 예상 실행 시간 합산
+    total_duration = sum(estimate_node_duration(node) for node in nodes)
+    
+    # 안전 제한: Lambda 타임아웃의 70%
+    safe_limit = lambda_timeout * 0.7
+    
+    logger.info(
+        f"[ATOMIC_GROUP_VALIDATION] {group_id}: "
+        f"{len(nodes)} nodes, estimated {total_duration:.1f}s "
+        f"(limit: {safe_limit:.1f}s)"
+    )
+    
+    if total_duration > safe_limit:
+        logger.warning(
+            f"[ATOMIC_GROUP_TIMEOUT_RISK] {group_id} exceeds safe limit: "
+            f"{total_duration:.1f}s > {safe_limit:.1f}s"
+        )
+        raise AtomicGroupTimeoutError(group_id, total_duration, lambda_timeout)
+
+
+def extract_atomic_groups(workflow_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    워크플로우에서 Atomic Group 추출
+    
+    명시적 그룹:
+    - type="group", atomic=true
+    
+    암묵적 그룹:
+    - DB 트랜잭션 패턴 (BEGIN ... COMMIT)
+    - HTTP 세션 유지 패턴
+    
+    Args:
+        workflow_config: 워크플로우 설정
+    
+    Returns:
+        Atomic Group 목록
+    """
+    nodes = workflow_config.get("nodes", [])
+    edges = workflow_config.get("edges", [])
+    
+    atomic_groups = []
+    
+    # 1. 명시적 그룹 추출
+    for node in nodes:
+        if node.get("type") == "group" and node.get("data", {}).get("atomic"):
+            group_nodes = node.get("data", {}).get("nodes", [])
+            atomic_groups.append({
+                "group_id": node["id"],
+                "nodes": [n for n in nodes if n["id"] in group_nodes],
+                "is_explicit": True
+            })
+    
+    # 2. 암묵적 그룹 감지 (DB 트랜잭션 패턴)
+    implicit_groups = _detect_transaction_patterns(nodes, edges)
+    atomic_groups.extend(implicit_groups)
+    
+    logger.info(
+        f"[ATOMIC_GROUPS] Extracted {len(atomic_groups)} groups "
+        f"({sum(1 for g in atomic_groups if g['is_explicit'])} explicit, "
+        f"{sum(1 for g in atomic_groups if not g['is_explicit'])} implicit)"
+    )
+    
+    return atomic_groups
+
+
+def _detect_transaction_patterns(
+    nodes: List[Dict[str, Any]],
+    edges: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """
+    DB 트랜잭션 패턴 자동 감지
+    
+    패턴:
+    1. BEGIN TRANSACTION → INSERT/UPDATE/DELETE → COMMIT
+    2. START SESSION → API CALL → END SESSION
+    
+    Args:
+        nodes: 노드 목록
+        edges: 엣지 목록
+    
+    Returns:
+        암묵적 Atomic Group 목록
+    """
+    implicit_groups = []
+    node_map = {n["id"]: n for n in nodes}
+    
+    # 엣지 인접 리스트 구성
+    adjacency = {n["id"]: [] for n in nodes}
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source and target:
+            adjacency[source].append(target)
+    
+    # BEGIN → ... → COMMIT 패턴 감지
+    for node in nodes:
+        if node.get("type") == "db_query":
+            query = node.get("config", {}).get("query", "").strip().upper()
+            
+            # BEGIN TRANSACTION 감지
+            if "BEGIN" in query or "START TRANSACTION" in query:
+                # 연결된 노드 추적
+                group_nodes = []
+                visited = set()
+                queue = [node["id"]]
+                
+                while queue:
+                    current_id = queue.pop(0)
+                    if current_id in visited:
+                        continue
+                    visited.add(current_id)
+                    
+                    current_node = node_map.get(current_id)
+                    if not current_node:
+                        continue
+                    
+                    group_nodes.append(current_node)
+                    
+                    # COMMIT 발견 시 종료
+                    if current_node.get("type") == "db_query":
+                        current_query = current_node.get("config", {}).get("query", "").upper()
+                        if "COMMIT" in current_query:
+                            break
+                    
+                    # 다음 노드 추가
+                    for next_id in adjacency.get(current_id, []):
+                        if next_id not in visited:
+                            queue.append(next_id)
+                
+                # 그룹 등록 (COMMIT 발견 시만)
+                if len(group_nodes) > 1:
+                    last_node = group_nodes[-1]
+                    last_query = last_node.get("config", {}).get("query", "").upper()
+                    if "COMMIT" in last_query:
+                        implicit_groups.append({
+                            "group_id": f"tx_{node['id']}",
+                            "nodes": group_nodes,
+                            "is_explicit": False,
+                            "pattern": "db_transaction"
+                        })
+                        logger.info(
+                            f"[TRANSACTION_PATTERN] Detected DB transaction group: "
+                            f"{node['id']} → {last_node['id']} ({len(group_nodes)} nodes)"
+                        )
+    
+    return implicit_groups
+
+
 def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     고급 워크플로우 분할: HITP 엣지와 LLM 노드 기반으로 세그먼트를 생성합니다.
@@ -206,6 +464,25 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     is_dag, cycle_path = validate_dag(nodes, outgoing_edges)
     if not is_dag:
         raise CycleDetectedError(cycle_path or ["unknown"])
+    
+    # [Critical Fix #3] Atomic Group 타임아웃 검증
+    atomic_groups = extract_atomic_groups(config)
+    for group in atomic_groups:
+        try:
+            validate_atomic_group_timeout(
+                group_id=group["group_id"],
+                nodes=group["nodes"],
+                lambda_timeout=LAMBDA_TIMEOUT_SECONDS
+            )
+        except AtomicGroupTimeoutError as e:
+            # 경고만 기록하고 계속 진행 (사용자가 위험 감수 가능)
+            logger.warning(
+                f"[ATOMIC_GROUP_WARNING] {e.group_id}: {e.estimated_duration:.1f}s "
+                f"exceeds safe limit {e.lambda_timeout * 0.7:.1f}s. Consider optimizing."
+            )
+            # 엄격 모드에서는 예외 발생
+            if os.environ.get("STRICT_ATOMIC_GROUP_VALIDATION", "false").lower() == "true":
+                raise
     
     # [Critical Fix #2] 합류점 집합 - 이 노드들은 반드시 새 세그먼트 시작점이 됨
     # find_convergence_node로 찾은 모든 합류점을 미리 수집
@@ -347,11 +624,10 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
                         "source_node": source,
                         "target_node": target,
                         "edge_type": edge.get("type", "normal"),
-                        "condition": edge.get("condition"),
+                        # ❌ REMOVED: condition, router_func, mapping (라우팅 주권 일원화)
+                        # 이유: 모든 라우팅 결정은 노드가 수행 (route_condition, __next_node)
                         "is_loop_exit": edge_data.get("isLoopExit", False),
                         "is_back_edge": edge_data.get("isBackEdge", False),
-                        "router_func": edge.get("router_func"),
-                        "mapping": edge.get("mapping"),
                         "metadata": {
                             "label": edge.get("label"),
                             "style": edge.get("style"),
@@ -755,11 +1031,14 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
                                 seg["next_mode"] = "default"
                                 seg["default_next"] = p_exit_edges[0]["target_segment"]
                             else:
-                                seg["next_mode"] = "conditional"
-                                seg["branches"] = [
-                                    {"condition": e["edge"].get("condition", "default"), "next": e["target_segment"]}
-                                    for e in p_exit_edges
-                                ]
+                                # [v3.27 Fix] Edge.condition 제거로 인한 수정
+                                # parallel_group의 다중 exit edge도 동일하게 처리
+                                logger.warning(
+                                    f"[Partition] Parallel group segment {seg['id']} has {len(p_exit_edges)} "
+                                    f"exit edges. Using default routing to first exit."
+                                )
+                                seg["next_mode"] = "default"
+                                seg["default_next"] = p_exit_edges[0]["target_segment"]
                             continue
 
                 # Fallback / Error Handling
@@ -810,11 +1089,16 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
                 seg["next_mode"] = "default"
                 seg["default_next"] = exit_edges[0]["target_segment"]
             else:
-                seg["next_mode"] = "conditional"
-                seg["branches"] = [
-                    {"condition": e["edge"].get("condition", "default"), "next": e["target_segment"]}
-                    for e in exit_edges
-                ]
+                # [v3.27 Fix] Edge에서 condition 필드 제거됨 (라우팅 주권 일원화)
+                # 다중 exit edge는 route_condition 노드가 처리해야 함
+                # 세그먼트 레벨에서는 첫 번째 exit edge로 default routing
+                logger.warning(
+                    f"[Partition] Segment {seg['id']} has {len(exit_edges)} exit edges "
+                    f"but Edge.condition field is removed. Using default routing to first exit. "
+                    f"Consider using route_condition node for conditional branching."
+                )
+                seg["next_mode"] = "default"
+                seg["default_next"] = exit_edges[0]["target_segment"]
     
     process_links_recursive(segments)
     
@@ -915,6 +1199,22 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "error_type": "CycleDetectedError",
             "error_message": str(e),
             "cycle_path": e.cycle_path,
+            "total_segments": 1,  # 🛡️ [P0] ASL null 참조 방지
+            "partition_map": []
+        }
+    
+    except AtomicGroupTimeoutError as e:
+        logger.error(
+            f"Atomic Group '{e.group_id}' timeout risk: "
+            f"{e.estimated_duration:.1f}s > {e.lambda_timeout * 0.7:.1f}s (70% of {e.lambda_timeout}s)"
+        )
+        return {
+            "status": "error",
+            "error_type": "AtomicGroupTimeoutError",
+            "error_message": str(e),
+            "group_id": e.group_id,
+            "estimated_duration": e.estimated_duration,
+            "lambda_timeout": e.lambda_timeout,
             "total_segments": 1,  # 🛡️ [P0] ASL null 참조 방지
             "partition_map": []
         }

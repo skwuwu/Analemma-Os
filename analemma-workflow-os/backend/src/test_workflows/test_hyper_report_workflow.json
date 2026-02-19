@@ -263,8 +263,8 @@
     {"source": "category_dispatcher", "target": "saas_analyzer_with_failure"},
     {"source": "saas_analyzer_with_failure", "target": "foreach_article_analysis"},
     {"source": "foreach_article_analysis", "target": "low_confidence_filter"},
-    {"source": "low_confidence_filter", "target": "human_approval_request", "type": "hitp", "condition": "low_confidence"},
-    {"source": "low_confidence_filter", "target": "aggregate_report", "condition": "high_confidence"},
+    {"source": "low_confidence_filter", "target": "human_approval_request", "type": "hitp"},
+    {"source": "low_confidence_filter", "target": "aggregate_report"},
     {"source": "human_approval_request", "target": "aggregate_report"},
     {"source": "aggregate_report", "target": "user_correction_processing"},
     {"source": "user_correction_processing", "target": "cost_calculation"}

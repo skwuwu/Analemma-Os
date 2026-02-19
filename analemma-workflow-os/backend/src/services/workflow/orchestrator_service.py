@@ -37,15 +37,17 @@ class EdgeModel(BaseModel):
     source: constr(min_length=1, max_length=128)
     target: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64) = "edge"
-    # conditional_edge 지원 필드
-    router_func: Optional[str] = None
-    mapping: Optional[Dict[str, str]] = None
-    condition: Optional[str] = None
+    
+    # ❌ REMOVED: conditional_edge 필드 제거 (라우팅 주권 일원화)
+    # router_func, mapping, condition 제거
 
 
 class NodeModel(BaseModel):
     id: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64)
+    ring_level: int = Field(ge=0, le=3, default=2)  # ✅ [v3.28] Ring Level (0-3, Required)
+    alias: Optional[constr(min_length=1, max_length=128)] = None  # ✅ [v3.28] Node alias for routing
+    tags: Optional[List[constr(min_length=1, max_length=64)]] = None  # ✅ [v3.28] Functional tags
     label: Optional[constr(min_length=0, max_length=256)] = None
     action: Optional[constr(min_length=0, max_length=256)] = None
     hitp: Optional[bool] = None
@@ -83,6 +85,53 @@ class NodeModel(BaseModel):
             )
         
         return v
+    
+    @field_validator('ring_level', mode='before')
+    @classmethod
+    def auto_assign_and_validate_ring_level(cls, v, info):
+        """
+        ✅ [v3.28] Auto-assign ring_level based on node type if not provided.
+        Validate minimum ring level for each node type.
+        """
+        # Default Ring Levels by node type
+        DEFAULT_RING_LEVELS = {
+            # Ring 3: Untrusted (LLM)
+            "llm_chat": 3,
+            "vision": 3,
+            "dynamic_router": 3,
+            # Ring 2: User (State modification)
+            "operator": 2,
+            "operator_custom": 2,
+            "operator_official": 2,
+            "for_each": 2,
+            "nested_for_each": 2,
+            "parallel_group": 2,
+            "aggregator": 2,
+            "loop": 2,
+            "route_condition": 2,
+            "video_chunker": 2,
+            # Ring 1: System (Infrastructure)
+            "db_query": 1,
+            "api_call": 1,
+            "skill_executor": 1,
+            # Ring 2: Subgraph (default)
+            "subgraph": 2,
+        }
+        
+        node_type = info.data.get('type', '').lower()
+        
+        # Auto-assign if not provided
+        if v is None:
+            return DEFAULT_RING_LEVELS.get(node_type, 2)
+        
+        # Validate minimum ring level
+        min_level = DEFAULT_RING_LEVELS.get(node_type, 0)
+        if v < min_level:
+            raise ValueError(
+                f"Node type '{node_type}' requires ring_level >= {min_level}, got {v}"
+            )
+        
+        return v
 
 
 class WorkflowConfigModel(BaseModel):
@@ -100,6 +149,96 @@ class WorkflowConfigModel(BaseModel):
 class AsyncLLMRequiredException(Exception):
     """Exception raised when async LLM processing is required."""
     pass
+
+
+class CircularReferenceException(Exception):
+    """Exception raised when circular subgraph reference is detected."""
+    pass
+
+
+# -----------------------------------------------------------------------------
+# ✅ [v3.28] Subgraph Circular Reference Detection
+# -----------------------------------------------------------------------------
+
+def validate_subgraph_dependencies(
+    workflow_config: Dict[str, Any],
+    subgraph_loader: Optional[callable] = None
+) -> None:
+    """
+    🧬 [v3.28] Validate subgraph dependency tree to prevent circular references.
+    
+    Args:
+        workflow_config: Workflow configuration dictionary
+        subgraph_loader: Optional function to load subgraph manifest by ref
+                        Signature: (subgraph_ref: str) -> Dict[str, Any]
+    
+    Raises:
+        CircularReferenceException: If circular reference detected
+    """
+    visited = set()
+    path = []
+    
+    def _detect_cycle(node: Dict[str, Any], depth: int = 0) -> None:
+        """Recursively detect circular references in subgraph tree."""
+        if depth > 50:  # Maximum depth guard
+            raise CircularReferenceException(
+                f"Subgraph depth exceeded 50 levels. Possible infinite recursion. "
+                f"Path: {' -> '.join(path)}"
+            )
+        
+        node_id = node.get("id")
+        node_type = node.get("type")
+        
+        if node_type != "subgraph":
+            return
+        
+        subgraph_ref = node.get("subgraph_ref")
+        subgraph_inline = node.get("subgraph_inline")
+        
+        # Check for inline subgraph (deprecated)
+        if subgraph_inline:
+            logger.warning(
+                f"⚠️ [Deprecated] Node '{node_id}' uses subgraph_inline. "
+                f"This will be removed in v3.30. Use subgraph_ref instead."
+            )
+            # Validate inline subgraph recursively
+            inline_nodes = subgraph_inline.get("nodes", [])
+            for inline_node in inline_nodes:
+                _detect_cycle(inline_node, depth + 1)
+            return
+        
+        if not subgraph_ref:
+            raise ValueError(f"Node '{node_id}': subgraph type requires subgraph_ref")
+        
+        # Check for circular reference
+        if subgraph_ref in visited:
+            raise CircularReferenceException(
+                f"🚨 Circular subgraph reference detected: {' -> '.join(path)} -> {subgraph_ref}"
+            )
+        
+        visited.add(subgraph_ref)
+        path.append(subgraph_ref)
+        
+        # Load subgraph manifest and validate recursively
+        if subgraph_loader:
+            try:
+                subgraph_manifest = subgraph_loader(subgraph_ref)
+                subgraph_nodes = subgraph_manifest.get("nodes", [])
+                for subgraph_node in subgraph_nodes:
+                    _detect_cycle(subgraph_node, depth + 1)
+            except Exception as e:
+                logger.error(f"Failed to load subgraph '{subgraph_ref}': {e}")
+                # Continue validation without loading
+        
+        path.pop()
+        visited.remove(subgraph_ref)
+    
+    # Validate all nodes in the workflow
+    nodes = workflow_config.get("nodes", [])
+    for node in nodes:
+        visited.clear()
+        path.clear()
+        _detect_cycle(node)
 
 
 # -----------------------------------------------------------------------------
@@ -292,6 +431,115 @@ class WorkflowOrchestratorService:
         return {
             "nodes": segment.get("nodes", []),
             "edges": segment.get("edges", [])
+        }
+    
+    def extract_and_save_subgraphs(
+        self, 
+        config: Dict[str, Any], 
+        threshold: int = 100
+    ) -> Dict[str, Any]:
+        """
+        워크플로우에서 서브그래프를 자동 추출하여 참조로 변환
+        
+        규칙:
+        - loop/for_each 노드의 subgraph_inline이 threshold 노드 이상이면 추출
+        - parallel_group의 각 branch도 동일 규칙 적용
+        - 동일 내용 서브그래프는 중복 제거 (Content-Addressable Storage)
+        
+        Args:
+            config: 워크플로우 설정
+            threshold: 서브그래프 추출 임계값 (기본 100 노드)
+        
+        Returns:
+            수정된 워크플로우 설정 (subgraph_inline → subgraph_ref)
+        """
+        from src.services.state.subgraph_store import create_subgraph_store
+        
+        subgraph_store = create_subgraph_store()
+        modified_nodes = []
+        
+        nodes = config.get("nodes", [])
+        
+        for node in nodes:
+            modified_node = node.copy()
+            node_type = node.get("type")
+            node_id = node.get("id")
+            
+            # loop/for_each 노드의 subgraph_inline 검사
+            if node_type in ["loop", "for_each"]:
+                node_config = node.get("config", {})
+                
+                if "subgraph_inline" in node_config:
+                    subgraph_def = node_config["subgraph_inline"]
+                    node_count = len(subgraph_def.get("nodes", []))
+                    
+                    # 임계값 이상이면 서브그래프로 추출
+                    if node_count >= threshold:
+                        try:
+                            subgraph_ref = subgraph_store.save_subgraph(subgraph_def)
+                            
+                            # 참조로 변환
+                            modified_node["config"] = node_config.copy()
+                            modified_node["config"]["subgraph_ref"] = subgraph_ref
+                            del modified_node["config"]["subgraph_inline"]
+                            
+                            logger.info(
+                                f"[SUBGRAPH_EXTRACT] {node_id}: "
+                                f"{node_count} nodes → {subgraph_ref[:20]}..."
+                            )
+                        except Exception as e:
+                            logger.error(f"[SUBGRAPH_EXTRACT] Failed for {node_id}: {e}")
+            
+            # parallel_group의 branches 검사
+            elif node_type == "parallel_group":
+                branches = node.get("branches", [])
+                modified_branches = []
+                
+                for idx, branch in enumerate(branches):
+                    if not isinstance(branch, dict):
+                        modified_branches.append(branch)
+                        continue
+                    
+                    branch_nodes = branch.get("nodes", [])
+                    
+                    # 브랜치가 임계값 이상이면 서브그래프로 추출
+                    if len(branch_nodes) >= threshold:
+                        try:
+                            subgraph_def = {
+                                "nodes": branch_nodes,
+                                "edges": branch.get("edges", [])
+                            }
+                            subgraph_ref = subgraph_store.save_subgraph(subgraph_def)
+                            
+                            # 참조로 변환
+                            modified_branch = {
+                                k: v for k, v in branch.items() 
+                                if k not in ["nodes", "edges"]
+                            }
+                            modified_branch["subgraph_ref"] = subgraph_ref
+                            
+                            logger.info(
+                                f"[SUBGRAPH_EXTRACT] {node_id}.branch[{idx}]: "
+                                f"{len(branch_nodes)} nodes → {subgraph_ref[:20]}..."
+                            )
+                            
+                            modified_branches.append(modified_branch)
+                        except Exception as e:
+                            logger.error(
+                                f"[SUBGRAPH_EXTRACT] Failed for {node_id}.branch[{idx}]: {e}"
+                            )
+                            modified_branches.append(branch)
+                    else:
+                        modified_branches.append(branch)
+                
+                if modified_branches:
+                    modified_node["branches"] = modified_branches
+            
+            modified_nodes.append(modified_node)
+        
+        return {
+            **config,
+            "nodes": modified_nodes
         }
     
     # =========================================================================

@@ -797,23 +797,6 @@ class DynamicWorkflowBuilder:
                         self.graph.add_edge(source, target)
                         logger.debug(f"Added edge: {source} -> {target}")
 
-            elif edge_type == "conditional_edge":
-                # Conditional edge의 source는 반드시 현재 세그먼트에 있어야 함
-                if source not in valid_node_ids:
-                    continue
-                    
-                # Handle conditional edges with router functions
-                mapping = edge.get("mapping", {})
-                router_name = edge.get("router_func", "route_draft_quality")
-                router = NODE_REGISTRY.get(router_name)
-
-                if not router or not callable(router):
-                    raise ValueError(f"Undefined router for conditional_edge: {router_name}")
-
-                self.graph.add_conditional_edges(source, router, mapping)
-                logger.debug(f"Added conditional edge from {source} with router {router_name}")
-                logger.debug(f"Added conditional edge from {source} with router {router_name}")
-
             elif edge_type == "start":
                 if source:
                     self.graph.set_entry_point(source)
@@ -897,15 +880,6 @@ class DynamicWorkflowBuilder:
                     outgoing_count[source] = outgoing_count.get(source, 0) + 1
                 elif edge_type == "end" or target == "END":
                     has_end_edge.add(source)
-                # conditional_edge도 outgoing으로 카운트
-                if edge_type == "conditional_edge":
-                    mapping = edge.get("mapping", {})
-                    # 매핑의 타겟들 중 현재 세그먼트 내부 노드가 있으면 카운트
-                    for mapped_target in mapping.values():
-                        if mapped_target in node_ids or mapped_target == "END":
-                            outgoing_count[source] = outgoing_count.get(source, 0) + 1
-                            if mapped_target == "END":
-                                has_end_edge.add(source)
         
         # 리프 노드 식별 (나가는 엣지가 0개)
         leaf_nodes = [

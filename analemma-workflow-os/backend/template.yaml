@@ -5020,6 +5020,28 @@ Resources:
         }
 
 
+  # --- WorkflowSubgraphMetadata Table ---
+  # 서브그래프 레이지 로딩을 위한 메타데이터 테이블
+  # Content-Addressable Storage: 해시 포인터로 서브그래프 참조
+  WorkflowSubgraphMetadata:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${AWS::StackName}-WorkflowSubgraphMetadata"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: subgraph_ref
+          AttributeType: S
+      KeySchema:
+        - AttributeName: subgraph_ref
+          KeyType: HASH
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-WorkflowSubgraphMetadata"
+        - Key: Purpose
+          Value: "Content-Addressable Subgraph Storage Metadata"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
   # --- Critical Alarm: Infra Health Failed ---
   CriticalInfraAlarm:
     Type: AWS::CloudWatch::Alarm

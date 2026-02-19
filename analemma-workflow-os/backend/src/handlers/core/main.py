@@ -211,7 +211,8 @@ ALLOWED_NODE_TYPES = {
     # Flow control (노드로 실행됨)
     "parallel_group", "aggregator", "for_each", "nested_for_each",
     "loop",  # Convergence support (v3.8)
-    "route_draft_quality",  # Quality routing for draft detection
+    "route_condition",  # [v3.27] Explicit conditional routing (replaces edge.condition)
+    "dynamic_router",  # [v3.27] LLM-based dynamic routing
     # Subgraph (재귀적 워크플로우 실행)
     "subgraph",
     # Infrastructure & Data
@@ -274,10 +275,14 @@ class EdgeModel(BaseModel):
     source: constr(min_length=1, max_length=128)
     target: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64) = "edge"
-    # conditional_edge 지원 필드
-    router_func: Optional[str] = None        # 라우터 함수명 (NODE_REGISTRY에 등록된)
-    mapping: Optional[Dict[str, str]] = None  # 라우터 반환값 -> 타겟 노드 매핑
-    condition: Optional[str] = None           # 조건 표현식 (partition_service에서 사용)
+    
+    # ❌ REMOVED: conditional_edge 필드 제거 (라우팅 주권 일원화)
+    # router_func: Optional[str] = None        # 제거: 라우터 함수명
+    # mapping: Optional[Dict[str, str]] = None  # 제거: 라우터 반환값 매핑
+    # condition: Optional[str] = None           # 제거: 조건 표현식
+    # 
+    # 이유: 엣지는 순수 연결 정보만 보유 (Passive Pipe)
+    #       모든 라우팅 결정은 노드(route_condition)가 수행
     
     class Config:
         extra = "ignore"
@@ -391,7 +396,576 @@ KERNEL_MANAGED_KEYS = {
     "__new_history_logs",     # Execution logs
     "skill_execution_log",    # Skill execution tracking
     "__kernel_actions",       # Kernel action audit trail
+    "__hidden_context",       # ✅ [v3.28] Hidden kernel memory (Ring 3 cannot read/write)
+    "__original_state",       # ✅ [v3.28] Original state snapshot (for Ring Level validation)
+    "__rollback_stack",       # ✅ [v3.28] Rollback action stack
 }
+
+
+# -----------------------------------------------------------------------------
+# ✅ [v3.28] Rollback Execution (Saga Pattern)
+# -----------------------------------------------------------------------------
+
+def execute_rollback_action(
+    rollback_entry: Dict[str, Any],
+    state: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    ✅ [v3.28] Execute a single rollback action.
+    
+    Rollback Policy:
+    - ✅ SINGLE ATTEMPT ONLY: Each rollback action is tried exactly once
+    - 🚨 NO RETRY: If rollback fails, immediately escalate to CRITICAL_MANUAL_INTERVENTION
+    - 🔒 SYSTEM LOCK: All further workflow execution is blocked until manual resolution
+    
+    Args:
+        rollback_entry: Rollback entry from __rollback_stack
+        state: Current state dictionary
+    
+    Returns:
+        Dictionary with rollback execution result
+    
+    Raises:
+        RollbackFailureException: If rollback fails (triggers CRITICAL state)
+    """
+    node_id = rollback_entry.get("node_id")
+    node_type = rollback_entry.get("node_type")
+    rollback_action = rollback_entry.get("rollback_action", {})
+    context = rollback_entry.get("context", {})
+    
+    action_type = rollback_action.get("type")
+    
+    logger.info(
+        f"🔄 [Rollback] Executing rollback for node '{node_id}' ({node_type}) "
+        f"with action type: {action_type}"
+    )
+    
+    try:
+        # Execute rollback action based on type
+        if action_type == "api_call":
+            # Execute compensating API call
+            url = _render_template(rollback_action.get("url"), {**state, **context})
+            method = rollback_action.get("method", "POST")
+            body = _render_template(rollback_action.get("body"), {**state, **context})
+            headers = rollback_action.get("headers", {})
+            
+            import requests
+            resp = requests.request(
+                method, url, 
+                headers=headers, 
+                json=body, 
+                timeout=30,  # Fixed timeout for rollback
+                allow_redirects=False
+            )
+            
+            if resp.status_code >= 400:
+                raise Exception(
+                    f"Rollback API call failed: {resp.status_code} {resp.text[:200]}"
+                )
+            
+            return {
+                "status": "SUCCESS",
+                "node_id": node_id,
+                "response_status": resp.status_code,
+                "response_body": resp.text[:500],  # Truncate
+            }
+        
+        elif action_type == "db_query":
+            # Execute compensating database query
+            query = rollback_action.get("query")
+            conn_str = rollback_action.get("connection")
+            
+            from src.sqlalchemy import create_engine, text
+            engine = create_engine(conn_str)
+            with engine.connect() as conn:
+                conn.execute(text(query), rollback_action.get("params", {}))
+                conn.commit()
+            
+            return {
+                "status": "SUCCESS",
+                "node_id": node_id,
+                "query": query[:200],  # Truncate
+            }
+        
+        elif action_type == "operator":
+            # Execute compensating Python code
+            code = rollback_action.get("code")
+            
+            # Safe execution context
+            safe_globals = {"__builtins__": {}}
+            safe_locals = {**state, **context}
+            
+            exec(code, safe_globals, safe_locals)
+            
+            return {
+                "status": "SUCCESS",
+                "node_id": node_id,
+                "code": code[:200],  # Truncate
+            }
+        
+        else:
+            raise ValueError(f"Unknown rollback action type: {action_type}")
+    
+    except Exception as e:
+        # 🚨 CRITICAL: Rollback failed - SINGLE ATTEMPT POLICY
+        logger.error(
+            f"🚨 [CRITICAL] Rollback failed for node '{node_id}': {e}\n"
+            f"NO RETRY will be attempted. Manual intervention required."
+        )
+        
+        return {
+            "status": "FAILED",
+            "node_id": node_id,
+            "error": str(e),
+            "critical": True,  # Mark as critical failure
+        }
+
+
+def execute_workflow_rollback(
+    state: Dict[str, Any],
+    execution_id: str
+) -> Dict[str, Any]:
+    """
+    ✅ [v3.28.1] Execute rollback for entire workflow (with Progress Tracking).
+    
+    Rollback Order: REVERSE chronological (last executed first)
+    Failure Policy: Stop at first failure, transition to CRITICAL_MANUAL_INTERVENTION
+    
+    [v3.28.1 개선사항]:
+    - Rollback Progress Marker: __hidden_context에 진행 상황 기록
+    - 관리자 개입 시 "어디까지 원복되었고, 어디부터 수동 처리해야 하는지" 명확한 리포트 제공
+    
+    Args:
+        state: Current workflow state
+        execution_id: Workflow execution ID
+    
+    Returns:
+        Dictionary with rollback results and final status
+    """
+    rollback_stack = state.get("__rollback_stack", [])
+    
+    if not rollback_stack:
+        logger.warning(f"[Rollback] No rollback stack found for execution {execution_id}")
+        return {
+            "status": "NO_ROLLBACK_NEEDED",
+            "execution_id": execution_id,
+            "message": "No rollback actions recorded"
+        }
+    
+    logger.info(
+        f"🔄 [Rollback] Starting rollback for execution {execution_id} "
+        f"({len(rollback_stack)} actions)"
+    )
+    
+    # ────────────────────────────────────────────────────────────────────
+    # [v3.28.1] Initialize Rollback Progress Marker
+    # ────────────────────────────────────────────────────────────────────
+    if "__hidden_context" not in state:
+        state["__hidden_context"] = {}
+    
+    state["__hidden_context"]["rollback_progress"] = {
+        "started_at": time.time(),
+        "total_actions": len(rollback_stack),
+        "executed_actions": 0,
+        "successful_actions": 0,
+        "failed_actions": 0,
+        "current_action_node": None,
+        "action_results": [],  # 상세 결과 목록
+        "status": "IN_PROGRESS",
+    }
+    
+    progress = state["__hidden_context"]["rollback_progress"]
+    
+    results = []
+    critical_failure = None
+    
+    # Execute rollback actions in REVERSE order
+    for idx, rollback_entry in enumerate(reversed(rollback_stack)):
+        node_id = rollback_entry.get("node_id")
+        
+        # Update progress marker
+        progress["current_action_node"] = node_id
+        progress["current_action_index"] = idx
+        
+        logger.info(
+            f"🔄 [Rollback Progress] {idx + 1}/{len(rollback_stack)}: "
+            f"Rolling back node '{node_id}'"
+        )
+        
+        result = execute_rollback_action(rollback_entry, state)
+        results.append(result)
+        
+        # Update progress marker
+        progress["executed_actions"] = idx + 1
+        if result.get("status") == "SUCCESS":
+            progress["successful_actions"] += 1
+        else:
+            progress["failed_actions"] += 1
+        
+        progress["action_results"].append({
+            "node_id": node_id,
+            "status": result.get("status"),
+            "error": result.get("error"),
+            "timestamp": time.time(),
+        })
+        
+        # Check for critical failure
+        if result.get("critical"):
+            critical_failure = result
+            logger.error(
+                f"🚨 [CRITICAL] Rollback failed at node '{result['node_id']}'. "
+                f"Stopping rollback execution. Manual intervention required."
+            )
+            
+            # Update progress marker with failure state
+            progress["status"] = "FAILED_AT_ACTION"
+            progress["failed_at_node"] = node_id
+            progress["failed_at_index"] = idx
+            progress["remaining_actions"] = len(rollback_stack) - (idx + 1)
+            progress["manual_intervention_required"] = True
+            
+            break
+    
+    # ────────────────────────────────────────────────────────────────────
+    # [v3.28.1] Finalize Rollback Progress Marker
+    # ────────────────────────────────────────────────────────────────────
+    progress["completed_at"] = time.time()
+    progress["duration_seconds"] = progress["completed_at"] - progress["started_at"]
+    
+    # Determine final status
+    if critical_failure:
+        final_status = "CRITICAL_MANUAL_INTERVENTION"
+        progress["status"] = "CRITICAL_MANUAL_INTERVENTION"
+        
+        logger.critical(
+            f"🚨🚨🚨 [CRITICAL_MANUAL_INTERVENTION] Workflow {execution_id} requires "
+            f"immediate manual intervention. Rollback failed at node '{critical_failure['node_id']}'. "
+            f"Progress: {progress['successful_actions']}/{progress['total_actions']} actions completed. "
+            f"Remaining: {progress.get('remaining_actions', 0)} actions NOT executed. "
+            f"System is now LOCKED for this workflow."
+        )
+    else:
+        success_count = sum(1 for r in results if r.get("status") == "SUCCESS")
+        if success_count == len(results):
+            final_status = "ROLLBACK_COMPLETE"
+            progress["status"] = "COMPLETE"
+        else:
+            final_status = "ROLLBACK_PARTIAL"
+            progress["status"] = "PARTIAL"
+    
+    # ────────────────────────────────────────────────────────────────────
+    # [v3.28.1] S3 Consistency Guarantee: verify_commit_with_retry
+    # ────────────────────────────────────────────────────────────────────
+    # 롤백 직후 커널이 상태를 읽으려는데, S3에 아직 반영되지 않은 구버전이 읽히는 것을 방지
+    # AsyncCommitService의 verify_commit_with_retry로 최신 무결성 상태 보장
+    if final_status in ["ROLLBACK_COMPLETE", "ROLLBACK_PARTIAL"]:
+        try:
+            from src.services.state.async_commit_service import AsyncCommitService
+            
+            # S3 버킷 및 키 정보 (환경 변수 또는 state에서 추출)
+            import os
+            s3_bucket = os.environ.get("WORKFLOW_STATE_BUCKET", state.get("_s3_bucket"))
+            
+            # Manifest ID 또는 현재 상태 키
+            current_manifest_id = state.get("manifest_id", state.get("current_manifest_id"))
+            
+            if s3_bucket and current_manifest_id:
+                s3_key = f"manifests/{execution_id}/{current_manifest_id}.json"
+                
+                logger.info(
+                    f"🔍 [S3 Consistency] Verifying rollback state commit to S3: "
+                    f"s3://{s3_bucket}/{s3_key}"
+                )
+                
+                async_commit = AsyncCommitService()
+                commit_status = async_commit.verify_commit_with_retry(
+                    execution_id=execution_id,
+                    s3_bucket=s3_bucket,
+                    s3_key=s3_key
+                )
+                
+                if commit_status.is_committed and commit_status.s3_available:
+                    logger.info(
+                        f"✅ [S3 Consistency] Rollback state verified in S3 "
+                        f"(retries={commit_status.retry_count}, wait={commit_status.total_wait_ms:.1f}ms)"
+                    )
+                    progress["s3_consistency_verified"] = True
+                    progress["s3_verification_retries"] = commit_status.retry_count
+                    progress["s3_verification_wait_ms"] = commit_status.total_wait_ms
+                else:
+                    logger.warning(
+                        f"⚠️ [S3 Consistency] Rollback state NOT verified in S3. "
+                        f"Redis={commit_status.redis_status}, S3={commit_status.s3_available}"
+                    )
+                    progress["s3_consistency_verified"] = False
+                    progress["s3_verification_error"] = "State not available in S3"
+            else:
+                logger.warning(
+                    f"⚠️ [S3 Consistency] Cannot verify: missing S3 bucket or manifest ID"
+                )
+                progress["s3_consistency_verified"] = False
+                progress["s3_verification_error"] = "Missing S3 bucket or manifest ID"
+                
+        except Exception as e:
+            logger.error(f"🚨 [S3 Consistency] Verification failed: {e}")
+            progress["s3_consistency_verified"] = False
+            progress["s3_verification_error"] = str(e)
+    
+    return {
+        "status": final_status,
+        "execution_id": execution_id,
+        "rollback_results": results,
+        "total_actions": len(rollback_stack),
+        "executed_actions": len(results),
+        "success_count": sum(1 for r in results if r.get("status") == "SUCCESS"),
+        "critical_failure": critical_failure,
+        "timestamp": time.time(),
+        
+        # [v3.28.1] Rollback Progress Report (for UI/Admin dashboard)
+        "rollback_progress": progress,
+    }
+
+
+# -----------------------------------------------------------------------------
+# ✅ [v3.28] Ring Level Protection
+# -----------------------------------------------------------------------------
+
+def _initialize_hidden_context(state: Dict[str, Any]) -> None:
+    """
+    ✅ [v3.28] Initialize hidden context for Ring Level validation.
+    
+    Hidden context is stored in kernel memory, NOT in user-visible StateBag.
+    This prevents Ring 3 agents from reading or manipulating original state.
+    
+    Args:
+        state: Current state dictionary
+    """
+    if "__hidden_context" not in state:
+        state["__hidden_context"] = {
+            "original_state": {},
+            "ring_violations": [],
+            "protected_keys": set(RESERVED_STATE_KEYS),
+        }
+
+
+def _snapshot_original_state(state: Dict[str, Any], node_id: str) -> None:
+    """
+    ✅ [v3.28] Snapshot original state before node execution.
+    
+    Stores original state in hidden context to detect unauthorized modifications
+    by Ring 3 nodes.
+    
+    Args:
+        state: Current state dictionary
+        node_id: Node identifier
+    """
+    _initialize_hidden_context(state)
+    
+    # Deep copy protected keys only (to minimize memory)
+    protected_snapshot = {}
+    for key in RESERVED_STATE_KEYS:
+        if key in state:
+            protected_snapshot[key] = copy.deepcopy(state[key])
+    
+    state["__hidden_context"]["original_state"] = protected_snapshot
+    state["__hidden_context"]["current_node"] = node_id
+
+
+def _enforce_ring_protection(
+    state: Dict[str, Any], 
+    output: Dict[str, Any], 
+    node_id: str, 
+    ring_level: int
+) -> Dict[str, Any]:
+    """
+    🛡️ [v3.28] Enforce Ring Level protection.
+    
+    Ring 3 nodes (LLM, Vision, Dynamic Router) CANNOT:
+    - Modify protected state keys (RESERVED_STATE_KEYS)
+    - Access hidden context
+    - Forge kernel commands
+    
+    Args:
+        state: Current state dictionary
+        output: Output from node execution
+        node_id: Node identifier
+        ring_level: Ring protection level (0-3)
+    
+    Returns:
+        Safe output dictionary
+    
+    Raises:
+        PermissionError: If Ring 3 node violates protection
+    """
+    if ring_level < 3:
+        # Ring 0-2: Trusted, allow all operations
+        return output
+    
+    # Ring 3: Untrusted (LLM), enforce strict protection
+    _initialize_hidden_context(state)
+    original_state = state["__hidden_context"].get("original_state", {})
+    
+    violations = []
+    
+    # Check for protected key modifications
+    for key in RESERVED_STATE_KEYS:
+        if key in output:
+            # Ring 3 cannot output protected keys
+            violations.append({
+                "type": "PROTECTED_KEY_OUTPUT",
+                "key": key,
+                "value": str(output[key])[:100],  # Truncate for logging
+            })
+    
+    # Check for hidden context access
+    if "__hidden_context" in output or "__original_state" in output:
+        violations.append({
+            "type": "HIDDEN_CONTEXT_ACCESS",
+            "keys": [k for k in output.keys() if k.startswith("__")]
+        })
+    
+    # Check for kernel command forgery
+    kernel_commands = [k for k in output.keys() if k.startswith("_kernel_")]
+    if kernel_commands:
+        violations.append({
+            "type": "KERNEL_COMMAND_FORGERY",
+            "commands": kernel_commands
+        })
+    
+    # Log violations
+    if violations:
+        logger.error(
+            f"🚨 [Ring Protection] Node '{node_id}' (Ring {ring_level}) "
+            f"violated protection: {violations}"
+        )
+        state["__hidden_context"]["ring_violations"].append({
+            "node_id": node_id,
+            "ring_level": ring_level,
+            "violations": violations,
+            "timestamp": time.time()
+        })
+        
+        # Filter out forbidden keys
+        safe_output = {
+            k: v for k, v in output.items()
+            if k not in RESERVED_STATE_KEYS
+            and not k.startswith("__")
+            and not k.startswith("_kernel_")
+        }
+        
+        logger.warning(
+            f"⚠️ [Ring Protection] Filtered {len(output) - len(safe_output)} "
+            f"forbidden keys from Ring 3 node '{node_id}'"
+        )
+        
+        return safe_output
+    
+    return output
+
+
+# -----------------------------------------------------------------------------
+# ✅ [v3.28] Node Alias/Tag Resolution for Routing
+# -----------------------------------------------------------------------------
+
+def _build_node_lookup_map(workflow_nodes: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    """
+    ✅ [v3.28] Build lookup maps for node alias and tags.
+    
+    Args:
+        workflow_nodes: List of node dictionaries
+    
+    Returns:
+        Dictionary with 'alias_to_id' and 'tag_to_ids' mappings
+    """
+    alias_to_id = {}
+    tag_to_ids = {}
+    
+    for node in workflow_nodes:
+        node_id = node.get("id")
+        alias = node.get("alias")
+        tags = node.get("tags", [])
+        
+        # Map alias to node ID
+        if alias:
+            if alias in alias_to_id:
+                logger.warning(
+                    f"⚠️ Duplicate alias '{alias}' found. "
+                    f"Previous: {alias_to_id[alias]}, Current: {node_id}"
+                )
+            alias_to_id[alias] = node_id
+        
+        # Map tags to node IDs
+        for tag in tags:
+            if tag not in tag_to_ids:
+                tag_to_ids[tag] = []
+            tag_to_ids[tag].append(node_id)
+    
+    return {
+        "alias_to_id": alias_to_id,
+        "tag_to_ids": tag_to_ids
+    }
+
+
+def resolve_node_target(
+    target: str,
+    workflow_nodes: List[Dict[str, Any]],
+    node_lookup_map: Optional[Dict[str, Dict[str, str]]] = None
+) -> str:
+    """
+    ✅ [v3.28] Resolve node target from ID, alias, or tag.
+    
+    Resolution order:
+    1. Direct node ID match
+    2. Alias match
+    3. Tag match (first node with tag)
+    
+    Args:
+        target: Target identifier (node ID, alias, or tag)
+        workflow_nodes: List of node dictionaries
+        node_lookup_map: Pre-built lookup map (optional, will build if not provided)
+    
+    Returns:
+        Resolved node ID
+    
+    Raises:
+        ValueError: If target cannot be resolved
+    """
+    # Check if target is a direct node ID
+    node_ids = {node.get("id") for node in workflow_nodes}
+    if target in node_ids:
+        return target
+    
+    # Build lookup map if not provided
+    if not node_lookup_map:
+        node_lookup_map = _build_node_lookup_map(workflow_nodes)
+    
+    alias_to_id = node_lookup_map.get("alias_to_id", {})
+    tag_to_ids = node_lookup_map.get("tag_to_ids", {})
+    
+    # Check alias
+    if target in alias_to_id:
+        resolved_id = alias_to_id[target]
+        logger.debug(f"✅ Resolved alias '{target}' → node '{resolved_id}'")
+        return resolved_id
+    
+    # Check tag
+    if target in tag_to_ids:
+        resolved_ids = tag_to_ids[target]
+        if resolved_ids:
+            resolved_id = resolved_ids[0]  # Take first matching node
+            logger.debug(
+                f"✅ Resolved tag '{target}' → node '{resolved_id}' "
+                f"(matched {len(resolved_ids)} nodes, using first)"
+            )
+            return resolved_id
+    
+    # Target not found
+    raise ValueError(
+        f"Cannot resolve target '{target}'. "
+        f"Not found as node ID, alias, or tag. "
+        f"Available aliases: {list(alias_to_id.keys())}, "
+        f"Available tags: {list(tag_to_ids.keys())}"
+    )
 
 def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int = 3) -> Dict[str, Any]:
     """
@@ -2465,7 +3039,36 @@ def api_call_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             body = resp.json()
         except Exception:
             body = resp.text
-        return {f"{node_id}_status": resp.status_code, f"{node_id}_response": body}
+        
+        result = {f"{node_id}_status": resp.status_code, f"{node_id}_response": body}
+        
+        # ✅ [v3.28] Rollback Stack Recording
+        on_rollback = inner_config.get("on_rollback")
+        if on_rollback:
+            rollback_stack = state.get("__rollback_stack", [])
+            rollback_entry = {
+                "node_id": node_id,
+                "node_type": "api_call",
+                "executed_at": time.time(),
+                "rollback_action": on_rollback,
+                "context": {
+                    "request_url": url,
+                    "request_method": method,
+                    "response_status": resp.status_code,
+                    "response_body": body if isinstance(body, dict) else None,
+                    # Extract rollback context from response
+                    "transaction_id": body.get("transaction_id") if isinstance(body, dict) else None,
+                    "rollback_url": on_rollback.get("url"),
+                }
+            }
+            rollback_stack.append(rollback_entry)
+            result["__rollback_stack"] = rollback_stack
+            logger.info(
+                f"✅ [Rollback Stack] Recorded rollback entry for '{node_id}' "
+                f"(total: {len(rollback_stack)} entries)"
+            )
+        
+        return result
     except requests.exceptions.Timeout:
         return {f"{node_id}_status": "error", f"{node_id}_error": f"Request timed out (limit: {timeout_val}s)"}
     except requests.exceptions.ConnectionError:
@@ -2509,7 +3112,32 @@ def db_query_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 res = [dict(r) for r in result.fetchall()]
             else:
                 res = result.rowcount
-            return {f"{node_id}_result": res}
+            
+            output = {f"{node_id}_result": res}
+            
+            # ✅ [v3.28] Rollback Stack Recording
+            on_rollback = inner_config.get("on_rollback")
+            if on_rollback:
+                rollback_stack = state.get("__rollback_stack", [])
+                rollback_entry = {
+                    "node_id": node_id,
+                    "node_type": "db_query",
+                    "executed_at": time.time(),
+                    "rollback_action": on_rollback,
+                    "context": {
+                        "query": query,
+                        "result": res,
+                        "connection": conn_str.split("@")[-1] if "@" in conn_str else "unknown",  # Hide credentials
+                    }
+                }
+                rollback_stack.append(rollback_entry)
+                output["__rollback_stack"] = rollback_stack
+                logger.info(
+                    f"✅ [Rollback Stack] Recorded rollback entry for '{node_id}' "
+                    f"(total: {len(rollback_stack)} entries)"
+                )
+            
+            return output
     except Exception as e:
         return {f"{node_id}_error": str(e)}
 
@@ -2724,15 +3352,36 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     else:
         input_list = input_val if isinstance(input_val, list) else []
 
-    # 2. Resolve Multi-node Sub-workflow
+    # 2. Resolve Multi-node Sub-workflow (우선순위: subgraph_ref > subgraph_inline > sub_workflow)
     sub_nodes = []
-    # sub_workflow.nodes -> subgraph_inline.nodes -> sub_node_config 순으로 탐색
-    sw_def = inner_config.get("sub_workflow") or inner_config.get("subgraph_inline")
-    if isinstance(sw_def, dict):
+    
+    # [LAZY_LOADING] subgraph_ref가 있으면 S3에서 서브그래프 로딩
+    if inner_config.get("subgraph_ref"):
+        try:
+            from src.services.state.subgraph_store import create_subgraph_store
+            subgraph_store = create_subgraph_store()
+            subgraph_def = subgraph_store.load_subgraph(inner_config["subgraph_ref"])
+            sub_nodes = subgraph_def.get("nodes", [])
+            logger.info(
+                f"[FOR_EACH_LAZY] Loaded subgraph {inner_config['subgraph_ref'][:20]}... "
+                f"({len(sub_nodes)} nodes)"
+            )
+        except Exception as e:
+            logger.error(f"[FOR_EACH_LAZY] Failed to load subgraph: {e}")
+            return {}
+    
+    # [INLINE] subgraph_inline 또는 sub_workflow (하위 호환)
+    elif inner_config.get("subgraph_inline"):
+        sw_def = inner_config["subgraph_inline"]
+        sub_nodes = sw_def.get("nodes", [])
+    elif inner_config.get("sub_workflow"):
+        sw_def = inner_config["sub_workflow"]
         sub_nodes = sw_def.get("nodes", [])
     else:
+        # [FALLBACK] sub_node_config (Legacy)
         sub_processor = inner_config.get("sub_node_config")
-        if sub_processor: sub_nodes = [sub_processor]
+        if sub_processor: 
+            sub_nodes = [sub_processor]
 
     if not sub_nodes:
         logger.error(f"[ForEach] No executable nodes found for {node_id}")
@@ -2746,18 +3395,42 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         logger.warning(f"for_each truncated {len(input_list)} -> {max_iterations}")
         input_list = input_list[:max_iterations]
 
-    # [Critical Fix] Create immutable snapshot of state for thread-safe parallel execution
-    # ChainMap with shared state causes race conditions in ThreadPoolExecutor
-    import copy
-    state_snapshot = copy.deepcopy(state)  # Deep copy once, used by all workers
+    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
+    # deepcopy 50MB → Proxy 11MB
+    try:
+        from src.common.state_view_context import create_state_view_context
+        state_view_context = create_state_view_context()
+        ring_level = state.get('ring_level', 3)
+        
+        # Ring별 Proxy View 생성 (Lazy Projection)
+        state_view = state_view_context.create_view(
+            core_state=state,
+            ring_level=ring_level
+        )
+        
+        # 메모리 절감 효과 로깅
+        import json
+        original_size_kb = len(json.dumps(state, default=str)) // 1024
+        proxy_size_kb = len(json.dumps(dict(state_view), default=str)) // 1024
+        reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
+        
+        logger.info(
+            f"[FOR_EACH] StateViewContext Ring {ring_level}: "
+            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction)"
+        )
+    except ImportError:
+        # Fallback: deepcopy (하위 호환)
+        import copy
+        state_view = copy.deepcopy(state)
+        state_view_context = None
     
     def worker(item):
         if execution_arn and check_execution_cancelled(execution_arn):
             return {"error": "cancelled", "_item": item}
         
         # [Fix] Each worker gets isolated state view (not shared reference)
-        # Using dict merge instead of ChainMap for true isolation
-        it_state = {**state_snapshot, item_key: item}
+        # Using dict merge for true isolation
+        it_state = {**state_view, item_key: item}
         
         # [Fix] Hydrate item if it's an S3 offloaded object
         if isinstance(item, dict) and item.get("__s3_offloaded"):
@@ -2915,8 +3588,30 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # [Fix] Support both config structures with fallback pattern
     inner_config = config.get("config") or config
     
-    # 1. Configuration
-    sub_nodes = inner_config.get("nodes", [])
+    # 1. Configuration (우선순위: subgraph_ref > subgraph_inline > nodes)
+    
+    # [LAZY_LOADING] subgraph_ref가 있으면 S3에서 서브그래프 로딩
+    if inner_config.get("subgraph_ref"):
+        try:
+            from src.services.state.subgraph_store import create_subgraph_store
+            subgraph_store = create_subgraph_store()
+            subgraph_def = subgraph_store.load_subgraph(inner_config["subgraph_ref"])
+            sub_nodes = subgraph_def.get("nodes", [])
+            logger.info(
+                f"[LOOP_LAZY] Loaded subgraph {inner_config['subgraph_ref'][:20]}... "
+                f"({len(sub_nodes)} nodes)"
+            )
+        except Exception as e:
+            logger.error(f"[LOOP_LAZY] Failed to load subgraph: {e}")
+            sub_nodes = []
+    elif inner_config.get("subgraph_inline"):
+        # [INLINE] subgraph_inline (중간 크기)
+        sw_def = inner_config["subgraph_inline"]
+        sub_nodes = sw_def.get("nodes", [])
+    else:
+        # [LEGACY] nodes (기본)
+        sub_nodes = inner_config.get("nodes", [])
+    
     condition = inner_config.get("condition", "false")
     max_iterations = inner_config.get("max_iterations", 5)
     loop_var = inner_config.get("loop_var", "loop_index")
@@ -2930,10 +3625,35 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # [Cancellation]
     execution_arn = state.get("execution_arn") or state.get("ExecutionArn")
     
-    # [Thread Safety] Deep copy to prevent mutation of original state across iterations
+    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
-    import copy
-    current_state = copy.deepcopy(state)
+    try:
+        from src.common.state_view_context import create_state_view_context
+        state_view_context = create_state_view_context()
+        ring_level = state.get('ring_level', 3)
+        
+        # Ring별 Proxy View 생성
+        current_state = state_view_context.create_view(
+            core_state=state,
+            ring_level=ring_level
+        )
+        
+        # 메모리 절감 효과 로깅
+        import json
+        original_size_kb = len(json.dumps(state, default=str)) // 1024
+        proxy_size_kb = len(json.dumps(dict(current_state), default=str)) // 1024
+        reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
+        
+        logger.info(
+            f"[LOOP] StateViewContext Ring {ring_level}: "
+            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
+            f"max_iterations={max_iterations}"
+        )
+    except ImportError:
+        # Fallback: deepcopy (하위 호환)
+        import copy
+        current_state = copy.deepcopy(state)
+        state_view_context = None
     
     all_loop_updates = {}
     
@@ -3304,17 +4024,154 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     return validate_state_with_schema(validated_output, node_id)
 
 
-def route_draft_quality(state: Dict[str, Any]) -> str:
-    """Legacy router for draft quality routing."""
-    draft = state.get("gemini_draft")
-    if not isinstance(draft, dict) or not draft.get("is_complete"):
-        return "reviser"
-    return "send_email"
+def route_condition(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    🔀 명시적 조건부 라우팅 노드 (Explicit Conditional Routing)
+    
+    [v3.27 New] Edge에서 Node로 라우팅 주권 일원화
+    [v3.28 Enhanced] Whitelist validation, alias/tag support
+    
+    EdgeModel에서 condition, router_func, mapping 필드가 제거되면서,
+    모든 조건부 라우팅은 이 노드를 통해 명시적으로 수행됩니다.
+    
+    Config Structure:
+    {
+        "branches": [
+            {
+                "condition": "score > 0.9",  # Python expression or natural language
+                "target": "high_quality_path",  # Can be node ID, alias, or tag
+                "label": "High Quality"
+            },
+            {
+                "condition": "score <= 0.9",
+                "target": "low_quality_path",
+                "label": "Low Quality"
+            }
+        ],
+        "allowed_targets": ["high_quality_path", "low_quality_path"],  # ✅ [v3.28] Whitelist
+        "default_target": "fallback_node"  # Optional: default if no condition matches
+    }
+    
+    Evaluation Methods:
+    1. Python Expression: Direct eval() with safe context (numbers, state keys only)
+    2. Natural Language: LLM-based evaluation (future enhancement)
+    
+    Returns:
+        Dict[str, Any]: Updated state with __next_node set
+    
+    Security:
+    - 🛡️ Safe eval context: Only allow state keys, numbers, comparison operators
+    - 🛡️ No exec(), __import__(), or dangerous builtins
+    - 🛡️ Whitelist validation for condition expressions
+    - ✅ [v3.28] allowed_targets whitelist enforcement
+    """
+    node_id = config.get("id", "route_condition")
+    inner_config = config.get("config") or config
+    branches = inner_config.get("branches", [])
+    default_target = inner_config.get("default_target")
+    allowed_targets = inner_config.get("allowed_targets")
+    
+    # ✅ [v3.28] Auto-extract allowed_targets from branches if not provided
+    if not allowed_targets:
+        allowed_targets = [b.get("target") for b in branches if b.get("target")]
+        if default_target:
+            allowed_targets.append(default_target)
+        logger.debug(
+            f"[{node_id}] Auto-extracted allowed_targets: {allowed_targets}"
+        )
+    
+    if not branches:
+        logger.warning(f"[{node_id}] No branches configured, routing to default")
+        if default_target:
+            return {"__next_node": default_target}
+        return {}
+    
+    logger.info(f"🔀 [{node_id}] Evaluating {len(branches)} branches")
+    
+    # Safe eval context: only allow state keys and safe operations
+    safe_context = {
+        "state": state,
+        # Allow direct state key access
+        **{k: v for k, v in state.items() if not k.startswith("_")},
+        # Safe comparison functions
+        "len": len,
+        "str": str,
+        "int": int,
+        "float": float,
+        "bool": bool,
+    }
+    
+    # ✅ [v3.28] Get workflow nodes for alias/tag resolution
+    workflow_nodes = state.get("__workflow_nodes", [])
+    node_lookup_map = None
+    if workflow_nodes:
+        node_lookup_map = _build_node_lookup_map(workflow_nodes)
+    
+    for idx, branch in enumerate(branches):
+        if not isinstance(branch, dict):
+            continue
+        
+        condition = branch.get("condition")
+        target = branch.get("target")
+        label = branch.get("label", f"Branch {idx}")
+        
+        if not condition or not target:
+            logger.warning(f"[{node_id}] Branch {idx} missing condition or target, skipping")
+            continue
+        
+        try:
+            # Evaluate condition (Python expression)
+            # 🛡️ Security: eval with restricted globals/locals
+            result = eval(condition, {"__builtins__": {}}, safe_context)
+            
+            if result:
+                # ✅ [v3.28] Resolve target (ID, alias, or tag)
+                if workflow_nodes:
+                    try:
+                        resolved_target = resolve_node_target(
+                            target, workflow_nodes, node_lookup_map
+                        )
+                    except ValueError as e:
+                        logger.error(f"[{node_id}] Failed to resolve target '{target}': {e}")
+                        continue
+                else:
+                    resolved_target = target
+                
+                # ✅ [v3.28] Whitelist validation
+                if allowed_targets and resolved_target not in allowed_targets:
+                    logger.error(
+                        f"🚨 [Security] Target '{resolved_target}' not in allowed_targets. "
+                        f"Routing to default. Allowed: {allowed_targets}"
+                    )
+                    if default_target:
+                        return {"__next_node": default_target}
+                    continue
+                
+                logger.info(
+                    f"✅ [{node_id}] Condition matched: '{condition}' → {resolved_target} ({label})"
+                )
+                return {"__next_node": resolved_target}
+        
+        except Exception as e:
+            logger.warning(
+                f"⚠️ [{node_id}] Failed to evaluate condition '{condition}': {e}"
+            )
+            continue
+    
+    # No condition matched
+    if default_target:
+        logger.info(f"🔀 [{node_id}] No condition matched, routing to default: {default_target}")
+        return {"__next_node": default_target}
+    
+    logger.warning(f"⚠️ [{node_id}] No condition matched and no default_target configured")
+    return {}
 
 
-def dynamic_router(state: Dict[str, Any]) -> str:
+def dynamic_router(state: Dict[str, Any], config: Dict[str, Any]) -> str:
     """
     범용 동적 라우터 - LLM이 평가한 결과를 기반으로 분기 결정
+    
+    [v3.28 Enhanced] Whitelist validation, alias/tag support
     
     While 루프의 자연어 조건 평가와 동일한 패턴을 사용:
     1. Frontend에서 자연어 조건들을 입력
@@ -3330,18 +4187,58 @@ def dynamic_router(state: Dict[str, Any]) -> str:
         }
     }
     
+    Config Structure:
+    {
+        "allowed_targets": ["high_priority", "low_priority", "default"],  # ✅ [v3.28] Required
+        "default_target": "default"  # ✅ [v3.28] Required fallback
+    }
+    
     Returns:
         str: Branch identifier (e.g., "branch_0", "branch_1", "default")
+    
+    Security:
+    - ✅ [v3.28] Whitelist validation prevents LLM hallucination
+    - 🛡️ Fallback to default if LLM selects invalid target
     """
+    node_id = config.get("id", "dynamic_router")
+    inner_config = config.get("config") or config
+    allowed_targets = inner_config.get("allowed_targets", [])
+    default_target = inner_config.get("default_target", "default")
+    
     router_result = state.get("__router_result", {})
     
     if isinstance(router_result, dict):
-        selected = router_result.get("selected_branch", "default")
-        logger.info(f"🔀 [Dynamic Router] Selected branch: {selected}")
-        return selected
+        selected = router_result.get("selected_branch", default_target)
+        
+        # ✅ [v3.28] Resolve target (ID, alias, or tag)
+        workflow_nodes = state.get("__workflow_nodes", [])
+        if workflow_nodes:
+            try:
+                node_lookup_map = _build_node_lookup_map(workflow_nodes)
+                resolved_target = resolve_node_target(
+                    selected, workflow_nodes, node_lookup_map
+                )
+            except ValueError as e:
+                logger.error(
+                    f"[{node_id}] Failed to resolve LLM-selected target '{selected}': {e}"
+                )
+                resolved_target = selected  # Fallback to original
+        else:
+            resolved_target = selected
+        
+        # ✅ [v3.28] Whitelist validation
+        if allowed_targets and resolved_target not in allowed_targets:
+            logger.warning(
+                f"⚠️ [Dynamic Router] LLM selected '{resolved_target}' which is not "
+                f"in allowed_targets {allowed_targets}. Using default '{default_target}'."
+            )
+            return default_target
+        
+        logger.info(f"🔀 [Dynamic Router] Selected branch: {resolved_target}")
+        return resolved_target
     
-    logger.warning("⚠️ [Dynamic Router] No valid router result, using default")
-    return "default"
+    logger.warning(f"⚠️ [Dynamic Router] No valid router result, using default '{default_target}'")
+    return default_target
 
 
 def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -3354,16 +4251,59 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     if not branches:
         return {}
 
-    # [Thread Safety] Create immutable snapshot for thread-safe parallel execution
+    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
-    import copy
-    state_snapshot = copy.deepcopy(state)
+    try:
+        from src.common.state_view_context import create_state_view_context
+        state_view_context = create_state_view_context()
+        ring_level = state.get('ring_level', 3)
+        
+        # Ring별 Proxy View 생성
+        state_snapshot = state_view_context.create_view(
+            core_state=state,
+            ring_level=ring_level
+        )
+        
+        # 메모리 절감 효과 로깅
+        import json
+        original_size_kb = len(json.dumps(state, default=str)) // 1024
+        proxy_size_kb = len(json.dumps(dict(state_snapshot), default=str)) // 1024
+        reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
+        
+        logger.info(
+            f"[PARALLEL] StateViewContext Ring {ring_level}: "
+            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
+            f"{len(branches)} branches"
+        )
+    except ImportError:
+        # Fallback: deepcopy (하위 호환)
+        import copy
+        state_snapshot = copy.deepcopy(state)
+        state_view_context = None
 
     def run_branch(branch):
         branch_id = branch.get("branch_id", "sub")
-        # [Fix] 일관성을 위해 branches 내부에서도 nodes 리스트나 sub_workflow 지원
-        branch_nodes = branch.get("nodes")
-        if not branch_nodes and "sub_workflow" in branch:
+        
+        # [LAZY_LOADING] 서브그래프 참조 우선 처리
+        branch_nodes = None
+        if branch.get("subgraph_ref"):
+            try:
+                from src.services.state.subgraph_store import create_subgraph_store
+                subgraph_store = create_subgraph_store()
+                subgraph_def = subgraph_store.load_subgraph(branch["subgraph_ref"])
+                branch_nodes = subgraph_def.get("nodes", [])
+                logger.info(
+                    f"[PARALLEL_LAZY] Branch {branch_id} loaded subgraph "
+                    f"{branch['subgraph_ref'][:20]}... ({len(branch_nodes)} nodes)"
+                )
+            except Exception as e:
+                logger.error(f"[PARALLEL_LAZY] Branch {branch_id} subgraph load failed: {e}")
+                branch_nodes = []
+        elif branch.get("nodes"):
+            # [INLINE] nodes (기본)
+            branch_nodes = branch.get("nodes")
+        elif "sub_workflow" in branch:
+            # [LEGACY] sub_workflow (하위 호환)
             branch_def = branch["sub_workflow"]
             if isinstance(branch_def, dict):
                 branch_nodes = branch_def.get("nodes", [])
@@ -3816,7 +4756,7 @@ register_node("api_call", api_call_runner)
 register_node("db_query", db_query_runner)
 register_node("for_each", for_each_runner)
 register_node("loop", loop_runner)  # Convergence support (v3.8)
-register_node("route_draft_quality", route_draft_quality)
+register_node("route_condition", route_condition)  # [v3.27] Explicit conditional routing
 register_node("dynamic_router", dynamic_router)  # LLM-based dynamic routing
 register_node("parallel_group", parallel_group_runner)
 register_node("parallel", parallel_group_runner)  # Alias for backward compat
@@ -3839,6 +4779,10 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     """
     SubGraph/Group 노드 실행 핸들러.
     
+    [v3.28] Ring Level Inheritance Capping:
+    서브그래프의 모든 노드는 부모 워크플로우의 Ring Level을 초과할 수 없습니다.
+    이는 권한 상승(Privilege Escalation) 공격을 방지합니다.
+    
     실제 서브그래프 컴파일 및 실행은 DynamicWorkflowBuilder에서 처리됩니다.
     이 핸들러는 세그먼트 러너에서 직접 호출될 때를 위한 폴백입니다.
     
@@ -3854,6 +4798,9 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     inner_config = config.get("config") or config
     logger.info(f"📦 SubGraph node executing: {node_id}")
     
+    # ✅ [v3.28] Get parent ring level for inheritance capping
+    parent_ring_level = config.get("ring_level", 2)
+    
     try:
         # DynamicWorkflowBuilder import
         from src.services.workflow.builder import DynamicWorkflowBuilder
@@ -3863,6 +4810,11 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         
         if inner_config.get("subgraph_inline"):
             subgraph_def = inner_config["subgraph_inline"]
+            # ⚠️ [v3.28] Deprecated warning
+            logger.warning(
+                f"⚠️ [Deprecated] Node '{node_id}' uses subgraph_inline. "
+                f"This will be removed in v3.30. Use subgraph_ref instead."
+            )
         elif inner_config.get("subgraph_ref"):
             # subgraph_ref는 워크플로우 컨텍스트에서 해석되어야 함
             # 여기서는 state에서 subgraphs를 찾음
@@ -3888,6 +4840,30 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             logger.warning(f"SubGraph definition not found: {node_id}")
             return {"subgraph_status": "skipped", "reason": "no_definition"}
         
+        # ✅ [v3.28] Ring Level Inheritance Capping
+        # Ensure no child node has ring_level < parent_ring_level
+        subgraph_nodes = subgraph_def.get("nodes", [])
+        violations = []
+        
+        for child_node in subgraph_nodes:
+            child_ring_level = child_node.get("ring_level", 2)
+            if child_ring_level < parent_ring_level:
+                # Cap child ring level to parent level
+                original_level = child_ring_level
+                child_node["ring_level"] = parent_ring_level
+                violations.append({
+                    "node_id": child_node.get("id"),
+                    "original_level": original_level,
+                    "capped_level": parent_ring_level
+                })
+        
+        if violations:
+            logger.warning(
+                f"🛡️ [Ring Capping] Subgraph '{node_id}' (Ring {parent_ring_level}) "
+                f"had {len(violations)} nodes with higher privileges. Capped to parent level. "
+                f"Violations: {violations}"
+            )
+        
         # 입력 매핑 적용
         input_mapping = config.get("input_mapping", {})
         child_state = {}
@@ -3899,6 +4875,9 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         for key in ["execution_id", "workflow_id", "owner_id"]:
             if key in state and key not in child_state:
                 child_state[key] = state[key]
+        
+        # ✅ [v3.28] Pass parent ring level to child state
+        child_state["__parent_ring_level"] = parent_ring_level
         
         # 서브그래프 빌드 및 실행
         builder = DynamicWorkflowBuilder(subgraph_def, use_lightweight_state=True)

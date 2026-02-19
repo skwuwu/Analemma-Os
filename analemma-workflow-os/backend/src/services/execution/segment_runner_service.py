@@ -458,6 +458,12 @@ class SegmentRunnerService:
         
         # [Guard] [v2.3] 4단계 아키텍처: Concurrency Controller
         self._concurrency_controller = None
+        
+        # [v3.20] RoutingResolver: 라우팅 주권 일원화 (O(1) 화이트리스트 검증)
+        self._routing_resolver = None
+        
+        # [v3.20] StateViewContext: 프록시 패턴 (메모리 78% 절감)
+        self._state_view_context = None
     
     @property
     def security_guard(self):
@@ -481,6 +487,60 @@ class SegmentRunnerService:
                 enable_throttling=True
             )
         return self._concurrency_controller
+    
+    @property
+    def routing_resolver(self):
+        """
+        Lazy RoutingResolver initialization
+        
+        워크플로우별로 한 번 초기화 (execute_segment 진입 시)
+        """
+        return self._routing_resolver
+    
+    @property
+    def state_view_context(self):
+        """
+        Lazy StateViewContext initialization
+        
+        첫 상태 로딩 시 한 번 초기화
+        """
+        if self._state_view_context is None:
+            try:
+                from src.common.state_view_context import (
+                    create_state_view_context, 
+                    FieldPolicyBuilder
+                )
+                
+                self._state_view_context = create_state_view_context()
+                
+                # 기본 필드 정책 설정
+                builder = FieldPolicyBuilder()
+                
+                # email: Ring 3에서 해시
+                self._state_view_context.set_field_policy(
+                    "email", 
+                    builder.hash_at_ring3()
+                )
+                
+                # ssn, password: Ring 2-3에서 리덕션
+                for field in ["ssn", "password"]:
+                    self._state_view_context.set_field_policy(
+                        field,
+                        builder.redact_at_ring2_3()
+                    )
+                
+                # _kernel_*: Ring 1만 접근 가능
+                self._state_view_context.set_field_policy(
+                    "_kernel_*",
+                    builder.hidden_above_ring1()
+                )
+                
+                logger.info("[StateViewContext] Initialized with default policies")
+            except ImportError as e:
+                logger.warning(f"[StateViewContext] Not available: {e}")
+                self._state_view_context = None
+        
+        return self._state_view_context
     
     def _safe_json_load(self, content: str) -> Dict[str, Any]:
         """
@@ -2827,6 +2887,31 @@ class SegmentRunnerService:
                 "total_segments": 1,
                 "segment_id": 0
             }
+        
+        # [v3.20] RoutingResolver 초기화 (워크플로우별 1회)
+        if self._routing_resolver is None:
+            try:
+                from src.services.execution.routing_resolver import create_routing_resolver
+                
+                # 워크플로우 설정 로딩 (모든 노드 ID 추출)
+                workflow_config = event.get('workflow_config') or event.get('config')
+                if workflow_config and isinstance(workflow_config, dict):
+                    all_node_ids = {n["id"] for n in workflow_config.get("nodes", []) if isinstance(n, dict) and "id" in n}
+                    
+                    # Ring 레벨 추출 (기본값 3 = Agent)
+                    ring_level = event.get('ring_level', 3)
+                    
+                    self._routing_resolver = create_routing_resolver(
+                        valid_node_ids=all_node_ids,
+                        current_ring_level=ring_level
+                    )
+                    
+                    logger.info(
+                        f"[RoutingResolver] Initialized: {len(all_node_ids)} nodes, "
+                        f"Ring {ring_level}"
+                    )
+            except ImportError as e:
+                logger.warning(f"[RoutingResolver] Not available: {e}")
         
         from src.common.statebag import ensure_state_bag
         

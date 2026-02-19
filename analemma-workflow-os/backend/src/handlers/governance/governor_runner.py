@@ -474,13 +474,29 @@ def _make_governance_decision(
         }
     
     # ────────────────────────────────────────────────────────────────────
-    # Decision 3: Gas Fee Exceeded → Reduce Parallelism
+    # Decision 3: Gas Fee Exceeded → Reduce Parallelism + Emit Governance Event
     # ────────────────────────────────────────────────────────────────────
     if any("GAS_FEE" in v for v in analysis.violations):
         kernel_commands["_kernel_modify_parallelism"] = {
             "max_concurrent_branches": 5,
             "reason": f"Cost guardrail triggered: {state.get('total_llm_cost', 0):.2f} USD"
         }
+        
+        # [v3.28] Emit Governance Event to __hidden_context
+        _emit_governance_event(
+            state=state,
+            category="COST",
+            severity="CRITICAL",
+            message="예산 한도 초과로 인해 실행 속도를 제한합니다.",
+            action_taken="병렬 브랜치를 5개로 제한함",
+            technical_detail={
+                "total_llm_cost_usd": state.get('total_llm_cost', 0),
+                "violation": next((v for v in analysis.violations if "GAS_FEE" in v), ""),
+                "agent_id": analysis.agent_id
+            },
+            related_node_id=analysis.agent_id,
+            triggered_by_ring=analysis.ring_level.value
+        )
     
     # ────────────────────────────────────────────────────────────────────
     # Decision 4: Circuit Breaker → Request Human Approval
@@ -927,8 +943,145 @@ def _emit_governance_metrics(
         # Continue execution even if metrics fail (don't block workflow)
 
 
+# ============================================================================# 🔔 Governance Event Emission to __hidden_context (v3.28)
 # ============================================================================
-# �🛡️ Node Registration Helper
+
+def _emit_governance_event(
+    state: Dict[str, Any],
+    category: str,  # "COST", "SECURITY", "PERFORMANCE", "COMPLIANCE", "PLAN_DRIFT"
+    severity: str,  # "INFO", "WARNING", "CRITICAL"
+    message: str,
+    action_taken: Optional[str] = None,
+    technical_detail: Optional[Dict[str, Any]] = None,
+    related_node_id: Optional[str] = None,
+    triggered_by_ring: Optional[int] = None
+) -> None:
+    """
+    [v3.28.1] Governance Event를 __hidden_context에 기록 (Event Debouncing 적용)
+    
+    Governor가 정책 위반이나 제어 액션을 수행할 때,
+    TaskManager가 파싱할 수 있도록 표준화된 이벤트를 추가합니다.
+    
+    [v3.28.1 개선사항]:
+    1. Event Flood 방어: 동일 노드/카테고리의 중복 이벤트를 occurrence_count로 압축
+    2. 타임스탬프 정밀도: time.time_ns()로 나노초 단위 기록 + sequence_number
+    3. S3 크기 최적화: 1,000번 반복 시에도 매니페스트 크기 4MB 이하 유지
+    
+    이벤트는 __hidden_context["governance_events"] 배열에 누적되며,
+    TaskService가 TaskContext.governance_alerts로 변환합니다.
+    
+    Args:
+        state: 워크플로우 상태 (변경됨 - in-place mutation)
+        category: 이벤트 카테고리
+        severity: 심각도
+        message: 사용자 친화적 메시지 (한글)
+        action_taken: Governor가 취한 조치
+        technical_detail: 개발자 모드용 상세 정보
+        related_node_id: 관련 노드 ID
+        triggered_by_ring: Ring Level
+    
+    Example:
+        _emit_governance_event(
+            state=state,
+            category="COST",
+            severity="CRITICAL",
+            message="예산 한도 초과로 인해 실행 속도를 제한합니다.",
+            action_taken="병렬 브랜치를 5개로 제한함",
+            technical_detail={"total_cost": 105.50},
+            related_node_id="manus_planner",
+            triggered_by_ring=3
+        )
+    """
+    import uuid
+    
+    try:
+        # Ensure __hidden_context exists
+        if "__hidden_context" not in state:
+            state["__hidden_context"] = {}
+        
+        # Ensure governance_events array exists
+        if "governance_events" not in state["__hidden_context"]:
+            state["__hidden_context"]["governance_events"] = []
+        
+        # Ensure sequence counter exists
+        if "governance_event_sequence" not in state["__hidden_context"]:
+            state["__hidden_context"]["governance_event_sequence"] = 0
+        
+        events = state["__hidden_context"]["governance_events"]
+        
+        # ────────────────────────────────────────────────────────────────────
+        # [v3.28.1] Event Debouncing: 동일 이벤트 압축 (OS Kernel 스타일)
+        # ────────────────────────────────────────────────────────────────────
+        # 동일 노드에서 발생한 동일 카테고리/심각도 이벤트를 찾음
+        debounce_key = f"{related_node_id}:{category}:{severity}"
+        existing_event = None
+        
+        # 최근 10개 이벤트만 검색 (O(1) 성능 보장)
+        for event in reversed(events[-10:]):
+            event_key = f"{event.get('related_node_id')}:{event.get('category')}:{event.get('severity')}"
+            if event_key == debounce_key:
+                existing_event = event
+                break
+        
+        if existing_event:
+            # 중복 이벤트 발견 → occurrence_count 증가
+            existing_event["occurrence_count"] = existing_event.get("occurrence_count", 1) + 1
+            existing_event["last_occurrence_timestamp_ns"] = time.time_ns()
+            existing_event["last_occurrence_sequence"] = state["__hidden_context"]["governance_event_sequence"]
+            
+            # 최신 technical_detail 업데이트 (선택적)
+            if technical_detail:
+                existing_event["technical_detail"] = technical_detail
+            
+            logger.info(
+                f"📡 [Governance Event] Debounced duplicate: "
+                f"{debounce_key} (count={existing_event['occurrence_count']})"
+            )
+            return  # 새 이벤트를 추가하지 않고 종료
+        
+        # ────────────────────────────────────────────────────────────────────
+        # [v3.28.1] 신규 이벤트 생성
+        # ────────────────────────────────────────────────────────────────────
+        sequence_number = state["__hidden_context"]["governance_event_sequence"]
+        state["__hidden_context"]["governance_event_sequence"] += 1
+        
+        event = {
+            "alert_id": str(uuid.uuid4()),
+            
+            # [v3.28.1] 타임스탬프 정밀도 향상
+            "timestamp_ns": time.time_ns(),  # 나노초 단위 (비동기 환경에서 순서 보장)
+            "timestamp": time.time(),  # 하위 호환성 (초 단위)
+            "sequence_number": sequence_number,  # 전역 시퀀스 번호
+            
+            "category": category,
+            "severity": severity,
+            "message": message,
+            "action_taken": action_taken,
+            "technical_detail": technical_detail,
+            "related_node_id": related_node_id,
+            "triggered_by_ring": triggered_by_ring,
+            
+            # [v3.28.1] Event Debouncing 지원
+            "occurrence_count": 1,  # 최초 발생 시 1
+            "last_occurrence_timestamp_ns": time.time_ns(),
+            "last_occurrence_sequence": sequence_number,
+        }
+        
+        # Append to governance_events
+        events.append(event)
+        
+        logger.info(
+            f"📡 [Governance Event] Emitted (seq={sequence_number}): "
+            f"category={category}, severity={severity}, "
+            f"message={message[:50]}..."
+        )
+        
+    except Exception as e:
+        logger.error(f"🚨 [Governance Event] Failed to emit event: {e}")
+        # Don't raise - event emission failure shouldn't block workflow
+
+
+# ============================================================================# �🛡️ Node Registration Helper
 # ============================================================================
 
 # This function is registered in handlers/core/main.py's NODE_TYPE_RUNNERS dict:

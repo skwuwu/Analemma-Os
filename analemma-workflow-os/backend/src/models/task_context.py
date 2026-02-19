@@ -111,6 +111,78 @@ class QuickFixType(str, Enum):
     ESCALATE = "ESCALATE"         # 관리자 에스컬레이션
 
 
+class GovernanceSeverity(str, Enum):
+    """Governance Alert 심각도"""
+    INFO = "INFO"           # 정보성 알림
+    WARNING = "WARNING"     # 경고 (조치 권장)
+    CRITICAL = "CRITICAL"   # 긴급 (강제 조치)
+
+
+class GovernanceCategory(str, Enum):
+    """Governance Alert 카테고리"""
+    COST = "COST"                 # 비용 관련
+    SECURITY = "SECURITY"         # 보안 위협
+    PERFORMANCE = "PERFORMANCE"   # 성능 저하
+    COMPLIANCE = "COMPLIANCE"     # 정책 위반
+    PLAN_DRIFT = "PLAN_DRIFT"     # 계획 이탈
+
+
+class GovernanceAlert(BaseModel):
+    """
+    [v3.28] Governor → TaskManager 이벤트
+    
+    Governor(Ring 1)가 정책 위반이나 제어 액션을 수행할 때
+    __hidden_context['governance_events']에 기록하며,
+    TaskManager가 이를 파싱하여 사용자 UI에 표시합니다.
+    
+    예시:
+        - 비용 임계값 초과 시 병렬성 스로틀
+        - SLOP 패턴 감지 시 Self-Correction 피드백
+        - Agent 재계획 3회 초과 시 Plan Drift 경고
+    """
+    alert_id: str = Field(..., description="알림 고유 ID")
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        description="이벤트 발생 시각"
+    )
+    severity: GovernanceSeverity = Field(..., description="심각도")
+    category: GovernanceCategory = Field(..., description="카테고리")
+    
+    # 사용자 친화적 메시지
+    message: str = Field(
+        ...,
+        max_length=500,
+        description="사용자에게 표시할 메시지 (한글)"
+    )
+    
+    # Governor가 취한 조치
+    action_taken: Optional[str] = Field(
+        None,
+        max_length=300,
+        description="커널이 수행한 조치 (예: '병렬 브랜치를 5개로 제한함')"
+    )
+    
+    # 기술 세부사항 (개발자 모드용)
+    technical_detail: Optional[Dict[str, Any]] = Field(
+        None,
+        description="디버깅용 상세 정보 (로그, 메트릭 등)"
+    )
+    
+    # 관련 노드 (추적용)
+    related_node_id: Optional[str] = Field(
+        None,
+        description="이벤트가 발생한 노드 ID"
+    )
+    
+    # Ring Level (보안 감사용)
+    triggered_by_ring: Optional[int] = Field(
+        None,
+        ge=0,
+        le=3,
+        description="이벤트를 발생시킨 Ring Level"
+    )
+
+
 class QuickFix(BaseModel):
     """
     Quick Fix: 장애 유형별 동적 액션 매핑
@@ -240,15 +312,9 @@ class CostDetail(BaseModel):
     billing_period_start: Optional[datetime] = Field(None, description="과금 기간 시작")
     billing_period_end: Optional[datetime] = Field(None, description="과금 기간 종료")
     
-    # 비용 알림
-    budget_limit_usd: Optional[Decimal] = Field(None, description="예산 한도 (USD)")
-    budget_warning_threshold: float = Field(
-        default=0.8,
-        ge=0,
-        le=1,
-        description="예산 경고 임계값 (0.8 = 80%)"
-    )
-    is_over_budget: bool = Field(default=False, description="예산 초과 여부")
+    # [v3.28] 정책 관련 필드 제거 (Governor 영역으로 이동)
+    # budget_limit_usd, budget_warning_threshold, is_over_budget 제거
+    # 대신 governance_alerts를 통해 정책 위반 알림 수신
     
     def add_cost(self, item: CostLineItem) -> None:
         """비용 항목 추가 및 합계 재계산."""
@@ -261,10 +327,6 @@ class CostDetail(BaseModel):
         
         # 총합 업데이트
         self.actual_total_usd += item.total_usd
-        
-        # 예산 체크
-        if self.budget_limit_usd and self.actual_total_usd > self.budget_limit_usd:
-            self.is_over_budget = True
     
     def get_category_total(self, category: CostCategory) -> Decimal:
         """특정 카테고리 비용 합계 조회."""
@@ -278,7 +340,6 @@ class CostDetail(BaseModel):
                 k: float(v) for k, v in self.breakdown_by_category.items()
             },
             "item_count": len(self.line_items),
-            "is_over_budget": self.is_over_budget,
         }
 
 
@@ -498,6 +559,12 @@ class TaskContext(BaseModel):
     cost_detail: Optional[CostDetail] = Field(
         None,
         description="LLM/Storage/Network 등 상세 비용 내역"
+    )
+    
+    # [v3.28] Governance 통합
+    governance_alerts: List[GovernanceAlert] = Field(
+        default_factory=list,
+        description="Governor가 발행한 정책 위반/제어 알림 목록"
     )
     
     # 타임스탬프

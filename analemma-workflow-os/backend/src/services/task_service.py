@@ -882,6 +882,9 @@ class TaskService:
                 task['artifacts'] = self._extract_artifacts(payload)
                 task['thought_history'] = self._extract_thought_history(payload)
                 
+                # [v3.28] Governance Alerts 파싱
+                task['governance_alerts'] = self._extract_governance_alerts(payload)
+                
                 # 비용 정보
                 step_function_state = payload.get('step_function_state', {})
                 if step_function_state:
@@ -1216,6 +1219,64 @@ class TaskService:
             return f"'{state_name}' 단계에서 문제가 발생했습니다."
         
         return f"'{state_name}' 단계 진행 중"
+
+    def _extract_governance_alerts(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        [v3.28] __hidden_context에서 governance_events 파싱
+        
+        Governor가 기록한 이벤트를 TaskContext의 GovernanceAlert 모델로 변환합니다.
+        
+        Args:
+            payload: Notification payload
+            
+        Returns:
+            List of GovernanceAlert dictionaries
+        """
+        from datetime import datetime, timezone
+        
+        alerts = []
+        
+        # __hidden_context에서 governance_events 추출
+        step_state = payload.get('step_function_state', {})
+        hidden_context = step_state.get('__hidden_context', {})
+        governance_events = hidden_context.get('governance_events', [])
+        
+        for event in governance_events:
+            try:
+                # timestamp를 ISO 형식으로 변환
+                timestamp = event.get('timestamp')
+                if isinstance(timestamp, (int, float)):
+                    timestamp_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    timestamp_iso = timestamp_dt.isoformat()
+                else:
+                    timestamp_iso = str(timestamp) if timestamp else None
+                
+                alert = {
+                    "alert_id": event.get('alert_id', str(hash(str(event)))),
+                    "timestamp": timestamp_iso,
+                    "severity": event.get('severity', 'INFO'),
+                    "category": event.get('category', 'UNKNOWN'),
+                    "message": event.get('message', ''),
+                    "action_taken": event.get('action_taken'),
+                    "technical_detail": event.get('technical_detail'),
+                    "related_node_id": event.get('related_node_id'),
+                    "triggered_by_ring": event.get('triggered_by_ring')
+                }
+                
+                alerts.append(alert)
+                
+            except Exception as e:
+                logger.error(f"Failed to parse governance event: {e}")
+                continue
+        
+        # 추가로 governance_alerts를 AgentThought로 변환하여 사용자에게 표시
+        # (선택사항: thought_history에도 추가하려면)
+        for alert in alerts:
+            if alert['severity'] in ['WARNING', 'CRITICAL']:
+                # thought_history에 추가할 메시지 생성은 호출자에서 처리
+                pass
+        
+        return alerts
 
     def _extract_technical_logs(self, notification: Dict[str, Any]) -> List[Dict[str, Any]]:
         """기술 로그 추출 (개발자 모드용)"""
