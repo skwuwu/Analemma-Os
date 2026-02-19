@@ -607,8 +607,7 @@ class StateHydrator:
                 logger.info("[StateHydrator] ✅ BatchedDehydrator initialized (Lazy Import)")
             except ImportError as e:
                 logger.error(f"[StateHydrator] ❌ Failed to import BatchedDehydrator: {e}")
-                # 🚩 피드백 ③ Safe Fallback: Batching 실패 시 Legacy로 회귀
-                logger.warning("[StateHydrator] 🔄 Falling back to legacy dehydration")
+                logger.warning("[StateHydrator] Batching failed, using field-by-field offload")
                 return self._dehydrate_legacy(
                     state=state,
                     owner_id=owner_id,
