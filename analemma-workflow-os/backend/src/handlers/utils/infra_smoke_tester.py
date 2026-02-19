@@ -24,7 +24,6 @@ from botocore.exceptions import ClientError
 
 # Services for logic tests
 from src.services.common.pii_masking_service import get_pii_masking_service
-from src.services.state.state_persistence_service import StatePersistenceService
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

@@ -54,9 +54,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.info(f"✅ Cleanup completed for {count}/{len(scenarios)} scenarios")
         return {"cleanup_count": count, "status": "SUCCESS"}
         
-    except ImportError as e:
-        logger.error(f"❌ StatePersistenceService not found: {e}")
-        return {"status": "SKIPPED_NO_SERVICE", "error": str(e)}
     except Exception as e:
         logger.exception(f"❌ Global cleanup failed")
         return {"status": "FAILED", "error": str(e)}
