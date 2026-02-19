@@ -1,133 +1,139 @@
+"""
+StateManager - Legacy State Management Utilities
+
+⚠️ DEPRECATED: Phase E에서 StateVersioningService로 통합 중
+
+현재 상태:
+- ✅ PII 마스킹 → SecurityUtils로 분리 완료
+- 🔄 S3 업로드/다운로드 → StateVersioningService로 통합 중
+- ✅ Backward Compatibility 유지 (기존 코드 그대로 작동)
+
+마이그레이션 가이드:
+    # 기존 코드 (계속 작동)
+    from src.services.state.state_manager import StateManager
+    manager = StateManager()
+    s3_path = manager.upload_state_to_s3(bucket, prefix, state)
+    
+    # 새 코드 (권장)
+    from src.services.state.state_versioning_service import StateVersioningService
+    versioning = StateVersioningService(...)
+    s3_path = versioning.save_state(state, workflow_id, execution_id)
+"""
+
 import json
 import logging
-import re
+import os
 import boto3
-from typing import Dict, Any, Optional, Tuple, Set
+from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# PII 마스킹 패턴 정의 (RFC 5322 이메일, 한국 전화번호, API 키 등)
-PII_REGEX_PATTERNS = {
-    'email': (re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'), '[EMAIL_MASKED]'),
-    'phone_kr': (re.compile(r'0\d{1,2}-\d{3,4}-\d{4}'), '[PHONE_MASKED]'),
-    'phone_intl': (re.compile(r'\+\d{1,3}[-.\s]?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}'), '[PHONE_MASKED]'),
-    'api_key': (re.compile(r'(?:api[_-]?key|apikey|secret[_-]?key)\s*[:=]\s*["\']?[\w\-]+["\']?', re.IGNORECASE), '[API_KEY_MASKED]'),
-}
-
-# [Perf Optimization] 마스킹 제외 대상 키 (대용량 바이너리/S3 참조 데이터)
-SKIP_MASKING_KEYS: Set[str] = {
-    'large_s3_payload', 's3_path', 's3_url', 'final_state_s3_path',
-    '__s3_reference', 'binary_data', 'file_content', 'image_data',
-    '__kernel_actions',  # 커널 액션은 시스템 데이터로 PII 없음
-}
-
-
-def mask_pii(text: str) -> str:
-    """문자열에서 PII를 마스킹"""
-    if not isinstance(text, str):
-        return text
-    for _, (pattern, replacement) in PII_REGEX_PATTERNS.items():
-        text = pattern.sub(replacement, text)
-    return text
-
-
-def mask_pii_in_state(state: Any, skip_keys: Set[str] = SKIP_MASKING_KEYS, depth: int = 0, max_depth: int = 50) -> Any:
-    """
-    상태 객체 내의 모든 문자열에서 PII를 재귀적으로 마스킹.
+# ✅ Phase E: PII 마스킹은 SecurityUtils로 분리
+try:
+    from src.common.security_utils import mask_pii_in_state as _mask_pii_in_state
+    _HAS_SECURITY_UTILS = True
+except ImportError:
+    logger.warning("[StateManager] SecurityUtils not available, using legacy masking")
+    _HAS_SECURITY_UTILS = False
     
-    [Perf Optimization v2]
-    - skip_keys: 대용량 데이터가 포함된 키는 마스킹 우회
-    - max_depth: 무한 재귀 방지 (기본 50 레벨)
-    - 대용량 문자열(>100KB)은 마스킹 스킵
-    """
-    # 무한 재귀 방지
-    if depth > max_depth:
-        logger.warning("⚠️ PII masking: max depth (%d) reached, returning as-is", max_depth)
-        return state
+    # Fallback: 기존 마스킹 로직
+    import re
     
-    if isinstance(state, str):
-        # [Perf] 100KB 이상 문자열은 마스킹 스킵 (성능 최적화)
-        if len(state) > 102400:
-            logger.debug("⚡ Skipping PII masking for large string (%d bytes)", len(state))
+    PII_REGEX_PATTERNS = {
+        'email': (re.compile(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'), '[EMAIL_MASKED]'),
+        'phone_kr': (re.compile(r'0\d{1,2}-\d{3,4}-\d{4}'), '[PHONE_MASKED]'),
+    }
+    
+    def _mask_pii_in_state(state: Any) -> Any:
+        """Legacy PII 마스킹 (fallback)"""
+        if isinstance(state, str):
+            for _, (pattern, replacement) in PII_REGEX_PATTERNS.items():
+                state = pattern.sub(replacement, state)
             return state
-        return mask_pii(state)
-    elif isinstance(state, dict):
-        result = {}
-        for k, v in state.items():
-            # [Perf] 대용량 키는 마스킹 우회
-            if k in skip_keys:
-                result[k] = v
-            else:
-                result[k] = mask_pii_in_state(v, skip_keys, depth + 1, max_depth)
-        return result
-    elif isinstance(state, list):
-        return [mask_pii_in_state(item, skip_keys, depth + 1, max_depth) for item in state]
-    else:
-        return state
+        elif isinstance(state, dict):
+            return {k: _mask_pii_in_state(v) for k, v in state.items()}
+        elif isinstance(state, list):
+            return [_mask_pii_in_state(item) for item in state]
+        else:
+            return state
 
 
 class StateManager:
     """
-    [LEGACY] State Management Utilities
+    ✅ Phase E: Wrapper Class (Backward Compatibility)
     
-    ⚠️ 역할 명확화:
-    - PII 마스킹: mask_pii_in_state() (✅ 계속 사용)
-    - S3 업로드/다운로드: download_state_from_s3(), upload_state_to_s3()
-      → StateVersioningService로 점진적 마이그레이션 권장
+    기존 코드와의 호환성을 위해 유지되는 래퍼 클래스입니다.
+    실제 구현은 StateVersioningService와 SecurityUtils에 위임됩니다.
     
-    ✅ 유지 기능:
-    - PII 마스킹은 보안 요구사항으로 별도 유틸리티로 분리 예정
-    - 기존 실행 중 워크플로우는 계속 이 클래스 사용
-    
-    🔄 마이그레이션:
-    - 새 워크플로우: StateVersioningService 사용
-    - 상태 저장: create_manifest() → Merkle DAG
-    - 상태 로드: load_manifest_segments() → Content-Addressable
+    ⚠️ DEPRECATED: 새 코드에서는 직접 StateVersioningService 사용 권장
     """
+    
     def __init__(self, s3_client=None):
         self.s3_client = s3_client or boto3.client("s3")
+        self._versioning_service = None  # Lazy initialization
+    
+    @property
+    def versioning_service(self):
+        """✅ Phase E: Lazy StateVersioningService 초기화"""
+        if self._versioning_service is None:
+            try:
+                from src.services.state.state_versioning_service import StateVersioningService
+                
+                # 환경 변수에서 설정 읽기
+                manifests_table = os.environ.get('MANIFESTS_TABLE', 'WorkflowManifests-v3-dev')
+                state_bucket = os.environ.get('SKELETON_S3_BUCKET') or os.environ.get('WORKFLOW_STATE_BUCKET')
+                
+                self._versioning_service = StateVersioningService(
+                    dynamodb_table=manifests_table,
+                    s3_bucket=state_bucket
+                )
+                logger.info("[StateManager] ✅ StateVersioningService initialized (Lazy)")
+            except Exception as e:
+                logger.error(f"[StateManager] ❌ Failed to initialize StateVersioningService: {e}")
+                raise
+        
+        return self._versioning_service
 
     def download_state_from_s3(self, s3_path: str) -> Dict[str, Any]:
         """
+        ✅ Phase E: Wrapper → StateVersioningService.load_state()
+        
         Download state JSON from S3.
+        
+        ⚠️ DEPRECATED: 새 코드에서는 StateVersioningService.load_state() 직접 사용
         """
-        import json as json_module  # [Critical Fix] Explicit local import to avoid UnboundLocalError
-        try:
-            logger.info("⬇️ Downloading state from: %s", s3_path)
-            bucket, key = s3_path.replace("s3://", "").split("/", 1)
-            response = self.s3_client.get_object(Bucket=bucket, Key=key)
-            body_bytes = response["Body"].read()
-            state_data = json_module.loads(body_bytes.decode("utf-8"))
-            logger.info("✅ State downloaded successfully (%d keys)", len(state_data.keys()))
-            return state_data
-        except Exception as e:
-            logger.error("❌ Failed to download state from %s: %s", s3_path, e)
-            raise RuntimeError(f"Failed to download state from S3: {e}")
+        logger.debug("[StateManager] download_state_from_s3() wrapper called")
+        return self.versioning_service.load_state(s3_path)
 
     def upload_state_to_s3(self, bucket: str, prefix: str, state: Dict[str, Any], deterministic_filename: Optional[str] = None) -> str:
         """
+        ✅ Phase E: Wrapper → StateVersioningService.save_state()
+        
         Upload state JSON to S3.
-        [Deprecated] Use _upload_raw_bytes_to_s3 for pre-serialized data.
+        
+        ⚠️ DEPRECATED: 새 코드에서는 StateVersioningService.save_state() 직접 사용
         """
+        logger.debug("[StateManager] upload_state_to_s3() wrapper called")
+        
+        # bucket과 prefix에서 workflow_id, execution_id 추출
+        # prefix 형식: "workflows/{workflow_id}/executions/{execution_id}/segments/{segment_id}"
         try:
-            import time
-            import uuid
-            
-            file_name = deterministic_filename if deterministic_filename else f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
-            key = f"{prefix}/{file_name}"
-            s3_path = f"s3://{bucket}/{key}"
-            
-            logger.info("⬆️ Uploading state to: %s", s3_path)
-            self.s3_client.put_object(
-                Bucket=bucket,
-                Key=key,
-                Body=json.dumps(state, ensure_ascii=False),
-                ContentType="application/json"
-            )
-            return s3_path
-        except Exception as e:
-            logger.error("❌ Failed to upload state to %s: %s", bucket, e)
-            raise RuntimeError(f"Failed to upload state to S3: {e}")
+            parts = prefix.split('/')
+            workflow_id = parts[1] if len(parts) > 1 else 'unknown'
+            execution_id = parts[3] if len(parts) > 3 else 'unknown'
+            segment_id = int(parts[5]) if len(parts) > 5 and parts[4] == 'segments' else None
+        except:
+            workflow_id = 'legacy'
+            execution_id = 'unknown'
+            segment_id = None
+        
+        return self.versioning_service.save_state(
+            state=state,
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            segment_id=segment_id,
+            deterministic_filename=deterministic_filename
+        )
 
     def _upload_raw_bytes_to_s3(self, bucket: str, prefix: str, serialized_bytes: bytes, deterministic_filename: Optional[str] = None) -> str:
         """
@@ -156,28 +162,18 @@ class StateManager:
 
     def handle_state_storage(self, state: Dict[str, Any], auth_user_id: str, workflow_id: str, segment_id: int, bucket: Optional[str], threshold: Optional[int] = None, loop_counter: Optional[int] = None) -> Tuple[Dict[str, Any], Optional[str]]:
         """
+        ✅ Phase E: PII 마스킹은 SecurityUtils 사용
+        
         Decide whether to store state inline or in S3 based on size threshold.
         PII data is masked before storage to ensure privacy compliance.
         
-        [Critical] Step Functions has a 256KB payload limit. If state exceeds this:
-        - With bucket: Upload to S3, return (s3_metadata_dict, s3_path)
-        - Without bucket: Return truncated state with error marker to prevent SF failure
-        
-        [Perf Optimization v2]
-        - Single serialization: 직렬화 결과를 재사용하여 중복 연산 제거
-        - Selective masking: 대용량 키는 마스킹 우회
-        - Safe threshold: 180KB로 하향하여 SF 래퍼 오버헤드 고려
-        
-        [v3.10] Loop Support:
-        - loop_counter arg added to prevent S3 overwrite during loops
-        
-        [v3.15] Never returns None for state:
-        - Always returns dict (either original state, s3_metadata, or truncated_state)
-        - Prevents AttributeError when calling .get() on result
+        ⚠️ 변경 사항:
+        - PII 마스킹: SecurityUtils.mask_pii_in_state() 사용
+        - 기존 로직 유지 (Backward Compatibility)
         """
         try:
-            # 🛡️ PII 마스킹 적용 (개인정보 보호) - 대용량 키 우회 적용됨
-            masked_state = mask_pii_in_state(state)
+            # ✅ Phase E: SecurityUtils로 PII 마스킹
+            masked_state = _mask_pii_in_state(state)
             logger.debug("🔒 PII masking applied to state before storage")
             
             # [Perf Optimization] Single Serialization - 직렬화 한 번만 수행

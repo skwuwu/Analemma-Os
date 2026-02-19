@@ -3028,6 +3028,60 @@ class SegmentRunnerService:
                     context=seal_context
                 )
                 
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # 🔥 [P0 통합] v3.3 KernelStateManager - save_state_delta()
+                # Merkle Chain 연속성 확보를 위한 manifest_id 전파
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                use_v3_state_saving = os.environ.get('USE_V3_STATE_SAVING', 'true').lower() == 'true'
+                
+                if use_v3_state_saving:
+                    try:
+                        from src.services.state.state_versioning_service import StateVersioningService
+                        
+                        # S3 버킷 확인
+                        s3_bucket = os.environ.get('S3_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
+                        if not s3_bucket:
+                            logger.error("[v3.3] ❌ S3_BUCKET not set, skipping state delta save")
+                        else:
+                            versioning_service = StateVersioningService(
+                                dynamodb_table=os.environ.get('MANIFESTS_TABLE', 'StateManifestsV3'),
+                                s3_bucket=s3_bucket,
+                                use_2pc=True,
+                                gc_dlq_url=os.environ.get('GC_DLQ_URL')
+                            )
+                            
+                            # 이전 manifest_id 추출 (Merkle Chain)
+                            previous_manifest_id = base_state.get('current_manifest_id')
+                            
+                            # Delta 저장
+                            save_result = versioning_service.save_state_delta(
+                                delta=original_final_state,  # execution_result의 final_state
+                                workflow_id=event.get('workflowId') or event.get('workflow_id', 'unknown'),
+                                execution_id=event.get('execution_id', 'unknown'),
+                                owner_id=event.get('ownerId') or event.get('owner_id', 'unknown'),
+                                segment_id=_segment_id,
+                                previous_manifest_id=previous_manifest_id
+                            )
+                            
+                            # 🎯 핵심: 다음 세그먼트를 위한 manifest_id 전파
+                            new_manifest_id = save_result.get('manifest_id')
+                            if new_manifest_id:
+                                sealed_result['state_data']['bag']['current_manifest_id'] = new_manifest_id
+                                logger.info(
+                                    f"[v3.3] ✅ State delta saved. Manifest rotated: "
+                                    f"{new_manifest_id[:12]}... (parent: {previous_manifest_id[:12] if previous_manifest_id else 'ROOT'}...)"
+                                )
+                            else:
+                                logger.warning("[v3.3] ⚠️ save_state_delta succeeded but no manifest_id returned")
+                    
+                    except ImportError as ie:
+                        logger.error(f"[v3.3] ❌ StateVersioningService import failed: {ie}")
+                    except Exception as e:
+                        # Non-blocking: v3.3 실패해도 워크플로우는 계속 진행
+                        logger.error(f"[v3.3] ❌ Failed to save state delta: {e}", exc_info=True)
+                else:
+                    logger.info("[v3.3] ℹ️ USE_V3_STATE_SAVING=false, skipping state delta save")
+                
                 logger.info(f"[v3.13] 🎯 Kernel Protocol: sealed response - "
                            f"next_action={sealed_result.get('next_action')}, "
                            f"state_size={len(json.dumps(sealed_result.get('state_data', {}), default=str))//1024}KB")
@@ -3235,60 +3289,41 @@ class SegmentRunnerService:
         # ====================================================================
         state_s3_path = event.get('state_s3_path')
         
-        # 🎒 [v3.14] Use Kernel Protocol for state extraction
-        if KERNEL_PROTOCOL_AVAILABLE:
-            # open_state_bag handles:
-            # 1. event.state_data.bag (if ASL wraps)
-            # 2. event.state_data (if flat)
-            # 3. event itself (if v3 ASL passes $.state_data.bag directly)
-            initial_state = open_state_bag(event)
-            resolved_source = "kernel_protocol.open_state_bag"
-            logger.debug(f"[v3.14 Kernel Protocol] Used open_state_bag, keys={list(initial_state.keys())[:5] if initial_state else []}")
-        else:
-            # Legacy fallback
-            state_data = event.get('state_data', {})
-            
-            # 🔍 [v3.5 None Trace] Entry point tracing
-            _trace_none_access('state_data', 'event', event.get('state_data'), 
-                               context=event, caller='ExecuteSegment:Entry')
-            
-            if not isinstance(state_data, dict):
-                state_data = {}
-            
-            # 🛡️ [v3.4] Search Priority (Deep Lookup):
-            bag_in_state_data = state_data.get('bag') if isinstance(state_data.get('bag'), dict) else None
-            
-            # 🔍 [v3.5 None Trace] Bag lookup tracing
-            _trace_none_access('bag', 'state_data', bag_in_state_data, 
-                               context=state_data, caller='ExecuteSegment:BagLookup')
-            
-            # Compute each candidate for tracing
-            candidate_1 = bag_in_state_data.get('current_state') if bag_in_state_data else None
-            candidate_2 = state_data.get('current_state') if state_data else None
-            candidate_3 = event.get('current_state')
-            candidate_4 = event.get('state')
-            # 🚨 [v3.14 FIX] If event IS the bag contents (v3 ASL: Payload.$=$.state_data.bag)
-            candidate_5 = event if event and not state_data else state_data
-            
-            initial_state = (
-                candidate_1 or candidate_2 or candidate_3 or candidate_4 or candidate_5 or {}
+        # 🔥 [P1 파괴적 리팩토링] Kernel Protocol 필수화 - Fail-Fast 원칙
+        # Legacy 5단계 fallback 완전 제거
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if not KERNEL_PROTOCOL_AVAILABLE:
+            raise RuntimeError(
+                "❌ CRITICAL: kernel_protocol is REQUIRED for v3.14+. "
+                "Legacy mode no longer supported. "
+                "Verify src.common.kernel_protocol import succeeded."
             )
-            
-            resolved_source = (
-                "bag.current_state" if candidate_1 else
-                "state_data.current_state" if candidate_2 else
-                "event.current_state" if candidate_3 else
-                "event.state" if candidate_4 else
-                "event_as_bag" if candidate_5 == event else
-                "state_data_as_bag" if candidate_5 else
-                "empty_fallback"
-            )
-        if not initial_state or (isinstance(initial_state, dict) and len(initial_state) == 0):
-            _trace_none_access('initial_state', 'combined_lookup', None, 
-                               context=event, caller='ExecuteSegment:FinalStateResolve')
         
-        logger.debug(f"[Deep Lookup] initial_state source: {resolved_source}, "
-                    f"initial_state keys={list(initial_state.keys())[:5] if isinstance(initial_state, dict) else 'N/A'}")
+        # 🎯 Unified State Extraction (단일 경로)
+        initial_state = open_state_bag(event)
+        
+        # 🛡️ Strict Validation: 데이터 규격 확신 필수
+        strict_mode = os.environ.get('AN_STRICT_MODE', 'false').lower() == 'true'
+        if strict_mode and (not initial_state or not isinstance(initial_state, dict)):
+            raise ValueError(
+                f"❌ [AN_STRICT_MODE] Invalid state structure. "
+                f"open_state_bag returned: {type(initial_state)}. "
+                f"Event keys: {list(event.keys())[:10]}. "
+                f"This indicates ASL schema mismatch."
+            )
+        
+        # Safe fallback for non-strict mode (개발 환경)
+        if not initial_state or not isinstance(initial_state, dict):
+            logger.warning(
+                f"⚠️ [Kernel Protocol] open_state_bag returned invalid data: {type(initial_state)}. "
+                f"Falling back to empty state. Event keys: {list(event.keys())[:10]}"
+            )
+            initial_state = {}
+        
+        logger.info(
+            f"[v3.14 Kernel Protocol] ✅ State extracted via unified path. "
+            f"Keys: {list(initial_state.keys())[:8]}, Strict: {strict_mode}"
+        )
         
         # [Critical Fix] S3 Offload Recovery: check __s3_offloaded flag
         # If previous segment did S3 offload, only metadata is included
@@ -4456,7 +4491,10 @@ class SegmentRunnerService:
                     Key=key_name,
                     ExpressionType='SQL',
                     Expression=f"SELECT * FROM s3object[*][{segment_index}]",
-                    InputSerialization={'JSON': {'Type': 'DOCUMENT'}},
+                    InputSerialization={
+                        'JSON': {'Type': 'DOCUMENT'},
+                        'CompressionType': 'GZIP'  # 🔄 v3.3 KernelStateManager 호환
+                    },
                     OutputSerialization={'JSON': {}}
                 )
                 

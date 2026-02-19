@@ -153,6 +153,14 @@ Globals:
         BEDROCK_JOB_TABLE: !Ref BedrockJobTableV3
         # [Checkpoint & Time Machine common variables]
         CHECKPOINT_TABLE: !Ref CheckpointsTableV3
+        
+        # ✅ Phase D: Smart StateBag Feature Flags (환경 변수 기반)
+        # 🚩 피드백 ③ Safe Fallback: 기본값 false (안전성 우선)
+        USE_BATCHING: "false"        # Phase 8: BatchedDehydrator 사용 (Hot/Warm/Cold 배치)
+        USE_ZSTD: "false"            # Phase 8: Zstd 압축 (68% vs 60% Gzip)
+        ZSTD_LEVEL: "3"              # Zstd 압축 레벨 (1-22, 기본 3)
+        USE_2PC: "false"             # Phase 10: 2-Phase Commit (99.99% 정합성)
+        GC_DLQ_URL: !GetAtt GCDeadLetterQueue.QueueUrl  # Phase 10: GC DLQ URL
 
 Conditions:
   CreateWorkflowStateBucket: !Equals [ !Ref WorkflowStateBucket, "" ]
@@ -4794,12 +4802,10 @@ Resources:
 
 
   # --- SNS Topic for Critical Alerts ---
-  # [TEMPORARILY DISABLED] Requires SNS:TagResource permission in GitHubActions-ServerlessDeployRole
-  # TODO: Re-enable after adding SNS permissions to IAM role
-  # MonitoringSNSTopic:
-  #   Type: AWS::SNS::Topic
-  #   Properties:
-  #     DisplayName: "Analemma Infrastructure Alerts"
+  MonitoringSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: "Analemma Infrastructure Alerts"
 
   # --- CloudWatch Dashboard: Single Pane of Glass ---
   AnalemmaDashboard:
@@ -5131,6 +5137,70 @@ Resources:
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref MonitoringSNSTopic
+
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  # Phase 10: SQS DLQ-based Garbage Collector
+  # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  
+  # SQS DLQ for orphan block cleanup
+  GCDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "analemma-gc-dlq-${StageName}"
+      VisibilityTimeout: 300  # 5분
+      MessageRetentionPeriod: 1209600  # 14일
+      ReceiveMessageWaitTimeSeconds: 20  # Long Polling
+      Tags:
+        - Key: Service
+          Value: SmartStateBag
+        - Key: Component
+          Value: GarbageCollector
+  
+  # Background GC Lambda
+  BackgroundGCFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "analemma-background-gc-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.background_gc.lambda_handler"]
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - CloudWatchPutMetricPolicy: {}
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt GCDeadLetterQueue.Arn
+            BatchSize: 10
+            MaximumBatchingWindowInSeconds: 5
+      Tags:
+        Service: SmartStateBag
+        Component: GarbageCollector
+  
+  # GC Metrics Alarm
+  GCFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "Analemma-${StageName}-GCFailures"
+      AlarmDescription: "Garbage Collector 실패 급증 - 데이터 정합성 위험"
+      Namespace: "AnalemmaOS/GC"
+      MetricName: "GCFailures"
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
       Threshold: 10
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching

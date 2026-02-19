@@ -163,8 +163,7 @@ class StateVersioningService:
                 logger.info("[StateVersioningService] ✅ EventualConsistencyGuard initialized (Lazy Import)")
             except ImportError as e:
                 logger.error(f"[StateVersioningService] ❌ Failed to import EventualConsistencyGuard: {e}")
-                # 🚩 피드백 ③ Safe Fallback: 2PC 실패 시 Legacy로 회귀
-                logger.warning("[StateVersioningService] 🔄 Falling back to legacy create_manifest")
+                logger.warning("[StateVersioningService] 2PC failed, using 1-phase transaction")
                 return self._create_manifest_legacy(
                     workflow_id=workflow_id,
                     workflow_config=workflow_config,

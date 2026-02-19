@@ -328,7 +328,10 @@ class SegmentFieldOptimizer:
                 Key=key,
                 ExpressionType='SQL',
                 Expression=sql_query,
-                InputSerialization={'JSON': {'Type': 'DOCUMENT'}},
+                InputSerialization={
+                    'JSON': {'Type': 'DOCUMENT'},
+                    'CompressionType': 'GZIP'  # 🔄 v3.3 KernelStateManager 호환
+                },
                 OutputSerialization={'JSON': {'RecordDelimiter': '\n'}}
             )
             

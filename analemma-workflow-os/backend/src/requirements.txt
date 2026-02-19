@@ -4,6 +4,9 @@ croniter
 pytest
 moto
 
+# Compression (Phase 8: Zstd)
+zstandard>=0.22.0  # High-performance compression (68% ratio, 4x faster than gzip)
+
 # Vertex AI SDK (Gemini Native)
 google-cloud-aiplatform>=1.51.0  # ResponseSchema, Context Caching 지원
 langgraph>=0.0.40
