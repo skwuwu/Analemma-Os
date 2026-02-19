@@ -46,7 +46,6 @@ from src.services.state.state_manager import StateManager, mask_pii_in_state
 from src.services.recovery.self_healing_service import SelfHealingService
 # [v3.11] Unified State Hydration
 from src.common.state_hydrator import StateHydrator, SmartStateBag
-# Legacy Imports (for now, until further refactoring)
 from src.services.workflow.repository import WorkflowRepository
 # Using generic imports from main handler file as source of truth
 from src.handlers.core.main import run_workflow, partition_workflow as _partition_workflow_dynamically, _build_segment_config
@@ -249,7 +248,6 @@ def _safe_get_from_bag(
             logger.warning(f"🔍 [Kernel Protocol] key='{key}' returned default. Caller: {caller}")
         return val
     
-    # Legacy fallback
     if not isinstance(event, dict):
         return default
     
@@ -271,7 +269,7 @@ def _safe_get_from_bag(
         return val
     
     if log_on_default:
-        logger.warning(f"🔍 [Legacy] key='{key}' returned default. Caller: {caller}")
+        logger.warning(f"🔍 [SafeGet] key='{key}' returned default. Caller: {caller}")
     
     return default
 
@@ -4433,8 +4431,6 @@ class SegmentRunnerService:
         - Size-based routing: 작은 manifest는 전체 로드, 큰 것은 S3 Select
         - In-memory cache: 같은 manifest 재사용 (Lambda warm start 최적화)
         - Checksum verification: manifest_hash 검증
-        
-        피드백 반영:
         - Lambda 캐싱이 실제 주 경로 (ASL Direct Injection은 20% 미만)
         - Warm Start 최적화로 캐시 히트율 80% 목표
         """
