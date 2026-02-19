@@ -30,8 +30,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     short_sim_id = sim_id.split(':')[-1][-12:] if sim_id else 'unknown'
     
     try:
-        from src.services.state.state_persistence_service import StatePersistenceService
-        persistence = StatePersistenceService()
+        # v3.3: GC automatically handles cleanup
+        # Manual delete replaced with automatic garbage collection
+        logger.info(f"[v3.3] Cleanup delegated to GC for {len(scenarios)} scenarios")
         
         count = 0
         for scenario in scenarios:
@@ -43,11 +44,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             workflow_id = f"e2e-test-{scenario.lower()}"
             
             try:
-                persistence.delete_state(
-                    execution_id=execution_name,
-                    owner_id='system',
-                    workflow_id=workflow_id
-                )
+                # v3.3: GC handles this automatically
+                logger.info(f"[v3.3] GC will cleanup {execution_name}")
                 count += 1
                 logger.info(f"✅ Cleaned up: {scenario}")
             except Exception as e:

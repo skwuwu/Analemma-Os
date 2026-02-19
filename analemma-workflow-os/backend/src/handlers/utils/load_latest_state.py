@@ -1,39 +1,21 @@
 """
 [Tiny Handler] Load Latest State
 
-Delegates all logic to StatePersistenceService.
+[v3.3] Direct StateVersioningService usage - wrapper removed
 This handler is a thin wrapper for Lambda/Step Functions compatibility.
 
-[v2.3] 개선사항:
-1. 상태 로드 실패 시 Step Functions Choice State용 명확한 플래그 제공
-2. 프라이빗 멤버 접근 대신 set_bucket() 메서드 사용
-3. Cold Start 최적화 - Global Scope에서 서비스 초기화
+[v3.3] 개선사항:
+1. DEPRECATED StatePersistenceService 제거
+2. StateVersioningService 직접 사용 (DynamoDB pointer-based load)
+3. 2-Phase Commit 활성화
 """
 
 import logging
 import os
 from typing import Dict, Any
 
-from src.services.state.state_persistence_service import get_state_persistence_service
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-
-# =============================================================================
-# [v2.3] Cold Start 최적화: Global Scope에서 서비스 인스턴스 초기화
-# Lambda Warm Start 시 인스턴스를 재사용하여 초기화 오버헤드 제거
-# =============================================================================
-_service_instance = None
-
-
-def _get_service():
-    """Lazy singleton service initialization."""
-    global _service_instance
-    if _service_instance is None:
-        _service_instance = get_state_persistence_service()
-    return _service_instance
-
 
 # =============================================================================
 # 상태 로드 실패 유형 (Step Functions Choice State에서 분기 결정용)
@@ -51,9 +33,9 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     """
     Load latest state for distributed workflow chunk.
     
-    Delegates to StatePersistenceService.load_state().
+    [v3.3] Direct StateVersioningService usage (pointer-based load).
     
-    [v2.3] Step Functions 분기 전략:
+    [v3.3] Step Functions 분기 전략:
     - state_loaded: True → 정상 진행
     - state_loaded: False + reason: "first_chunk" → 정상 진행 (첫 청크)
     - state_loaded: False + is_critical_failure: True → Fail 상태로 전이 권장
@@ -105,22 +87,30 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
         # [P0] 상위 컨텍스트 보존을 위해 total_segments를 미리 확보
         total_segments = event.get('total_segments')
         
-        logger.info(f"LoadLatestState: chunk={chunk_id}, index={chunk_index}")
+        logger.info(f"[v3.3] LoadLatestState: chunk={chunk_id}, index={chunk_index}")
         
-        # [v2.3] Global Scope의 싱글톤 서비스 사용 (Cold Start 최적화)
-        service = _get_service()
+        # v3.3: Direct StateVersioningService usage
+        from src.services.state.state_versioning_service import StateVersioningService
         
-        # [v2.3] 프라이빗 멤버 접근 대신 set_bucket() 메서드 사용
-        if state_bucket:
-            service.set_bucket(state_bucket)
-        
-        result = service.load_state(
-            execution_id=execution_id,
-            owner_id=owner_id,
-            workflow_id=workflow_id,
-            chunk_index=chunk_index,
-            chunk_data=chunk_data
+        kernel = StateVersioningService(
+            dynamodb_table=os.environ.get('MANIFESTS_TABLE', 'StateManifestsV3'),
+            s3_bucket=state_bucket or os.environ.get('WORKFLOW_STATE_BUCKET'),
+            use_2pc=True
         )
+        
+        # Load latest state from DynamoDB pointer
+        loaded_state = kernel.load_latest_state(
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            owner_id=owner_id
+        )
+        
+        # Convert to legacy format for Step Functions compatibility
+        result = {
+            "state_loaded": bool(loaded_state),
+            "previous_state": loaded_state or {},
+            "latest_segment_id": loaded_state.get('latest_segment_id') if loaded_state else None
+        }
 
         # 🛡️ [P0] 데이터 정화 (유령 'code' 타입 박멸)
         # 로드된 상태 내부의 모든 노드 타입을 검사하여 operator로 강제 환원

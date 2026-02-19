@@ -1,34 +1,25 @@
 """
-StateManager - Legacy State Management Utilities
+StateManager - Pure S3 Client Wrapper
 
-⚠️ DEPRECATED: Phase E에서 StateVersioningService로 통합 중
+[v3.3] Simplified to pure S3 operations only.
+No StateVersioningService delegation - use StateVersioningService directly for state management.
 
-현재 상태:
-- ✅ PII 마스킹 → SecurityUtils로 분리 완료
-- 🔄 S3 업로드/다운로드 → StateVersioningService로 통합 중
-- ✅ Backward Compatibility 유지 (기존 코드 그대로 작동)
-
-마이그레이션 가이드:
-    # 기존 코드 (계속 작동)
-    from src.services.state.state_manager import StateManager
-    manager = StateManager()
-    s3_path = manager.upload_state_to_s3(bucket, prefix, state)
-    
-    # 새 코드 (권장)
-    from src.services.state.state_versioning_service import StateVersioningService
-    versioning = StateVersioningService(...)
-    s3_path = versioning.save_state(state, workflow_id, execution_id)
+This class only handles:
+- Raw S3 get/put operations
+- PII masking before storage
+- Size-based offloading logic
 """
 
 import json
 import logging
-import os
+import time
+import uuid
 import boto3
 from typing import Dict, Any, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# ✅ Phase E: PII 마스킹은 SecurityUtils로 분리
+# PII masking utility
 try:
     from src.common.security_utils import mask_pii_in_state as _mask_pii_in_state
     _HAS_SECURITY_UTILS = True
@@ -36,7 +27,6 @@ except ImportError:
     logger.warning("[StateManager] SecurityUtils not available, using legacy masking")
     _HAS_SECURITY_UTILS = False
     
-    # Fallback: 기존 마스킹 로직
     import re
     
     PII_REGEX_PATTERNS = {
@@ -45,7 +35,7 @@ except ImportError:
     }
     
     def _mask_pii_in_state(state: Any) -> Any:
-        """Legacy PII 마스킹 (fallback)"""
+        """Legacy PII masking (fallback)"""
         if isinstance(state, str):
             for _, (pattern, replacement) in PII_REGEX_PATTERNS.items():
                 state = pattern.sub(replacement, state)
@@ -60,189 +50,174 @@ except ImportError:
 
 class StateManager:
     """
-    ✅ Phase E: Wrapper Class (Backward Compatibility)
+    [v3.3] Pure S3 Client Wrapper
     
-    기존 코드와의 호환성을 위해 유지되는 래퍼 클래스입니다.
-    실제 구현은 StateVersioningService와 SecurityUtils에 위임됩니다.
-    
-    ⚠️ DEPRECATED: 새 코드에서는 직접 StateVersioningService 사용 권장
+    Simplified to handle only S3 operations. For state versioning and 
+    manifest management, use StateVersioningService directly.
     """
     
     def __init__(self, s3_client=None):
         self.s3_client = s3_client or boto3.client("s3")
-        self._versioning_service = None  # Lazy initialization
-    
-    @property
-    def versioning_service(self):
-        """✅ Phase E: Lazy StateVersioningService 초기화"""
-        if self._versioning_service is None:
-            try:
-                from src.services.state.state_versioning_service import StateVersioningService
-                
-                # 환경 변수에서 설정 읽기
-                manifests_table = os.environ.get('MANIFESTS_TABLE', 'WorkflowManifests-v3-dev')
-                state_bucket = os.environ.get('SKELETON_S3_BUCKET') or os.environ.get('WORKFLOW_STATE_BUCKET')
-                
-                self._versioning_service = StateVersioningService(
-                    dynamodb_table=manifests_table,
-                    s3_bucket=state_bucket
-                )
-                logger.info("[StateManager] ✅ StateVersioningService initialized (Lazy)")
-            except Exception as e:
-                logger.error(f"[StateManager] ❌ Failed to initialize StateVersioningService: {e}")
-                raise
-        
-        return self._versioning_service
 
     def download_state_from_s3(self, s3_path: str) -> Dict[str, Any]:
         """
-        ✅ Phase E: Wrapper → StateVersioningService.load_state()
+        Download and parse JSON from S3.
         
-        Download state JSON from S3.
-        
-        ⚠️ DEPRECATED: 새 코드에서는 StateVersioningService.load_state() 직접 사용
+        Args:
+            s3_path: S3 URI (s3://bucket/key)
+            
+        Returns:
+            Parsed JSON dict
         """
-        logger.debug("[StateManager] download_state_from_s3() wrapper called")
-        return self.versioning_service.load_state(s3_path)
+        try:
+            # Parse s3://bucket/key
+            if not s3_path.startswith("s3://"):
+                raise ValueError(f"Invalid S3 path: {s3_path}")
+            
+            parts = s3_path[5:].split("/", 1)
+            bucket = parts[0]
+            key = parts[1] if len(parts) > 1 else ""
+            
+            logger.debug(f"[StateManager] Downloading from s3://{bucket}/{key}")
+            
+            response = self.s3_client.get_object(Bucket=bucket, Key=key)
+            content = response["Body"].read().decode("utf-8")
+            
+            return json.loads(content)
+            
+        except Exception as e:
+            logger.error(f"Failed to download from {s3_path}: {e}")
+            raise RuntimeError(f"S3 download failed: {e}")
 
     def upload_state_to_s3(self, bucket: str, prefix: str, state: Dict[str, Any], deterministic_filename: Optional[str] = None) -> str:
         """
-        ✅ Phase E: Wrapper → StateVersioningService.save_state()
+        Upload JSON to S3.
         
-        Upload state JSON to S3.
-        
-        ⚠️ DEPRECATED: 새 코드에서는 StateVersioningService.save_state() 직접 사용
-        """
-        logger.debug("[StateManager] upload_state_to_s3() wrapper called")
-        
-        # bucket과 prefix에서 workflow_id, execution_id 추출
-        # prefix 형식: "workflows/{workflow_id}/executions/{execution_id}/segments/{segment_id}"
-        try:
-            parts = prefix.split('/')
-            workflow_id = parts[1] if len(parts) > 1 else 'unknown'
-            execution_id = parts[3] if len(parts) > 3 else 'unknown'
-            segment_id = int(parts[5]) if len(parts) > 5 and parts[4] == 'segments' else None
-        except:
-            workflow_id = 'legacy'
-            execution_id = 'unknown'
-            segment_id = None
-        
-        return self.versioning_service.save_state(
-            state=state,
-            workflow_id=workflow_id,
-            execution_id=execution_id,
-            segment_id=segment_id,
-            deterministic_filename=deterministic_filename
-        )
-
-    def _upload_raw_bytes_to_s3(self, bucket: str, prefix: str, serialized_bytes: bytes, deterministic_filename: Optional[str] = None) -> str:
-        """
-        [Perf Optimization] Upload pre-serialized bytes directly to S3.
-        Eliminates double serialization overhead.
-        """
-        try:
-            import time
-            import uuid
+        Args:
+            bucket: S3 bucket name
+            prefix: S3 key prefix
+            state: Data to upload
+            deterministic_filename: Optional fixed filename
             
-            file_name = deterministic_filename if deterministic_filename else f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
+        Returns:
+            S3 URI (s3://bucket/key)
+        """
+        try:
+            file_name = deterministic_filename or f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
             key = f"{prefix}/{file_name}"
             s3_path = f"s3://{bucket}/{key}"
             
-            logger.info("⬆️ [Optimized] Uploading pre-serialized bytes to: %s (%d bytes)", s3_path, len(serialized_bytes))
+            serialized = json.dumps(state, ensure_ascii=False).encode("utf-8")
+            
+            logger.debug(f"[StateManager] Uploading to {s3_path} ({len(serialized)} bytes)")
+            
+            self.s3_client.put_object(
+                Bucket=bucket,
+                Key=key,
+                Body=serialized,
+                ContentType="application/json"
+            )
+            
+            return s3_path
+            
+        except Exception as e:
+            logger.error(f"Failed to upload to s3://{bucket}/{prefix}: {e}")
+            raise RuntimeError(f"S3 upload failed: {e}")
+
+
+    def _upload_raw_bytes_to_s3(self, bucket: str, prefix: str, serialized_bytes: bytes, deterministic_filename: Optional[str] = None) -> str:
+        """
+        Upload pre-serialized bytes directly to S3.
+        Eliminates double serialization overhead.
+        """
+        try:
+            file_name = deterministic_filename or f"{int(time.time())}_{uuid.uuid4().hex[:8]}.json"
+            key = f"{prefix}/{file_name}"
+            s3_path = f"s3://{bucket}/{key}"
+            
+            logger.debug(f"[StateManager] Uploading raw bytes to {s3_path} ({len(serialized_bytes)} bytes)")
+            
             self.s3_client.put_object(
                 Bucket=bucket,
                 Key=key,
                 Body=serialized_bytes,
                 ContentType="application/json"
             )
+            
             return s3_path
+            
         except Exception as e:
-            logger.error("❌ Failed to upload raw bytes to %s: %s", bucket, e)
-            raise RuntimeError(f"Failed to upload raw bytes to S3: {e}")
+            logger.error(f"Failed to upload raw bytes to s3://{bucket}/{prefix}: {e}")
+            raise RuntimeError(f"S3 upload failed: {e}")
 
     def handle_state_storage(self, state: Dict[str, Any], auth_user_id: str, workflow_id: str, segment_id: int, bucket: Optional[str], threshold: Optional[int] = None, loop_counter: Optional[int] = None) -> Tuple[Dict[str, Any], Optional[str]]:
         """
-        ✅ Phase E: PII 마스킹은 SecurityUtils 사용
-        
         Decide whether to store state inline or in S3 based on size threshold.
-        PII data is masked before storage to ensure privacy compliance.
+        PII data is masked before storage.
         
-        ⚠️ 변경 사항:
-        - PII 마스킹: SecurityUtils.mask_pii_in_state() 사용
-        - 기존 로직 유지 (Backward Compatibility)
+        Args:
+            state: State data to store
+            auth_user_id: User ID for S3 path
+            workflow_id: Workflow ID for S3 path
+            segment_id: Segment ID for S3 path
+            bucket: S3 bucket (required if size exceeds threshold)
+            threshold: Size threshold in bytes (default 180KB)
+            loop_counter: Optional loop iteration counter
+            
+        Returns:
+            (state_or_metadata, s3_path_or_none)
         """
         try:
-            # ✅ Phase E: SecurityUtils로 PII 마스킹
+            # Apply PII masking
             masked_state = _mask_pii_in_state(state)
-            logger.debug("🔒 PII masking applied to state before storage")
             
-            # [Perf Optimization] Single Serialization - 직렬화 한 번만 수행
+            # Single serialization
             serialized_bytes = json.dumps(masked_state, ensure_ascii=False).encode("utf-8")
             state_size = len(serialized_bytes)
             
-            # [Critical Fix] Step Functions hard limit with safety buffer
-            # 256KB = 262,144 bytes, but AWS wrapper adds ~10-15KB overhead
-            # Using 180KB (180,000 bytes) for safe margin
-            SF_HARD_LIMIT = 180000  # ~175KB safe threshold
-            
-            # [Fix] Handle None threshold - default to 180KB (safe Step Functions limit)
-            if threshold is None:
-                threshold = 180000
-                logger.warning("⚠️ threshold parameter was None, using default 180KB (safe SF limit)")
+            # Default to 180KB (safe Step Functions limit with buffer)
+            threshold = threshold or 180000
+            SF_HARD_LIMIT = 180000
             
             if state_size > threshold:
                 if not bucket:
-                    logger.error("🚨 CRITICAL: State size (%d bytes, %.1fKB) exceeds threshold (%d) but no S3 bucket provided!", 
-                                state_size, state_size/1024, threshold)
+                    logger.error(f"State size ({state_size} bytes) exceeds threshold but no S3 bucket provided!")
                     
-                    # [Critical Fix] Instead of returning the full state (which causes SF failure),
-                    # return a truncated state with error information
                     if state_size > SF_HARD_LIMIT:
-                        logger.error("🚨 State exceeds Step Functions safe limit (180KB)! Creating safe fallback state.")
-                        
-                        # Create a minimal safe state that won't exceed limits
+                        # Return truncated safe state
                         safe_state = {
                             "__state_truncated": True,
                             "__original_size_bytes": state_size,
                             "__original_size_kb": round(state_size / 1024, 2),
-                            "__truncation_reason": "State exceeded 180KB Step Functions safe limit but no S3 bucket available",
                             "__error": "PAYLOAD_TOO_LARGE_NO_S3_BUCKET",
-                            # Preserve essential metadata if present
-                            "workflowId": masked_state.get("workflowId") if isinstance(masked_state, dict) else None,
-                            "ownerId": masked_state.get("ownerId") if isinstance(masked_state, dict) else None,
                             "segment_id": segment_id,
                         }
                         
-                        # Try to preserve test result if this is a test workflow
                         if isinstance(masked_state, dict):
-                            for key in ['TEST_RESULT', 'VALIDATION_STATUS', '__kernel_actions']:
+                            for key in ['workflowId', 'ownerId', 'TEST_RESULT', 'VALIDATION_STATUS']:
                                 if key in masked_state:
                                     safe_state[key] = masked_state[key]
                         
-                        logger.warning("⚠️ Returning truncated safe state (%d bytes) instead of full state (%d bytes)", 
-                                      len(json.dumps(safe_state)), state_size)
+                        logger.warning(f"Returning truncated state ({len(json.dumps(safe_state))} bytes)")
                         return safe_state, None
                     else:
-                        # State is below SF limit but above our threshold - return with warning
-                        logger.warning("⚠️ State size (%d) exceeds threshold but below SF safe limit. Returning inline (risky).", state_size)
+                        logger.warning(f"State size ({state_size}) exceeds threshold but below SF limit")
                         return masked_state, None
 
                 if not auth_user_id:
                     raise PermissionError("Missing authenticated user id for S3 upload")
                 
-                # [v3.10] Loop-Safe Path Construction
+                # Construct S3 path
                 if loop_counter is not None and isinstance(loop_counter, int) and loop_counter >= 0:
-                    # e.g. .../segments/10/5/output.json (Loop #5)
                     prefix = f"workflow-states/{auth_user_id}/{workflow_id}/segments/{segment_id}/{loop_counter}"
                 else:
                     prefix = f"workflow-states/{auth_user_id}/{workflow_id}/segments/{segment_id}"
                 
-                # [Perf Optimization] 이미 직렬화된 바이트를 직접 S3에 업로드 (중복 직렬화 제거)
+                # Upload to S3
                 s3_path = self._upload_raw_bytes_to_s3(bucket, prefix, serialized_bytes, deterministic_filename="output.json")
-                logger.info("📦 State uploaded to S3: %s (%d bytes, %.1fKB)", s3_path, state_size, state_size/1024)
+                logger.info(f"State uploaded to S3: {s3_path} ({state_size} bytes, {state_size/1024:.1f}KB)")
                 
-                # [Critical Fix] Return S3 metadata instead of None to prevent AttributeError
-                # downstream when calling .get() on the result
+                # Return S3 metadata
                 s3_metadata = {
                     "__s3_offloaded": True,
                     "__s3_path": s3_path,
@@ -250,8 +225,9 @@ class StateManager:
                 }
                 return s3_metadata, s3_path
             else:
-                logger.info("📦 Returning state inline (%d bytes <= %d threshold)", state_size, threshold)
+                logger.info(f"Returning state inline ({state_size} bytes)")
                 return masked_state, None
+                
         except Exception as e:
             logger.exception("Failed to handle state storage")
             raise RuntimeError(f"Failed to handle state storage: {e}")

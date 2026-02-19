@@ -1,15 +1,13 @@
 """
 [Tiny Handler] Save Latest State
 
-Delegates all logic to StatePersistenceService.
+[v3.3] Direct StateVersioningService usage - wrapper removed
 This handler is a thin wrapper for Lambda/Step Functions compatibility.
 """
 
 import logging
 import os
 from typing import Dict, Any
-
-from src.services.state.state_persistence_service import get_state_persistence_service
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -19,7 +17,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
     """
     Save latest state for distributed workflow chunk.
     
-    Delegates to StatePersistenceService.save_state().
+    [v3.3] Direct StateVersioningService.save_state_delta() usage.
     
     Args:
         event: {
@@ -64,30 +62,38 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                                 logger.warning(f"🛡️ [SaveHandler] Fixing 'code' type to 'operator' in state for node {node.get('id')}")
                                 node['type'] = 'operator'
         
-        logger.info(f"SaveLatestState: chunk={chunk_id}, segment={segment_id}")
+        logger.info(f"[v3.3] SaveLatestState: chunk={chunk_id}, segment={segment_id}")
         
-        # Delegate to service
-        service = get_state_persistence_service()
+        # v3.3: Direct StateVersioningService usage
+        from src.services.state.state_versioning_service import StateVersioningService
         
-        # 🛡️ [P0] 캡슐화 준수 - set_bucket 메서드 사용
-        if state_bucket:
-            service.set_bucket(state_bucket)
-        
-        save_result = service.save_state(
-            execution_id=execution_id,
-            owner_id=owner_id,
-            workflow_id=workflow_id,
-            chunk_id=chunk_id,
-            segment_id=segment_id,
-            state_data=final_state
+        kernel = StateVersioningService(
+            dynamodb_table=os.environ.get('MANIFESTS_TABLE', 'StateManifestsV3'),
+            s3_bucket=state_bucket or os.environ.get('WORKFLOW_STATE_BUCKET'),
+            use_2pc=True
         )
         
-        # 🛡️ [P0] 컨텍스트 보존 (total_segments 누락 방지)
-        # Step Functions의 다음 State가 null을 참조하여 TypeError가 발생하지 않도록 함
-        if isinstance(save_result, dict):
-            save_result['total_segments'] = int(total_segments) if total_segments is not None else 1
+        save_result = kernel.save_state_delta(
+            delta=final_state,
+            workflow_id=workflow_id,
+            execution_id=execution_id,
+            owner_id=owner_id,
+            segment_id=segment_id,
+            previous_manifest_id=final_state.get('current_manifest_id')
+        )
+        
+        # v3.3: Convert to legacy format for Step Functions compatibility
+        result = {
+            "saved": True,
+            "manifest_id": save_result.get('manifest_id'),
+            "block_ids": save_result.get('block_ids', []),
+            "segment_id": segment_id,
+            "chunk_id": chunk_id,
+            "committed": save_result.get('committed', False),
+            "total_segments": int(total_segments) if total_segments is not None else 1
+        }
             
-        return save_result
+        return result
         
     except Exception as e:
         logger.exception(f"SaveLatestState failed: {e}")
