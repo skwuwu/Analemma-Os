@@ -571,14 +571,16 @@ class StateHydrator:
                 return_delta=return_delta
             )
         
-        # 기존 Legacy 방식
-        return self._dehydrate_legacy(
+        # v3.3: Batching 강제 사용 (Legacy 제거)
+        if not self.use_batching:
+            logger.warning("[StateHydrator] use_batching=False is deprecated, forcing batching")
+        
+        return self._dehydrate_with_batching(
             state=state,
             owner_id=owner_id,
             workflow_id=workflow_id,
             execution_id=execution_id,
             segment_id=segment_id,
-            force_offload_fields=force_offload_fields,
             return_delta=return_delta
         )
     
@@ -596,27 +598,14 @@ class StateHydrator:
         
         🧩 피드백 ① 적용: 실제 사용 시점에 import
         """
-        # 🧩 Lazy Import: 최초 사용 시에만 import
+        # Lazy Import
         if self._batcher is None:
-            try:
-                from src.common.batched_dehydrator import BatchedDehydrator
-                self._batcher = BatchedDehydrator(
-                    bucket_name=self._bucket,
-                    compression_level=self.compression_level
-                )
-                logger.info("[StateHydrator] ✅ BatchedDehydrator initialized (Lazy Import)")
-            except ImportError as e:
-                logger.error(f"[StateHydrator] ❌ Failed to import BatchedDehydrator: {e}")
-                logger.warning("[StateHydrator] Batching failed, using field-by-field offload")
-                return self._dehydrate_legacy(
-                    state=state,
-                    owner_id=owner_id,
-                    workflow_id=workflow_id,
-                    execution_id=execution_id,
-                    segment_id=segment_id,
-                    force_offload_fields=None,
-                    return_delta=return_delta
-                )
+            from src.common.batched_dehydrator import BatchedDehydrator
+            self._batcher = BatchedDehydrator(
+                bucket_name=self._bucket,
+                compression_level=self.compression_level
+            )
+            logger.info("[StateHydrator] ✅ BatchedDehydrator initialized")
         
         # Delta 추출
         delta = state.get_delta()
@@ -653,94 +642,6 @@ class StateHydrator:
             f"{len(batch_pointers)} batches, "
             f"{len(delta.changed_fields)} changed fields"
         )
-        
-        return result
-    
-    def _dehydrate_legacy(
-        self,
-        state: SmartStateBag,
-        owner_id: str,
-        workflow_id: str,
-        execution_id: str,
-        segment_id: Optional[int],
-        force_offload_fields: Optional[Set[str]],
-        return_delta: bool
-    ) -> Dict[str, Any]:
-        """
-        🔄 기존 Legacy Dehydration (Field-by-Field Offload)
-        """
-        start_time = time.time()
-        result = {}
-        offloaded_count = 0
-        
-        # Control Plane 필드는 항상 포함
-        result.update(state.get_control_plane())
-        
-        # Data Plane 필드 처리
-        all_fields = set(state.keys()) | set(state.get_lazy_pointers().keys())
-        
-        for field_name in all_fields:
-            # Control Plane은 이미 처리됨
-            if field_name in CONTROL_PLANE_FIELDS:
-                continue
-            
-            # Lazy 필드는 포인터 그대로 유지
-            if field_name in state.get_lazy_pointers():
-                result[field_name] = state.get_lazy_pointers()[field_name].to_dict()
-                continue
-            
-            # Delta 모드에서 변경되지 않은 필드는 스킵
-            if return_delta and field_name not in state._changed_fields:
-                continue
-            
-            value = state.get(field_name)
-            if value is None:
-                continue
-            
-            # 크기 체크 및 오프로드 결정
-            should_offload = (
-                field_name in DATA_PLANE_FIELDS or
-                (force_offload_fields and field_name in force_offload_fields)
-            )
-            
-            if should_offload:
-                value_json = json.dumps(value, ensure_ascii=False, default=str)
-                value_size = len(value_json.encode('utf-8'))
-                
-                if value_size > self._field_offload_threshold:
-                    # S3 오프로드
-                    pointer = self._offload_to_s3(
-                        value=value,
-                        value_json=value_json,
-                        owner_id=owner_id,
-                        workflow_id=workflow_id,
-                        execution_id=execution_id,
-                        field_name=field_name,
-                        segment_id=segment_id
-                    )
-                    result[field_name] = pointer.to_dict()
-                    offloaded_count += 1
-                    continue
-            
-            # 작은 필드는 그대로 포함
-            result[field_name] = value
-        
-        # Delta 메타데이터 추가
-        if return_delta and state.has_changes():
-            result[DELTA_MARKER] = True
-            result["__changed_fields__"] = list(state._changed_fields)
-            result["__deleted_fields__"] = list(state._deleted_fields)
-        
-        # 최종 크기 검증
-        final_size = len(json.dumps(result, ensure_ascii=False, default=str).encode('utf-8'))
-        
-        elapsed = (time.time() - start_time) * 1000
-        logger.info(f"[StateHydrator] Dehydrated in {elapsed:.2f}ms, "
-                   f"final_size={final_size/1024:.2f}KB, offloaded={offloaded_count}")
-        
-        if final_size > self._control_plane_max_size:
-            logger.warning(f"[StateHydrator] Payload exceeds target ({final_size/1024:.2f}KB > "
-                          f"{self._control_plane_max_size/1024:.2f}KB)")
         
         return result
     

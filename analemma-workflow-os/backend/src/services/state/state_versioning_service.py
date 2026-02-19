@@ -108,9 +108,7 @@ class StateVersioningService:
         """
         새 Pointer Manifest 생성
         
-        ✅ Phase B: 자동 전략 선택
-        - use_2pc=True → EventualConsistencyGuard 사용 (99.99% 정합성)
-        - use_2pc=False → Legacy Transaction (98% 정합성)
+        ✅ v3.3: 2-Phase Commit 강제 사용 (Legacy 제거)
         
         Args:
             workflow_id: 워크플로우 ID
@@ -121,22 +119,19 @@ class StateVersioningService:
         Returns:
             ManifestPointer: 생성된 매니페스트 포인터
         """
-        # ✅ Phase B: 2-Phase Commit 사용 여부 확인
-        if self.use_2pc and self.gc_dlq_url:
-            return self._create_manifest_with_2pc(
-                workflow_id=workflow_id,
-                workflow_config=workflow_config,
-                segment_manifest=segment_manifest,
-                parent_manifest_id=parent_manifest_id
-            )
-        else:
-            # 기존 Legacy 방식
-            return self._create_manifest_legacy(
-                workflow_id=workflow_id,
-                workflow_config=workflow_config,
-                segment_manifest=segment_manifest,
-                parent_manifest_id=parent_manifest_id
-            )
+        # v3.3: 2-Phase Commit 강제 사용
+        if not self.use_2pc:
+            logger.warning("[StateVersioningService] use_2pc=False is deprecated, forcing 2PC")
+        
+        if not self.gc_dlq_url:
+            raise RuntimeError("GC DLQ URL is required for 2-Phase Commit")
+        
+        return self._create_manifest_with_2pc(
+            workflow_id=workflow_id,
+            workflow_config=workflow_config,
+            segment_manifest=segment_manifest,
+            parent_manifest_id=parent_manifest_id
+        )
     
     def _create_manifest_with_2pc(
         self,
@@ -146,28 +141,18 @@ class StateVersioningService:
         parent_manifest_id: Optional[str]
     ) -> ManifestPointer:
         """
-        ✅ Phase B: EventualConsistencyGuard를 사용한 2-Phase Commit
-        
-        🧩 피드백 ① 적용: Lazy Import (실제 사용 시 import)
+        ✅ v3.3: EventualConsistencyGuard를 사용한 2-Phase Commit (강제)
         """
-        # 🧩 Lazy Import: 최초 사용 시에만 import
+        # Lazy Import
         if self._consistency_guard is None:
-            try:
-                from src.services.state.eventual_consistency_guard import EventualConsistencyGuard
-                self._consistency_guard = EventualConsistencyGuard(
-                    s3_bucket=self.bucket,
-                    dynamodb_table=self.table.name,
-                    block_references_table=self.block_references_table,
-                    gc_dlq_url=self.gc_dlq_url
-                )
-                logger.info("[StateVersioningService] ✅ EventualConsistencyGuard initialized (Lazy Import)")
-            except ImportError as e:
-                logger.error(f"[StateVersioningService] ❌ Failed to import EventualConsistencyGuard: {e}")
-                logger.warning("[StateVersioningService] 2PC failed, using 1-phase transaction")
-                return self._create_manifest_legacy(
-                    workflow_id=workflow_id,
-                    workflow_config=workflow_config,
-                    segment_manifest=segment_manifest,
+            from src.services.state.eventual_consistency_guard import EventualConsistencyGuard
+            self._consistency_guard = EventualConsistencyGuard(
+                s3_bucket=self.bucket,
+                dynamodb_table=self.table.name,
+                block_references_table=self.block_references_table,
+                gc_dlq_url=self.gc_dlq_url
+            )
+            logger.info("[StateVersioningService] ✅ EventualConsistencyGuard initialized")
                     parent_manifest_id=parent_manifest_id
                 )
         
