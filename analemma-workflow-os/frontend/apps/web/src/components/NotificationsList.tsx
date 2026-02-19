@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { useRouter } from 'next/navigation';
+import { useNavigate } from 'react-router-dom';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Trash2, BellOff, CheckCheck, Check, AlertCircle, Info, X } from 'lucide-react';
@@ -37,7 +37,7 @@ const NotificationsList: React.FC<Props> = ({
   onMarkAllRead,
   onClearAll
 }) => {
-  const router = useRouter();
+  const navigate = useNavigate();
   const unreadCount = useMemo(() => notifications.filter(n => !n.read).length, [notifications]);
 
   if (!notifications || notifications.length === 0) {
@@ -128,7 +128,7 @@ const NotificationsList: React.FC<Props> = ({
                   onMarkRead(n.id);
                 }
                 // Navigate to Task Manager with selected task
-                router.push(`/task-manager?taskId=${taskId}`);
+                navigate(`/task-manager?taskId=${taskId}`);
               } else {
                 // Fallback to existing onSelect behavior
                 onSelect(taskId || (n.id ? `notification:${n.id}` : null));
