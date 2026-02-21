@@ -751,7 +751,13 @@ class TimeMachineService:
                     "node_id": cp.get('node_id'),
                     "status": cp.get('status'),
                     "timestamp": cp.get('created_at'),
-                    "state_keys": list(cp.get('state_snapshot', {}).keys())[:10],
+                    "state_summary": {
+                        k: self._truncate_value(
+                            json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v,
+                            max_length=200
+                        )
+                        for k, v in list(cp.get('state_snapshot', {}).items())[:10]
+                    },
                     "has_error": cp.get('status') in ['FAILED', 'ERROR']
                 }
                 checkpoint_summaries.append(summary)

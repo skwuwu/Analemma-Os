@@ -3,6 +3,13 @@ from typing import Dict, Any, List, Optional
 
 import boto3
 
+try:
+    from src.services.recovery.prompt_security_guard import get_security_guard
+    RING_PROTECTION_AVAILABLE = True
+except ImportError:
+    get_security_guard = None
+    RING_PROTECTION_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 METRIC_NAMESPACE = "Analemma/Engine"
@@ -44,6 +51,16 @@ class SelfHealingService:
         fix_instruction = healing_meta.get("suggested_fix")
         if not fix_instruction:
             return
+
+        # PromptSecurityGuard로 healing advice 살균 (Ring-3 신뢰 수준 적용)
+        # Gemini가 생성한 텍스트이므로 Ring-3(비신뢰) 수준으로 검증
+        if RING_PROTECTION_AVAILABLE and get_security_guard:
+            try:
+                guard = get_security_guard()
+                fix_instruction = guard.sanitize_healing_advice(fix_instruction)
+            except Exception as e:
+                logger.warning(f"sanitize_healing_advice failed, proceeding with basic sanitization: {e}")
+                healing_meta["security_scan"] = "skipped"
 
         logger.info("🚑 Applying Self-Healing instruction refinement: %s", fix_instruction)
         

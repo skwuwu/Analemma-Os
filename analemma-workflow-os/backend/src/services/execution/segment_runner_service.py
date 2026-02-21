@@ -2593,7 +2593,28 @@ class SegmentRunnerService:
             if node_type in ('llm_chat', 'aiModel', 'llm'):
                 prompt = config.get('prompt_content') or config.get('prompt') or ''
                 system_prompt = config.get('system_prompt', '')
-                
+
+                # [Time Machine] _auto_fix_instructions 주입
+                # Time Machine 롤백 후 재실행 시 state에 주입된 Auto-Fix 지침을 system_prompt 앞에 적용
+                auto_fix = initial_state.get('_auto_fix_instructions') if initial_state else None
+                if auto_fix:
+                    rollback_ctx = initial_state.get('_rollback_context', {})
+                    fix_header = (
+                        f"\n\n[AUTO-FIX CONTEXT - Applied by Time Machine]\n"
+                        f"{auto_fix}\n"
+                    )
+                    if rollback_ctx.get('original_error'):
+                        fix_header += f"Original error: {rollback_ctx['original_error']}\n"
+                    if rollback_ctx.get('fix_strategy'):
+                        fix_header += f"Fix strategy: {rollback_ctx['fix_strategy']}\n"
+                    fix_header += (
+                        "Follow the above instructions to correct previous mistakes.\n"
+                        "[END AUTO-FIX]\n"
+                    )
+                    system_prompt = fix_header + system_prompt
+                    config['system_prompt'] = system_prompt
+                    logger.info(f"[Time Machine] Auto-Fix instructions injected into node {node_id}")
+
                 # 프롬프트 검증
                 for prompt_type, prompt_content in [('prompt', prompt), ('system_prompt', system_prompt)]:
                     if prompt_content:

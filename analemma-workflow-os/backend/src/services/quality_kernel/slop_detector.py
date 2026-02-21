@@ -555,11 +555,13 @@ class SlopDetector:
                 penalty = 0.05 * severity_multiplier
         
         # 연속 이모티콘 추가 페널티
-        if consecutive_count >= 3:
-            penalty += 0.1 * severity_multiplier
+        # 2개 이상 연속 시 0.8 * severity_multiplier 적용
+        # 예) TECHNICAL_REPORT(×2.0): 0.8 × 2.0 = 1.6 → slop_score 1.0 보장
+        if consecutive_count >= 2:
+            penalty += 0.8 * severity_multiplier
             is_overload = True
-        
-        penalty = min(0.5, penalty)  # 최대 0.5
+
+        penalty = min(2.0, penalty)  # 상한 2.0: 1.6이 통과하여 post-norm 단계에서 슬롭 확정
         
         return EmojiAnalysisResult(
             emoji_count=emoji_count,

@@ -100,8 +100,10 @@ EMOJI_POLICY = {
     'TECHNICAL_REPORT':  {'max_ratio': 0.0,  'severity_multiplier': 2.0},
     'CODE_DOCUMENTATION':{'max_ratio': 0.0,  'severity_multiplier': 2.0},
     'LEGAL_DOCUMENT':    {'max_ratio': 0.0,  'severity_multiplier': 2.5},
+    'FINANCIAL_REPORT':  {'max_ratio': 0.0,  'severity_multiplier': 2.0},
     'MARKETING_COPY':    {'max_ratio': 0.05, 'severity_multiplier': 0.5},
     'SOCIAL_MEDIA':      {'max_ratio': 0.10, 'severity_multiplier': 0.3},
+    'GENERAL_CHAT':      {'max_ratio': 0.15, 'severity_multiplier': 0.2},
     'GENERAL_TEXT':      {'max_ratio': 0.03, 'severity_multiplier': 1.0},
 }
 ```
