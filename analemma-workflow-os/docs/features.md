@@ -1,8 +1,8 @@
-# ✨ Features Guide
+# Features Guide
 
-> [← Back to Main README](../README.md)
+> [Back to Main README](../README.md)
 
-This document provides a comprehensive overview of Analemma OS features, including the Co-design Assistant, monitoring capabilities, Time Machine debugging, and other service features.
+This document covers Analemma OS features: the Co-design Assistant, workflow execution controls, observability tools, and operational utilities.
 
 ---
 
@@ -13,58 +13,55 @@ This document provides a comprehensive overview of Analemma OS features, includi
 3. [Human-in-the-Loop (HITP)](#3-human-in-the-loop-hitp)
 4. [Time Machine Debugging](#4-time-machine-debugging)
 5. [Glass-Box Observability](#5-glass-box-observability)
-6. [Self-Healing & Recovery](#6-self-healing--recovery)
+6. [Self-Healing and Recovery](#6-self-healing-and-recovery)
 7. [Mission Simulator](#7-mission-simulator)
 8. [Skill Repository](#8-skill-repository)
 9. [Real-time Monitoring](#9-real-time-monitoring)
 10. [Model Router](#10-model-router)
+11. [Instruction Distiller](#11-instruction-distiller)
+12. [Task Manager](#12-task-manager)
+13. [Scheduled Workflows](#13-scheduled-workflows)
 
 ---
 
 ## 1. Co-design Assistant
 
-The Co-design Assistant enables **natural language workflow editing** through real-time AI collaboration.
+The Co-design Assistant enables natural language workflow editing through real-time AI collaboration.
 
 ### 1.1 Overview
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Co-design Assistant                          │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   User: "Add error handling to the API calls"                   │
-│                         │                                        │
-│                         ▼                                        │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │              Natural Language Processing                 │   │
-│   │   • Intent Detection (structure needs, complexity)      │   │
-│   │   • Negation Awareness ("without loops")                │   │
-│   │   • Context Analysis (existing workflow state)          │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                         │                                        │
-│                         ▼                                        │
-│   ┌─────────────────────────────────────────────────────────┐   │
-│   │              Workflow Modification                       │   │
-│   │   • Generate new nodes/edges                            │   │
-│   │   • Suggest optimizations                               │   │
-│   │   • Explain changes                                     │   │
-│   └─────────────────────────────────────────────────────────┘   │
-│                         │                                        │
-│                         ▼                                        │
-│   Output: JSONL stream of node, edge, and suggestion updates    │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+User: "Add error handling to the API calls"
+                 |
+                 v
++------------------------------------------------------------+
+|              Natural Language Processing                    |
+|   - Intent Detection (structure needs, complexity)          |
+|   - Negation Awareness ("without loops")                    |
+|   - Context Analysis (existing workflow state)              |
++------------------------------------------------------------+
+                 |
+                 v
++------------------------------------------------------------+
+|              Workflow Modification                          |
+|   - Generate new nodes/edges                               |
+|   - Suggest optimizations                                  |
+|   - Explain changes                                        |
++------------------------------------------------------------+
+                 |
+                 v
+Output: JSONL stream of node, edge, and suggestion updates
 ```
 
 ### 1.2 Capabilities
 
 | Feature | Description |
-|---------|-------------|
-| **Natural Language Editing** | Describe changes in plain English |
-| **Incremental Updates** | Modify existing workflows without rebuilding |
-| **Smart Suggestions** | AI-powered optimization recommendations |
-| **Real-time Streaming** | See changes as they're generated |
-| **Context Awareness** | Understands existing workflow structure |
+|---|---|
+| Natural Language Editing | Describe changes in plain English |
+| Incremental Updates | Modify existing workflows without rebuilding |
+| Smart Suggestions | AI-powered optimization recommendations |
+| Real-time Streaming | See changes as they are generated |
+| Context Awareness | Understands existing workflow structure |
 
 ### 1.3 Supported Commands
 
@@ -100,169 +97,160 @@ The Co-design Assistant streams responses in JSONL format:
 
 ## 2. Agentic Designer
 
-The Agentic Designer **generates complete workflows from scratch** based on natural language descriptions.
+The Agentic Designer generates complete workflows from scratch based on natural language descriptions.
 
 ### 2.1 When It Activates
 
-The system automatically switches to Agentic Designer mode when:
+The system switches to Agentic Designer mode when:
 
 - Canvas is empty (no nodes or edges)
 - No conversation history exists
-- User requests full workflow generation
+- User explicitly requests full workflow generation
 
 ### 2.2 Generation Process
 
 ```
-User Request: "Create a workflow that monitors social media 
+User Request: "Create a workflow that monitors social media
                mentions and sends alerts for negative sentiment"
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Agentic Designer                          │
-├─────────────────────────────────────────────────────────────┤
-│  1. Parse intent and requirements                            │
-│  2. Select appropriate node types                            │
-│  3. Design optimal graph structure                           │
-│  4. Calculate layout positions                               │
-│  5. Generate edges with proper connections                   │
-│  6. Stream output in JSONL format                            │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
+                              |
+                              v
++------------------------------------------------------------+
+|                    Agentic Designer                         |
+|  1. Parse intent and requirements                           |
+|  2. Select appropriate node types                           |
+|  3. Design optimal graph structure                          |
+|  4. Calculate layout positions                              |
+|  5. Generate edges with proper connections                  |
+|  6. Stream output in JSONL format                           |
++------------------------------------------------------------+
+                              |
+                              v
 Generated Workflow:
-┌─────┐    ┌───────────┐    ┌───────────┐    ┌─────────┐    ┌─────┐
-│Start│───>│ API Fetch │───>│ Sentiment │───>│ Condition│───>│ End │
-└─────┘    │ (Twitter) │    │ Analysis  │    │ (< 0.3) │    └─────┘
-           └───────────┘    └───────────┘    └────┬────┘
-                                                   │
-                                                   ▼
-                                             ┌───────────┐
-                                             │Send Alert │
-                                             │ (Slack)   │
-                                             └───────────┘
++-----+    +-----------+    +-----------+    +---------+    +-----+
+|Start|   >| API Fetch |   >| Sentiment |   >|Condition|   >| End |
++-----+    | (Twitter) |    | Analysis  |    | (< 0.3) |    +-----+
+           +-----------+    +-----------+    +----+----+
+                                                  |
+                                                  v
+                                            +-----------+
+                                            |Send Alert |
+                                            | (Slack)   |
+                                            +-----------+
 ```
 
 ### 2.3 Node Types Supported
 
 | Category | Node Types |
-|----------|------------|
-| **Control Flow** | start, end, condition, loop, parallel |
-| **AI/LLM** | llm_chat, gemini_chat, anthropic_chat |
-| **Data** | api_call, database_query, transform |
-| **Integration** | webhook, email, slack, custom |
-| **Human** | hitp, approval, input_form |
+|---|---|
+| Control Flow | start, end, condition, loop, parallel |
+| AI/LLM | llm_chat, gemini_chat, anthropic_chat |
+| Data | api_call, database_query, transform |
+| Integration | webhook, email, slack, custom |
+| Human | hitp, approval, input_form |
 
 ### 2.4 Layout Rules
 
-The Agentic Designer follows consistent layout rules:
-
 ```
 Layout Algorithm:
-├── Sequential nodes: X=150, Y increases by 100
-├── Parallel branches: Same Y, X spreads by 200
-├── Conditional branches: Left (true), Right (false)
-└── Loop internals: X offset +50 for nesting
+  Sequential nodes: X=150, Y increases by 100
+  Parallel branches: Same Y, X spreads by 200
+  Conditional branches: Left (true), Right (false)
+  Loop internals: X offset +50 for nesting
 ```
 
 ---
 
 ## 3. Human-in-the-Loop (HITP)
 
-HITP provides **physical pause points** in workflow execution for human oversight and approval.
+HITP provides physical pause points in workflow execution for human oversight and approval. When an HITP node is reached, the kernel stores a Step Functions task token in DynamoDB and suspends execution. Resumption requires the task token to be returned via the API.
 
 ### 3.1 HITP Flow
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                      HITP Execution Flow                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   Workflow Execution                                            │
-│         │                                                        │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │          HITP Node Reached             │                     │
-│   │   • Store Task Token in DynamoDB      │                     │
-│   │   • Persist current state to S3       │                     │
-│   │   • Send WebSocket notification       │                     │
-│   └───────────────────────────────────────┘                     │
-│         │                                                        │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Step Functions WAIT State          │                     │
-│   │   • Execution paused                   │                     │
-│   │   • 24-hour timeout (configurable)    │                     │
-│   └───────────────────────────────────────┘                     │
-│         │                                                        │
-│         │  User Response via API/WebSocket                      │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Resume Execution                   │                     │
-│   │   • Validate user response            │                     │
-│   │   • Inject response into state        │                     │
-│   │   • Continue workflow                  │                     │
-│   └───────────────────────────────────────┘                     │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Workflow Execution
+      |
+      v
++------------------------------------------+
+|         HITP Node Reached                 |
+|   - Store Task Token in DynamoDB          |
+|   - Persist current state to S3           |
+|   - Send WebSocket notification           |
++------------------------------------------+
+      |
+      v
++------------------------------------------+
+|     Step Functions WAIT State             |
+|   - Execution paused                      |
+|   - 24-hour timeout (configurable)        |
++------------------------------------------+
+      |
+      | User Response via API/WebSocket
+      v
++------------------------------------------+
+|     Resume Execution                      |
+|   - Validate user response               |
+|   - Inject response into state           |
+|   - Continue workflow                     |
++------------------------------------------+
 ```
 
 ### 3.2 Use Cases
 
 | Use Case | Description |
-|----------|-------------|
-| **Approval Gates** | Require human approval before critical actions |
-| **Data Validation** | Human review of AI-generated content |
-| **Exception Handling** | Manual intervention for edge cases |
-| **Compliance** | Audit trail with human sign-off |
+|---|---|
+| Approval Gates | Require human approval before critical actions |
+| Data Validation | Human review of AI-generated content |
+| Exception Handling | Manual intervention for edge cases |
+| Compliance | Audit trail with human sign-off |
 
 ### 3.3 Notification Channels
 
-When HITP is triggered, users are notified through:
+When HITP is triggered:
 
-1. **WebSocket Push** - Real-time in-app notification
-2. **Notification Center** - Persistent notification stored in DynamoDB
-3. **Email/SMS** - Optional external notifications
+1. **WebSocket Push** — Real-time in-app notification
+2. **Notification Center** — Persistent notification stored in DynamoDB
+3. **Email/SMS** — Optional external notifications (configurable)
 
 ---
 
 ## 4. Time Machine Debugging
 
-Time Machine enables **checkpoint-based debugging** and state inspection throughout workflow execution.
+Time Machine enables checkpoint-based debugging and state inspection throughout workflow execution. Every segment execution produces a Merkle-linked manifest. The Time Machine queries DynamoDB for the manifest chain and reconstructs state at any historical point.
 
 ### 4.1 Features
 
 | Feature | Description |
-|---------|-------------|
-| **Execution Timeline** | View all events in chronological order |
-| **Checkpoint Snapshots** | Full state captured at each segment |
-| **State Diff** | Compare state between any two checkpoints |
-| **Resume from Checkpoint** | Restart execution from any point |
+|---|---|
+| Execution Timeline | View all events in chronological order |
+| Checkpoint Snapshots | Full state captured at each segment via Merkle DAG |
+| State Diff | Compare state between any two manifests |
+| Resume from Checkpoint | Restart execution from any approved manifest |
 
 ### 4.2 Timeline View
 
 ```
 Execution Timeline: exec_xyz789
-────────────────────────────────────────────────────────────────
-10:05:00.000 │ ● START        │ Execution initiated
-10:05:00.150 │ ● SEGMENT_0    │ Started segment 0
-10:05:01.200 │ ○ LLM_CALL     │ gemini-3-pro (1,250 tokens)
-10:05:02.050 │ ● SEGMENT_0    │ Completed
-10:05:02.100 │ ● SEGMENT_1    │ Started segment 1
-10:05:03.500 │ ○ API_CALL     │ external-api.com/data
-10:05:04.200 │ ● SEGMENT_1    │ Completed
-10:05:04.250 │ ● HITP         │ Waiting for human approval
-10:15:00.000 │ ● RESUME       │ User approved
-10:15:00.100 │ ● SEGMENT_2    │ Started segment 2
-10:15:01.500 │ ● END          │ Execution completed
-────────────────────────────────────────────────────────────────
+------------------------------------------------------------------------
+10:05:00.000 | START        | Execution initiated
+10:05:00.150 | SEGMENT_0    | Started segment 0
+10:05:01.200 | LLM_CALL     | gemini-3-pro (1,250 tokens)
+10:05:02.050 | SEGMENT_0    | Completed - manifest_id: abc001
+10:05:02.100 | SEGMENT_1    | Started segment 1
+10:05:03.500 | API_CALL     | external-api.com/data
+10:05:04.200 | SEGMENT_1    | Completed - manifest_id: abc002
+10:05:04.250 | HITP         | Waiting for human approval
+10:15:00.000 | RESUME       | User approved
+10:15:00.100 | SEGMENT_2    | Started segment 2
+10:15:01.500 | END          | Execution completed - manifest_id: abc003
+------------------------------------------------------------------------
 ```
 
 ### 4.3 Checkpoint Comparison
 
 ```json
-// Compare checkpoint_001 vs checkpoint_005
-
 {
+  "manifest_a": "abc001",
+  "manifest_b": "abc003",
   "added_keys": ["processed_items", "sentiment_scores"],
   "removed_keys": ["temp_buffer"],
   "modified_keys": ["counter", "status", "results"],
@@ -278,15 +266,17 @@ Execution Timeline: exec_xyz789
 
 ## 5. Glass-Box Observability
 
-Glass-Box provides **transparent AI decision-making** by logging all LLM interactions and tool usage.
+Glass-Box provides transparent AI decision-making by streaming all LLM interactions, tool usage, and Governor decisions to connected WebSocket clients in real time. The `trace_id` kernel-protected field correlates all events across distributed Lambda invocations.
 
-### 5.1 What's Logged
+### 5.1 What Is Logged
 
 | Event Type | Data Captured |
-|------------|---------------|
-| `ai_thought` | LLM prompts, responses, reasoning |
+|---|---|
+| `ai_thought` | LLM prompts, responses, Thinking Mode reasoning chain |
 | `tool_usage` | Tool calls, inputs, outputs |
 | `decision` | Branch decisions, conditions evaluated |
+| `governance_result` | Governor APPROVED / REJECTED / ROLLBACK decisions |
+| `kernel_event` | State transitions, offload operations, ring boundary crossings |
 | `error` | Failures with stack traces |
 
 ### 5.2 Log Structure
@@ -295,6 +285,7 @@ Glass-Box provides **transparent AI decision-making** by logging all LLM interac
 {
   "type": "ai_thought",
   "timestamp": "2026-01-14T10:05:01.200Z",
+  "trace_id": "exec_xyz789",
   "segment_id": 0,
   "data": {
     "model": "gemini-3-pro",
@@ -311,100 +302,86 @@ Glass-Box provides **transparent AI decision-making** by logging all LLM interac
 }
 ```
 
-### 5.3 PII Masking
+### 5.3 Ring-Based PII Filtering
 
-Sensitive data is automatically masked in logs:
-
-```python
-# Before masking
-"Please process email: john.doe@example.com with SSN 123-45-6789"
-
-# After masking
-"Please process email: j***@e***.com with SSN ***-**-****"
-```
+Sensitive fields are filtered according to the Ring protection policy before appearing in Glass-Box streams. At Ring 3 (agent output level), email addresses are SHA-256 hashed and SSN / password fields are fully redacted. This filtering is applied by `StateViewContext` prior to streaming and cannot be bypassed by agent output.
 
 ---
 
-## 6. Self-Healing & Recovery
+## 6. Self-Healing and Recovery
 
-Analemma OS includes **automatic error recovery** through LLM-powered diagnostics.
+Analemma OS includes automatic error recovery through Gemini-powered diagnostics. When a segment fails, the Governor checks the circuit breaker count and, if within the retry budget, passes the error context to Gemini for diagnosis.
 
 ### 6.1 Self-Healing Process
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Self-Healing Process                         │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   Execution Fails                                               │
-│         │                                                        │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Error Analysis                     │                     │
-│   │   • Parse error type and message      │                     │
-│   │   • Identify affected segment/node    │                     │
-│   │   • Check error history patterns      │                     │
-│   └───────────────────────────────────────┘                     │
-│         │                                                        │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Generate Fix Instruction           │                     │
-│   │   • LLM analyzes error context        │                     │
-│   │   • Proposes recovery strategy        │                     │
-│   │   • Validates fix is applicable       │                     │
-│   └───────────────────────────────────────┘                     │
-│         │                                                        │
-│         ▼                                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Inject into Retry                  │                     │
-│   │   • Sandboxed prompt injection        │                     │
-│   │   • Security validation               │                     │
-│   │   • Retry with enhanced context       │                     │
-│   └───────────────────────────────────────┘                     │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Execution Fails
+      |
+      v
++------------------------------------------+
+|     Governor: Error Analysis              |
+|   - Parse error type and message         |
+|   - Check circuit breaker count          |
+|   - Retrieve error history from state    |
++------------------------------------------+
+      |
+      | Within retry budget
+      v
++------------------------------------------+
+|     Gemini: Diagnosis                     |
+|   - Full execution context injected      |
+|   - 2M token window for history analysis |
+|   - Returns targeted recovery action     |
++------------------------------------------+
+      |
+      v
++------------------------------------------+
+|     Kernel: SOFT_ROLLBACK                 |
+|   - Inject fix instruction into state    |
+|   - Retry current segment               |
+|   - Increment circuit breaker counter   |
++------------------------------------------+
+```
+
+Recovery actions are targeted, not generic retries. Example:
+
+```
+"Previous 3 attempts failed due to JSON parsing errors.
+ Injecting structured output enforcement schema into next prompt."
 ```
 
 ### 6.2 Recovery Strategies
 
-| Error Type | Strategy |
-|------------|----------|
-| **LLM Timeout** | Retry with shorter prompt, different model |
-| **Rate Limit** | Exponential backoff, queue pending requests |
-| **Invalid Output** | Add format instructions to prompt |
-| **External API Failure** | Retry with fallback endpoint |
+| Error Type | Governor Decision | Recovery Action |
+|---|---|---|
+| LLM output format error | `SOFT_ROLLBACK` | Inject format enforcement schema |
+| Gas fee exceeded | `SOFT_ROLLBACK` | Inject token budget instruction |
+| Plan drift detected | `SOFT_ROLLBACK` | Inject original plan reminder |
+| Circuit breaker exhausted | `HARD_ROLLBACK` | Restore last approved manifest |
+| Kernel command forgery | `TERMINAL_HALT` | Immediate workflow termination |
 
-### 6.3 Sandboxed Injection
+### 6.3 Fix Instruction Injection
 
-Fix instructions are securely injected to prevent prompt injection attacks:
-
-```
-<!-- ANALEMMA_SELF_HEALING_ADVICE -->
-<SYSTEM_ADVICE>
-SYSTEM WARNING: The following is automated advice from error history.
-Previous attempt failed with: "JSON parsing error - missing closing brace"
-Ensure your output is valid JSON with all braces properly closed.
-</SYSTEM_ADVICE>
-```
+Fix instructions are injected into the next segment's prompt context via a sandboxed key in the state bag (`_kernel_inject_recovery`). This key is in `KERNEL_CONTROL_KEYS` — Ring 3 agents cannot write to it. Only the Governor (Ring 1) can set recovery instructions.
 
 ---
 
 ## 7. Mission Simulator
 
-The Mission Simulator is a **stress-testing suite** that validates workflow resilience against real-world failure scenarios.
+The Mission Simulator is a stress-testing suite that validates workflow resilience against real-world failure scenarios before production deployment.
 
 ### 7.1 Simulated Scenarios
 
 | Scenario | Description |
-|----------|-------------|
-| **Network Latency** | Introduces random delays (100ms-5s) |
-| **LLM Hallucination** | Returns invalid/unexpected responses |
-| **Rate Limiting** | Simulates 429 responses |
-| **Timeout** | Forces request timeouts |
-| **Partial Failure** | Some nodes succeed, others fail |
-| **State Corruption** | Injects invalid state data |
-| **Concurrent Load** | Parallel execution stress test |
-| **Memory Pressure** | Large payload handling |
+|---|---|
+| Network Latency | Introduces random delays (100ms–5s) |
+| LLM Hallucination | Returns invalid or structurally malformed responses |
+| Rate Limiting | Simulates 429 responses with Retry-After headers |
+| Timeout | Forces request timeouts at configurable thresholds |
+| Partial Failure | Some nodes succeed, others fail (tests partial success paths) |
+| State Corruption | Injects invalid state data to test USC defensive guards |
+| Concurrent Load | Parallel execution stress test |
+| Memory Pressure | Large payload handling to test L1-L5 offload cascade |
 
 ### 7.2 Running Simulations
 
@@ -426,34 +403,34 @@ python -m tests.simulator.trigger_test \
 
 ```
 Mission Simulator Report
-════════════════════════════════════════════════════════════
+====================================================================
 Scenario: concurrent_load
 Duration: 300s
 Concurrency: 50 parallel executions
 
 Results:
-├── Total Executions: 1,247
-├── Successful: 1,231 (98.7%)
-├── Failed: 12 (1.0%)
-├── Timed Out: 4 (0.3%)
+  Total Executions: 1,247
+  Successful: 1,231 (98.7%)
+  Failed: 12 (1.0%)
+  Timed Out: 4 (0.3%)
 
 Performance:
-├── Avg Latency: 2.3s
-├── P95 Latency: 4.8s
-├── P99 Latency: 7.2s
+  Avg Latency: 2.3s
+  P95 Latency: 4.8s
+  P99 Latency: 7.2s
 
 Resource Usage:
-├── Peak Lambda Concurrency: 48
-├── DynamoDB RCU: 450/500
-├── DynamoDB WCU: 380/500
-════════════════════════════════════════════════════════════
+  Peak Lambda Concurrency: 48
+  DynamoDB RCU: 450/500
+  DynamoDB WCU: 380/500
+====================================================================
 ```
 
 ---
 
 ## 8. Skill Repository
 
-The Skill Repository provides **reusable, versioned workflow components**.
+The Skill Repository provides reusable, versioned workflow components that can be referenced inline in workflow definitions.
 
 ### 8.1 Skill Structure
 
@@ -464,7 +441,6 @@ The Skill Repository provides **reusable, versioned workflow components**.
   "version": "1.2.0",
   "category": "data-processing",
   "description": "Parses CSV files with configurable delimiters and headers",
-  
   "schema": {
     "input": {
       "type": "object",
@@ -484,10 +460,9 @@ The Skill Repository provides **reusable, versioned workflow components**.
       }
     }
   },
-  
   "subgraph": {
-    "nodes": [...],
-    "edges": [...]
+    "nodes": [],
+    "edges": []
   }
 }
 ```
@@ -495,15 +470,13 @@ The Skill Repository provides **reusable, versioned workflow components**.
 ### 8.2 Skill Categories
 
 | Category | Examples |
-|----------|----------|
-| **Data Processing** | CSV Parser, JSON Transformer, Data Validator |
-| **AI/ML** | Sentiment Analysis, Text Summarizer, Image Classifier |
-| **Integration** | Slack Notifier, Email Sender, Webhook Caller |
-| **Utility** | Rate Limiter, Cache Manager, Error Handler |
+|---|---|
+| Data Processing | CSV Parser, JSON Transformer, Data Validator |
+| AI/ML | Sentiment Analysis, Text Summarizer, Image Classifier |
+| Integration | Slack Notifier, Email Sender, Webhook Caller |
+| Utility | Rate Limiter, Cache Manager, Error Handler |
 
 ### 8.3 Using Skills in Workflows
-
-Skills can be referenced in workflow definitions:
 
 ```json
 {
@@ -524,143 +497,124 @@ Skills can be referenced in workflow definitions:
 
 ## 9. Real-time Monitoring
 
-Analemma OS provides **comprehensive real-time monitoring** through WebSocket connections and CloudWatch integration.
+Analemma OS provides real-time monitoring through WebSocket connections and CloudWatch integration.
 
 ### 9.1 Dashboard Metrics
 
 | Metric | Description |
-|--------|-------------|
-| **Active Executions** | Currently running workflows |
-| **Execution Rate** | Workflows started per minute |
-| **Success Rate** | Percentage of successful completions |
-| **Avg Duration** | Average execution time |
-| **Error Rate** | Failed executions per minute |
-| **HITP Pending** | Workflows awaiting human input |
+|---|---|
+| Active Executions | Currently running workflows |
+| Execution Rate | Workflows started per minute |
+| Success Rate | Percentage of successful completions |
+| Avg Duration | Average execution time |
+| Error Rate | Failed executions per minute |
+| HITP Pending | Workflows awaiting human input |
 
 ### 9.2 CloudWatch Metrics
 
-Custom CloudWatch metrics published:
-
 ```
 Namespace: Analemma/Workflow
-├── ExecutionStarted (Count)
-├── ExecutionCompleted (Count)
-├── ExecutionFailed (Count)
-├── SegmentDuration (Milliseconds)
-├── LLMTokensUsed (Count)
-├── SelfHealingTriggered (Count)
-├── HITPRequested (Count)
-└── HITPResponseTime (Seconds)
+  ExecutionStarted            (Count)
+  ExecutionCompleted          (Count)
+  ExecutionFailed             (Count)
+  SegmentDuration             (Milliseconds)
+  LLMTokensUsed               (Count)
+  GovernanceApproved          (Count)
+  GovernanceRejected          (Count)
+  SelfHealingTriggered        (Count)
+  HITPRequested               (Count)
+  HITPResponseTime            (Seconds)
+  PayloadSizeKB               (Kilobytes)
+  S3OffloadTriggered          (Count)
 ```
 
-### 9.3 Alerts Configuration
-
-Recommended CloudWatch alarms:
+### 9.3 Recommended Alarms
 
 | Alarm | Condition | Action |
-|-------|-----------|--------|
+|---|---|---|
 | High Error Rate | ErrorRate > 5% for 5 min | SNS notification |
 | Long HITP Wait | HITPPending > 10 for 1 hour | Email alert |
 | Lambda Throttling | ThrottleCount > 0 | Scale up concurrency |
 | LLM Cost Spike | TokensUsed > 1M in 1 hour | Budget alert |
+| Governance Rejection Spike | GovernanceRejected > 10 in 5 min | Operational alert |
 
 ---
 
 ## 10. Model Router
 
-The Model Router **intelligently selects the optimal LLM** for each request based on multiple factors.
+The Model Router selects the optimal Gemini variant for each request based on context length, task complexity, and latency requirements.
 
 ### 10.1 Selection Criteria
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Model Selection Algorithm                     │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│   Input: User request, Canvas mode, Workflow state              │
-│                         │                                        │
-│                         ▼                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Semantic Intent Detection          │                     │
-│   │   • Structure needs (loop, parallel)  │                     │
-│   │   • Negation awareness                │                     │
-│   │   • Complexity estimation             │                     │
-│   └───────────────────────────────────────┘                     │
-│                         │                                        │
-│                         ▼                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Context Analysis                   │                     │
-│   │   • Workflow size                     │                     │
-│   │   • History length                    │                     │
-│   │   • Token estimation                  │                     │
-│   └───────────────────────────────────────┘                     │
-│                         │                                        │
-│                         ▼                                        │
-│   ┌───────────────────────────────────────┐                     │
-│   │     Requirement Matching               │                     │
-│   │   • Latency requirements              │                     │
-│   │   • Context window needs              │                     │
-│   │   • Cost constraints                  │                     │
-│   └───────────────────────────────────────┘                     │
-│                         │                                        │
-│                         ▼                                        │
-│   Output: Selected model (e.g., gemini-3-pro)                  │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+Input: User request, canvas mode, workflow state
+                 |
+                 v
++------------------------------------------+
+|     Semantic Intent Detection             |
+|   - Structure needs (loop, parallel)     |
+|   - Negation awareness                   |
+|   - Complexity estimation                |
++------------------------------------------+
+                 |
+                 v
++------------------------------------------+
+|     Context Analysis                      |
+|   - Workflow size                        |
+|   - History length                       |
+|   - Token estimation                     |
++------------------------------------------+
+                 |
+                 v
++------------------------------------------+
+|     Requirement Matching                  |
+|   - Latency requirements                 |
+|   - Context window needs                 |
+|   - Cost constraints                     |
++------------------------------------------+
+                 |
+                 v
+Output: Selected model (e.g., gemini-3-pro)
 ```
 
 ### 10.2 Available Models
 
-| Model | Use Case | Context | Latency | Cost |
-|-------|----------|---------|---------|------|
-| `gemini-3-pro` | Full generation, complex reasoning | 2M tokens | ~500ms TTFT | $0.25/1M |
-| `gemini-3-flash` | Real-time collaboration, streaming | 1M tokens | ~100ms TTFT | $0.10/1M |
-| `gemini-3-flash-lite` | Pre-routing, classification | 1M tokens | ~80ms TTFT | $0.05/1M |
-| `claude-3-sonnet` | Fallback, Bedrock integration | 200K tokens | ~1.5s TTFT | $3/1M |
+| Model | Use Case | Context Window | Approx. TTFT |
+|---|---|---|---|
+| `gemini-3-pro` | Full generation, complex reasoning, self-healing | 2M tokens | ~500ms |
+| `gemini-3-flash` | Real-time collaboration, streaming, Distributed Map workers | 1M tokens | ~100ms |
+| `gemini-3-flash-lite` | Pre-routing, classification | 1M tokens | ~80ms |
+| `claude-3-sonnet` | Fallback, Bedrock integration | 200K tokens | ~1.5s |
 
 ### 10.3 Context Caching
 
-For repeated contexts (system prompts, large documents), Context Caching reduces costs by 75%:
-
-```python
-# Automatic caching for contexts > 32K tokens
-if token_count > 32000:
-    enable_context_caching = True
-    # Cached tokens billed at 25% of regular rate
-```
+Context caching activates automatically for contexts above 32K tokens. System prompts and large reference documents cached via `CachedContent` API are billed at the provider's reduced token rate.
 
 ---
 
 ## 11. Instruction Distiller
 
-The Instruction Distiller is an **intelligent learning system** that extracts implicit user preferences from HITL corrections and automatically applies them to future executions.
+The Instruction Distiller extracts implicit user preferences from HITP corrections and applies them to future executions.
 
 ### 11.1 Overview
 
-When a user modifies an AI-generated output during HITL review, the system analyzes the differences between the original and corrected versions to extract generalizable instructions.
-
 ```
-HITL Correction Flow:
-                                                    
-    Original Output ──────────────────────────────┐
-         │                                        │
-         ▼                                        ▼
-    User Corrects ─────────────────────> Diff Analysis
-         │                                        │
-         ▼                                        ▼
-    Corrected Output                  Instruction Extraction
-                                              │
-                                              ▼
-                                    DistilledInstructions DB
-                                              │
-                                              ▼
-                                    Future Executions Apply
+Original Output ----------------> Diff Analysis
+      |                                |
+      v                                v
+User Corrects -----------> Instruction Extraction
+      |                                |
+      v                                v
+Corrected Output            DistilledInstructions DB
+                                       |
+                                       v
+                             Future Executions Apply
 ```
 
 ### 11.2 Instruction Categories
 
 | Category | Description | Example |
-|----------|-------------|---------|
+|---|---|---|
 | `style` | Writing style preferences | "Use active voice instead of passive" |
 | `content` | Content requirements | "Always include source citations" |
 | `format` | Output formatting rules | "Use bullet points for lists" |
@@ -669,102 +623,34 @@ HITL Correction Flow:
 
 ### 11.3 Weight Management
 
-Instructions have dynamic weights that adjust based on usage and feedback:
+Instructions have dynamic weights that decay when repeatedly re-corrected:
 
-```
-Weight Lifecycle:
-                                                    
-    New Instruction ──────────────────> Weight: 1.0
-         │
-         ▼ (User corrects again)
-    Weight Decay ─────────────────────> Weight: 0.7
-         │
-         ▼ (User corrects again)
-    Further Decay ────────────────────> Weight: 0.4
-         │
-         ▼ (Below threshold)
-    Deactivation ─────────────────────> Weight: 0.1 (archived)
-```
+| Event | Weight Change |
+|---|---|
+| New instruction | 1.0 (initial) |
+| User re-corrects | -0.3 |
+| Below 0.1 threshold | Archived (inactive) |
 
-**Weight Rules:**
-- Initial weight: 1.0
-- Decay per re-correction: 0.3
-- Minimum active weight: 0.1
-- Maximum instructions per node: 10
+Maximum 10 active instructions per node. When exceeded, LLM-based semantic compression reduces to 3 core instructions while preserving meaning.
 
 ### 11.4 Conflict Resolution
 
-When new instructions conflict with existing ones, the system automatically detects and resolves conflicts:
-
-| Conflict Type | Description | Resolution Strategy |
-|---------------|-------------|---------------------|
-| `contradiction` | Opposite instructions | Keep higher-weight instruction |
-| `redundancy` | Duplicate meanings | Merge into single instruction |
-| `ambiguity` | Unclear overlap | LLM-based clarification |
-
-### 11.5 Instruction Compression
-
-When instruction count exceeds the limit, the system compresses them:
-
-```
-Compression Process:
-                                                    
-    10+ Instructions ─────────────────> LLM Analysis
-         │
-         ▼
-    Semantic Grouping ────────────────> Cluster by meaning
-         │
-         ▼
-    Core Extraction ──────────────────> 3 essential instructions
-         │
-         ▼
-    Validation ───────────────────────> Meaning preserved check
-```
-
-### 11.6 Few-Shot Learning
-
-High-quality correction examples are stored for few-shot prompting:
-
-| Criteria | Threshold |
-|----------|-----------|
-| Minimum quality score | 0.7 |
-| Maximum example length | 500 characters |
-| Examples per instruction | 3 |
+| Conflict Type | Resolution |
+|---|---|
+| `contradiction` | Keep higher-weight instruction |
+| `redundancy` | Merge into single instruction |
+| `ambiguity` | LLM-based clarification |
 
 ---
 
 ## 12. Task Manager
 
-The Task Manager provides a **business-friendly abstraction layer** over technical workflow executions, designed for end-user visibility and control.
+The Task Manager provides a business-friendly abstraction layer over technical workflow executions.
 
-### 12.1 Overview
-
-```
-Technical Layer                      Business Layer
-                                                    
-    Execution Log ───────────────────> Task Context
-    Step Functions Status ───────────> Task Status
-    S3 Artifacts ────────────────────> Artifact Previews
-    Lambda Logs ─────────────────────> Agent Thoughts
-```
-
-### 12.2 Task Context Model
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `task_id` | string | Unique task identifier |
-| `status` | TaskStatus | Business-friendly status |
-| `title` | string | Human-readable task name |
-| `description` | string | Task description |
-| `progress` | float | Completion percentage (0-100) |
-| `artifacts` | ArtifactPreview[] | Output previews |
-| `agent_thoughts` | AgentThought[] | AI reasoning stream |
-| `business_metrics` | dict | Cost, time, quality metrics |
-
-### 12.3 Task Status Mapping
+### 12.1 Status Mapping
 
 | Technical Status | Task Status | Display |
-|------------------|-------------|---------|
+|---|---|---|
 | `RUNNING` | `in_progress` | "In Progress" |
 | `SUCCEEDED` | `completed` | "Completed" |
 | `FAILED` | `failed` | "Failed" |
@@ -773,17 +659,17 @@ Technical Layer                      Business Layer
 | `PENDING` | `pending` | "Pending" |
 | `WAITING_FOR_CALLBACK` | `awaiting_input` | "Awaiting Input" |
 
-### 12.4 Artifact Types
+### 12.2 Artifact Types
 
-| Type | Description | Preview Strategy |
-|------|-------------|------------------|
-| `text` | Text documents | First 500 characters |
-| `code` | Source code | Syntax-highlighted snippet |
-| `image` | Generated images | Thumbnail URL |
-| `data` | Structured data | Schema summary |
-| `report` | Analysis reports | Executive summary |
+| Type | Preview Strategy |
+|---|---|
+| `text` | First 500 characters |
+| `code` | Syntax-highlighted snippet |
+| `image` | Thumbnail URL |
+| `data` | Schema summary |
+| `report` | Executive summary |
 
-### 12.5 API Endpoints
+### 12.3 API Endpoints
 
 ```
 GET  /tasks                    List all tasks (paginated)
@@ -793,130 +679,75 @@ POST /tasks/{task_id}/cancel   Cancel running task
 POST /tasks/{task_id}/retry    Retry failed task
 ```
 
-### 12.6 Real-time Updates
-
-Task Manager integrates with WebSocket for live updates:
-
-```json
-{
-  "type": "task_update",
-  "task_id": "task_abc123",
-  "changes": {
-    "status": "in_progress",
-    "progress": 45.5,
-    "current_step": "Analyzing data..."
-  }
-}
-```
-
 ---
 
-## 13. Scheduled Workflows (Cron Scheduler)
+## 13. Scheduled Workflows
 
-The Cron Scheduler enables **time-based automatic workflow execution** using EventBridge rules.
+The Cron Scheduler enables time-based automatic workflow execution using EventBridge rules.
 
-### 13.1 Overview
-
-```
-Scheduling Architecture:
-                                                    
-    Cron Expression ──────────────────> EventBridge Rule
-         │                                      │
-         ▼                                      ▼
-    Workflows Table (GSI) ────────────> Scheduler Lambda
-         │                                      │
-         ▼                                      ▼
-    Due Workflows ────────────────────> Step Functions Start
-```
-
-### 13.2 Workflow Scheduling Configuration
+### 13.1 Scheduling Configuration
 
 | Field | Type | Description |
-|-------|------|-------------|
+|---|---|---|
 | `schedule_enabled` | boolean | Enable/disable scheduling |
 | `cron_expression` | string | Standard cron syntax |
 | `next_run_at` | timestamp | Unix timestamp of next execution |
 | `last_run_at` | timestamp | Last execution timestamp |
 | `timezone` | string | Timezone for cron evaluation |
 
-### 13.3 Cron Expression Format
+### 13.2 Cron Expression Format
 
 ```
-┌───────────── minute (0 - 59)
-│ ┌───────────── hour (0 - 23)
-│ │ ┌───────────── day of month (1 - 31)
-│ │ │ ┌───────────── month (1 - 12)
-│ │ │ │ ┌───────────── day of week (0 - 6)
-│ │ │ │ │
++-------------- minute (0-59)
+| +------------ hour (0-23)
+| | +---------- day of month (1-31)
+| | | +-------- month (1-12)
+| | | | +------ day of week (0-6)
+| | | | |
 * * * * *
 ```
 
-**Examples:**
-- `0 9 * * 1-5` - Every weekday at 9:00 AM
-- `*/15 * * * *` - Every 15 minutes
-- `0 0 1 * *` - First day of every month at midnight
+Examples:
+- `0 9 * * 1-5` — Every weekday at 9:00 AM
+- `*/15 * * * *` — Every 15 minutes
+- `0 0 1 * *` — First day of every month at midnight
 
-### 13.4 Scheduler Lambda
+### 13.3 Scheduler Lambda
 
-The scheduler runs on a fixed interval (default: every minute) and:
+Runs on a fixed interval (default: every minute):
 
-1. Queries `ScheduledWorkflowsIndex` GSI for due workflows
-2. Filters workflows where `next_run_at <= current_time`
-3. Starts Step Functions execution for each
-4. Updates `next_run_at` based on cron expression
+1. Queries `ScheduledWorkflowsIndex` GSI for workflows where `next_run_at <= current_time`
+2. Starts Step Functions execution for each due workflow
+3. Updates `next_run_at` based on cron expression
 
-### 13.5 Parallel Execution Scheduler
-
-For parallel workflow branches, the system uses an intelligent scheduling strategy:
+### 13.4 Parallel Execution Strategy
 
 | Strategy | Description | Use Case |
-|----------|-------------|----------|
+|---|---|---|
 | `SPEED_OPTIMIZED` | All branches in parallel | Time-critical workflows |
 | `COST_OPTIMIZED` | Batched execution | Budget-constrained workflows |
-| `BALANCED` | Dynamic batching based on resources | Default strategy |
-
-### 13.6 Resource-Aware Scheduling
-
-The scheduler estimates resource requirements before execution:
-
-```
-Resource Estimation:
-                                                    
-    Branch Analysis ──────────────────> Token estimation
-         │                                      │
-         ▼                                      ▼
-    Memory Calculation ───────────────> Batch sizing
-         │                                      │
-         ▼                                      ▼
-    Concurrency Check ────────────────> Guardrail enforcement
-```
-
-| Resource | Limit | Enforcement |
-|----------|-------|-------------|
-| Memory per batch | 512 MB | Split into smaller batches |
-| Tokens per batch | 100,000 | Sequential batch execution |
-| Concurrent executions | 10 | Queue excess workflows |
+| `BALANCED` | Dynamic batching based on resources | Default |
 
 ---
 
-## Summary: Feature Matrix
+## Feature Matrix
 
 | Feature | Description | Status |
-|---------|-------------|--------|
+|---|---|---|
 | Co-design Assistant | Natural language workflow editing | Available |
-| Agentic Designer | Full workflow generation | Available |
-| HITP | Human-in-the-Loop pause points | Available |
-| Time Machine | Checkpoint debugging | Available |
-| Glass-Box | AI transparency logging | Available |
-| Self-Healing | Automatic error recovery | Available |
-| Mission Simulator | Stress testing suite | Available |
-| Skill Repository | Reusable components | Available |
+| Agentic Designer | Full workflow generation from description | Available |
+| HITP | Human-in-the-Loop pause points with task token | Available |
+| Time Machine | Merkle-chain checkpoint debugging | Available |
+| Glass-Box | Real-time AI reasoning transparency | Available |
+| Self-Healing | Governor-directed automatic error recovery | Available |
+| Mission Simulator | Chaos engineering stress-testing suite | Available |
+| Skill Repository | Reusable versioned workflow components | Available |
 | Real-time Monitoring | WebSocket + CloudWatch | Available |
 | Model Router | Intelligent LLM selection | Available |
-| Instruction Distiller | Learning from HITL corrections | Available |
+| Instruction Distiller | Learning from HITP corrections | Available |
 | Task Manager | Business-friendly task abstraction | Available |
 | Cron Scheduler | Time-based workflow execution | Available |
 
 ---
 
-> [← Back to Main README](../README.md)
+> [Back to Main README](../README.md)

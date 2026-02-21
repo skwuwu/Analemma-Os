@@ -6,7 +6,9 @@
 
 ## Overview
 
-This guide documents the implementation of distributed transaction consistency in Analemma OS v3.3. The system guarantees atomicity across S3 (content storage) and DynamoDB (metadata/pointers) using a Three-Phase Commit protocol with idempotent garbage collection.
+This guide documents the implementation of distributed transaction consistency in Analemma OS v3.3. The system guarantees atomicity across S3 (content storage) and DynamoDB (metadata/pointers) using a 2-Phase Commit protocol with an optional post-commit tag promotion step and idempotent garbage collection.
+
+The protocol has two formal phases: **Phase 1 (Prepare)** and **Phase 2 (Commit)**. A non-critical post-commit step updates S3 block tags from `pending` to `committed`; failure of this step does not fail the transaction and is handled by the GC worker.
 
 ---
 
@@ -45,7 +47,7 @@ Prior implementations used optimistic writes with background cleanup:
 
 ---
 
-## Three-Phase Commit Protocol
+## 2-Phase Commit Protocol
 
 ### Phase 1: Prepare (S3 Upload with Pending Tags)
 
@@ -169,9 +171,11 @@ Phase 2 failures trigger asynchronous garbage collection (blocks are already in 
 
 ---
 
-### Phase 3: Confirm (S3 Tag Promotion)
+### Post-Commit: Tag Promotion (Non-Critical)
 
-**Objective:** Promote pending blocks to committed status
+**Objective:** Promote pending blocks to committed status.
+
+This step runs after Phase 2 commits successfully. It is not a formal protocol phase: tag update failures do not fail the transaction. The GC worker distinguishes `pending` from `committed` blocks and skips deletion of committed blocks.
 
 ```python
 for block in block_uploads:
@@ -187,13 +191,11 @@ for block in block_uploads:
     )
 ```
 
-**Non-Critical Phase:** Tag update failures do not fail the transaction. Blocks remain pending and are cleaned up by idempotent GC (see below).
-
 **Success Path:**
 ```
-Phase 1: S3 blocks (pending) ✓
-Phase 2: DynamoDB manifest + refs ✓
-Phase 3: S3 tags (committed) ✓
+Phase 1: S3 blocks (pending)          - required
+Phase 2: DynamoDB manifest + refs     - required (commit point)
+Post-commit: S3 tags (committed)      - best-effort, GC handles failures
 Result: Transaction complete
 ```
 
@@ -316,11 +318,11 @@ The transaction commit point is the DynamoDB manifest write (Phase 2b).
 ### Failure Mode Analysis
 
 | Phase | Failure Scenario | Resolution | Data Loss |
-|-------|------------------|------------|-----------|
+|---|---|---|---|
 | 1 | S3 upload fails | Synchronous rollback (delete uploaded blocks) | None |
 | 2a | Reference update fails | Retry safe (idempotent ADD) | None |
-| 2b | Manifest write fails | Schedule GC for pending blocks | None |
-| 3 | Tag update fails | GC verifies status before deletion | None |
+| 2b | Manifest write fails | Schedule GC for pending blocks via SQS DLQ | None |
+| Post-commit | Tag update fails | GC re-verifies tag before deletion; skips committed blocks | None |
 
 **Measured Consistency:**
 - v3.2 (optimistic writes): 98%

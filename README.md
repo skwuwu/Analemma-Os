@@ -1,7 +1,8 @@
-# 🌌 Analemma OS (Gemini 3 Native)
+# Analemma OS
 
-> **The Deterministic Runtime for Autonomous AI Agents**  
-> *Enterprise-grade reliability meets Gemini's revolutionary reasoning.*
+**The Deterministic Runtime for Autonomous AI Agents**
+
+Official Submission — Google Gemini API Developer Competition 2026
 
 [![Google Gemini API](https://img.shields.io/badge/Powered%20by-Gemini%203%20Pro-4285F4.svg?logo=google)](https://ai.google.dev/)
 [![License: BSL 1.1](https://img.shields.io/badge/License-BSL%201.1-blue.svg)](LICENSE)
@@ -9,406 +10,392 @@
 
 ---
 
-## 📌 Executive Summary
+## Executive Summary
 
-**Analemma OS** is a serverless operating system that transforms unreliable AI agent loops into **deterministic, self-healing cloud processes**. 
+**Analemma OS** is a serverless operating system kernel that converts probabilistic AI agent loops into deterministic, self-healing cloud processes.
 
-> "AI agents are probabilistic. Infrastructure must be deterministic.  
-> Analemma bridges this gap with a kernel-level governance layer powered by **Gemini 3 Pro**."
+> "AI agents are probabilistic. Infrastructure must be deterministic.
+> Analemma bridges this gap with a kernel-level governance layer powered by Gemini 3 Pro."
 
-**🏆 Official Submission for Google Gemini API Developer Competition 2026**
-
----
-
-## 🔥 Why Gemini-Native? — Leveraging Gemini's Advanced Capabilities
-
-This project demonstrates deep integration with Gemini's unique architectural features—it's an **operating system designed specifically for Gemini**.
-
-> **"Gemini's advanced capabilities enable new architectural patterns."**
->
-> After technical evaluation, Gemini 3 Pro provides several key advantages for OS-level abstractions:
-
-### Gemini's Unique Capabilities Enable Our Core Architecture
-
-| Gemini 3 Pro Feature | Analemma Kernel Use Case | Technical Advantage |
-|----------------------|--------------------------|--------------------|
-| **2M Token Context Window** | Load **entire workflow execution history** for self-healing diagnosis | Large context enables comprehensive analysis |
-| **Sub-500ms TTFT** | Kernel scheduler makes **real-time partitioning decisions** during execution | Fast response enables real-time processing |
-| **Native JSON Mode** | **Zero-parsing overhead** for structured kernel state serialization | Direct structured output improves reliability |
-| **Structured Output Schema** | Guarantees valid `Node[]` / `Edge[]` workflow graph output | Schema validation ensures deterministic behavior |
-| **Context Caching** | Cache 500K+ token system prompts, **75% cost reduction** | Caching reduces operational costs |
-| **Multimodal Reasoning** | Analyze **logs + architecture diagrams + metrics** together | Multimodal analysis provides richer insights |
-
-### The Gemini Kernel Advantage
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    Traditional Agent Framework                       │
-├─────────────────────────────────────────────────────────────────────┤
-│  [Agent Loop] → [LLM Call] → [Parse Response] → [Handle Errors]    │
-│       ↑                                              ↓              │
-│       └──────── Manual Retry / Hope for the Best ────┘              │
-└─────────────────────────────────────────────────────────────────────┘
-
-                              vs.
-
-┌─────────────────────────────────────────────────────────────────────┐
-│                     Analemma OS + Gemini 3 Kernel                    │
-├─────────────────────────────────────────────────────────────────────┤
-│  [Workflow Definition]                                              │
-│       ↓                                                             │
-│  [🧠 Gemini Scheduler] ─── Dynamic Segmentation ───→ [Kernel Space] │
-│       ↓                                                             │
-│  [Step Functions] ←── Deterministic Retry/Checkpoint ──→ [S3 State] │
-│       ↓                                                             │
-│  [🔄 Gemini Self-Healing] ─── Failure Analysis + Auto-Recovery ───→ │
-└─────────────────────────────────────────────────────────────────────┘
-```
+The core thesis is that a reliable AI agent system requires two orthogonal properties: **intelligent reasoning** (Gemini's domain) and **deterministic state management** (the kernel's domain). Most frameworks conflate the two. Analemma enforces their strict separation through a 4-ring privilege architecture.
 
 ---
 
-## 🎯 The Problem: AI's "Trust Gap"
+## The Problem: The AI Trust Gap
 
-| Problem | Impact | Analemma + Gemini Solution |
-|---------|--------|---------------------------|
-| **Unpredictable Loops** | Agents stuck in infinite $500 token spirals | Gemini-powered loop detection with auto-termination |
-| **State Volatility** | 3-hour workflow lost to a single API timeout | S3-backed virtual memory with checkpoint persistence |
-| **Resource Throttling** | Infrastructure collapse under 100x agent spikes | Reserved concurrency + intelligent exponential backoff |
-| **Black Box Reasoning** | "Why did the agent do that?" remains unanswered | **Glass-Box callbacks**: Real-time reasoning transparency via WebSocket |
-
----
-
-## 🏗️ Architecture: The 3-Layer Kernel Model
-
-```mermaid
-flowchart TB
-    subgraph UserSpace["🧠 USER SPACE (Agent Logic)"]
-        LG[LangGraph Workflows]
-        CD[Co-design Assistant]
-        SR[Skill Repository]
-    end
-    
-    subgraph KernelSpace["⚙️ KERNEL SPACE (Gemini 3 Core)"]
-        SCH["🧠 Gemini Scheduler"]
-        SM[State Manager]
-        PS[Partition Service]
-        MR[Model Router]
-        GB[Glass-Box Callback]
-        CP[Checkpoint Service]
-    end
-    
-    subgraph Hardware["🔧 INFRASTRUCTURE ABSTRACTION"]
-        Lambda[Compute Engine]
-        SFN[State Machine]
-        DB[(Persistent Storage)]
-    end
-    
-    UserSpace --> KernelSpace
-    KernelSpace --> Hardware
-    
-    style SCH fill:#4285F4,stroke:#333,color:#fff
-```
-
-### 🌐 Infrastructure-Agnostic Design — Vertex AI Ready
-
-> **🔑 For Google Reviewers: Why AWS Infrastructure Doesn't Matter**
-
-**The kernel's intelligence is 100% Gemini-powered.** AWS is merely the "hardware layer"—a replaceable execution substrate. The same way Linux runs on Intel, AMD, or ARM, Analemma OS runs on any serverless platform.
-
-#### Why This OS Couldn't Exist Without Gemini
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  � TECHNICAL REQUIREMENTS                                          │
-├─────────────────────────────────────────────────────────────────────┤
-│  • Large context window for full execution history analysis        │
-│  • Low latency for real-time kernel scheduling                     │
-│  • Native JSON mode for reliable structured output                 │
-│  • Advanced reasoning for autonomous failure analysis              │
-│                                                                     │
-│  → Requirements for OS-level abstraction                           │
-└─────────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────────┐
-│  ✅ GEMINI 3 PRO CAPABILITIES                                       │
-├─────────────────────────────────────────────────────────────────────┤
-│  • 2M token context → Entire workflow history in single inference  │
-│  • Sub-500ms TTFT → Kernel scheduling with low latency             │
-│  • Native JSON Mode → Zero-parsing structured state serialization  │
-│  • Deep reasoning → Autonomous failure analysis & recovery         │
-│                                                                     │
-│  → Analemma OS: AI Agent Operating System Implementation           │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-#### Vertex AI Compatibility Statement
-
-| Aspect | Current State | Vertex AI Readiness |
-|--------|---------------|---------------------|
-| **Gemini API** | `vertexai` SDK (Vertex AI Native) | ✅ Production Ready |
-| **Context Caching** | Vertex AI caching enabled | ✅ CachedContent API |
-| **Model Routing** | Gemini 3 Pro/Flash selection | ✅ Same models on Vertex AI |
-| **Authentication** | GCP Service Account | ✅ Enterprise IAM Ready |
-
-#### GCP Migration Roadmap
-
-| Component | Current (AWS) | GCP Target | Migration Effort |
-|-----------|---------------|------------|------------------|
-| **AI Core** | Gemini API | **Vertex AI** | 🟢 **2 weeks** |
-| **Compute** | Lambda | Cloud Run | 🟡 4 weeks |
-| **Storage** | S3 + DynamoDB | GCS + Firestore | 🟡 5 weeks |
-| **Orchestration** | Step Functions | Cloud Workflows | 🟡 8 weeks |
-| **Real-time** | API Gateway WS | Firebase + Pub/Sub | 🟡 3 weeks |
-
-> **Total Estimated Migration: 4-5 months** (Already in technical planning)
-
-#### The Core Truth
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                                                                     │
-│   "AWS provides the execution substrate.                           │
-│    Gemini 3 provides the INTELLIGENCE.                             │
-│                                                                     │
-│    You can replace AWS with GCP.                                   │
-│    You CANNOT replace Gemini with any other model."                │
-│                                                                     │
-│   — This is why Analemma is a GEMINI-NATIVE operating system.      │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-**The value proposition is Gemini's reasoning—not the infrastructure wrapper.**
+| Problem | Engineering Impact | Analemma Solution |
+|---|---|---|
+| Unpredictable agent loops | Uncapped token cost, runaway execution | Kernel-enforced loop counter + Gas Fee circuit breaker |
+| State volatility on failure | Hours of work lost to a single API timeout | Merkle DAG checkpointing — resume from exact failure point |
+| Agent command forgery | Agent outputs `_kernel_*` commands to hijack execution | Ring 0/1 reservation — forgery triggers immediate SIGKILL |
+| Opaque reasoning | Post-mortem debugging requires log archaeology | Glass-Box callbacks stream real-time reasoning via WebSocket |
+| 256KB Step Functions payload limit | Large state causes silent execution failure | Universal Sync Core auto-offloads to S3 with content-addressed blocks |
 
 ---
 
-## ⚡ Key Innovations
+## Architecture: 4-Ring Kernel Model
 
-### 🎯 Mission Simulator (Chaos Engineering)
-Built-in stress-testing suite simulating 8+ failure scenarios:
-- Network partitioning, LLM hallucinations, token exhaustion
-- Rate limiting (429 responses), cold start cascades
-- Validates 98%+ success rate under adversarial conditions
-
-### ⏱️ Time Machine (State Recovery)
-Every agent step is persisted. Resume from exact failure point with **zero data loss**.
-- Compare any two checkpoints with visual diff
-- "What changed between step 5 and step 8?"
-
-### 🔄 Gemini-Powered Self-Healing
-When failures occur, Gemini analyzes the full execution context:
-```
-"Previous 3 attempts failed due to JSON parsing errors.
- Injecting structured output enforcement into next prompt."
-```
-
-### 👁️ Glass-Box Observability
-Real-time WebSocket streaming of AI reasoning:
-- See *why* the agent made each decision
-- Trace correlation across distributed segments
-- Production debugging without reproduction
-
----
-
-## 🛠️ Tech Stack
-
-| Category | Technology |
-|----------|------------|
-| **🧠 AI Core** | **Gemini 3 Pro** (Orchestration, Reasoning, Self-Healing) |
-| **Runtime** | Python 3.12 |
-| **Orchestration** | AWS Step Functions (Portable to Cloud Workflows) |
-| **Compute** | AWS Lambda (Portable to Cloud Run) |
-| **Storage** | DynamoDB, S3 (Portable to Firestore, Cloud Storage) |
-| **Real-time** | WebSocket API |
-| **IaC** | AWS SAM / CloudFormation |
-
----
-
-## 🚀 Quick Start
-
-```bash
-# Clone the repository
-git clone https://github.com/skwuwu/Analemma-Os.git
-cd Analemma-Os/analemma-workflow-os/backend
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure Gemini API
-export GEMINI_API_KEY="your-api-key-here"
-
-# Deploy the Kernel
-sam build && sam deploy --guided
-```
-
----
-
-## 📚 Documentation
-
-| Document | Description |
-|----------|-------------|
-| [**Architecture Deep-Dive**](analemma-workflow-os/docs/architecture.md) | Kernel design, state management, Gemini integration patterns |
-| [**API Reference**](analemma-workflow-os/docs/api-reference.md) | REST API, WebSocket protocol |
-| [**Features Guide**](analemma-workflow-os/docs/features.md) | Co-design assistant, Time Machine, Mission Simulator |
-| [**Installation Guide**](analemma-workflow-os/docs/installation.md) | Deployment, configuration, environment setup |
-
----
-
-## 🎬 Demo
-
-> 📹 **[Watch the 3-Minute Demo Video](#)** *(Coming Soon)*
-
-See Analemma OS orchestrate a complex multi-agent workflow with:
-- Real-time Glass-Box reasoning visualization
-- Intentional failure injection and automatic recovery
-- Time Machine checkpoint navigation
-
----
-
-## 📄 License
-
-**Business Source License 1.1 (BSL 1.1)**
-
-- ✅ Free for development, testing, and personal projects
-- 📧 Contact for production/commercial licensing
-- 🔓 Converts to Apache 2.0 on 2029-01-14
-
----
-
-## 🏆 Hackathon Context — Why This Entry Matters
-
-This repository is the **official submission for Google Gemini API Developer Competition 2026**.
-
-### 🏗️ Foundation vs. Application — What's New for This Competition
-
-> **"This project leverages the author's independent research — a 'Serverless Agent Kernel (Step Functions-based)' — as infrastructure foundation. For this hackathon, we developed the 'Autonomous Architect' module, which maximizes Gemini 3's reasoning capabilities."**
-
-| Layer | Description | Development Timeline |
-|-------|-------------|---------------------|
-| **🔧 Foundation Layer** | Serverless Agent Kernel (SFN-based orchestration, S3 state management, Lambda compute) | Pre-existing personal research |
-| **🧠 Application Layer** | **Autonomous Architect** — Gemini 3 Native intelligence modules | **🆕 Built for this competition** |
-
-#### What the Foundation Provides (Infrastructure)
-- Step Functions state machine orchestration
-- S3-based checkpoint persistence
-- Lambda compute abstraction
-- WebSocket real-time communication
-
-#### What We Built NEW for This Competition (Gemini 3 Exclusive)
-- **Gemini Scheduler**: Dynamic workflow partitioning using 2M context analysis
-- **Self-Healing Engine**: Autonomous failure diagnosis and recovery
-- **Glass-Box Callbacks**: Real-time reasoning transparency
-- **Context Caching Integration**: 75% cost reduction for enterprise scale
-- **Thinking Mode Visualization**: Expose Gemini's reasoning process to users
-
----
-
-### 🔮 Gemini 3 Exclusive Features — Impossible Without This Model
-
-These features were **architecturally impossible** before Gemini 3. They represent genuinely new capabilities enabled by this specific model:
-
-#### 1. 🧠 Intelligent Feedback Loop (2M Context Required)
+Analemma OS enforces a privilege hierarchy modeled after CPU protection rings. Agent output is treated as untrusted input — never as an instruction to the kernel.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│           GEMINI 3 EXCLUSIVE: Full-System Log Analysis              │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  [Complete System Logs]     [Architecture Diagrams]    [Metrics]   │
-│         ↓                          ↓                       ↓        │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │              🧠 Gemini 3 Pro (2M Token Context)              │   │
-│  │                                                              │   │
-│  │  "Analyzing 847,000 tokens of execution history...          │   │
-│  │   Detected pattern: Memory leak in Node #47 causing         │   │
-│  │   cascading failures. Recommending infrastructure change:   │   │
-│  │   Increase Lambda memory from 512MB to 1024MB."             │   │
-│  └─────────────────────────────────────────────────────────────┘   │
-│         ↓                                                           │
-│  [Real-time Infrastructure Reconfiguration]                        │
-│                                                                     │
-│  ⚠️ WHY ONLY GEMINI 3:                                             │
-│  • GPT-4 (128K): Can only see 15% of logs → misses root cause     │
-│  • Claude (200K): Truncates critical failure sequence              │
-│  • Gemini 3 (2M): Full observability → accurate diagnosis          │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+Ring 0 — KERNEL (Immutable System Core)
+    |   kernel_protocol.py    seal_state_bag / open_state_bag
+    |   universal_sync_core   Unified state merge pipeline
+    |   state_versioning      Merkle DAG + 2-Phase Commit
+    |
+    v
+Ring 1 — GOVERNOR (Deterministic Gatekeeper)
+    |   governor_runner       Post-execution output validation
+    |   trust_score_manager   EMA-based agent trust accounting
+    |   constitution.py       Constitutional AI clause enforcement
+    |
+    v
+Ring 2 — TRUSTED TOOLS
+    |   Verified internal services, validated API integrations
+    |
+    v
+Ring 3 — USER AGENTS (Untrusted)
+        Gemini-powered agents, external tools
+        All output treated as unverified data
 ```
 
-#### 2. 💭 Thinking Mode Integration (Reasoning Transparency)
+### Ring Enforcement Invariants
 
-Gemini 3's **Thinking Mode** enables unprecedented visibility into AI decision-making:
+1. **Kernel Control Keys are read-only above Ring 1.** If a Ring 3 agent outputs any reserved `_kernel_*` key, the Governor immediately triggers `TERMINAL_HALT`. There is no bypass path.
+
+2. **State mutations flow through one pipeline.** Every Lambda function — regardless of what it does — exits through `seal_state_bag()`, which passes all data through the Universal Sync Core. There is no side-channel for state writes.
+
+3. **Governance decisions produce immutable audit records.** Every APPROVED / REJECTED / ROLLBACK decision is written to DynamoDB with a 90-day TTL. The Merkle chain makes retroactive tampering detectable.
+
+---
+
+## Kernel Design: "The Great Seal" Protocol (v3.13)
+
+The kernel defines a single I/O contract for every Lambda function in the system.
+
+### Entry: `open_state_bag(event)`
+
+Extracts the actual state dictionary from the raw Step Functions event, regardless of nesting depth. Searches three paths in order: `event.state_data.bag` (standard v3.13), `event.state_data` (flattened), `event` (direct invocation). This decouples Lambda code from ASL `ResultPath` configuration — changing the ASL topology does not require Lambda code changes.
+
+### Exit: `seal_state_bag(base_state, result_delta, action)`
+
+Standardizes the Lambda return value. Internally:
+
+1. Calls the Universal Sync Core with the action type (init / sync / aggregate_branches / merge_callback / etc.)
+2. Returns the canonical two-key response:
 
 ```python
-# Glass-Box Callback leveraging Thinking Mode
 {
-    "type": "reasoning_trace",
-    "thinking_process": [
-        "Step 1: Identified 3 potential failure points in workflow",
-        "Step 2: Cross-referenced with historical execution patterns",
-        "Step 3: Concluded Node #12 has 94% probability of timeout",
-        "Step 4: Preemptively adjusting timeout from 30s to 90s"
-    ],
-    "confidence": 0.94,
-    "action_taken": "preemptive_timeout_adjustment"
+    "state_data": { ...merged, offloaded, optimized... },
+    "next_action": "CONTINUE" | "COMPLETE" | "FAILED" | "PAUSED_FOR_HITP"
 }
 ```
 
-**This is NOT prompt engineering** — it's native model capability that other LLMs cannot replicate.
+The ASL `ResultSelector` then maps `$.Payload.state_data` to `$.state_data.bag`, and the next Lambda receives a clean bag. This design prevents double-wrapping — a subtle failure mode where `state_data` nests inside `state_data` when the protocol is implemented ad hoc.
 
-#### 3. 🔄 Autonomous Infrastructure Adaptation
+### Universal Sync Core — The State Pipeline
 
-| Scenario | Traditional Approach | Gemini 3 Approach |
-|----------|---------------------|-------------------|
-| Memory pressure detected | Alert → Human reviews → Manual fix (hours) | Analyze full context → Auto-scale → Verify (seconds) |
-| Cascading failures | Restart everything blindly | Identify root cause in 847K log lines → Surgical fix |
-| Cost spike anomaly | Post-mortem analysis | Real-time detection + automatic mitigation |
-
-#### 4. 📊 Multimodal System Debugging
-
-Gemini 3 can simultaneously process:
-- **Text logs** (execution traces)
-- **Architecture diagrams** (system topology)
-- **Performance graphs** (metrics visualization)
+All state transitions pass through a four-step pipeline:
 
 ```
-"Cross-referencing the architecture diagram with execution logs,
- I identified that the bottleneck at 14:32:07 correlates with
- the single-threaded connector shown in region us-east-1.
- Recommending parallel connection pool implementation."
-```
+flatten_result(new_result, context)
+    Action-specific extraction: unwraps execution_result wrappers,
+    sorts distributed Map outputs by execution_order, resolves S3
+    ResultWriter manifests to lightweight pointers.
 
-**No other model can perform this multimodal system analysis.**
+merge_logic(base_state, delta, context)
+    Copy-on-Write shallow merge: copies only modified sub-trees
+    instead of full deepcopy. List fields use per-field strategies
+    (dedupe_append for history, replace for branch topology,
+    append for failure records). Control fields always take delta.
+
+optimize_and_offload(state, context)
+    Multi-layer 256KB defense:
+      L1: Individual fields > 30KB  → S3, store pointer
+      L2: Total state > 100KB       → full state to S3
+      L3: state_history > 50 entries → archive older entries
+      L4: Pointer bloat             → summarize + offload
+      L5: State > 150KB (75% of internal 200KB cap) → emergency array offload
+    The 200KB internal cap preserves a 56KB margin for SFN metadata overhead
+    below the AWS hard limit of 256KB.
+
+_compute_next_action(state, delta, action)
+    Centralised routing decision: STARTED / CONTINUE / COMPLETE /
+    FAILED / PAUSED_FOR_HITP. No routing logic lives in individual
+    Lambda functions.
+```
 
 ---
 
-### What Makes This Entry Unique
+## Merkle DAG State Versioning and 2-Phase Commit
 
-| Dimension | Traditional Hackathon Project | Analemma OS |
-|-----------|------------------------------|-------------|
-| **Scope** | Single-purpose app / chatbot | Full operating system abstraction |
-| **Gemini Usage** | API wrapper / prompt chaining | **Architectural dependency** — impossible without Gemini |
-| **Production Readiness** | Demo/prototype quality | Enterprise-grade patterns (multi-tenant, secure, recoverable) |
-| **Technical Depth** | Surface-level integration | Kernel-level OS design with syscall semantics |
+Every segment execution produces an immutable state manifest. Manifests are linked by `parent_manifest_id` into a tamper-evident Merkle chain.
 
-### The "Gemini Dependency Test"
+### Content-Addressed Block Storage
 
-> **Could this project work with a different LLM?**
+State data is serialized into blocks keyed by SHA-256 hash of content:
 
-| Component | Without Gemini | Verdict |
-|-----------|----------------|---------|
-| Self-Healing (execution history analysis) | ❌ 200K context too small | **Gemini Required** |
-| Real-time Kernel Scheduling | ❌ 2s+ latency unacceptable | **Gemini Required** |
-| Structured Workflow Generation | ⚠️ Possible but brittle | **Gemini Preferred** |
-| Context Caching (cost viability) | ❌ No equivalent feature | **Gemini Required** |
+```
+s3://[WORKFLOW_STATE_BUCKET]/manifests/[workflow_id]/[segment]/
+    block_[sha256_of_content].json
+```
 
-**Conclusion: Analemma OS is not portable to other LLMs.** This is the ultimate proof of Gemini-native design.
+Because block IDs are content hashes, identical state fields across executions share the same block. No upload occurs for unchanged fields (content-addressed deduplication). The Merkle root is a three-term SHA-256:
+
+```
+B = SHA-256( CONCAT sorted_by_block_id(block.checksum) )
+R = SHA-256( config_hash || parent_manifest_hash || B )
+```
+
+The inclusion of `config_hash` and `parent_manifest_hash` means identical block sets produce different roots if the workflow configuration or parent chain differs. Any field change propagates to a new `B`, a new root `R`, and a new manifest ID — making retroactive tampering detectable without a separate signature mechanism.
+
+### 2-Phase Commit Protocol
+
+S3 and DynamoDB are kept consistent through an atomic two-phase protocol:
+
+```
+Phase 1 — PREPARE
+    Upload each block to S3 with tag: status=pending (create_manifest path)
+                                   or status=temp    (save_state_delta path)
+    If the Lambda crashes here, blocks remain in pending/temp state.
+    GC worker (DynamoDB Streams TTL expiry → async Lambda) identifies and
+    deletes orphaned blocks. SQS DLQ handles transaction failure orphans.
+    No manual cleanup required.
+
+Phase 2 — COMMIT
+    DynamoDB TransactWriteItems (atomic, exactly-once):
+      - Put manifest record with condition: attribute_not_exists(manifest_id)
+      - Idempotent: duplicate commits are no-ops
+    Update S3 block tags: status=pending -> status=committed
+                       or status=temp    -> status=ready
+    GC workers skip committed/ready blocks.
+```
+
+### Rollback Capability
+
+The Governor can trigger three rollback types:
+
+| Violation | Rollback | Mechanism |
+|---|---|---|
+| KERNEL_COMMAND_FORGERY | TERMINAL_HALT | Immediate workflow SIGKILL |
+| SLOP / CIRCUIT_BREAKER | HARD_ROLLBACK | Restore last `governance_decision=APPROVED` manifest via DynamoDB GSI query |
+| PLAN_DRIFT / GAS_FEE | SOFT_ROLLBACK | Retry current segment with agent feedback message |
+
+HARD_ROLLBACK marks the abandoned branch's blocks for GC with a 7-day grace period. No data loss occurs for approved manifests.
 
 ---
 
-<div align="center">
-  <h3>🌌 Analemma OS</h3>
-  <p><em>"Making AI agents as reliable as operating system processes."</em></p>
-  <br>
-  <p>Built with ❤️ for the Gemini ecosystem</p>
-</div>
+## Governance Layer: Constitutional AI at the Kernel Level
+
+The Governor (Ring 1) validates agent output after every segment execution.
+
+### Detection Metrics
+
+| Metric | Method | Threshold |
+|---|---|---|
+| Output size (SLOP) | `len(json.dumps(output).encode('utf-8'))` | Configurable, default 500KB |
+| Plan drift | SHA-256 hash comparison + keyword-overlap Intent Retention Rate | 0.7 IRR minimum |
+| Gas fee | Accumulated `total_tokens_used * cost_per_token` | Configurable, default $100 USD |
+| Circuit breaker | Per-agent retry counter from workflow state | Configurable, default 3 retries |
+| Kernel command forgery | Intersection of agent output keys with `KERNEL_CONTROL_KEYS` set | Zero tolerance |
+
+### Trust Score Model
+
+Agent trust scores use an Exponential Moving Average to solve the asymmetric recovery problem inherent in fixed-increment systems:
+
+```
+delta_S = BASE_INCREMENT * (1 + 2.0 * streak_ratio)
+          where streak_ratio = consecutive_successes / recent_window (last 10)
+
+T_new = clamp(T_old + delta_S - (PENALTY_MULTIPLIER * anomaly_score), 0.0, 1.0)
+```
+
+With a 5-step consecutive success streak, `delta_S = 0.03` (vs. the fixed baseline of `0.01`). Trust restoration from 0.4 to 0.8 converges in **14 iterations instead of 40** — a 65% reduction in recovery steps. This figure is derived directly from the model parameters in `trust_score_manager.py`.
+
+Ring-level penalty multipliers: Ring 0 = 2.0x, Ring 1 = 1.5x, Ring 2 = 0.8x, Ring 3 = 0.5x.
+
+Scores below 0.4 force STRICT governance mode regardless of ring level.
+
+### Constitutional AI Clauses
+
+Six default articles are enforced at Ring 1. CRITICAL-severity violations produce immediate REJECTED decisions:
+
+| Article | Rule | Severity |
+|---|---|---|
+| 1 | Professional tone | MEDIUM |
+| 2 | No harmful content generation | CRITICAL |
+| 3 | No PII solicitation (passwords, card numbers) | CRITICAL |
+| 4 | Transparency about uncertainty | LOW |
+| 5 | No security policy bypass | CRITICAL |
+| 6 | No PII in output text (email, phone, SSN detected via regex) | CRITICAL |
+
+Custom clauses can be added per-workflow via `governance_policies.constitution[]` with article numbers above 6.
+
+---
+
+## Why Gemini 3 Is Architecturally Required
+
+The kernel infrastructure (Step Functions orchestration, Merkle DAG, 2PC, Ring protection) is model-agnostic. The **intelligence layer** is not.
+
+| Capability | Analemma Requirement | Why Gemini 3 |
+|---|---|---|
+| 2M token context window | Load full execution history for self-healing diagnosis | GPT-4: 128K, Claude 3.5: 200K — insufficient for full-history analysis |
+| Sub-500ms time-to-first-token | Real-time kernel scheduling decisions between segments | Higher latency degrades the execution loop to batch, not interactive |
+| Native structured output | Zero-parsing overhead for Merkle manifest serialization | Prompt-engineered JSON is brittle at scale |
+| Vertex AI context caching | Cache 500K+ token system prompts across executions | Gemini-specific API — no equivalent in other providers |
+| Thinking Mode | Expose reasoning chain to Glass-Box callbacks | Native capability; cannot be replicated via prompt engineering |
+| Multimodal input | Analyze logs + architecture diagrams + metrics simultaneously | Required for self-healing diagnosis across heterogeneous signals |
+
+The "Gemini Dependency Test": removing Gemini 3 and substituting any other current model degrades or eliminates: (1) full-history self-healing due to context window, (2) context caching economics, (3) Thinking Mode transparency. The kernel continues to function; the intelligence layer does not.
+
+---
+
+## Distributed Execution Strategy
+
+The kernel selects execution strategy automatically at workflow save time:
+
+| Condition | Strategy | ASL Mechanism |
+|---|---|---|
+| Total segments <= 10 | SAFE (sequential) | Standard Choice/Pass loop |
+| Total segments 10–100 | BATCHED | ASL Map state, ItemsPath: `$.state_data.bag.segment_manifest` |
+| Total segments > 100, independence > 0.7 | MAP_REDUCE | ASL Distributed Map with S3 ResultWriter |
+
+`segment_manifest` — a lightweight array of S3 pointers (~200 bytes per segment) — is intentionally excluded from S3 offloading so the ASL Map state can reference it inline via `ItemsPath`. Full segment configuration lives at the referenced S3 path.
+
+---
+
+## Key Innovations
+
+### Mission Simulator (Chaos Engineering)
+Built-in stress-testing suite simulating failure scenarios including network partitioning, LLM hallucination injection, token exhaustion, rate limiting (429 responses), and cold start cascades. Validates system behavior under adversarial conditions before production deployment.
+
+### Time Machine (State Recovery)
+Every agent step is checkpointed via the Merkle DAG. Execution can be resumed from the exact failure point by restoring the last approved manifest. Supports point-in-time state comparison between any two manifests.
+
+### Self-Healing via Gemini Context
+When failures occur, Gemini analyzes the full execution context within its 2M token window. The kernel injects structured failure context, and Gemini returns a targeted recovery action — not a generic retry. Example:
+
+```
+"Previous 3 attempts failed due to JSON parsing errors.
+ Injecting structured output enforcement schema into next prompt."
+```
+
+### Glass-Box Observability
+Real-time WebSocket streaming exposes the agent's Thinking Mode trace at each decision point. Production debugging without reproduction. Trace correlation is maintained across distributed Map state segments via shared `execution_id`.
+
+---
+
+## Tech Stack
+
+| Category | Technology |
+|---|---|
+| AI Core | Gemini 3 Pro (Orchestration, Reasoning, Self-Healing) |
+| Runtime | Python 3.12 |
+| Orchestration | AWS Step Functions (portable to Cloud Workflows) |
+| Compute | AWS Lambda arm64 / Graviton2 (portable to Cloud Run) |
+| State Storage | S3 (blocks) + DynamoDB (manifests) |
+| Real-time | WebSocket API Gateway |
+| IaC | AWS SAM / CloudFormation |
+
+---
+
+## Deployment Prerequisites
+
+Analemma OS is a production-grade serverless kernel. Deployment requires pre-existing AWS infrastructure and credentials for multiple external services. There is no single-command quick start.
+
+**AWS Infrastructure (must exist before deployment):**
+
+| Resource | Purpose |
+|---|---|
+| Cognito User Pool | API authentication — `CognitoIssuerUrl`, `CognitoAudience` required |
+| ECR Image URI | Lambda container image built via `docker build` and pushed separately |
+| S3 Bucket | Workflow state block storage |
+| DynamoDB Tables | Manifest store, governance audit log, trust score metrics |
+| SQS Dead Letter Queue | GC worker for orphaned temp blocks (2PC Phase 1 recovery) |
+
+**API Keys (all required at deploy time):**
+
+| Key | Environment Variable |
+|---|---|
+| Gemini API key | `GEMINI_API_KEY` |
+| OpenAI API key | `OPEN_AI_API_KEY` |
+| Anthropic API key | `ANTHROPIC_API_KEY` |
+| Google AI API key | `GOOGLE_API_KEY` |
+
+**Deployment:**
+
+```bash
+git clone https://github.com/skwuwu/Analemma-Os.git
+cd Analemma-Os/analemma-workflow-os/backend
+
+# Build Lambda container image and push to ECR first
+docker build -t analemma-backend .
+# aws ecr ... (tag and push)
+
+# Deploy SAM stack with required parameters
+sam build
+sam deploy --guided \
+  --parameter-overrides \
+    CognitoIssuerUrl=<your-cognito-issuer-url> \
+    CognitoAudience=<your-cognito-audience> \
+    BackendLambdaImageUri=<your-ecr-image-uri> \
+    GeminiApiKey=<your-gemini-key> \
+    OpenAiApiKey=<your-openai-key> \
+    AnthropicApiKey=<your-anthropic-key> \
+    GoogleApiKey=<your-google-key>
+```
+
+See the [Installation Guide](analemma-workflow-os/docs/installation.md) for the complete deployment walkthrough, IAM permissions, and optional parameters (Fargate async worker, VPC configuration, Kinesis streaming).
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [Architecture Deep-Dive](analemma-workflow-os/docs/architecture.md) | Kernel design, state management, Gemini integration patterns |
+| [Kernel Layer Technical Report](analemma-workflow-os/docs/KERNEL_LAYER_TECHNICAL_REPORT.md) | Ring protection, Great Seal protocol, USC pipeline, Merkle DAG, 2PC |
+| [API Reference](analemma-workflow-os/docs/api-reference.md) | REST API, WebSocket protocol |
+| [Features Guide](analemma-workflow-os/docs/features.md) | Co-design assistant, Time Machine, Mission Simulator |
+| [Installation Guide](analemma-workflow-os/docs/installation.md) | Deployment, configuration, environment setup |
+
+---
+
+## Hackathon Context: Foundation vs. New Work
+
+This submission builds on independent prior research (Serverless Agent Kernel architecture) as infrastructure foundation. The Gemini-native intelligence layer was developed for this competition.
+
+| Layer | Description | Status |
+|---|---|---|
+| Foundation | Step Functions orchestration, S3 state management, Lambda compute, WebSocket | Pre-existing personal research |
+| Application | Gemini Scheduler, Self-Healing Engine, Glass-Box Callbacks, Context Caching integration, Thinking Mode visualization | Built for this competition |
+
+The kernel infrastructure is a prerequisite, not the submission. The submission is the demonstration that Gemini 3's specific capabilities — 2M context, Thinking Mode, context caching, native structured output — enable a class of AI agent reliability that is architecturally impossible to achieve with any other currently available model.
+
+---
+
+## Vertex AI Readiness
+
+| Component | Current | GCP Target | Estimated Effort |
+|---|---|---|---|
+| AI Core | Gemini API (vertexai SDK) | Vertex AI (same SDK) | 2 weeks |
+| Compute | Lambda | Cloud Run | 4 weeks |
+| Storage | S3 + DynamoDB | Cloud Storage + Firestore | 5 weeks |
+| Orchestration | Step Functions | Cloud Workflows | 8 weeks |
+| Real-time | API Gateway WebSocket | Firebase + Pub/Sub | 3 weeks |
+
+The Gemini API integration already uses the `vertexai` SDK. Context caching uses `CachedContent` API. Authentication is GCP Service Account. The kernel logic is independent of the infrastructure substrate.
+
+---
+
+## License
+
+**Business Source License 1.1 (BSL 1.1)**
+
+- Free for development, testing, and personal use
+- Commercial licensing available on request
+- Converts to Apache 2.0 on 2029-01-14
+
+---
+
+*"AI agents are probabilistic. Operating systems are not. Analemma OS is the boundary layer between the two."*

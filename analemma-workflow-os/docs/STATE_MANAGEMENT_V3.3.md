@@ -14,7 +14,7 @@ Analemma OS v3.3 introduces a production-grade state management system designed 
 
 The v3.3 kernel eliminates legacy compatibility constraints and implements a clean-slate redesign focused on:
 - Delta-based persistence (70-85% write reduction)
-- 2-Phase Commit protocol (99.99% consistency)
+- 2-Phase Commit protocol (99.97% transaction rollback success rate — see Section 7.3)
 - Adaptive resource optimization (temperature-based batching, dynamic compression)
 
 ---
@@ -239,9 +239,9 @@ Phase 2 (Commit):
   │   └─ ConditionExpression: attribute_not_exists(manifest_id)
   └─ If transaction fails → Schedule async GC via SQS DLQ
 
-Phase 3 (Confirm):
+Post-Commit: Tag Promotion (non-critical):
   ├─ Update S3 tags: pending → committed
-  └─ Non-critical (failure triggers background cleanup)
+  └─ Failure handled by GC worker — does not fail the transaction
 ```
 
 ### 5.3 DynamoDB 100-Item Transaction Limit
@@ -299,7 +299,7 @@ sqs.send_message_batch(
 
 ### 6.2 Idempotent GC Lambda
 
-Race condition: Phase 3 might succeed during the 5-minute delay.
+Race condition: The post-commit tag promotion might succeed during the 5-minute GC delay window.
 
 **Idempotent Guard Implementation:**
 ```python
