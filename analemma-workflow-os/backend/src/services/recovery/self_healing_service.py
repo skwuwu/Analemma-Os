@@ -57,7 +57,12 @@ class SelfHealingService:
         if RING_PROTECTION_AVAILABLE and get_security_guard:
             try:
                 guard = get_security_guard()
-                fix_instruction = guard.sanitize_healing_advice(fix_instruction)
+                sanitized = guard.sanitize_healing_advice(fix_instruction)
+                if sanitized != fix_instruction:
+                    # 살균으로 내용이 변경된 경우 감사 플래그 기록
+                    healing_meta["security_scan"] = "filtered"
+                    logger.info("sanitize_healing_advice modified the healing advice (injection detected)")
+                fix_instruction = sanitized
             except Exception as e:
                 logger.warning(f"sanitize_healing_advice failed, proceeding with basic sanitization: {e}")
                 healing_meta["security_scan"] = "skipped"
