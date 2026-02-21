@@ -753,7 +753,7 @@ class TimeMachineService:
                     "timestamp": cp.get('created_at'),
                     "state_summary": {
                         k: self._truncate_value(
-                            json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v,
+                            json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else v,
                             max_length=200
                         )
                         for k, v in list(cp.get('state_snapshot', {}).items())[:10]

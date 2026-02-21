@@ -670,7 +670,12 @@ Your verdict (REJECT or APPROVE):"""
             threshold_high = self.stage2_threshold_high
         
         # 판정
-        if combined_score < threshold_low:
+        # 슬롭 점수가 임계값(0.95) 이상이면 엔트로피 무관하게 즉시 FAIL
+        # (예: ✨✨ in TECHNICAL_REPORT → emoji_penalty=1.6 → slop_score=1.0 → 항상 거부)
+        if slop_result.slop_score >= 0.95:
+            verdict = QualityVerdict.FAIL
+            requires_stage2 = False
+        elif combined_score < threshold_low:
             verdict = QualityVerdict.FAIL
             requires_stage2 = False
         elif combined_score > threshold_high:
