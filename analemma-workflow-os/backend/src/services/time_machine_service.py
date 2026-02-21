@@ -43,9 +43,9 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 환경 변수 - 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
+# 환경 변수 - template.yaml PlanBriefingFunction 환경변수와 일치
 # ═══════════════════════════════════════════════════════════════════════════════
-STATE_MACHINE_ARN = os.environ.get('STATE_MACHINE_ARN', '')
+STATE_MACHINE_ARN = os.environ.get('WORKFLOW_ORCHESTRATOR_ARN', '')
 BRANCHES_TABLE = os.environ.get('WORKFLOW_BRANCHES_TABLE', 'WorkflowBranchesTable')
 ENABLE_COGNITIVE_ROLLBACK = os.environ.get('ENABLE_COGNITIVE_ROLLBACK', 'true').lower() == 'true'
 

@@ -1136,6 +1136,7 @@ Resources:
           SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
           ROOT_THREAD_INDEX: root-thread-index
           OPENAI_API_KEY: !Ref OpenAiApiKey
+          WORKFLOW_ORCHESTRATOR_ARN: !Ref StepFunctionOrchestrator
       Policies:
         - DynamoDBReadPolicy:
             TableName: !Ref ExecutionsTableV3
@@ -1149,6 +1150,8 @@ Resources:
             TableName: !Ref WorkflowBranchesTable
         - S3ReadPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt StepFunctionOrchestrator.Name
       Events:
         # Workflow Preview
         WorkflowPreviewEvent:
