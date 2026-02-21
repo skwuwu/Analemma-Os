@@ -248,22 +248,25 @@ class TrustScoreManager:
     def get_state(self, agent_id: str) -> Optional[TrustScoreState]:
         """
         Get complete trust score state
-        
+
         Args:
             agent_id: Agent ID
-        
+
         Returns:
             TrustScoreState or None
         """
-    
+        # [BUG-GX-01 FIX] return이 _flush_history_to_metrics() 끝에 잘못 위치해 있었음.
+        # get_state()는 항상 None을 반환했고, _flush_history_to_metrics()는 TrustScoreState를 반환했음.
+        return self.agent_scores.get(agent_id)
+
     def _flush_history_to_metrics(self, agent_id: str, history_records: List[Tuple[str, float]]) -> None:
         try:
             import boto3
             from decimal import Decimal
-            
+
             dynamodb = boto3.resource('dynamodb')
             metrics_table = dynamodb.Table('GovernanceTrustScoreMetrics')
-            
+
             with metrics_table.batch_writer() as batch:
                 for manifest_id, score in history_records:
                     batch.put_item(Item={
@@ -273,8 +276,7 @@ class TrustScoreManager:
                         'timestamp': datetime.utcnow().isoformat() + 'Z',
                         'ttl': int(datetime.utcnow().timestamp()) + (90 * 24 * 3600)
                     })
-            
+
             logger.info(f"[TrustScore Flush] Flushed {len(history_records)} records for {agent_id}")
         except Exception as e:
             logger.error(f"[TrustScore Flush] Failed: {e}")
-        return self.agent_scores.get(agent_id)

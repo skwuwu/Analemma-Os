@@ -254,6 +254,11 @@ def should_update_database(payload: dict, state_data: dict) -> bool:
     """
     데이터베이스 업데이트 여부를 결정하는 로직
     """
+    # [BUG-06 FIX] 독립 호출 시 정규화 보장 (lambda_handler에서 이미 정규화되지만 방어적 처리)
+    if isinstance(state_data, dict) and 'bag' in state_data:
+        state_data = state_data['bag']
+        if not isinstance(state_data, dict):
+            state_data = {}
     current_status = payload.get('status', '').upper()
     action = payload.get('notification_type', payload.get('action', ''))
     current_segment = payload.get('segment_to_run', state_data.get('segment_to_run', 0))
@@ -593,35 +598,48 @@ def _update_execution_status(owner_id: str, notification_payload: dict) -> bool:
         # [v2.1 데이터 무결성 강화] S3에서 기존 히스토리 가져와서 병합
         # segment_runner가 누적 히스토리를 보내더라도, 핸들러 레벨에서 검증/병합
         new_logs = notification_payload.get('new_history_logs') or inner.get('new_history_logs')
-        
+
         try:
             MAX_HISTORY = int(os.environ.get('STATE_HISTORY_MAX_ENTRIES', '50'))
         except:
             MAX_HISTORY = 50
-        
+
         if new_logs and isinstance(new_logs, list):
             # [핵심 변경] S3에서 기존 히스토리 가져오기 (덮어쓰기 방지)
             existing_history = _fetch_existing_history_from_s3(exec_id)
-            
+
             # 기존 히스토리와 새 로그 병합 (중복 제거, 순서 보장)
             merged_history = _merge_history_logs(
                 existing_history=existing_history,
                 new_logs=new_logs,
                 max_entries=MAX_HISTORY
             )
-            
+
             full_state['state_history'] = merged_history
-            
+
             logger.info(
                 f"[HistoryMerge] exec={exec_id[:16]}..., "
                 f"existing={len(existing_history)}, new={len(new_logs)}, merged={len(merged_history)}"
             )
         else:
-            # new_logs가 없으면 기존 state_history 유지 또는 빈 리스트
-            current_history = full_state.get('state_history', [])
+            # [BUG-03 FIX] USC가 new_history_logs를 state_history로 소비함(키 제거됨).
+            # 우선순위:
+            #   1. full_state.state_history (raw_state에서 직접 얻은 경우)
+            #   2. inner.state_history       (lambda_handler inner_payload에 USC 병합 후 주입됨)
+            #   3. 빈 리스트
+            current_history = (
+                full_state.get('state_history')
+                or inner.get('state_history')  # USC-merged state_history from inner_payload
+                or []
+            )
             if not isinstance(current_history, list):
                 current_history = []
-            full_state['state_history'] = current_history
+            full_state['state_history'] = current_history[:MAX_HISTORY]
+            if current_history:
+                logger.info(
+                    f"[HistoryMerge] exec={exec_id[:16]}..., "
+                    f"using USC-merged state_history: {len(current_history)} entries"
+                )
                 
         history_s3_key = _upload_history_to_s3(exec_id, full_state)
         logger.info(f"[DEBUG] history_s3_key after upload: {history_s3_key}")
@@ -713,6 +731,11 @@ def lambda_handler(event: Any, context: Any) -> Dict[str, Any]:
     # 데이터 추출 로직 간소화 (get with defaults)
     state_data = payload.get('state_data') or {}
     if not isinstance(state_data, dict): state_data = {} # 방어 코드
+    # [BUG-04/06 FIX] Kernel Protocol v3.13: ASL ResultSelector가 flat state를 'bag' 키 아래에 래핑함.
+    # Lambda가 수신하는 payload의 state_data는 {bag: flat_dict, next_action: "..."} 구조일 수 있음.
+    # 'bag' 키가 있으면 추출, 없으면 이미 flat이므로 그대로 사용.
+    state_data = state_data.get('bag', state_data)
+    if not isinstance(state_data, dict): state_data = {}
 
     # [Glass Box] 시작 시간 추출
     start_time = payload.get('start_time') or state_data.get('start_time')

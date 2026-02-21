@@ -66,7 +66,9 @@ KERNEL_CONTROL_KEYS = {
     "_kernel_rollback_reason",
     "_kernel_rollback_type",
     "_kernel_modify_parallelism",
-    "_kernel_request_human_approval"
+    "_kernel_request_human_approval",
+    "_kernel_terminate_workflow",       # [BUG-GX-03 FIX] TERMINAL_HALT 시 사용되는 키 추가.
+    "_kernel_retry_current_segment",    # [BUG-GX-03 FIX] SOFT_ROLLBACK 시 사용되는 키 추가.
 }
 
 
@@ -183,7 +185,9 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
     # ────────────────────────────────────────────────────────────────────
     # 4.5. Emit CloudWatch Metrics (v2.1)
     # ────────────────────────────────────────────────────────────────────
-    _emit_governance_metrics(analysis, decision)
+    # [BUG-GX-02 FIX] decision은 GovernanceDecision 객체이므로 .decision 문자열 필드를 전달해야 함.
+    # 기존 코드는 객체 전체를 넘겨 CloudWatch 메트릭 파서가 "decision=GovernanceDecision(...)"를 받았음.
+    _emit_governance_metrics(analysis, decision.decision)
     
     # ────────────────────────────────────────────────────────────────────
     # 5. Optimistic Rollback Policy (v2.1) - Differential Rollback Strategy

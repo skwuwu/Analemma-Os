@@ -524,9 +524,13 @@ def lambda_handler(event, context):
             body['is_scheduled'] = str(True).lower()
             # Auto-generate next_run_time if not provided (use current time + 1 hour as default)
             if 'next_run_time' not in body or body.get('next_run_time') in (None, ''):
+                import calendar
                 from datetime import datetime, timedelta
                 default_next_run = datetime.utcnow() + timedelta(hours=1)
-                body['next_run_time'] = default_next_run.isoformat() + 'Z'
+                # [BUG-SW-01 FIX] line 660에서 int() 강제 변환 필요.
+                # ISO 문자열로 설정하면 int("2026-...Z") → ValueError → 400 반환.
+                # Unix 타임스탬프(int) 로 생성해야 타입 일관성 보장.
+                body['next_run_time'] = calendar.timegm(default_next_run.timetuple())
                 logger.info(f"Auto-generated next_run_time for time trigger: {body['next_run_time']}")
         else:
             # Not scheduled: ensure is_scheduled=false and no next_run_time

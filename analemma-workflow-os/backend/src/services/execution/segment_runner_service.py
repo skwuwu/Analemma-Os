@@ -47,8 +47,8 @@ from src.services.recovery.self_healing_service import SelfHealingService
 # [v3.11] Unified State Hydration
 from src.common.state_hydrator import StateHydrator, SmartStateBag
 from src.services.workflow.repository import WorkflowRepository
-# Using generic imports from main handler file as source of truth
-from src.handlers.core.main import run_workflow, partition_workflow as _partition_workflow_dynamically, _build_segment_config
+# [C-02 FIX] run_workflow는 Cold Start 순환 임포트 방지를 위해 Lazy Local Import로 이동.
+# (_partition_workflow_dynamically, _build_segment_config 는 실제 호출 없음 → 제거)
 from src.common.statebag import normalize_inplace
 
 # [P0 Refactoring] Smart StateBag Architecture
@@ -1006,7 +1006,9 @@ class SegmentRunnerService:
         if isinstance(segment_config, dict) and segment_config.get('nodes'):
             node_types = [n.get('type', 'unknown') for n in segment_config.get('nodes', [])[:5]]
             logger.error(f"[v3.27 AUTO_SPLIT] First 5 node types: {node_types}")
-        
+
+        # [C-02 FIX] Lazy import: 순환 임포트 방지 (top-level에서 제거됨)
+        from src.handlers.core.main import run_workflow
         result = run_workflow(
             config_json=segment_config,
             initial_state=initial_state,
@@ -2710,6 +2712,8 @@ class SegmentRunnerService:
                                f"node_ids={[n.get('id') for n in segment_config.get('nodes', [])]}")
                     logger.error(f"[v3.27 DEBUG] Calling run_workflow with segment_config keys: {list(segment_config.keys())[:15] if isinstance(segment_config, dict) else 'NOT A DICT'}")
                     logger.error(f"[v3.27 DEBUG] segment_config.nodes count: {len(segment_config.get('nodes', [])) if isinstance(segment_config, dict) else 'N/A'}")
+                    # [C-02 FIX] Lazy import: 순환 임포트 방지 (top-level에서 제거됨)
+                    from src.handlers.core.main import run_workflow
                     result_state = run_workflow(
                         config_json=segment_config,
                         initial_state=initial_state,
@@ -3036,8 +3040,13 @@ class SegmentRunnerService:
                     try:
                         from src.services.state.state_versioning_service import StateVersioningService
                         
-                        # S3 버킷 확인
-                        s3_bucket = os.environ.get('S3_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
+                        # [H-02 FIX] WORKFLOW_STATE_BUCKET 우선 (initialize_state_data.py 와 동일한 규칙).
+                        # S3_BUCKET / SKELETON_S3_BUCKET 은 레거시 폴백.
+                        s3_bucket = (
+                            os.environ.get('WORKFLOW_STATE_BUCKET')
+                            or os.environ.get('S3_BUCKET')
+                            or os.environ.get('SKELETON_S3_BUCKET')
+                        )
                         if not s3_bucket:
                             logger.error("[v3.3] ❌ S3_BUCKET not set, skipping state delta save")
                         else:
@@ -3064,7 +3073,10 @@ class SegmentRunnerService:
                             # 🎯 핵심: 다음 세그먼트를 위한 manifest_id 전파
                             new_manifest_id = save_result.get('manifest_id')
                             if new_manifest_id:
-                                sealed_result['state_data']['bag']['current_manifest_id'] = new_manifest_id
+                                # [BUG-02 FIX] seal_state_bag 반환 시 state_data는 flat dict.
+                                # ASL ResultSelector가 'bag' 키를 추가하는 것은 Lambda 반환 *이후*.
+                                # 따라서 여기서는 state_data 직접 접근이 올바름.
+                                sealed_result['state_data']['current_manifest_id'] = new_manifest_id
                                 logger.info(
                                     f"[v3.3] ✅ State delta saved. Manifest rotated: "
                                     f"{new_manifest_id[:12]}... (parent: {previous_manifest_id[:12] if previous_manifest_id else 'ROOT'}...)"

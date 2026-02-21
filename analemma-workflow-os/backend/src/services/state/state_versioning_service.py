@@ -11,6 +11,7 @@
 
 import hashlib
 import json
+import os
 import time
 import logging
 from typing import Dict, List, Optional, Any
@@ -26,6 +27,23 @@ logger = logging.getLogger(__name__)
 # 운영 환경 상수
 MAX_BLOCK_SIZE = 4 * 1024 * 1024  # 4MB (블록 분할 임계값)
 VERSION_RETRY_ATTEMPTS = 3  # Race Condition 재시도 횟수
+
+
+def _calculate_optimal_workers() -> int:
+    """Lambda 메모리 기반 I/O 병렬 스레드 수 계산.
+
+    S3 작업은 I/O-bound이므로 vCPU 수보다 많은 스레드가 유효.
+    Lambda는 메모리 1769MB당 1 vCPU 할당. 그 비율로 스레드 수 조정.
+
+    Returns:
+        int: 4 ~ 32 사이의 적정 worker 수.
+    """
+    import os
+    try:
+        memory_mb = int(os.environ.get('AWS_LAMBDA_FUNCTION_MEMORY_SIZE', '512'))
+        return min(32, max(4, memory_mb // 256))
+    except (ValueError, TypeError):
+        return 4  # safe default
 
 
 @dataclass
@@ -153,8 +171,8 @@ class StateVersioningService:
                 gc_dlq_url=self.gc_dlq_url
             )
             logger.info("[StateVersioningService] ✅ EventualConsistencyGuard initialized")
-                    parent_manifest_id=parent_manifest_id
-                )
+            # [FIX] 이전 리팩토링 과정에서 남겨진 고아 코드 제거.
+            # parent_manifest_id는 아래 metadata dict에 이미 포함됨 (line ~198).
         
         # 매니페스트 기본 정보 생성
         import uuid
@@ -1698,7 +1716,10 @@ class StateVersioningService:
                     })
             
             # 2-3. WorkflowsTableV3 포인터 갱신 (🗑️ latest_state.json 대체)
-            workflows_table_name = self.table.name.replace('Manifests', 'WorkflowsTableV3')
+            # [FIX] string replace 방식은 'WorkflowManifests-v3-dev' →
+            # 'WorkflowWorkflowsTableV3-v3-dev' 로 잘못 변환됨.
+            # 환경변수에서 직접 읽어야 함.
+            workflows_table_name = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
             transact_items.append({
                 'Update': {
                     'TableName': workflows_table_name,

@@ -356,7 +356,12 @@ def lambda_handler(event, context):
     hydrator = StateHydrator(bucket_name=bucket)
     
     # 2. Input Resolution
-    raw_input = event.get('input', event)
+    # SFN 입력이 {'input': {...}} 형태이면 하위 dict 사용.
+    # 'initial_state' 키도 인식 (v3+ SFN 입력 스키마).
+    # 둘 다 없으면 event 전체를 폴백 (ownerId/workflowId가 top-level에 있는 레거시 호출 호환).
+    # [M-03 Note] event 전체 폴백 시 orchestrator_selection 등 SFN 내부 필드가 포함될 수 있음.
+    #   해당 필드들은 force_offload={'input'} 경로를 통해 S3로 오프로드되어 SFN 페이로드에 잔류하지 않음.
+    raw_input = event.get('input') or event.get('initial_state') or event
     if not isinstance(raw_input, dict):
         raw_input = {}
         
@@ -435,99 +440,128 @@ def lambda_handler(event, context):
     config_hash = None
     
     if _HAS_VERSIONING and workflow_config and partition_map:
-        try:
-            versioning_service = StateVersioningService(
-                dynamodb_table=MANIFESTS_TABLE,
-                s3_bucket=STATE_BUCKET
-            )
-            
-            # segment_manifest 생성 (먼저 계산)
-            segment_manifest = []
-            for idx, segment in enumerate(partition_map):
-                segment_manifest.append({
-                    "segment_id": idx,
-                    "segment_config": segment,
-                    "execution_order": idx,
-                    "dependencies": segment.get("dependencies", []),
-                    "type": segment.get("type", "normal")
-                })
-            
-            # Merkle Manifest 생성
-            manifest_pointer = versioning_service.create_manifest(
-                workflow_id=workflow_id,
-                workflow_config=workflow_config,
-                segment_manifest=segment_manifest,
-                parent_manifest_id=None  # 최초 버전
-            )
-            
-            manifest_id = manifest_pointer.manifest_id
-            manifest_hash = manifest_pointer.manifest_hash
-            config_hash = manifest_pointer.config_hash
-            
-            logger.info(
-                f"[Merkle DAG] Created manifest {manifest_id[:8]}... "
-                f"(hash={manifest_hash[:8]}..., {total_segments} segments)"
-            )
-            
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # [Phase 8.1] Pre-flight Check: S3 Strong Consistency 검증
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # "데이터가 준비되지 않았다면 실행조차 하지 않는다"
-            # - S3 Propagation Delay 방어
-            # - Fail-fast: 700ms 내 검증 완료 (3회 재시도)
-            # - Trust Chain의 첫 번째 검증 지점
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Merkle DAG 생성: 최초 1회 시도 + 실패 시 1회 재시도
+        # 무결성 원칙: 재생성도 실패하면 워크플로우를 명시적으로 종료.
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        _manifest_last_error = None
+        for _attempt in range(1, 3):  # 1회차, 2회차
             try:
-                from src.services.state.async_commit_service import get_async_commit_service
-                
-                async_commit = get_async_commit_service()
-                manifest_s3_key = f"manifests/{manifest_id}.json"
-                
-                logger.info(
-                    f"[Pre-flight Check] Verifying manifest availability: "
-                    f"{manifest_id[:8]}..."
-                )
-                
-                commit_status = async_commit.verify_commit_with_retry(
-                    execution_id=execution_id,
+                # [BUG-INIT-01 FIX] gc_dlq_url 및 use_2pc 누락 → create_manifest()가
+                # "GC DLQ URL is required for 2-Phase Commit" RuntimeError를 항상 발생시킴.
+                # segment_runner_service.py와 동일한 설정을 사용해야 함.
+                versioning_service = StateVersioningService(
+                    dynamodb_table=MANIFESTS_TABLE,
                     s3_bucket=STATE_BUCKET,
-                    s3_key=manifest_s3_key,
-                    redis_key=None  # Redis 없이 S3만 검증
+                    use_2pc=True,
+                    gc_dlq_url=os.environ.get('GC_DLQ_URL')
                 )
-                
-                if not commit_status.s3_available:
-                    raise RuntimeError(
-                        f"[System Fault] Manifest S3 availability verification failed "
-                        f"after {commit_status.retry_count} attempts "
-                        f"(total_wait={commit_status.total_wait_ms:.1f}ms). "
-                        f"S3 Strong Consistency violation! "
-                        f"Manifest: {manifest_id[:8]}..."
-                    )
-                
+
+                # segment_manifest 생성 (먼저 계산)
+                segment_manifest = []
+                for idx, segment in enumerate(partition_map):
+                    segment_manifest.append({
+                        "segment_id": idx,
+                        "segment_config": segment,
+                        "execution_order": idx,
+                        "dependencies": segment.get("dependencies", []),
+                        "type": segment.get("type", "normal")
+                    })
+
+                # Merkle Manifest 생성
+                manifest_pointer = versioning_service.create_manifest(
+                    workflow_id=workflow_id,
+                    workflow_config=workflow_config,
+                    segment_manifest=segment_manifest,
+                    parent_manifest_id=None  # 최초 버전
+                )
+
+                manifest_id = manifest_pointer.manifest_id
+                manifest_hash = manifest_pointer.manifest_hash
+                config_hash = manifest_pointer.config_hash
+
                 logger.info(
-                    f"[Pre-flight Check] ✅ Manifest verified: {manifest_id[:8]}... "
-                    f"(retries={commit_status.retry_count}, "
-                    f"wait={commit_status.total_wait_ms:.1f}ms)"
+                    f"[Merkle DAG] Created manifest {manifest_id[:8]}... "
+                    f"(attempt={_attempt}/2, hash={manifest_hash[:8]}..., {total_segments} segments)"
                 )
-                
-            except ImportError:
-                logger.warning(
-                    "[Pre-flight Check] AsyncCommitService not available, "
-                    "skipping S3 verification (development mode)"
-                )
-            except Exception as verify_error:
-                logger.error(
-                    f"[Pre-flight Check] Manifest verification failed: {verify_error}",
-                    exc_info=True
-                )
-                raise RuntimeError(
-                    f"Pre-flight Check failed for manifest {manifest_id[:8]}...: "
-                    f"{str(verify_error)}"
-                ) from verify_error
-            
-        except Exception as e:
-            logger.error(f"Failed to create Merkle manifest: {e}", exc_info=True)
-            # Fallback to legacy mode
-            manifest_id = None
+
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # [Phase 8.1] Pre-flight Check: S3 Strong Consistency 검증
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # "데이터가 준비되지 않았다면 실행조차 하지 않는다"
+                # - S3 Propagation Delay 방어
+                # - Fail-fast: 700ms 내 검증 완료 (3회 재시도)
+                # - Trust Chain의 첫 번째 검증 지점
+                try:
+                    from src.services.state.async_commit_service import get_async_commit_service
+
+                    async_commit = get_async_commit_service()
+                    manifest_s3_key = f"manifests/{manifest_id}.json"
+
+                    logger.info(
+                        f"[Pre-flight Check] Verifying manifest availability: "
+                        f"{manifest_id[:8]}..."
+                    )
+
+                    commit_status = async_commit.verify_commit_with_retry(
+                        execution_id=execution_id,
+                        s3_bucket=STATE_BUCKET,
+                        s3_key=manifest_s3_key,
+                        redis_key=None  # Redis 없이 S3만 검증
+                    )
+
+                    if not commit_status.s3_available:
+                        raise RuntimeError(
+                            f"[System Fault] Manifest S3 availability verification failed "
+                            f"after {commit_status.retry_count} attempts "
+                            f"(total_wait={commit_status.total_wait_ms:.1f}ms). "
+                            f"S3 Strong Consistency violation! "
+                            f"Manifest: {manifest_id[:8]}..."
+                        )
+
+                    logger.info(
+                        f"[Pre-flight Check] ✅ Manifest verified: {manifest_id[:8]}... "
+                        f"(retries={commit_status.retry_count}, "
+                        f"wait={commit_status.total_wait_ms:.1f}ms)"
+                    )
+
+                except ImportError:
+                    logger.warning(
+                        "[Pre-flight Check] AsyncCommitService not available, "
+                        "skipping S3 verification (development mode)"
+                    )
+                except Exception as verify_error:
+                    logger.error(
+                        f"[Pre-flight Check] Manifest verification failed: {verify_error}",
+                        exc_info=True
+                    )
+                    raise RuntimeError(
+                        f"Pre-flight Check failed for manifest {manifest_id[:8]}...: "
+                        f"{str(verify_error)}"
+                    ) from verify_error
+
+                break  # ✅ 생성 + 검증 모두 성공 → 루프 탈출
+
+            except Exception as e:
+                _manifest_last_error = e
+                manifest_id = None
+                if _attempt < 2:
+                    logger.warning(
+                        f"[Merkle DAG] Attempt {_attempt}/2 failed: {e}. "
+                        f"Retrying manifest creation once more..."
+                    )
+                else:
+                    logger.error(
+                        f"[Merkle DAG] Attempt {_attempt}/2 failed: {e}",
+                        exc_info=True
+                    )
+
+        if not manifest_id:
+            raise RuntimeError(
+                f"[System Fault] Merkle DAG manifest creation failed after 2 attempts. "
+                f"Workflow state integrity cannot be guaranteed — aborting execution. "
+                f"Last error: {_manifest_last_error}"
+            ) from _manifest_last_error
     
     # State Bag Construction
     bag = SmartStateBag({}, hydrator=hydrator)
@@ -536,12 +570,15 @@ def lambda_handler(event, context):
     # [Phase 2] Merkle DAG Content-Addressable Storage
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if not manifest_id:
+        # _HAS_VERSIONING=False 등 manifest가 생성되지 않은 경우.
+        # 재시도 로직은 _HAS_VERSIONING 블록 내에서 처리되며, 이 경로는
+        # StateVersioningService 자체가 비활성화된 환경에서만 도달함.
         raise RuntimeError(
-            "Failed to create Merkle DAG manifest. "
-            "StateVersioningService.create_manifest() returned None. "
-            "Check S3/DynamoDB permissions and configuration."
+            "Merkle DAG manifest is required for workflow state integrity. "
+            "StateVersioningService is not available (_HAS_VERSIONING=False). "
+            "Check StateVersioningService import and dependencies."
         )
-    
+
     # ✅ Merkle DAG Mode: Content-Addressable Storage
     # - workflow_config/partition_map → S3 블록으로 저장됨
     # - StateBag에는 manifest_id 포인터만 저장 (93% 크기 감소)
@@ -549,7 +586,7 @@ def lambda_handler(event, context):
     bag['manifest_id'] = manifest_id
     bag['manifest_hash'] = manifest_hash
     bag['config_hash'] = config_hash
-    
+
     logger.info(
         f"[Merkle DAG] State storage optimized: "
         f"manifest_id={manifest_id[:8]}..., "
@@ -570,6 +607,10 @@ def lambda_handler(event, context):
     bag['max_concurrency'] = int(max_concurrency)
     bag['llm_segments'] = llm_segments
     bag['hitp_segments'] = hitp_segments
+    # [M-02 FIX] execution_id를 bag에 명시적으로 저장.
+    # segment_runner_service의 save_state_delta 가 event.get('execution_id', 'unknown')으로
+    # 조회하므로, bag에 없으면 항상 'unknown'이 기록됨.
+    bag['execution_id'] = execution_id
     
     # [State Bag] Enforce Input Encapsulation
     # Embed raw input into the bag so it can be offloaded if large
@@ -676,14 +717,19 @@ def lambda_handler(event, context):
                     "type": segment.get("type", "normal")
                 })
 
-    # Add to bag (will be overwritten by pointers in final step)
-    # [Zero-Payload-Limit] Do NOT add full manifest to bag inline. Relies on S3 path.
-    # bag['segment_manifest'] = segment_manifest
+    # Add to bag
+    # [C-01 FIX] segment_manifest_pointers는 경량 포인터 배열 (~200B × n 세그먼트).
+    # ASL v3 Map state의 ItemsPath: "$.state_data.bag.segment_manifest" 가 이 배열을 참조.
+    # 포인터가 없으면 BATCHED/MAP_REDUCE 모드에서 Map state가 0회 실행되어 전면 불능.
+    # 전체 segment_config가 아닌 포인터만 담으므로 256KB SFN 한도 내에 유지됨.
+    bag['segment_manifest'] = segment_manifest_pointers
     bag['segment_manifest_s3_path'] = manifest_s3_path
-    
+
     # 6. Dehydrate Final Payload
     # Force offload large fields to Ensure "SFN Only Sees Pointers"
     # Added 'input' to forced offload list to prevent Zombie Data
+    # Note: 'segment_manifest' is intentionally NOT force-offloaded — it is a
+    #   lightweight pointer array required inline by ASL Map state ItemsPath.
     force_offload = {'workflow_config', 'partition_map', 'current_state', 'input'}
     
     payload = hydrator.dehydrate(
@@ -696,9 +742,8 @@ def lambda_handler(event, context):
     )
     
     # 7. Post-Processing & Compatibility
-    # [Zero-Payload-Limit] Removed inline segment_manifest pointers
-    # payload['segment_manifest'] = segment_manifest_pointers -> REMOVED
-    # The Distributed Map (PrepareDistributedExecution) will load partition_map from S3.
+    # [C-01] segment_manifest_pointers는 bag['segment_manifest']에 이미 저장됨.
+    # dehydrate() 이후에도 포인터 배열이 payload에 유지되어야 ASL Map state가 동작함.
     
     # Ensure compatibility aliases exist if fields were offloaded
     # (ASL might reference _s3_path fields directly)
