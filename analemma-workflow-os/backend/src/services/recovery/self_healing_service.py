@@ -67,6 +67,12 @@ class SelfHealingService:
                 logger.warning(f"sanitize_healing_advice failed, proceeding with basic sanitization: {e}")
                 healing_meta["security_scan"] = "skipped"
 
+        # 보안 가드가 advice를 완전히 차단한 경우 플레이스홀더 텍스트를 LLM에 주입하지 않음
+        if fix_instruction == "[HEALING_ADVICE_FILTERED]":
+            healing_meta["security_scan"] = "blocked"
+            logger.warning("Healing advice completely blocked by security guard — aborting injection")
+            return
+
         logger.info("🚑 Applying Self-Healing instruction refinement: %s", fix_instruction)
         
         # 📊 Emit SelfHealingCount metric for monitoring dashboard

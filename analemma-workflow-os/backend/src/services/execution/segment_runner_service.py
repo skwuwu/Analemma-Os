@@ -2583,8 +2583,17 @@ class SegmentRunnerService:
         
         # [Time Machine] _auto_fix_instructions 추출 후 state에서 즉시 제거
         # 첫 번째 LLM 노드에만 주입하고 state에서 소거 → 하위 세그먼트 연쇄 오염 방지
-        auto_fix = initial_state.pop('_auto_fix_instructions', None) if initial_state else None
-        rollback_ctx = initial_state.pop('_rollback_context', {}) if initial_state else {}
+        # NOTE: SmartStateBag은 pop()을 오버라이드하지 않으므로 del을 명시적으로 사용해야
+        #       _deleted_fields가 올바르게 추적되어 DynamoDB delta write에 반영됨.
+        auto_fix = None
+        rollback_ctx = {}
+        if initial_state:
+            if '_auto_fix_instructions' in initial_state:
+                auto_fix = initial_state['_auto_fix_instructions']
+                del initial_state['_auto_fix_instructions']
+            if '_rollback_context' in initial_state:
+                rollback_ctx = initial_state['_rollback_context']
+                del initial_state['_rollback_context']
         auto_fix_injected = False  # 첫 번째 LLM 노드에만 주입
 
         for node in nodes:
