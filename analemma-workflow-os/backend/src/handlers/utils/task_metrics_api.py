@@ -320,7 +320,7 @@ def _format_bento_grid_response(task: Dict[str, Any]) -> Dict[str, Any]:
     
     # 1. Display 정보 구성
     display = {
-        "title": task.get("execution_alias") or task.get("task_summary") or f"작업 #{task.get('execution_id', '')[:8]}",
+        "title": task.get("execution_alias") or task.get("task_summary") or f"작업 #{(task.get('execution_id') or '')[:8]}",
         "status_color": _get_status_color(status, progress),
         "eta_text": task.get("estimated_completion_time") or _calculate_eta_text(progress, status, task),
         "status": status,
@@ -342,9 +342,9 @@ def _format_bento_grid_response(task: Dict[str, Any]) -> Dict[str, Any]:
         "value": confidence_score,
         "level": _get_confidence_level(confidence_score),
         "breakdown": {
-            "reflection": float(confidence_components.get("self_reflection", 70)),
-            "schema": float(confidence_components.get("schema_match", 90)),
-            "alignment": float(confidence_components.get("instruction_alignment", 70))
+            "reflection": float(confidence_components.get("self_reflection") or 70),
+            "schema": float(confidence_components.get("schema_match") or 90),
+            "alignment": float(confidence_components.get("instruction_alignment") or 70)
         }
     }
     

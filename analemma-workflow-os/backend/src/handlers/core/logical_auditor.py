@@ -226,8 +226,8 @@ class LogicalAuditor:
             
             required = required_configs.get(node_type, [])
             missing = [
-                field for field in required 
-                if not combined.get(field)
+                field for field in required
+                if field not in combined or combined[field] is None
             ]
             
             if missing:
