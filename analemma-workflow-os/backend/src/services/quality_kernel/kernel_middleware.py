@@ -473,8 +473,22 @@ class KernelMiddlewareInterceptor:
         start_time = time.time()
         timestamp = datetime.utcnow().isoformat() + 'Z'
         
-        # 빈 출력 처리
+        # 빈 출력 처리 (schema가 있으면 먼저 검증 — 빈 출력도 schema 위반)
         if not node_output or len(node_output.strip()) < 10:
+            if context and 'response_schema' in context:
+                return InterceptorResult(
+                    action=InterceptorAction.REGENERATE,
+                    original_output=node_output,
+                    processed_output=None,
+                    entropy_result=None,
+                    slop_result=None,
+                    processing_time_ms=(time.time() - start_time) * 1000,
+                    node_id=node_id,
+                    workflow_id=workflow_id,
+                    timestamp=timestamp,
+                    combined_score=0.0,
+                    recommendation="REGENERATE: Empty/insufficient output does not satisfy required response schema"
+                )
             return self._create_pass_result(node_output, node_id, workflow_id, timestamp, 0)
         
         # ============================================================
