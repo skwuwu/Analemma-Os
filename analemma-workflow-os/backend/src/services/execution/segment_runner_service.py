@@ -2592,7 +2592,8 @@ class SegmentRunnerService:
                 auto_fix = initial_state['_auto_fix_instructions']
                 del initial_state['_auto_fix_instructions']
             if '_rollback_context' in initial_state:
-                rollback_ctx = initial_state['_rollback_context']
+                ctx = initial_state['_rollback_context']
+                rollback_ctx = ctx if isinstance(ctx, dict) else {}
                 del initial_state['_rollback_context']
         auto_fix_injected = False  # 첫 번째 LLM 노드에만 주입
 

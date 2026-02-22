@@ -220,9 +220,9 @@ class TimeMachineService:
         "Gemini가 이 시점으로 돌아가라고 제안합니다" 팝업과 함께
         현재 상태 vs 과거 성공 상태를 나란히 표시
         """
-        current_state = current_checkpoint.get('state_snapshot', {}) if current_checkpoint else {}
-        target_state = target_checkpoint.get('state_snapshot', {})
-        
+        current_state = (current_checkpoint.get('state_snapshot') or {}) if current_checkpoint else {}
+        target_state = target_checkpoint.get('state_snapshot') or {}
+
         # 변수 차이 분석
         all_keys = set(current_state.keys()) | set(target_state.keys())
         variable_diffs = []
@@ -948,9 +948,9 @@ JSON만 응답하세요."""
         if not current_checkpoint:
             return {"level": "unknown", "details": "현재 상태를 알 수 없습니다."}
         
-        target_state = target_checkpoint.get('state_snapshot', {})
-        current_state = current_checkpoint.get('state_snapshot', {})
-        
+        target_state = target_checkpoint.get('state_snapshot') or {}
+        current_state = current_checkpoint.get('state_snapshot') or {}
+
         # 변경된 변수 수 계산
         changed_vars = 0
         for key in set(target_state.keys()) | set(current_state.keys()):
@@ -1022,9 +1022,9 @@ JSON만 응답하세요."""
         current_checkpoint: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """데이터 변경 미리보기 - 상세 분석"""
-        target_state = target_checkpoint.get('state_snapshot', {})
-        current_state = current_checkpoint.get('state_snapshot', {}) if current_checkpoint else {}
-        
+        target_state = target_checkpoint.get('state_snapshot') or {}
+        current_state = (current_checkpoint.get('state_snapshot') or {}) if current_checkpoint else {}
+
         # 복원될 변수
         restored = []
         removed = []
