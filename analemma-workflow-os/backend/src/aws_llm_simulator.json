@@ -1,5 +1,5 @@
 {
-    "Comment": "LLM Integration Test Simulator - MOCK_MODE=false로 실제 LLM 호출 검증",
+    "Comment": "LLM Pipeline Test Simulator — MOCK_MODE=false로 실제 스키마 워크플로 실행, 파이프라인 전체 점검",
     "StartAt": "CheckScenarios",
     "States": {
         "CheckScenarios": {
@@ -17,14 +17,12 @@
             "Type": "Pass",
             "Parameters": {
                 "scenarios": [
-                    "STAGE1_BASIC",
-                    "STAGE2_FLOW_CONTROL",
-                    "STAGE3_VISION_BASIC",
-                    "STAGE4_VISION_MAP",
-                    "STAGE5_HYPER_STRESS",
-                    "STAGE6_DISTRIBUTED_MAP_REDUCE",
-                    "STAGE7_PARALLEL_MULTI_LLM",
-                    "STAGE8_SLOP_DETECTION"
+                    "COMPLETE",
+                    "FAIL",
+                    "MAP_AGGREGATOR",
+                    "LOOP_LIMIT",
+                    "S3_LARGE",
+                    "ASYNC_LLM"
                 ]
             },
             "Next": "InitializeSimulator"
@@ -41,7 +39,7 @@
         "ParallelExecution": {
             "Type": "Map",
             "ItemsPath": "$.scenarios",
-            "MaxConcurrency": 1,
+            "MaxConcurrency": 3,
             "Parameters": {
                 "scenario.$": "$$.Map.Item.Value",
                 "simulator_execution_id.$": "$.simulator_execution_id"
@@ -109,6 +107,7 @@
                         "Type": "Task",
                         "Resource": "arn:aws:states:::states:startExecution.sync:2",
                         "TimeoutSeconds": 600,
+                        "Comment": "10-minute timeout — aiModel 노드 실제 LLM 호출 포함",
                         "Parameters": {
                             "StateMachineArn.$": "$.prep_result.targetArn",
                             "Name.$": "$.prep_result.name",
@@ -116,7 +115,8 @@
                         },
                         "ResultSelector": {
                             "status.$": "$.Status",
-                            "output.$": "$.Output"
+                            "output.$": "$.Output",
+                            "executionArn.$": "$.ExecutionArn"
                         },
                         "ResultPath": "$.test_result",
                         "Catch": [
@@ -124,21 +124,10 @@
                                 "ErrorEquals": [
                                     "States.ALL"
                                 ],
-                                "ResultPath": "$.test_error",
-                                "Next": "HandleTestError"
+                                "ResultPath": "$.test_result",
+                                "Next": "VerifyResult"
                             }
                         ],
-                        "Next": "VerifyResult"
-                    },
-                    "HandleTestError": {
-                        "Type": "Pass",
-                        "Parameters": {
-                            "scenario.$": "$.scenario",
-                            "test_result": {
-                                "status": "FAILED",
-                                "error.$": "$.test_error"
-                            }
-                        },
                         "Next": "VerifyResult"
                     },
                     "VerifyResult": {
@@ -149,11 +138,7 @@
                             "Payload": {
                                 "scenario.$": "$.scenario",
                                 "scenario_key.$": "$.scenario",
-                                "test_result.$": "$.test_result",
-                                "test_config": {
-                                    "include_task_abstraction_verification": true,
-                                    "verify_provider": true
-                                }
+                                "test_result.$": "$.test_result"
                             }
                         },
                         "ResultSelector": {
@@ -214,46 +199,6 @@
                     "Next": "SimulatorComplete"
                 }
             ],
-            "Next": "GenerateComprehensiveReport"
-        },
-        "GenerateComprehensiveReport": {
-            "Type": "Task",
-            "Resource": "arn:aws:states:::lambda:invoke",
-            "TimeoutSeconds": 30,
-            "Comment": "Generate detailed comprehensive report with formatted output",
-            "Parameters": {
-                "FunctionName": "${ViewComprehensiveReportFunction}",
-                "Payload": {
-                    "report.$": "$.report_result.report"
-                }
-            },
-            "ResultSelector": {
-                "formatted_report.$": "$.Payload.formatted_report",
-                "comprehensive_report.$": "$.Payload.comprehensive_report",
-                "summary.$": "$.Payload.summary"
-            },
-            "ResultPath": "$.comprehensive_report_result",
-            "Retry": [
-                {
-                    "ErrorEquals": [
-                        "Lambda.ServiceException",
-                        "Lambda.AWSLambdaException",
-                        "Lambda.SdkClientException"
-                    ],
-                    "IntervalSeconds": 2,
-                    "MaxAttempts": 2,
-                    "BackoffRate": 2.0
-                }
-            ],
-            "Catch": [
-                {
-                    "ErrorEquals": [
-                        "States.ALL"
-                    ],
-                    "ResultPath": "$.comprehensive_report_error",
-                    "Next": "SimulatorComplete"
-                }
-            ],
             "Next": "SimulatorComplete"
         },
         "SimulatorComplete": {
@@ -263,9 +208,7 @@
                 "simulator_execution_id.$": "$.simulator_execution_id",
                 "start_time.$": "$.start_time",
                 "test_results.$": "$.test_results",
-                "report.$": "$.report_result.report",
-                "comprehensive_report.$": "$.comprehensive_report_result",
-                "mock_mode": "false"
+                "report.$": "$.report_result.report"
             },
             "End": true
         }
