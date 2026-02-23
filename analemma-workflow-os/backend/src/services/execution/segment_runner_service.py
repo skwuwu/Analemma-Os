@@ -42,7 +42,8 @@ except ImportError:
     ConcurrencyControllerV2 = None
 
 # Services
-from src.services.state.state_manager import StateManager, mask_pii_in_state
+from src.services.state.state_manager import StateManager
+from src.common.security_utils import mask_pii_in_state
 from src.services.recovery.self_healing_service import SelfHealingService
 # [v3.11] Unified State Hydration
 from src.common.state_hydrator import StateHydrator, SmartStateBag
