@@ -73,9 +73,12 @@ def _find_workflow_path(scenario_name: str) -> str:
     """
     시나리오에 해당하는 워크플로 파일 경로를 반환합니다.
 
+    워크플로 파일 위치: backend/src/test_workflows/<file>.json
+    Lambda 배포 시 Docker 이미지에 포함됨 (/var/task/src/test_workflows/)
+
     탐색 순서:
-      1. Lambda 배포 환경: /var/task/tests/backend/workflows/<file>.json
-      2. 로컬 개발 환경: 핸들러 위치에서 4단계 상위 = 프로젝트 루트
+      1. Lambda 배포 환경: /var/task/src/test_workflows/<file>.json
+      2. 로컬 개발 환경: 핸들러 위치에서 2단계 상위 = backend/src/
 
     Raises:
         KeyError: 알 수 없는 시나리오 이름
@@ -84,14 +87,14 @@ def _find_workflow_path(scenario_name: str) -> str:
     workflow_id = PIPELINE_TEST_MAPPINGS[scenario_name]  # KeyError on unknown scenario
     filename = f"{workflow_id}.json"
 
-    # 1. Lambda 배포 환경 (/var/task 고정)
-    lambda_path = os.path.join("/var/task/tests/backend/workflows", filename)
+    # 1. Lambda 배포 환경 (/var/task/src/test_workflows/ — Docker 이미지에 포함)
+    lambda_path = os.path.join("/var/task/src/test_workflows", filename)
     if os.path.exists(lambda_path):
         return lambda_path
 
-    # 2. 로컬 개발 환경 (handlers/simulator → ../../../../ = 프로젝트 루트)
+    # 2. 로컬 개발 환경 (handlers/simulator → ../../ = backend/src/)
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    local_path = os.path.join(current_dir, "../../../../tests/backend/workflows", filename)
+    local_path = os.path.join(current_dir, "../../test_workflows", filename)
     if os.path.exists(local_path):
         return os.path.abspath(local_path)
 
