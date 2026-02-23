@@ -206,16 +206,46 @@ class EventualConsistencyGuard:
                 f"Phase 2 Complete: Committed manifest {manifest_id} + "
                 f"{len(block_uploads)} block references (batched updates)"
             )
-            
+
             transaction.status = "committed"
-            
+
         except Exception as e:
             logger.error(f"Phase 2 Failed: DynamoDB transaction error - {e}")
             # Phase 2 실패: GC 스케줄 (S3 블록 정리)
             self._schedule_gc(block_uploads, transaction_id, "phase2_failure")
             transaction.status = "failed"
             raise
-        
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Phase 2.5: Manifest S3 마커 (pre-flight check 검증용)
+        # Pre-flight check는 manifests/{manifest_id}.json 존재 여부를 확인하므로
+        # DynamoDB 커밋 직후 S3에 마커 파일을 써서 강한 일관성 보장.
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        try:
+            manifest_marker = json.dumps({
+                'manifest_id': manifest_id,
+                'version': version,
+                'workflow_id': workflow_id,
+                'manifest_hash': manifest_hash,
+                'config_hash': config_hash,
+                'transaction_id': transaction_id,
+                'committed': True,
+                'committed_at': datetime.utcnow().isoformat()
+            }, default=str)
+            self.s3.put_object(
+                Bucket=self.bucket,
+                Key=f"manifests/{manifest_id}.json",
+                Body=manifest_marker,
+                ContentType='application/json'
+            )
+            logger.info(f"Phase 2.5 Complete: Manifest marker written to S3 (manifests/{manifest_id[:8]}...json)")
+        except Exception as e:
+            logger.warning(
+                f"Phase 2.5 Failed: Manifest S3 marker write error - {e}. "
+                f"Pre-flight check may fail. DynamoDB is still the source of truth."
+            )
+            # Non-fatal: DynamoDB 커밋은 이미 완료됨
+
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Phase 3: Confirm (S3 태그 확정)
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
