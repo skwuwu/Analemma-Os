@@ -572,6 +572,8 @@ Resources:
       Environment:
         Variables:
           WORKFLOWS_TABLE: !Ref WorkflowsTableV3
+          MANIFESTS_TABLE: !Ref WorkflowManifestsV3
+          BLOCK_REFERENCES_TABLE: !Ref WorkflowBlockReferencesV3
           # 🗂️ [S3 Offload] State offloading for large payloads (>256KB)
           SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
           WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
@@ -584,9 +586,17 @@ Resources:
             TableName: !Ref WorkflowsTableV3
         - DynamoDBReadPolicy:
             TableName: !Ref UsersTableV3
+        # Merkle DAG manifest storage — InitializeState creates the manifest
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowManifestsV3
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowBlockReferencesV3
         # 🗂️ [S3 Offload] Write permissions for large state storage
         - S3CrudPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GCDeadLetterQueue.QueueName
 
   # SegmentRunnerFunction - Heavy dependencies required (langgraph, etc.)
   # 🛡️ [1단계: Reserved Concurrency] 워크플로우 엔진 동시성 제한
@@ -695,6 +705,9 @@ Resources:
             Resource:
               - !GetAtt WorkflowManifestsV3.Arn
               - !GetAtt WorkflowBlockReferencesV3.Arn
+        # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt GCDeadLetterQueue.QueueName
 
   # 🛡️ [Reserved Concurrency] 디자인 어시스턴트 동시성 제한
   # - 계정 한도 1000 중 50개 예약
