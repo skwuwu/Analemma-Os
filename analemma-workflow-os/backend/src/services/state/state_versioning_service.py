@@ -202,7 +202,33 @@ class StateVersioningService:
             raise
         
         # 블록 분할 및 해시 계산
-        blocks = self._split_into_blocks(segment_manifest)
+        # EventualConsistencyGuard expects plain dicts with block_id, s3_key, data.
+        # _split_into_blocks() returns ContentBlock objects (used only by legacy path).
+        blocks = []
+        for idx, segment in enumerate(segment_manifest):
+            segment_json = self._canonical_json_serialize(segment)
+            segment_bytes = segment_json.encode('utf-8')
+            block_id = hashlib.sha256(segment_bytes).hexdigest()
+            if len(segment_bytes) <= MAX_BLOCK_SIZE:
+                blocks.append({
+                    'block_id': block_id,
+                    's3_key': f"state-blocks/{block_id}.json",
+                    'data': segment,
+                })
+            else:
+                # Large segment: split into chunks
+                chunk_index = 0
+                for offset in range(0, len(segment_json), MAX_BLOCK_SIZE):
+                    chunk_str = segment_json[offset:offset + MAX_BLOCK_SIZE]
+                    chunk_bytes = chunk_str.encode('utf-8')
+                    chunk_id = hashlib.sha256(chunk_bytes).hexdigest()
+                    blocks.append({
+                        'block_id': chunk_id,
+                        's3_key': f"state-blocks/{chunk_id}.json",
+                        'data': {'__chunk__': chunk_str, '__chunk_index__': chunk_index,
+                                 'segment_index': idx},
+                    })
+                    chunk_index += 1
         segment_hashes = self._compute_segment_hashes(segment_manifest)
         manifest_hash = self._compute_hash({
             'workflow_id': workflow_id,
