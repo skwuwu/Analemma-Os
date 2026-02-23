@@ -21,12 +21,11 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 
 import boto3
+from botocore.exceptions import ClientError
 try:
-    from botocore.exceptions import BotoCoreError, ClientError
+    from botocore.exceptions import BotoCoreError
 except ImportError:
     class BotoCoreError(Exception):
-        pass
-    class ClientError(Exception):
         pass
 
 # [Fix #2] Pydantic 기반 스키마 검증

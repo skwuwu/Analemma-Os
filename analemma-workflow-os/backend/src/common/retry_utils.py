@@ -77,19 +77,18 @@ except (ImportError, TypeError):
     pass
 
 try:
-    from botocore.exceptions import (
-        EndpointConnectionError,
-        ConnectionClosedError,
-        ReadTimeoutError,
-        ConnectTimeoutError
-    )
-    RETRYABLE_NETWORK_EXCEPTIONS += (
-        EndpointConnectionError,
-        ConnectionClosedError,
-        ReadTimeoutError,
-        ConnectTimeoutError
-    )
-except (ImportError, TypeError):
+    import botocore.exceptions as _botocore_exc_mod
+    for _exc_name in (
+        'EndpointConnectionError',
+        'ConnectionClosedError',
+        'ReadTimeoutError',
+        'ConnectTimeoutError',
+    ):
+        _exc_cls = getattr(_botocore_exc_mod, _exc_name, None)
+        if _exc_cls is not None:
+            RETRYABLE_NETWORK_EXCEPTIONS += (_exc_cls,)
+    del _exc_name, _exc_cls, _botocore_exc_mod
+except ImportError:
     pass
 
 
