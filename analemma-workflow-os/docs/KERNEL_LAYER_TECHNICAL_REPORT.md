@@ -90,8 +90,9 @@ Ring 0 — KERNEL
 
 Ring 1 — GOVERNOR (Driver)
     ├─ governor_runner.py
-    ├─ trust_score_manager.py
-    └─ constitution.py / constitution_loader.py
+    ├─ governance_engine.py
+    ├─ constitution.py / constitution_loader.py
+    └─ prompt_security_guard.py / semantic_shield.py
 
 Ring 2 — TRUSTED TOOLS
     ├─ Verified segment runners
@@ -609,7 +610,7 @@ Each entry is ~200 bytes. For 100 segments this is ~20 KB — well within the in
 
 ## 11. Governance Layer (Ring 1)
 
-**Files:** `governor_runner.py`, `trust_score_manager.py`, `constitution.py`, `agent_guardrails.py`
+**Files:** `governor_runner.py`, `governance_engine.py`, `constitution.py`, `agent_guardrails.py`, `prompt_security_guard.py`, `semantic_shield.py`
 
 The Governor intercepts agent outputs **after execution** and decides whether to allow, escalate, or rollback.
 
@@ -625,7 +626,7 @@ governor_node_runner(agent_id, agent_output, workflow_state, config):
   │    ├─ Metric 2: Plan hash change (plan drift)
   │    ├─ Metric 3: Gas fee accumulation (LLM cost budget)
   │    ├─ Metric 4: Retry count (circuit breaker, default 3)
-  │    ├─ Metric 5: Prompt injection (TODO: PromptSecurityGuard)
+  │    ├─ Metric 5: Constitutional article validation (GovernanceEngine.verify(), asyncio.gather)
   │    └─ Metric 6: Kernel command forgery (KERNEL_CONTROL_KEYS check)
   │    → AgentBehaviorAnalysis { anomaly_score: 0.0–1.0, violations: [...] }
   │
@@ -646,38 +647,39 @@ governor_node_runner(agent_id, agent_output, workflow_state, config):
 ### 11.2 Rollback Decision Matrix
 
 ```
-Violation               Rollback Type    Action
-─────────────────────────────────────────────────────────────────
-KERNEL_COMMAND_FORGERY  TERMINAL_HALT    Immediate SIGKILL
-SECURITY_VIOLATION      TERMINAL_HALT    Immediate SIGKILL
-SLOP_DETECTED           HARD_ROLLBACK    Restore last safe manifest
-CIRCUIT_BREAKER         HARD_ROLLBACK    Restore + HITP human approval
-PLAN_CHANGE_DETECTED    SOFT_ROLLBACK    Retry with agent feedback
-GAS_FEE_EXCEEDED        SOFT_ROLLBACK    Reduce parallelism to 5 branches
+Violation                   Rollback Type    Action
+───────────────────────────────────────────────────────────────────────
+KERNEL_COMMAND_FORGERY      TERMINAL_HALT    Immediate SIGKILL (score=1.0)
+SECURITY_VIOLATION          TERMINAL_HALT    Immediate SIGKILL
+CONSTITUTIONAL_VIOLATION    HARD_ROLLBACK    anomaly_score ≥ 0.8 → REJECTED
+SLOP_DETECTED               HARD_ROLLBACK    Restore last safe manifest
+CIRCUIT_BREAKER             HARD_ROLLBACK    Restore + HITP human approval
+PLAN_CHANGE_DETECTED        SOFT_ROLLBACK    Retry with agent feedback
+GAS_FEE_EXCEEDED            SOFT_ROLLBACK    Reduce parallelism to 5 branches
 ```
 
-### 11.3 Trust Score Model (EMA-based Asymmetric Recovery)
+### 11.3 Anomaly Score Model
+
+The Governor computes `anomaly_score` (0.0–1.0) from the full violations list collected across all six metrics. Base calculation adds 0.2 per violation, capped at 1.0. Two hard boosts are applied after:
 
 ```
-T_new = max(0, min(1, T_old + delta_S - (alpha * A)))
+anomaly_score = min(len(violations) * 0.2, 1.0)
 
-where:
-  delta_S  = BASE_SUCCESS_INCREMENT * (1 + EMA_ACCELERATION * streak_ratio)
-           = 0.01 * (1 + 2.0 * streak_ratio)   # EMA: accelerated recovery
-  alpha    = VIOLATION_MULTIPLIER = 0.5
-  A        = anomaly_score (0.0–1.0)
+# Hard boosts (checked in order after base)
+if KERNEL_COMMAND_FORGERY in violations:
+    anomaly_score = 1.0                          # Maximum threat — SIGKILL
 
-  streak_ratio = recent_successes / recent_total   (last 10 decisions)
-
-Ring Penalty Multipliers:
-  Ring 0: 2.0x   Ring 1: 1.5x   Ring 2: 0.8x   Ring 3: 0.5x
-
-Thresholds:
-  initial_score = 0.8
-  strict_threshold = 0.4  → score < 0.4 forces STRICT mode
+if CONSTITUTIONAL_VIOLATION in violations:
+    anomaly_score = max(anomaly_score, 0.8)      # REJECTED threshold guaranteed
 ```
 
-**Asymmetric recovery benefit:** 5 consecutive successes → `streak_ratio=1.0` → `delta_S=0.03`. Recovery from 0.4→0.8 takes **14 iterations** instead of 40 (65% reduction).
+Decision thresholds:
+
+| Score Range | Decision | Consequence |
+|---|---|---|
+| ≥ 0.8 | REJECTED | Rollback triggered, kernel commands injected |
+| 0.5 – 0.8 | ESCALATED | HITP inserted or parallelism reduced |
+| < 0.5 | APPROVED | State committed normally |
 
 ### 11.4 Constitutional AI Clauses
 
@@ -693,6 +695,104 @@ Default constitution (6 articles, all enforced at Ring 1):
 | 6 | No PII Leakage in Text (email, phone, SSN in output) | CRITICAL |
 
 Custom clauses can be added via `workflow_config.governance_policies.constitution[]` with article numbers > 6.
+
+### 11.5 GovernanceEngine — Parallel Article Enforcement
+
+`GovernanceEngine` (`governance_engine.py`) is the single entry point that connects `constitution.py` Article definitions to runtime enforcement. All validators run in parallel via `asyncio.gather()`, eliminating sequential latency:
+
+```
+GovernanceEngine.verify(output_text, context)
+  │
+  ├─ asyncio.gather(
+  │    Article1ToneValidator.validate()           → profanity patterns
+  │    Article2HarmfulContentValidator.validate() → INJECTION_PATTERNS + harmful set
+  │    Article3UserProtectionValidator.validate() → PII solicitation regex
+  │    Article4TransparencyValidator.validate()   → over-certainty phrase detection
+  │    Article5SecurityPolicyValidator.validate() → INJECTION_PATTERNS (security)
+  │    Article6PIILeakageValidator.validate()     → RetroactiveMaskingService.scan()
+  │  )
+  │
+  ├─ LOW accumulation: count(LOW) ≥ 10 → upgrade to MEDIUM
+  └─ Returns GovernanceVerdict { violations, max_severity, recommended_action }
+```
+
+Recommended action mapping: `LOW` → WARN, `MEDIUM` → SOFT_ROLLBACK, `CRITICAL` → TERMINAL_HALT.
+
+### 11.6 SemanticShield — 3-Stage Injection Defense
+
+`SemanticShield` (`semantic_shield.py`) is invoked at the start of `validate_prompt()` in `prompt_security_guard.py`. It normalizes text before pattern matching, making encoding-bypass attacks structurally impossible:
+
+```
+Stage 1 — NormalizationPipeline (all rings)
+    ├─ Zero-Width Space strip: U+200B, U+200C, U+200D, U+FEFF, U+2060
+    ├─ RTL Override removal: U+202E, U+202D
+    ├─ Base64 decode attempt: pattern ≥ 20 chars → decode and inspect payload
+    └─ Homoglyph normalization: Cyrillic/Greek/Full-width chars → Latin equivalents
+
+Stage 2 — Pattern Matching (all rings)
+    ├─ English: INJECTION_PATTERNS (10 patterns from SecurityConfig)
+    └─ Korean: 8 patterns (이전 지시사항 무시, 시스템 프롬프트 누설, etc.)
+    Patterns applied to normalized text — bypasses blocked.
+
+Stage 3 — Semantic LLM Classification (Ring 2 / Ring 3 only)
+    ├─ Bedrock Guardrails or Gemini ShieldGemma
+    ├─ Intent: BENIGN | INJECTION | JAILBREAK
+    └─ Skipped for Ring 0/1 (cost optimization — high-trust callers)
+
+Graceful degradation: Stage 3 failure → fallback to Stage 1+2, logged as WARNING.
+```
+
+Blocking detection types: `BASE64_INJECTION`, `INJECTION_PATTERN`, `SEMANTIC_INJECTION`, `SEMANTIC_JAILBREAK`.
+Non-blocking (normalize only): `ZERO_WIDTH_CHAR`, `RTL_OVERRIDE`, `HOMOGLYPH`.
+
+### 11.7 Ring-fenced Capability Map
+
+`validate_capability(ring_level, tool_name)` in `prompt_security_guard.py` enforces Default-Deny access control. The whitelist is a `frozenset` per ring level. Any tool not in the set returns `False` unconditionally:
+
+```python
+CAPABILITY_MAP = {
+    RING_0_KERNEL:  None            # None sentinel → unrestricted
+    RING_1_DRIVER:  frozenset({filesystem_read, filesystem_write, subprocess_call,
+                               network_limited, database_*, config_*, s3_read,
+                               cache_*, event_publish})
+    RING_2_SERVICE: frozenset({network_read, database_query, database_read,
+                               cache_read, event_publish, s3_read, config_read})
+    RING_3_USER:    frozenset({basic_query, read_only})
+}
+
+def validate_capability(ring_level, tool_name) -> bool:
+    allowed = CAPABILITY_MAP.get(ring_level.value)
+    if allowed is None:   return True   # Ring 0 — unrestricted
+    return tool_name in allowed         # Default-Deny: unlisted → False
+```
+
+### 11.8 Distributed CircuitBreaker (Redis-backed)
+
+`RedisCircuitBreaker` in `retry_utils.py` provides cross-worker Circuit Breaker consensus. The factory `get_or_create(name)` selects the implementation based on environment:
+
+```
+REDIS_URL set   → RedisCircuitBreaker (Lua atomic, Pub/Sub broadcast)
+REDIS_URL unset → CircuitBreaker (in-memory, single-process)
+```
+
+Lua atomic failure script (INCR + EXPIRE + state transition, no race condition):
+
+```lua
+local count = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))   -- TTL = window_seconds
+if count >= tonumber(ARGV[2]) then                  -- failure_threshold
+    local current = redis.call('GET', KEYS[2])
+    if current ~= 'OPEN' then
+        redis.call('SET', KEYS[2], 'OPEN')
+        redis.call('SET', KEYS[3], ARGV[3])         -- opened_at timestamp
+        redis.call('PUBLISH', ARGV[4], KEYS[2] .. ':OPEN')
+    end
+end
+return count
+```
+
+Redis keys: `cb:{service_id}:failures`, `cb:{service_id}:state`, `cb:{service_id}:opened_at`.
+Pub/Sub channel: `analemma:cb:state_changes`.
 
 ---
 
@@ -713,6 +813,7 @@ Custom clauses can be added via `workflow_config.governance_policies.constitutio
 | `WORKFLOW_DISTRIBUTED_ORCHESTRATOR_ARN` | Distributed SFN state machine ARN | Yes |
 | `USE_2PC` | Enable 2-Phase Commit (`"true"`) | Optional (default `"false"`) |
 | `AWS_LAMBDA_FUNCTION_MEMORY_SIZE` | Used to calculate parallel S3 workers | Auto-set by Lambda |
+| `REDIS_URL` | Enable distributed CircuitBreaker (e.g. `redis://host:6379/0`) | Optional (in-memory fallback) |
 
 ### 12.2 USC Size Thresholds
 

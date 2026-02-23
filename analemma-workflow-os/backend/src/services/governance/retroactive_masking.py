@@ -3,12 +3,30 @@ Retroactive PII Masking
 Post-detection PII masking in text output
 """
 import re
+import copy
 import hashlib
 import json
 import logging
 from typing import Dict, Any, List, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+def _replace_pii(text: str, pii_value: str, replacement: str, pii_type: str) -> str:
+    """PII 값을 텍스트 안에서 경계를 인식하며 교체.
+
+    str.replace()의 부분 일치 문제 방지:
+    - email: "user@example.com"이 "user@example.com.au" 안에서 잘못 치환되는 것을 막음
+    - 그 외(phone/ssn/card/ip): 숫자·문자 경계 보호
+    """
+    escaped = re.escape(pii_value)
+    if pii_type == "email":
+        # 이메일 뒤에 추가 도메인 레이블(.au, .kr 등)이 없는 위치에서만 치환
+        pattern = escaped + r'(?!\.[A-Za-z])(?![A-Za-z0-9_%+@-])'
+    else:
+        # 숫자·영문자로 경계가 이어지는 경우 치환 금지
+        pattern = r'(?<![0-9A-Za-z])' + escaped + r'(?![0-9A-Za-z])'
+    return re.sub(pattern, replacement, text)
 
 
 class PIIPattern:
@@ -168,51 +186,53 @@ def apply_retroactive_masking(
     Returns:
         Masked output
     """
-    masked = output.copy()
-    
+    # deepcopy: 중첩 dict/list 원본 공유 방지 (shallow copy 버그 수정)
+    masked = copy.deepcopy(output)
+
     # Maskable text fields
     text_fields = ["thought", "message", "response", "reasoning"]
-    
+
     total_masked = 0
-    
+
     for field in text_fields:
         if field not in masked:
             continue
-        
+
         text = masked[field]
         if not isinstance(text, str):
             continue
-        
+
         original_text = text
-        
+
         # Mask emails
         for email in pii_map.get("email", []):
-            email_hash = hashlib.sha256(email.encode()).hexdigest()[:8]
-            text = text.replace(email, f"***EMAIL_{email_hash}***")
+            # [:16]: 8자(32bit)에서 16자(64bit)로 확장 → 사전공격 역추적 난도 2^32배 상승
+            email_hash = hashlib.sha256(email.encode()).hexdigest()[:16]
+            text = _replace_pii(text, email, f"***EMAIL_{email_hash}***", "email")
             total_masked += 1
-        
+
         # Mask phones
         for phone in pii_map.get("phone", []):
-            phone_hash = hashlib.sha256(phone.encode()).hexdigest()[:8]
-            text = text.replace(phone, f"***PHONE_{phone_hash}***")
+            phone_hash = hashlib.sha256(phone.encode()).hexdigest()[:16]
+            text = _replace_pii(text, phone, f"***PHONE_{phone_hash}***", "phone")
             total_masked += 1
-        
+
         # Mask SSNs
         for ssn in pii_map.get("ssn", []):
-            ssn_hash = hashlib.sha256(ssn.encode()).hexdigest()[:8]
-            text = text.replace(ssn, f"***SSN_{ssn_hash}***")
+            ssn_hash = hashlib.sha256(ssn.encode()).hexdigest()[:16]
+            text = _replace_pii(text, ssn, f"***SSN_{ssn_hash}***", "ssn")
             total_masked += 1
-        
+
         # Mask card numbers
         for card in pii_map.get("card", []):
-            card_hash = hashlib.sha256(card.encode()).hexdigest()[:8]
-            text = text.replace(card, f"***CARD_{card_hash}***")
+            card_hash = hashlib.sha256(card.encode()).hexdigest()[:16]
+            text = _replace_pii(text, card, f"***CARD_{card_hash}***", "card")
             total_masked += 1
-        
+
         # Mask IP addresses
         for ip in pii_map.get("ip", []):
-            ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:8]
-            text = text.replace(ip, f"***IP_{ip_hash}***")
+            ip_hash = hashlib.sha256(ip.encode()).hexdigest()[:16]
+            text = _replace_pii(text, ip, f"***IP_{ip_hash}***", "ip")
             total_masked += 1
         
         if text != original_text:

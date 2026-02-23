@@ -21,6 +21,7 @@ Integration:
     3. Governor 출력(_kernel 명령)을 SegmentRunnerService가 처리
 """
 
+import asyncio
 import json
 import time
 import logging
@@ -29,6 +30,31 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# 🔧 Async Compatibility Helper
+# ============================================================================
+
+def _get_verdict_sync(engine, output_text: str, context: dict):
+    """
+    GovernanceEngine.verify()를 동기 컨텍스트에서 안전하게 호출하는 헬퍼.
+
+    Lambda Warm Start / FastAPI 내부 호출 모두 커버:
+      - 이미 실행 중인 루프가 있으면 nest_asyncio로 중첩 실행 허용
+      - 루프가 없으면 asyncio.run()으로 새 루프 생성
+
+    nest_asyncio 설치: pip install nest_asyncio>=1.6.0
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # 실행 중인 루프 존재 → nest_asyncio 패치 후 중첩 실행
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        return loop.run_until_complete(engine.verify(output_text, context))
+    except RuntimeError:
+        # 실행 중인 루프 없음 → 새 루프 생성
+        return asyncio.run(engine.verify(output_text, context))
 
 
 # ============================================================================
@@ -357,11 +383,25 @@ def _analyze_agent_behavior(
         )
     
     # ────────────────────────────────────────────────────────────────────
-    # Metric 5: Prompt Injection Validation (Ring Protection)
+    # Metric 5: Constitutional Article Validation (GovernanceEngine)
     # ────────────────────────────────────────────────────────────────────
-    # TODO: Integrate with PromptSecurityGuard
-    # security_guard = get_security_guard()
-    # security_result = security_guard.validate_prompt(...)
+    # Article 1–6 병렬 검증 (asyncio.gather 기반)
+    try:
+        from src.services.governance.governance_engine import GovernanceEngine
+        engine = GovernanceEngine.get_instance()
+        output_text = json.dumps(agent_output, ensure_ascii=False)
+        verdict = _get_verdict_sync(
+            engine,
+            output_text=output_text,
+            context={"agent_id": agent_id, "ring_level": ring_level.value},
+        )
+        for av in verdict.violations:
+            violations.append(
+                f"CONSTITUTIONAL_VIOLATION[Article {av.article_num}]: "
+                f"{av.description} (evidence: {av.evidence[:40]})"
+            )
+    except Exception as e:
+        logger.warning(f"[Governor] GovernanceEngine check failed, skipping: {e}")
     
     # ────────────────────────────────────────────────────────────────────
     # Metric 6: Kernel Command Forgery Detection (v2.1)
@@ -382,6 +422,9 @@ def _analyze_agent_behavior(
     # Boost score for critical violations
     if any("KERNEL_COMMAND_FORGERY" in v for v in violations):
         anomaly_score = 1.0  # Maximum threat
+    if any("CONSTITUTIONAL_VIOLATION" in v for v in violations):
+        # CRITICAL Article 위반 → 최소 0.8 (REJECTED 임계치 이상)
+        anomaly_score = max(anomaly_score, 0.8)
     
     return AgentBehaviorAnalysis(
         agent_id=agent_id,

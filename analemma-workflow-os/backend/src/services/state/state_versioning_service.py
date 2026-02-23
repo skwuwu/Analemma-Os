@@ -115,6 +115,9 @@ class StateVersioningService:
         self.use_2pc = use_2pc
         self.gc_dlq_url = gc_dlq_url
         self._consistency_guard = None  # Lazy Import (실제 사용 시 초기화)
+
+        # S3 블록 키 프리픽스 (state-blocks/{block_id}.json)
+        self.prefix = "state-"
     
     def create_manifest(
         self,

@@ -111,8 +111,11 @@ class ErrorClassifier:
         r"AuthenticationError",
         r"CredentialsError",
         r"InvalidToken",
-        r"403",
-        r"401",
+        # HTTP 상태코드는 단독으로 등장할 때만 매칭 (단순 숫자 '401' 포함 텍스트 오탐 방지)
+        r"\b403\b",
+        r"\b401\b",
+        # 'forbidden'은 독립 단어 경계로 한정 (e.g. "forbidden" in log text는 매칭, "unforbidden" 제외)
+        r"\bforbidden\b",
     ]
     
     MAX_AUTO_HEALING_COUNT = 3
@@ -146,7 +149,11 @@ class ErrorClassifier:
             Tuple[ErrorCategory, str]: (분류, 이유)
         """
         full_error_text = f"{error_type}: {error_message}"
-        
+
+        # healing_count 입력값 검증: 호출자가 음수/비정상값을 전달해 circuit breaker를
+        # 우회하는 DoS 시나리오 방지. 유효 범위로 클램핑한다.
+        healing_count = max(0, int(healing_count) if isinstance(healing_count, (int, float)) else 0)
+
         # 1. Circuit Breaker 확인 (3회 초과 시 무조건 SEMANTIC)
         if healing_count >= self.MAX_AUTO_HEALING_COUNT:
             return (

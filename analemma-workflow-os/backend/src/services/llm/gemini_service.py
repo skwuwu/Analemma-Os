@@ -487,10 +487,23 @@ def _init_vertexai() -> bool:
         
         # 1c. Write SA key to temp file for GOOGLE_APPLICATION_CREDENTIALS
         if sa_key:
+            import atexit
             with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
                 f.write(sa_key)
-                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = f.name
-                logger.debug(f"Service Account credentials written to {f.name}")
+                _sa_temp_path = f.name
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _sa_temp_path
+
+            # 프로세스 종료 시 임시 자격증명 파일 반드시 삭제
+            # (delete=False로 생성했으므로 명시적으로 제거해야 함)
+            def _cleanup_sa_temp_file(path: str = _sa_temp_path) -> None:
+                try:
+                    if os.path.exists(path):
+                        os.unlink(path)
+                except Exception:
+                    pass
+
+            atexit.register(_cleanup_sa_temp_file)
+            logger.debug("Service Account credentials written to temp file")
         
         # Step 2: Get project ID
         project_id = GCP_PROJECT_ID

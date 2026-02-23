@@ -13,6 +13,7 @@ Author: Analemma Team
 import re
 import uuid
 import logging
+import threading
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
@@ -153,39 +154,52 @@ class PIIMaskingService:
         mapping = str.maketrans('0123456789abcdef', 'abcdefghijklmnop')
         return hex_uuid.translate(mapping)
     
+    @staticmethod
+    def _parens_balanced(url: str) -> bool:
+        """괄호 순서를 고려한 균형 검사.
+
+        count() 비교만으로는 ')(' 처럼 순서가 뒤집힌 케이스를 잡지 못한다.
+        카운터가 음수가 되는 순간(닫힘이 열림보다 먼저) False를 반환한다.
+        """
+        depth = 0
+        for ch in url:
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                if depth < 0:   # 닫힘이 열림보다 먼저 → 불균형
+                    return False
+        return depth == 0
+
     def _clean_url_trailing(self, url: str) -> Tuple[str, str]:
         """
         Remove trailing punctuation from URL while preserving balanced parentheses.
-        
+
         Examples:
             "https://ex.com/page." -> ("https://ex.com/page", ".")
             "https://ex.com/wiki/A_(B)" -> ("https://ex.com/wiki/A_(B)", "")
             "https://ex.com/page)." -> ("https://ex.com/page", ").")
-        
+            "https://ex.com/url)(" -> ("https://ex.com/url", ")(")   ← 수정 전 버그 케이스
+
         Returns:
             Tuple of (cleaned_url, trailing_chars)
         """
-        original_len = len(url)
         trailing_chars = []
-        
+
         while url:
-            # Check parentheses balance
-            open_parens = url.count('(')
-            close_parens = url.count(')')
-            
             last_char = url[-1]
-            
-            # If balanced and ends with closing paren, it might be part of URL
-            if last_char == ')' and open_parens == close_parens:
+
+            # 끝이 ')' 이고 괄호가 순서까지 균형 잡혀 있으면 URL의 일부로 판단
+            if last_char == ')' and self._parens_balanced(url):
                 break
-            
-            # If unbalanced closing paren or trailing punct, strip it
+
+            # 후행 구두점이면 제거
             if last_char in self.TRAILING_PUNCT:
                 trailing_chars.append(last_char)
                 url = url[:-1]
             else:
                 break
-        
+
         trailing = ''.join(reversed(trailing_chars))
         return url, trailing
     
@@ -245,19 +259,22 @@ class PIIMaskingService:
 
 # Singleton instance
 _pii_masking_instance = None
+_pii_masking_lock = threading.Lock()
 
 
 def get_pii_masking_service(strict_mode: bool = True) -> PIIMaskingService:
     """
-    Get or create the singleton PIIMaskingService instance.
-    
+    Get or create the singleton PIIMaskingService instance (스레드 안전).
+
     Args:
         strict_mode: If True, use stricter URL handling
-        
+
     Returns:
         PIIMaskingService instance
     """
     global _pii_masking_instance
     if _pii_masking_instance is None:
-        _pii_masking_instance = PIIMaskingService(strict_mode=strict_mode)
+        with _pii_masking_lock:
+            if _pii_masking_instance is None:  # double-checked locking
+                _pii_masking_instance = PIIMaskingService(strict_mode=strict_mode)
     return _pii_masking_instance

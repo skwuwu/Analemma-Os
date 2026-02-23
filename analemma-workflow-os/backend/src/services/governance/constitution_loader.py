@@ -4,7 +4,7 @@ Load user-defined constitutional clauses from workflow configuration
 """
 from typing import List, Dict, Any
 import logging
-from services.governance.constitution import ConstitutionalClause, ClauseSeverity, DEFAULT_CONSTITUTION
+from .constitution import ConstitutionalClause, ClauseSeverity, DEFAULT_CONSTITUTION
 
 logger = logging.getLogger(__name__)
 

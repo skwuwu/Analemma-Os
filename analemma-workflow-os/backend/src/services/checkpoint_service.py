@@ -170,7 +170,11 @@ class CheckpointService:
             if not bucket:
                 logger.warning(f"No S3 bucket configured for state loading")
                 return {}
-            
+
+            if not key:
+                logger.warning(f"Empty S3 key derived from path '{s3_path}' — skipping load")
+                return {}
+
             get_func = partial(
                 self.s3_client.get_object,
                 Bucket=bucket,
@@ -568,19 +572,21 @@ class CheckpointService:
         thread_id: str,
         checkpoint_id: str,
         workflow_id: Optional[str] = None,
-        owner_id: Optional[str] = None
+        owner_id: Optional[str] = None,
+        caller_owner_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         체크포인트에서 워크플로우 재실행
-        
+
         특정 체크포인트의 상태를 기반으로 새로운 워크플로우 실행을 트리거합니다.
-        
+
         Args:
             thread_id: 원본 실행 스레드 ID
             checkpoint_id: 복원할 체크포인트 ID
             workflow_id: 워크플로우 ID (없으면 체크포인트에서 추출)
             owner_id: 소유자 ID (없으면 체크포인트에서 추출)
-            
+            caller_owner_id: 요청자 소유자 ID (제공 시 체크포인트 소유자와 일치 여부 검증)
+
         Returns:
             새 실행 정보 {new_execution_id, status, restored_from}
         """
@@ -589,15 +595,25 @@ class CheckpointService:
             checkpoint = await self.get_checkpoint_detail(thread_id, checkpoint_id)
             if not checkpoint:
                 raise ValueError(f"Checkpoint not found: {checkpoint_id}")
-            
+
             state_snapshot = checkpoint.get('state_snapshot', {})
             if not state_snapshot:
                 raise ValueError(f"No state snapshot available for checkpoint: {checkpoint_id}")
-            
+
             # 워크플로우/소유자 정보 추출
             exec_context = checkpoint.get('execution_context', {})
             wf_id = workflow_id or exec_context.get('workflow_id') or state_snapshot.get('workflow_id')
             o_id = owner_id or exec_context.get('owner_id') or state_snapshot.get('owner_id')
+
+            # 인가 검증: 요청자가 체크포인트 소유자인지 확인
+            if caller_owner_id and o_id and caller_owner_id != o_id:
+                logger.warning(
+                    f"[Checkpoint] Authorization denied: caller={caller_owner_id} "
+                    f"is not owner of thread={thread_id} (owner={o_id})"
+                )
+                raise PermissionError(
+                    f"Access denied: caller '{caller_owner_id}' does not own this checkpoint"
+                )
             
             if not wf_id:
                 raise ValueError("Cannot determine workflow_id for restoration")

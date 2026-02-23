@@ -39,6 +39,14 @@ except ImportError:
     def log_security_event(event_type: str, severity: str = "INFO", **context):
         logging.getLogger("security_events").info(f"Security event: {event_type}", extra=context)
 
+# Semantic Shield (3단계 정규화 + 패턴 + 모델)
+try:
+    from src.services.recovery.semantic_shield import SemanticShield, DetectionType
+    SEMANTIC_SHIELD_AVAILABLE = True
+except ImportError:
+    SemanticShield = None
+    SEMANTIC_SHIELD_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -83,31 +91,62 @@ class SecurityCheckResult:
     kernel_log: Optional[Dict[str, Any]] = None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Capability Map — Ring별 허용 도구 화이트리스트 (Default-Deny)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ALL_TOOLS = None  # sentinel: 무제한 (Ring 0 전용)
+
+CAPABILITY_MAP: Dict[int, Optional[frozenset]] = {
+    # Ring 0 — 커널: 제한 없음
+    RingLevel.RING_0_KERNEL.value: _ALL_TOOLS,
+
+    # Ring 1 — 드라이버: 신뢰하지만 범위 제한 (상태 변경 도구 포함)
+    RingLevel.RING_1_DRIVER.value: frozenset({
+        'filesystem_read', 'filesystem_write',
+        'subprocess_call', 'network_limited',
+        'database_write', 'database_read', 'database_query',
+        'config_read', 'config_write',
+        's3_read', 'cache_read', 'cache_write', 'event_publish',
+    }),
+
+    # Ring 2 — 서비스층: 읽기/조회 중심, 상태 변경 제한
+    RingLevel.RING_2_SERVICE.value: frozenset({
+        'network_read', 'database_query', 'database_read',
+        'cache_read', 'event_publish', 's3_read',
+        'config_read',
+    }),
+
+    # Ring 3 — 비신뢰 사용자: 최소 권한
+    RingLevel.RING_3_USER.value: frozenset({
+        'basic_query', 'read_only',
+    }),
+}
+
+
 class PromptSecurityGuard:
     """
     🛡️ Ring Protection 기반 프롬프트 보안 가드
-    
+
     CPU의 Ring 보호 모델을 LLM 프롬프트에 적용하여
     신뢰할 수 없는 사용자 입력이 시스템 프롬프트를 무력화하는 것을 방지.
-    
+
     Usage:
         guard = PromptSecurityGuard()
-        
-        # 프롬프트 검증
+
+        # 프롬프트 검증 (SemanticShield 자동 적용)
         result = guard.validate_prompt(user_input, ring_level=RingLevel.RING_3_USER)
         if not result.is_safe:
             if result.should_sigkill:
-                # 세그먼트 강제 종료
                 raise SecurityViolationError(result.violations)
             else:
-                # 필터링 후 진행
                 safe_input = result.sanitized_content
-        
+
         # Ring 0 보호 프롬프트 생성
         protected = guard.create_ring_0_prompt(system_purpose, security_rules)
-        
-        # 도구 접근 권한 검증
-        allowed = guard.check_tool_permission("s3_delete", ring_level=RingLevel.RING_3_USER)
+
+        # 도구 접근 권한 검증 (Default-Deny)
+        allowed = guard.validate_capability(RingLevel.RING_3_USER, "database_write")
     """
     
     def __init__(self):
@@ -151,10 +190,52 @@ class PromptSecurityGuard:
                 ring_level=ring_level.value,
                 sanitized_content=content
             )
-        
+
         violations = []
-        
-        # 1. Prompt Injection 패턴 탐지
+
+        # 0. Semantic Shield (Stage 1 정규화 + Stage 2 패턴 + Stage 3 LLM)
+        #    - Stage 1 정규화: 모든 Ring에서 수행 (Zero-Width·RTL·Base64·Homoglyph)
+        #    - Stage 3 LLM  : Ring 2/3에서만 수행 (비용 최적화)
+        if SEMANTIC_SHIELD_AVAILABLE:
+            shield = SemanticShield.get_instance()
+            shield_result = shield.inspect(content, ring_level.value)
+            # 정규화된 텍스트로 교체 (이후 패턴 매칭의 우회 방지)
+            content = shield_result.normalized_text
+            if not shield_result.allowed:
+                for detection in shield_result.detections:
+                    if detection.detection_type in (
+                        DetectionType.INJECTION_PATTERN,
+                        DetectionType.BASE64_INJECTION,
+                        DetectionType.SEMANTIC_INJECTION,
+                        DetectionType.SEMANTIC_JAILBREAK,
+                    ):
+                        severity = (
+                            SecurityConfig.SEVERITY_CRITICAL
+                            if detection.detection_type in (
+                                DetectionType.SEMANTIC_JAILBREAK,
+                                DetectionType.BASE64_INJECTION,
+                            )
+                            else SecurityConfig.SEVERITY_HIGH
+                        )
+                        violations.append(SecurityViolation(
+                            violation_type=ViolationType.INJECTION_ATTEMPT,
+                            severity=severity,
+                            message=f"[SemanticShield] {detection.description}",
+                            matched_pattern=detection.detection_type.value,
+                            source_ring=ring_level.value,
+                            target_ring=0,
+                            context=context or {},
+                        ))
+                log_security_event(
+                    "SEMANTIC_SHIELD_BLOCKED",
+                    severity=SecurityConfig.SEVERITY_HIGH,
+                    ring_level=ring_level.value,
+                    risk_score=shield_result.risk_score,
+                    stages_run=shield_result.stages_run,
+                    **(context or {}),
+                )
+
+        # 1. Prompt Injection 패턴 탐지 (정규화 후 텍스트 기준)
         injection_violations = self._detect_injection_patterns(content, context or {})
         violations.extend(injection_violations)
         
@@ -398,6 +479,52 @@ class PromptSecurityGuard:
     # 🛡️ 시스템 콜 인터페이스: 도구 접근 권한 검증
     # ========================================================================
     
+    def validate_capability(
+        self,
+        ring_level: RingLevel,
+        tool_name: str,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        도구 접근 권한 검증 — CAPABILITY_MAP 기반 Default-Deny.
+
+        화이트리스트에 명시되지 않은 도구는 Ring 수준에 관계없이 False.
+        Ring 0 (커널)은 유일하게 모든 도구를 허용.
+
+        Args:
+            ring_level: 요청 Ring 레벨
+            tool_name:  접근하려는 도구 이름
+            context:    감사 로그용 추가 컨텍스트
+
+        Returns:
+            True (허용) / False (거부)
+        """
+        if not self.enable_protection:
+            return True
+
+        allowed_set = CAPABILITY_MAP.get(ring_level.value)
+
+        # Ring 0 → sentinel None → 무제한 허용
+        if allowed_set is _ALL_TOOLS:
+            return True
+
+        granted = tool_name in (allowed_set or frozenset())
+
+        if not granted:
+            log_security_event(
+                "CAPABILITY_DENIED",
+                severity=SecurityConfig.SEVERITY_HIGH,
+                tool_name=tool_name,
+                ring_level=ring_level.value,
+                **(context or {}),
+            )
+            logger.warning(
+                "[CapabilityMap] Denied: ring=%d tool=%s (not in whitelist)",
+                ring_level.value, tool_name,
+            )
+
+        return granted
+
     def check_tool_permission(
         self,
         tool_name: str,
@@ -405,48 +532,48 @@ class PromptSecurityGuard:
         context: Optional[Dict[str, Any]] = None
     ) -> Tuple[bool, Optional[SecurityViolation]]:
         """
-        도구 접근 권한 검증 (시스템 콜 인터페이스)
-        
-        Ring 3 (사용자)에서 위험 도구에 직접 접근 시도 시 차단.
-        
+        도구 접근 권한 검증 (시스템 콜 인터페이스).
+
+        내부적으로 validate_capability()를 사용.
+        Ring별 CAPABILITY_MAP(Default-Deny) 기반 화이트리스트 검사.
+
         Args:
-            tool_name: 도구 이름
+            tool_name:  도구 이름
             ring_level: 요청 Ring 레벨
-            context: 추가 컨텍스트
-            
+            context:    추가 컨텍스트
+
         Returns:
             (허용 여부, 위반 정보 또는 None)
         """
         if not self.enable_protection:
             return True, None
-        
-        # Ring 0/1에서는 모든 도구 허용
-        if ring_level.value <= RingLevel.RING_1_DRIVER.value:
+
+        granted = self.validate_capability(ring_level, tool_name, context)
+
+        if granted:
             return True, None
-        
-        # Ring 3에서 위험 도구 접근 시도
-        if tool_name.lower() in SecurityConfig.DANGEROUS_TOOLS:
-            violation = SecurityViolation(
-                violation_type=ViolationType.DANGEROUS_TOOL_ACCESS,
-                severity=SecurityConfig.SEVERITY_HIGH,
-                message=f"Ring 3 attempted to access dangerous tool: {tool_name}",
-                source_ring=ring_level.value,
-                target_ring=0,
-                context=context or {}
-            )
-            
-            log_security_event(
-                "DANGEROUS_TOOL_ACCESS_BLOCKED",
-                severity=SecurityConfig.SEVERITY_HIGH,
-                tool_name=tool_name,
-                ring_level=ring_level.value,
-                **(context or {})
-            )
-            
-            return False, violation
-        
-        # 안전 도구는 허용
-        return True, None
+
+        violation = SecurityViolation(
+            violation_type=ViolationType.DANGEROUS_TOOL_ACCESS,
+            severity=SecurityConfig.SEVERITY_HIGH,
+            message=(
+                f"Ring {ring_level.value} attempted to access tool not in capability "
+                f"whitelist: {tool_name}"
+            ),
+            source_ring=ring_level.value,
+            target_ring=0,
+            context=context or {},
+        )
+
+        log_security_event(
+            "DANGEROUS_TOOL_ACCESS_BLOCKED",
+            severity=SecurityConfig.SEVERITY_HIGH,
+            tool_name=tool_name,
+            ring_level=ring_level.value,
+            **(context or {}),
+        )
+
+        return False, violation
     
     def syscall_request_tool(
         self,
@@ -484,30 +611,77 @@ class PromptSecurityGuard:
                 }
             }
         
-        # 위험 도구 접근 요청 - justification 검증
-        # (프로덕션에서는 Gemini ShieldGemma로 justification 유효성 검증)
-        if justification and len(justification) > 20:
+        # 위험 도구 접근 요청 - justification 다단계 검증
+        # (1) 최소 길이 100자: 의미 있는 사유 서술 요구
+        _JUSTIFICATION_MIN_LENGTH = 100
+        # (2) 고유 문자 종류 15종 이상: "aaa…" 반복 우회 방지
+        _JUSTIFICATION_MIN_UNIQUE_CHARS = 15
+
+        justification_denied_reason = None
+
+        if not justification or len(justification) < _JUSTIFICATION_MIN_LENGTH:
+            justification_denied_reason = (
+                f"Justification too short: {len(justification) if justification else 0} chars "
+                f"(minimum {_JUSTIFICATION_MIN_LENGTH} required)"
+            )
+        elif len(set(justification)) < _JUSTIFICATION_MIN_UNIQUE_CHARS:
+            justification_denied_reason = (
+                f"Justification lacks diversity: only {len(set(justification))} unique chars "
+                f"(minimum {_JUSTIFICATION_MIN_UNIQUE_CHARS} required)"
+            )
+        else:
+            # (3) justification 자체에 인젝션 시도가 없는지 검증
+            jst_check = self.validate_prompt(
+                justification,
+                ring_level=ring_level,
+                context={"source": "syscall_justification", "tool_name": tool_name}
+            )
+            if not jst_check.is_safe:
+                justification_denied_reason = (
+                    "Justification failed security validation (injection pattern detected)"
+                )
+
+        if justification_denied_reason:
             log_security_event(
-                "SYSCALL_ELEVATED_ACCESS",
-                severity="WARN",
+                "SYSCALL_JUSTIFICATION_REJECTED",
+                severity=SecurityConfig.SEVERITY_HIGH,
                 tool_name=tool_name,
-                justification=justification[:200],
+                reason=justification_denied_reason,
                 ring_level=ring_level.value,
                 **(context or {})
             )
-            
             return {
-                "granted": True,
-                "reason": "Elevated access granted with justification",
+                "granted": False,
+                "reason": f"Access denied: {justification_denied_reason}",
                 "audit_log": {
-                    "action": "SYSCALL_ELEVATED_ACCESS",
+                    "action": "SYSCALL_DENIED",
                     "tool": tool_name,
                     "ring_level": ring_level.value,
-                    "justification": justification,
                     "timestamp": time.time()
-                },
-                "warning": "This access will be audited"
+                }
             }
+
+        log_security_event(
+            "SYSCALL_ELEVATED_ACCESS",
+            severity="WARN",
+            tool_name=tool_name,
+            justification=justification[:200],
+            ring_level=ring_level.value,
+            **(context or {})
+        )
+
+        return {
+            "granted": True,
+            "reason": "Elevated access granted with justification",
+            "audit_log": {
+                "action": "SYSCALL_ELEVATED_ACCESS",
+                "tool": tool_name,
+                "ring_level": ring_level.value,
+                "justification": justification,
+                "timestamp": time.time()
+            },
+            "warning": "This access will be audited"
+        }
         
         return {
             "granted": False,

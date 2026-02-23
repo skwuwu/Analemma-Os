@@ -1,3 +1,4 @@
+import heapq
 import os
 import json
 import logging
@@ -568,19 +569,20 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
                 in_degree[tgt] += 1
         
         # Kahn's Algorithm: 진입 차수가 0인 노드부터 시작
-        queue = [nid for nid in node_ids if in_degree[nid] == 0]
+        # heapq로 최솟값 추출 O(log n): 매 반복 queue.sort() O(n log n) 제거 → 전체 O(n log n)
+        # 결정론적 순서 보장: heapq는 항상 알파벳 최솟값 노드 ID를 반환
+        queue = sorted([nid for nid in node_ids if in_degree[nid] == 0])
+        heapq.heapify(queue)
         sorted_ids = []
-        
+
         while queue:
-            # 안정적인 순서를 위해 정렬 (알파벳 순)
-            queue.sort()
-            node_id = queue.pop(0)
+            node_id = heapq.heappop(queue)
             sorted_ids.append(node_id)
-            
+
             for neighbor in adj[node_id]:
                 in_degree[neighbor] -= 1
                 if in_degree[neighbor] == 0:
-                    queue.append(neighbor)
+                    heapq.heappush(queue, neighbor)
         
         # 정렬되지 않은 노드가 있으면 (사이클 또는 연결 안됨) 원래 순서로 추가
         if len(sorted_ids) < len(node_ids):

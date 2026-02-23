@@ -130,25 +130,35 @@ class EventualConsistencyGuard:
                 block_id = block['block_id']
                 s3_key = block['s3_key']
                 block_data = block.get('data', {})
-                
-                # S3 업로드 (pending 태그)
+
+                # 업로드 이벤트마다 고유 nonce 생성
+                # GC Lambda가 이 nonce와 현재 S3 태그의 nonce를 비교해
+                # 다른 트랜잭션이 재업로드한 블록을 잘못 삭제하는 레이스 컨디션 방지
+                upload_nonce = str(uuid.uuid4())
+
+                # S3 업로드 (pending 태그 + upload_nonce)
                 self.s3.put_object(
                     Bucket=self.bucket,
                     Key=s3_key,
                     Body=json.dumps(block_data, default=str),
                     ContentType='application/json',
-                    Tagging=f"status=pending&transaction_id={transaction_id}",
+                    Tagging=(
+                        f"status=pending"
+                        f"&transaction_id={transaction_id}"
+                        f"&upload_nonce={upload_nonce}"
+                    ),
                     Metadata={
                         'block_id': block_id,
                         'transaction_id': transaction_id,
                         'workflow_id': workflow_id
                     }
                 )
-                
+
                 block_uploads.append({
                     'block_id': block_id,
                     's3_key': s3_key,
-                    'bucket': self.bucket
+                    'bucket': self.bucket,
+                    'upload_nonce': upload_nonce  # GC 레이스 컨디션 방지용
                 })
             
             logger.info(f"Phase 1 Complete: Uploaded {len(block_uploads)} blocks with pending tags")
@@ -347,6 +357,13 @@ class EventualConsistencyGuard:
                         'reason': reason,
                         'scheduled_at': datetime.utcnow().isoformat(),
                         'transaction_id': transaction_id,
+                        # GC Lambda가 삭제 전 반드시 두 조건을 모두 확인해야 함:
+                        #   1. S3 태그 status != "committed"
+                        #   2. S3 태그 upload_nonce == 이 메시지의 upload_nonce
+                        # 조건 2가 없으면, txn-A 실패 후 txn-B가 동일 s3_key를
+                        # 재업로드했을 때 GC가 txn-B의 블록을 잘못 삭제하는
+                        # 레이스 컨디션이 발생한다.
+                        'upload_nonce': block.get('upload_nonce', ''),
                         'idempotent_check': True  # GC Lambda가 태그 재확인 필수
                     }),
                     'DelaySeconds': 300  # 5분 후 처리 (Phase 3 완료 여유 시간)
@@ -365,3 +382,58 @@ class EventualConsistencyGuard:
                 )
             except Exception as e:
                 logger.error(f"Failed to schedule GC batch: {e}")
+
+    def process_dlq_gc_message(self, message_body: Dict[str, Any]) -> bool:
+        """
+        SQS DLQ GC 메시지 처리 (레이스 컨디션 안전 삭제)
+
+        삭제 전 두 가지 조건을 모두 검증:
+        1. S3 태그 status != "committed"  → committed 블록 보호
+        2. S3 태그 upload_nonce == message upload_nonce
+           → txn-A 실패 후 txn-B가 동일 s3_key를 재업로드한 경우
+             GC가 txn-B 블록을 잘못 삭제하는 레이스 컨디션 방지
+
+        Returns:
+            bool: True이면 삭제 실행, False이면 건너뜀
+        """
+        s3_key = message_body.get('s3_key', '')
+        bucket = message_body.get('bucket', self.bucket)
+        expected_nonce = message_body.get('upload_nonce', '')
+        expected_txn = message_body.get('transaction_id', '')
+
+        try:
+            response = self.s3.get_object_tagging(Bucket=bucket, Key=s3_key)
+            tags = {tag['Key']: tag['Value'] for tag in response.get('TagSet', [])}
+        except ClientError as e:
+            if e.response['Error']['Code'] in ('NoSuchKey', '404'):
+                logger.info(f"[GC DLQ] Block already gone: {s3_key}")
+                return False
+            logger.error(f"[GC DLQ] Failed to read tags for {s3_key}: {e}")
+            return False
+
+        # 조건 1: committed 블록은 절대 삭제하지 않음
+        if tags.get('status') == 'committed':
+            logger.info(f"[GC DLQ] Block committed, skipping: {s3_key}")
+            return False
+
+        # 조건 2: upload_nonce가 다르면 다른 트랜잭션이 재업로드한 블록
+        current_nonce = tags.get('upload_nonce', '')
+        if expected_nonce and current_nonce != expected_nonce:
+            logger.info(
+                f"[GC DLQ] Nonce mismatch for {s3_key} "
+                f"(expected={expected_nonce}, current={current_nonce}). "
+                f"Block reused by another transaction — skipping."
+            )
+            return False
+
+        # 두 조건 통과 → 안전하게 삭제
+        try:
+            self.s3.delete_object(Bucket=bucket, Key=s3_key)
+            logger.info(
+                f"[GC DLQ] Deleted orphaned block: {s3_key} "
+                f"(transaction={expected_txn}, nonce={expected_nonce})"
+            )
+            return True
+        except ClientError as e:
+            logger.error(f"[GC DLQ] Failed to delete {s3_key}: {e}")
+            return False

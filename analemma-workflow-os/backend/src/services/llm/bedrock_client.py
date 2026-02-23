@@ -132,12 +132,34 @@ def invoke_bedrock_model(
                 payload["system"] = system_prompt
         
         client = get_bedrock_client()
-        response = client.invoke_model(body=json.dumps(payload), modelId=model_id)
-        return json.loads(response.get("body").read())
-        
-    except ClientError as e:
-        logger.exception(f"Bedrock invoke_model failed: {e}")
-        raise
+        body_str = json.dumps(payload)
+
+        # ThrottlingException / TooManyRequestsException 지수 백오프 재시도
+        _THROTTLE_CODES = {"ThrottlingException", "TooManyRequestsException", "ServiceUnavailableException"}
+        _MAX_RETRIES = 4
+        _BASE_DELAY = 1.0  # seconds
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = client.invoke_model(body=body_str, modelId=model_id)
+                return json.loads(response.get("body").read())
+            except ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code in _THROTTLE_CODES and attempt < _MAX_RETRIES - 1:
+                    delay = _BASE_DELAY * (2 ** attempt)  # 1s → 2s → 4s
+                    logger.warning(
+                        f"[Bedrock] {code} on attempt {attempt + 1}/{_MAX_RETRIES}, "
+                        f"retrying in {delay:.1f}s (model={model_id})"
+                    )
+                    time.sleep(delay)
+                    last_exc = exc
+                else:
+                    logger.exception(f"Bedrock invoke_model failed: {exc}")
+                    raise
+
+        # 재시도 소진 (이론상 도달 불가, 안전 경로)
+        raise last_exc  # type: ignore[misc]
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse Bedrock response JSON: {e}")
         raise ValueError(f"Invalid JSON response from Bedrock: {e}")

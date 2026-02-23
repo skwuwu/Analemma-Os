@@ -581,7 +581,22 @@ class CircuitBreaker:
     
     @classmethod
     def get_or_create(cls, name: str, **kwargs) -> 'CircuitBreaker':
-        """서비스별 싱글톤 Circuit Breaker 획득"""
+        """
+        서비스별 싱글톤 Circuit Breaker 획득.
+
+        환경변수 REDIS_URL이 설정된 경우 RedisCircuitBreaker 반환.
+        Redis 연결 실패 또는 REDIS_URL 미설정 시 인메모리 CircuitBreaker 반환.
+        """
+        import os
+        redis_url = os.environ.get('REDIS_URL')
+        if redis_url:
+            try:
+                return RedisCircuitBreaker.get_or_create(name, redis_url=redis_url, **kwargs)
+            except Exception as e:
+                logger.warning(
+                    f"[CircuitBreaker] Redis unavailable, falling back to in-memory: {e}"
+                )
+
         with cls._registry_lock:
             if name not in cls._registry:
                 cls._registry[name] = cls(name=name, **kwargs)
@@ -862,3 +877,300 @@ def reset_circuit_breaker(name: str) -> bool:
             logger.info(f"🔄 Circuit Breaker [{name}] reset to CLOSED")
             return True
         return False
+
+
+# =============================================================================
+# Redis 기반 분산 Circuit Breaker
+# =============================================================================
+
+class RedisCircuitBreaker:
+    """
+    Redis INCR + Lua 원자 연산 기반 분산 Circuit Breaker.
+
+    멀티 워커 환경에서 상태를 Redis에 공유:
+    - 실패 카운트: Redis INCR + TTL (슬라이딩 윈도우)
+    - 상태 전이: Lua 스크립트로 원자 실행 (Race Condition 방지)
+    - 상태 브로드캐스트: Redis Pub/Sub (모든 워커 즉시 동기화)
+
+    Redis 연결 불가 시 in-memory CircuitBreaker로 자동 폴백.
+
+    Redis 키 구조:
+        cb:{service_id}:failures   → INCR + EXPIRE (슬라이딩 윈도우)
+        cb:{service_id}:state      → CLOSED | OPEN | HALF_OPEN
+        cb:{service_id}:opened_at  → OPEN 전환 타임스탬프
+
+    Usage:
+        breaker = RedisCircuitBreaker.get_or_create("bedrock-api", redis_url="redis://...")
+        if breaker.allow_request():
+            try:
+                result = call_api()
+                breaker.record_success()
+            except Exception:
+                breaker.record_failure()
+                raise
+    """
+
+    # Lua 스크립트: 실패 기록 + 임계치 초과 시 OPEN 전환 (원자 실행)
+    _LUA_RECORD_FAILURE = """
+local count = redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1]))
+if count >= tonumber(ARGV[2]) then
+    local current_state = redis.call('GET', KEYS[2])
+    if current_state ~= 'OPEN' then
+        redis.call('SET', KEYS[2], 'OPEN')
+        redis.call('SET', KEYS[3], ARGV[3])
+        redis.call('PUBLISH', ARGV[4], KEYS[2] .. ':OPEN')
+    end
+end
+return count
+"""
+
+    # Lua 스크립트: 성공 기록 + HALF_OPEN에서 연속 성공 시 CLOSED 전환
+    _LUA_RECORD_SUCCESS = """
+local state = redis.call('GET', KEYS[1])
+if state == 'HALF_OPEN' then
+    local ok_count = redis.call('INCR', KEYS[2])
+    redis.call('EXPIRE', KEYS[2], 60)
+    if ok_count >= tonumber(ARGV[1]) then
+        redis.call('SET', KEYS[1], 'CLOSED')
+        redis.call('DEL', KEYS[2])
+        redis.call('DEL', KEYS[3])
+        redis.call('DEL', KEYS[4])
+        redis.call('PUBLISH', ARGV[2], KEYS[1] .. ':CLOSED')
+    end
+end
+return state or 'CLOSED'
+"""
+
+    # Pub/Sub 채널
+    PUBSUB_CHANNEL = "analemma:cb:state_changes"
+
+    _registry: Dict[str, 'RedisCircuitBreaker'] = {}
+    _registry_lock = Lock()
+
+    def __init__(
+        self,
+        name: str,
+        redis_url: str,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        window_seconds: int = 60,
+        success_threshold: int = 2,
+    ):
+        self.name = name
+        self._redis_url = redis_url
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.window_seconds = window_seconds
+        self.success_threshold = success_threshold
+
+        # Redis 클라이언트 (lazy init)
+        self._redis = None
+        self._pubsub_thread = None
+
+        # in-memory 폴백 CB
+        self._fallback: Optional[CircuitBreaker] = None
+
+        # Redis 키
+        self._key_failures  = f"cb:{name}:failures"
+        self._key_state     = f"cb:{name}:state"
+        self._key_opened_at = f"cb:{name}:opened_at"
+        self._key_ok_count  = f"cb:{name}:ok_count"
+
+        # 로컬 상태 캐시 (Pub/Sub로 업데이트)
+        self._local_state = CircuitState.CLOSED
+        self._local_state_lock = Lock()
+
+        self._init_redis()
+
+    @classmethod
+    def get_or_create(cls, name: str, redis_url: str, **kwargs) -> 'RedisCircuitBreaker':
+        """서비스별 싱글톤 RedisCircuitBreaker."""
+        with cls._registry_lock:
+            if name not in cls._registry:
+                cls._registry[name] = cls(name=name, redis_url=redis_url, **kwargs)
+            return cls._registry[name]
+
+    def _init_redis(self) -> None:
+        """Redis 연결 초기화 + Pub/Sub 리스너 시작."""
+        try:
+            import redis as redis_lib
+            self._redis = redis_lib.from_url(
+                self._redis_url,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            self._redis.ping()  # 연결 확인
+
+            # Pub/Sub 리스너: 백그라운드 스레드로 상태 변경 구독
+            self._start_pubsub_listener()
+            logger.info(f"[RedisCircuitBreaker] Initialized: {self.name} @ {self._redis_url}")
+
+        except Exception as e:
+            logger.warning(
+                f"[RedisCircuitBreaker] Redis init failed for '{self.name}', "
+                f"falling back to in-memory: {e}"
+            )
+            self._redis = None
+            self._fallback = CircuitBreaker(
+                name=self.name,
+                failure_threshold=self.failure_threshold,
+                recovery_timeout=self.recovery_timeout,
+            )
+
+    def _start_pubsub_listener(self) -> None:
+        """Redis Pub/Sub 리스너 스레드 시작."""
+        import threading
+
+        def _listen():
+            try:
+                import redis as redis_lib
+                r = redis_lib.from_url(self._redis_url, decode_responses=True)
+                pubsub = r.pubsub()
+                pubsub.subscribe(self.PUBSUB_CHANNEL)
+                for message in pubsub.listen():
+                    if message['type'] != 'message':
+                        continue
+                    data = message.get('data', '')
+                    # 형식: "cb:{name}:state:OPEN" or "cb:{name}:state:CLOSED"
+                    if f"cb:{self.name}:state:" in data:
+                        parts = data.split(':')
+                        new_state_str = parts[-1]
+                        try:
+                            new_state = CircuitState(new_state_str.lower())
+                            with self._local_state_lock:
+                                self._local_state = new_state
+                            logger.info(
+                                f"[RedisCircuitBreaker][PubSub] '{self.name}' → {new_state_str}"
+                            )
+                        except ValueError:
+                            pass
+            except Exception as e:
+                logger.debug(f"[RedisCircuitBreaker] PubSub listener error: {e}")
+
+        t = threading.Thread(target=_listen, daemon=True, name=f"cb-pubsub-{self.name}")
+        t.start()
+        self._pubsub_thread = t
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def allow_request(self) -> bool:
+        """요청 허용 여부."""
+        if self._fallback:
+            return self._fallback.allow_request()
+
+        state = self._get_state()
+
+        if state == CircuitState.CLOSED:
+            return True
+
+        if state == CircuitState.OPEN:
+            # recovery_timeout 경과 시 HALF_OPEN으로 전환
+            opened_at = self._redis_get_float(self._key_opened_at)
+            if opened_at and (time.time() - opened_at) >= self.recovery_timeout:
+                self._set_state('HALF_OPEN')
+                return True
+            return False
+
+        if state == CircuitState.HALF_OPEN:
+            return True
+
+        return False
+
+    def record_failure(self) -> CircuitState:
+        """실패 기록. Lua 스크립트로 원자 실행."""
+        if self._fallback:
+            self._fallback.record_failure()
+            return CircuitState(self._fallback.state.value)
+
+        try:
+            script = self._redis.register_script(self._LUA_RECORD_FAILURE)
+            script(
+                keys=[self._key_failures, self._key_state, self._key_opened_at],
+                args=[
+                    self.window_seconds,
+                    self.failure_threshold,
+                    time.time(),
+                    self.PUBSUB_CHANNEL,
+                ],
+            )
+        except Exception as e:
+            logger.warning(f"[RedisCircuitBreaker] record_failure error: {e}")
+
+        return self._get_state()
+
+    def record_success(self) -> CircuitState:
+        """성공 기록. HALF_OPEN → CLOSED 전환 처리."""
+        if self._fallback:
+            self._fallback.record_success()
+            return CircuitState(self._fallback.state.value)
+
+        try:
+            script = self._redis.register_script(self._LUA_RECORD_SUCCESS)
+            script(
+                keys=[self._key_state, self._key_ok_count,
+                      self._key_failures, self._key_opened_at],
+                args=[self.success_threshold, self.PUBSUB_CHANNEL],
+            )
+        except Exception as e:
+            logger.warning(f"[RedisCircuitBreaker] record_success error: {e}")
+
+        return self._get_state()
+
+    def get_state(self) -> CircuitState:
+        """현재 CB 상태 반환."""
+        if self._fallback:
+            return CircuitState(self._fallback.state.value)
+        return self._get_state()
+
+    def get_status(self) -> Dict[str, Any]:
+        """상태 정보 (모니터링용)."""
+        if self._fallback:
+            return self._fallback.get_status()
+
+        try:
+            failure_count = int(self._redis.get(self._key_failures) or 0)
+        except Exception:
+            failure_count = -1
+
+        return {
+            "name": self.name,
+            "backend": "redis",
+            "state": self._get_state().value,
+            "failure_count": failure_count,
+            "config": {
+                "failure_threshold": self.failure_threshold,
+                "recovery_timeout": self.recovery_timeout,
+                "window_seconds": self.window_seconds,
+            },
+        }
+
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _get_state(self) -> CircuitState:
+        """Redis에서 현재 상태 읽기."""
+        try:
+            raw = self._redis.get(self._key_state) or 'CLOSED'
+            return CircuitState(raw.lower())
+        except Exception:
+            # Redis 장애 → 로컬 캐시(Pub/Sub 업데이트) 사용
+            with self._local_state_lock:
+                return self._local_state
+
+    def _set_state(self, state_str: str) -> None:
+        try:
+            self._redis.set(self._key_state, state_str)
+            self._redis.publish(
+                self.PUBSUB_CHANNEL,
+                f"cb:{self.name}:state:{state_str}",
+            )
+        except Exception as e:
+            logger.debug(f"[RedisCircuitBreaker] _set_state error: {e}")
+
+    def _redis_get_float(self, key: str) -> Optional[float]:
+        try:
+            val = self._redis.get(key)
+            return float(val) if val else None
+        except Exception:
+            return None

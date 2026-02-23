@@ -17,6 +17,7 @@
 import time
 import random
 import logging
+import threading
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
 
@@ -102,6 +103,7 @@ class AsyncCommitService:
         for attempt in range(RETRY_ATTEMPTS):
             # 1. Redis 상태 확인
             redis_status = None
+            redis_error = False  # Redis 장애(연결 실패) vs 키 미존재 구분
             if self.redis_client and _HAS_REDIS:
                 try:
                     redis_status = self.redis_client.get(redis_key)
@@ -109,6 +111,7 @@ class AsyncCommitService:
                         redis_status = redis_status.decode('utf-8') if isinstance(redis_status, bytes) else redis_status
                 except Exception as e:
                     logger.warning(f"Redis check failed: {e}")
+                    redis_error = True  # 연결 장애, 키 미존재가 아님
             
             # 2. S3 파일 존재 확인
             s3_exists = self._check_s3_exists(s3_bucket, s3_key)
@@ -170,6 +173,20 @@ class AsyncCommitService:
             
             # 5. 아직 커밋 안 됨
             if redis_status != 'committed':
+                # Redis 장애 + S3에 파일 존재 → S3를 진실의 원천으로 신뢰
+                # (Redis 키 미존재와 Redis 장애를 redis_error 플래그로 구분)
+                if redis_error and s3_exists:
+                    logger.warning(
+                        f"[AsyncCommit] Redis unavailable; S3 object exists — "
+                        f"trusting S3 as source of truth for {s3_key[:60]}"
+                    )
+                    return CommitStatus(
+                        is_committed=True,
+                        s3_available=True,
+                        redis_status="unavailable",
+                        retry_count=attempt + 1,
+                        total_wait_ms=total_wait * 1000
+                    )
                 return CommitStatus(
                     is_committed=False,
                     s3_available=s3_exists,
@@ -238,11 +255,14 @@ class AsyncCommitService:
 
 # Singleton 인스턴스
 _async_commit_service = None
+_async_commit_lock = threading.Lock()
 
 
 def get_async_commit_service(redis_client=None) -> AsyncCommitService:
-    """AsyncCommitService 싱글톤 인스턴스 반환"""
+    """AsyncCommitService 싱글톤 인스턴스 반환 (스레드 안전)"""
     global _async_commit_service
     if _async_commit_service is None:
-        _async_commit_service = AsyncCommitService(redis_client=redis_client)
+        with _async_commit_lock:
+            if _async_commit_service is None:  # double-checked locking
+                _async_commit_service = AsyncCommitService(redis_client=redis_client)
     return _async_commit_service

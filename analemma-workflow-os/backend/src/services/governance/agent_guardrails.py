@@ -15,105 +15,108 @@ v2.1 Enhancements:
     - Intent Retention Rate: Semantic validation beyond hash comparison
 """
 
-import time
 import hashlib
 import logging
-from typing import Dict, Any, Optional, Tuple, List
-from dataclasses import dataclass
+from typing import Dict, Any, Optional, Tuple
+
+# retry_utils의 분산 CircuitBreaker 재사용 (중복 제거)
+# REDIS_URL 환경변수 설정 시 RedisCircuitBreaker 자동 선택
+from src.common.retry_utils import CircuitBreaker as _BaseCircuitBreaker, CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# 🛡️ Circuit Breaker Pattern
+# 🛡️ Circuit Breaker Pattern (retry_utils 위임)
 # ============================================================================
-
-@dataclass
-class CircuitBreakerState:
-    """Circuit Breaker 상태"""
-    failure_count: int
-    last_failure_time: float
-    state: str  # CLOSED / OPEN / HALF_OPEN
-
 
 class CircuitBreaker:
     """
-    Circuit Breaker Pattern for Agent Retry Control
-    
+    Circuit Breaker Pattern for Agent Retry Control.
+
+    내부적으로 retry_utils.CircuitBreaker (또는 RedisCircuitBreaker)에 위임.
+    REDIS_URL 환경변수 설정 시 Redis 기반 분산 CB 자동 선택.
+
     States:
-        - CLOSED: Normal operation
-        - OPEN: Too many failures, block all requests
-        - HALF_OPEN: Test if system recovered
-    
-    Thresholds:
-        - failure_threshold: 3 (3번 실패 시 OPEN)
-        - timeout: 60s (OPEN 후 60초 뒤 HALF_OPEN)
-    
+        - CLOSED   : 정상 동작
+        - OPEN     : 장애 — 요청 즉시 실패
+        - HALF_OPEN: 복구 테스트 — 제한적 허용
+
     Example:
         cb = CircuitBreaker(failure_threshold=3, timeout_seconds=60)
-        
         try:
             result = cb.call(risky_agent_function, arg1, arg2)
         except Exception as e:
             logger.error(f"Circuit Breaker OPEN: {e}")
     """
-    
+
     def __init__(self, failure_threshold: int = 3, timeout_seconds: int = 60):
-        self.failure_threshold = failure_threshold
-        self.timeout_seconds = timeout_seconds
-        self._state = CircuitBreakerState(
-            failure_count=0,
-            last_failure_time=0,
-            state="CLOSED"
+        self._inner = _BaseCircuitBreaker.get_or_create(
+            name=f"agent_guardrail_{id(self)}",
+            failure_threshold=failure_threshold,
+            recovery_timeout=float(timeout_seconds),
         )
-    
+
     def call(self, func, *args, **kwargs):
-        """Execute function with circuit breaker protection"""
-        if self._state.state == "OPEN":
-            # Check if timeout expired
-            if time.time() - self._state.last_failure_time > self.timeout_seconds:
-                self._state.state = "HALF_OPEN"
-                logger.info(f"🔄 Circuit Breaker transitioning to HALF_OPEN (testing recovery)")
-            else:
-                raise Exception(
-                    f"Circuit Breaker OPEN: {self._state.failure_count} failures. "
-                    f"Retry after {self.timeout_seconds}s timeout."
-                )
-        
+        """Circuit Breaker 보호 하에 함수 실행."""
+        if not self._inner.allow_request():
+            status = self._inner.get_status()
+            raise CircuitOpenError(
+                f"Circuit Breaker OPEN: {status.get('failure_count', '?')} failures."
+            )
         try:
             result = func(*args, **kwargs)
-            # Success: Reset circuit breaker
-            if self._state.state == "HALF_OPEN":
-                logger.info(f"✅ Circuit Breaker transitioning to CLOSED (recovery confirmed)")
-            self._state.failure_count = 0
-            self._state.state = "CLOSED"
+            self._inner.record_success()
             return result
-        except Exception as e:
-            # Failure: Increment counter
-            self._state.failure_count += 1
-            self._state.last_failure_time = time.time()
-            
-            if self._state.failure_count >= self.failure_threshold:
-                self._state.state = "OPEN"
-                logger.error(
-                    f"🚨 Circuit Breaker OPEN: {self._state.failure_count} consecutive failures"
-                )
-            
-            raise e
-    
+        except Exception:
+            self._inner.record_failure()
+            raise
+
     def reset(self):
-        """Manually reset circuit breaker (e.g., after manual intervention)"""
-        self._state.failure_count = 0
-        self._state.state = "CLOSED"
-        logger.info(f"🔄 Circuit Breaker manually reset to CLOSED")
-    
+        """수동 리셋 (CLOSED 전환)."""
+        from src.common.retry_utils import reset_circuit_breaker
+        reset_circuit_breaker(self._inner.name)
+        logger.info(f"[CircuitBreaker] Manually reset to CLOSED")
+
     def get_state(self) -> Dict[str, Any]:
-        """Get current circuit breaker state"""
-        return {
-            "state": self._state.state,
-            "failure_count": self._state.failure_count,
-            "last_failure_time": self._state.last_failure_time
-        }
+        """현재 상태 반환."""
+        return self._inner.get_status()
+
+
+# ============================================================================
+# 🛡️ JSON Depth Guard (Resource Exhaustion Prevention)
+# ============================================================================
+
+MAX_JSON_DEPTH = 10  # 10단계 이상 중첩은 공격 또는 비정상으로 간주
+
+
+def get_json_depth(data: Any, current_depth: int = 0) -> int:
+    """
+    JSON 구조의 최대 중첩 깊이를 재귀적으로 계산.
+
+    공격 예시:
+        {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"h": {"i": {"j": {"k": "v"}}}}}}}}}}}}
+        → depth = 11 → MAX_JSON_DEPTH(10) 초과 → SLOP 판정
+
+    Args:
+        data: 검사할 Python 객체 (dict, list, scalar)
+        current_depth: 현재 재귀 깊이 (내부 사용)
+
+    Returns:
+        int: 최대 중첩 깊이
+    """
+    if not isinstance(data, (dict, list)) or not data:
+        return current_depth
+    if isinstance(data, dict):
+        return max(
+            (get_json_depth(v, current_depth + 1) for v in data.values()),
+            default=current_depth,
+        )
+    # list
+    return max(
+        (get_json_depth(item, current_depth + 1) for item in data),
+        default=current_depth,
+    )
 
 
 # ============================================================================
@@ -165,9 +168,11 @@ def detect_slop(
             if count > 100:
                 return True, f"Repetitive pattern detected: '{substring}' appears {count} times"
     
-    # Check 3: Excessive nesting (TODO: Implement JSON depth check)
-    # Placeholder for now - would require recursive JSON traversal
-    
+    # Check 3: Excessive JSON nesting (Resource Exhaustion Guard)
+    depth = get_json_depth(output)
+    if depth > MAX_JSON_DEPTH:
+        return True, f"Excessive JSON nesting depth {depth} exceeds limit {MAX_JSON_DEPTH}"
+
     return False, None
 
 
@@ -412,10 +417,9 @@ def check_agent_health(
 
 __all__ = [
     "CircuitBreaker",
-    "CircuitBreakerState",
     "detect_slop",
     "calculate_gas_fee",
     "check_gas_fee_exceeded",
     "detect_plan_drift",
-    "check_agent_health"
+    "check_agent_health",
 ]

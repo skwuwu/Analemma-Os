@@ -38,7 +38,8 @@ Analemma OS is a serverless kernel that enforces deterministic state management 
 |  |                                                                   | |
 |  | +---------------------------------------------------------------+ | |
 |  | | Ring 1 - GOVERNOR (Deterministic Gatekeeper)                  | | |
-|  | | governor_runner, trust_score_manager, constitution.py          | | |
+|  | | governor_runner, governance_engine, constitution.py            | | |
+|  | | prompt_security_guard (capability map + semantic shield)       | | |
 |  | |                                                               | | |
 |  | | +-----------------------------------------------------------+ | | |
 |  | | | Ring 0 - KERNEL (Immutable System Core)                   | | | |
@@ -62,7 +63,7 @@ Analemma OS is a serverless kernel that enforces deterministic state management 
 | Ring | Name | Components | Trust Level |
 |---|---|---|---|
 | 0 | KERNEL | `kernel_protocol.py`, `universal_sync_core.py`, `state_versioning_service.py` | Immutable system core |
-| 1 | GOVERNOR | `governor_runner.py`, `trust_score_manager.py`, `constitution.py` | Deterministic gatekeeper |
+| 1 | GOVERNOR | `governor_runner.py`, `governance_engine.py`, `constitution.py`, `prompt_security_guard.py` | Deterministic gatekeeper |
 | 2 | TRUSTED TOOLS | Verified internal services, validated API integrations | Controlled access |
 | 3 | USER AGENTS | Gemini agents, external tools, user-defined logic | Untrusted input |
 
@@ -409,31 +410,60 @@ The Governor (Ring 1) validates agent output after every segment execution. Vali
 | Circuit breaker | Per-agent retry counter from workflow state | 3 retries |
 | Kernel command forgery | Intersection of agent output keys with `KERNEL_CONTROL_KEYS` | Zero tolerance |
 
-### Trust Score Model
+### Anomaly Score Model
 
-Agent trust scores use an Exponential Moving Average to solve the asymmetric recovery problem inherent in fixed-increment systems:
+The Governor produces an `anomaly_score` (0.0–1.0) from the union of all detected violations. Hard boosts are applied after the base calculation:
 
 ```
-streak_ratio = consecutive_successes / recent_window (last 10 decisions)
+anomaly_score = min(len(violations) * 0.2, 1.0)
 
-delta_S = BASE_INCREMENT * (1 + EMA_ACCELERATION * streak_ratio)
-        = 0.01 * (1 + 2.0 * streak_ratio)
-
-T_new = clamp(T_old + delta_S - (ring_penalty_multiplier * anomaly_score), 0.0, 1.0)
+KERNEL_COMMAND_FORGERY   → anomaly_score = 1.0            (immediate SIGKILL)
+CONSTITUTIONAL_VIOLATION → anomaly_score = max(score, 0.8) (REJECTED threshold)
 ```
 
-With a 5-step consecutive success streak (`streak_ratio = 1.0`): `delta_S = 0.03`. Recovery from 0.4 to 0.8 converges in 14 iterations versus 40 with a fixed +0.01 increment — a 65% reduction derived directly from the model parameters in `trust_score_manager.py`.
+Decision thresholds: `≥ 0.8` → REJECTED, `≥ 0.5` → ESCALATED, `< 0.5` → APPROVED.
 
-Ring-level penalty multipliers:
+### GovernanceEngine — Parallel Article Enforcement
 
-| Ring | Multiplier |
+`GovernanceEngine` (`governance_engine.py`) connects Article definitions in `constitution.py` to runtime enforcement. All six articles are validated in parallel via `asyncio.gather()`, eliminating sequential latency:
+
+| Article | Validator | Severity |
+|---|---|---|
+| 1 — Professional Tone | `Article1ToneValidator` | MEDIUM |
+| 2 — No Harmful Content | `Article2HarmfulContentValidator` | CRITICAL |
+| 3 — User Protection | `Article3UserProtectionValidator` | CRITICAL |
+| 4 — Transparency | `Article4TransparencyValidator` | LOW |
+| 5 — Security Compliance | `Article5SecurityPolicyValidator` | CRITICAL |
+| 6 — No PII Leakage | `Article6PIILeakageValidator` | CRITICAL |
+
+LOW accumulation policy: 10+ LOW violations in a single `verify()` call are upgraded to MEDIUM.
+
+### SemanticShield — 3-Stage Injection Defense
+
+`SemanticShield` (`semantic_shield.py`) replaces the static blocklist with a normalization-then-match pipeline, making encoding bypass attacks impossible:
+
+| Stage | Action | Ring Scope |
+|---|---|---|
+| 1 — Normalization | Zero-Width Strip, RTL remove, Base64 decode, Homoglyph map | All rings |
+| 2 — Pattern Match | English + Korean injection patterns on normalized text | All rings |
+| 3 — Semantic LLM | Bedrock Guardrails / Gemini ShieldGemma intent classification | Ring 2/3 only |
+
+Stage 3 is skipped for Ring 0/1 to avoid inference overhead on high-trust callers. Graceful degradation: Stage 3 unavailability falls back to Stage 1+2 silently.
+
+### Ring-fenced Capability Map
+
+`validate_capability(ring_level, tool_name)` enforces Default-Deny access control at every tool call boundary. Any tool not in the whitelist returns `False` — no exceptions:
+
+| Ring | Allowed |
 |---|---|
-| 0 (Kernel) | 2.0x |
-| 1 (Governor) | 1.5x |
-| 2 (Trusted Tools) | 0.8x |
-| 3 (User Agents) | 0.5x |
+| 0 — KERNEL | All tools |
+| 1 — DRIVER | filesystem, subprocess, network_limited, database_*, config_*, s3_read, cache_*, event_publish |
+| 2 — SERVICE | network_read, database_query/read, cache_read, event_publish, s3_read, config_read |
+| 3 — USER | basic_query, read_only |
 
-Scores below 0.4 force `STRICT` governance mode regardless of ring level.
+### Distributed CircuitBreaker
+
+`RedisCircuitBreaker` provides cross-worker consensus. Lua atomic INCR + EXPIRE prevents race conditions between concurrent Lambda workers. Redis Pub/Sub broadcasts state changes (`OPEN` / `CLOSED`) to all workers immediately. Falls back to in-memory CircuitBreaker when `REDIS_URL` is unset.
 
 ### Constitutional AI Clauses
 

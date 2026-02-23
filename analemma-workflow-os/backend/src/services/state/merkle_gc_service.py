@@ -256,7 +256,7 @@ class MerkleGarbageCollector:
                         last_accessed = :now,
                         zero_reached_at = if_not_exists(zero_reached_at, :null)
                 """,
-                ConditionExpression="attribute_not_exists(ref_count) OR ref_count > :zero",
+                ConditionExpression="ref_count > :zero",  # attribute_not_exists 제거: 항목 없을 때도 통과하면 0-1=-1 음수 발생
                 ExpressionAttributeValues={
                     ':dec': 1,
                     ':zero': 0,
@@ -298,7 +298,14 @@ class MerkleGarbageCollector:
                     return False  # 아직 삭제하지 않음 (graceful_wait 시작)
                 
                 # graceful_wait 경과 확인
-                zero_time = datetime.fromisoformat(zero_reached_at)
+                try:
+                    zero_time = datetime.fromisoformat(zero_reached_at)
+                except (ValueError, TypeError) as parse_err:
+                    logger.warning(
+                        f"[GC] Block {block_id[:8]}... invalid zero_reached_at format "
+                        f"'{zero_reached_at}': {parse_err} — skipping"
+                    )
+                    return False
                 elapsed = (datetime.utcnow() - zero_time).total_seconds()
                 
                 if elapsed >= graceful_wait_seconds:
@@ -334,7 +341,14 @@ class MerkleGarbageCollector:
                     zero_reached_at = item.get('zero_reached_at')
                     
                     if zero_reached_at:
-                        zero_time = datetime.fromisoformat(zero_reached_at)
+                        try:
+                            zero_time = datetime.fromisoformat(zero_reached_at)
+                        except (ValueError, TypeError) as parse_err:
+                            logger.warning(
+                                f"[GC] Block {block_id[:8]}... invalid zero_reached_at "
+                                f"'{zero_reached_at}': {parse_err} — treating as not ready"
+                            )
+                            return False
                         elapsed = (datetime.utcnow() - zero_time).total_seconds()
                         return elapsed >= graceful_wait_seconds
                 except Exception:

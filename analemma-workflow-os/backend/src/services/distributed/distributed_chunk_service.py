@@ -84,7 +84,7 @@ class DistributedChunkService:
                  idx_start = start_segment
                  # If start_segment is global index, and map is global map.
                  if idx_start < len(full_map):
-                     idx_end = chunk_data.get('end_segment', idx_start) # Inclusive
+                     idx_end = end_segment  # line 79에서 이미 계산된 값 사용 (기본값 오류 수정)
                      partition_slice = full_map[idx_start : idx_end + 1]
                      chunk_data['partition_slice'] = partition_slice
         

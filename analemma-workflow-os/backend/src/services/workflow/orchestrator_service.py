@@ -218,20 +218,26 @@ def validate_subgraph_dependencies(
         
         visited.add(subgraph_ref)
         path.append(subgraph_ref)
-        
+
         # Load subgraph manifest and validate recursively
-        if subgraph_loader:
-            try:
-                subgraph_manifest = subgraph_loader(subgraph_ref)
-                subgraph_nodes = subgraph_manifest.get("nodes", [])
-                for subgraph_node in subgraph_nodes:
-                    _detect_cycle(subgraph_node, depth + 1)
-            except Exception as e:
-                logger.error(f"Failed to load subgraph '{subgraph_ref}': {e}")
-                # Continue validation without loading
-        
-        path.pop()
-        visited.remove(subgraph_ref)
+        # try/finally: 예외로 종료되더라도 visited/path를 반드시 정리
+        try:
+            if subgraph_loader:
+                try:
+                    subgraph_manifest = subgraph_loader(subgraph_ref)
+                except Exception as load_err:
+                    logger.error(f"Failed to load subgraph '{subgraph_ref}': {load_err}")
+                    subgraph_manifest = None
+                    # Continue validation without loading
+
+                if subgraph_manifest is not None:
+                    subgraph_nodes = subgraph_manifest.get("nodes", [])
+                    for subgraph_node in subgraph_nodes:
+                        # CircularReferenceException / ValueError 는 여기서 삼키지 않고 상위로 전파
+                        _detect_cycle(subgraph_node, depth + 1)
+        finally:
+            path.pop()
+            visited.remove(subgraph_ref)
     
     # Validate all nodes in the workflow
     nodes = workflow_config.get("nodes", [])
