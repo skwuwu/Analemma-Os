@@ -20,7 +20,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import boto3
-from botocore.exceptions import ClientError, ConditionalCheckFailedException
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -1547,9 +1547,11 @@ class StateVersioningService:
             )
             return True
             
-        except ConditionalCheckFailedException:
-            logger.warning(f"[Manifest Invalidation] Manifest not found: {manifest_id}")
-            return False
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                logger.warning(f"[Manifest Invalidation] Manifest not found: {manifest_id}")
+                return False
+            raise
             
         except Exception as e:
             logger.error(f"[Manifest Invalidation] ❌ Failed: {e}")
