@@ -374,22 +374,27 @@ def lambda_handler(event, context):
     if not isinstance(raw_input, dict):
         raw_input = {}
         
-    owner_id = raw_input.get('ownerId', "")
-    workflow_id = raw_input.get('workflowId', "")
+    # [FIX] When raw_input resolves to event['initial_state'], top-level fields
+    # (workflowId, ownerId, test_workflow_config) are in event, not in raw_input.
+    # Always fall back to event for fields that callers place at the top level.
+    owner_id = raw_input.get('ownerId', "") or event.get('ownerId', "")
+    workflow_id = raw_input.get('workflowId', "") or event.get('workflowId', "")
     current_time = int(time.time())
-    
+
     # Generate execution_id for state tracking
     # Use idempotency_key if provided, otherwise generate unique ID
-    execution_id = raw_input.get('idempotency_key') or raw_input.get('execution_id')
+    execution_id = (raw_input.get('idempotency_key') or event.get('idempotency_key')
+                    or raw_input.get('execution_id') or event.get('execution_id'))
     if not execution_id:
         import uuid
         execution_id = f"init-{workflow_id}-{int(time.time())}-{str(uuid.uuid4())[:8]}"
-    
+
     # 2.1 Load Config & Partition Map
     # Priority: Input > DB (Precompiled) > Runtime Calc
-    
-    workflow_config = raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
-    partition_map = raw_input.get('partition_map')
+
+    workflow_config = (raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
+                       or event.get('test_workflow_config') or event.get('workflow_config'))
+    partition_map = raw_input.get('partition_map') or event.get('partition_map')
     
     # DB Loader Fallback
     if not workflow_config and workflow_id and owner_id:
@@ -607,8 +612,10 @@ def lambda_handler(event, context):
     # Metadata
     bag['ownerId'] = owner_id
     bag['workflowId'] = workflow_id
-    bag['idempotency_key'] = raw_input.get('idempotency_key', "")
-    bag['quota_reservation_id'] = raw_input.get('quota_reservation_id', "")
+    bag['idempotency_key'] = (raw_input.get('idempotency_key', "")
+                              or event.get('idempotency_key', ""))
+    bag['quota_reservation_id'] = (raw_input.get('quota_reservation_id', "")
+                                   or event.get('quota_reservation_id', ""))
     bag['segment_to_run'] = 0
     bag['total_segments'] = max(1, total_segments)
     bag['distributed_mode'] = is_distributed_mode
@@ -632,10 +639,12 @@ def lambda_handler(event, context):
     
     # [v3.23] 시뮬레이터 플래그를 bag 최상위로 복사
     # store_task_token.py가 bag.get('AUTO_RESUME_HITP') 조회
-    if raw_input.get('AUTO_RESUME_HITP'):
-        bag['AUTO_RESUME_HITP'] = raw_input['AUTO_RESUME_HITP']
-    if raw_input.get('MOCK_MODE'):
-        bag['MOCK_MODE'] = raw_input['MOCK_MODE']
+    auto_resume = raw_input.get('AUTO_RESUME_HITP') or event.get('AUTO_RESUME_HITP')
+    if auto_resume:
+        bag['AUTO_RESUME_HITP'] = auto_resume
+    mock_mode = raw_input.get('MOCK_MODE') or event.get('MOCK_MODE')
+    if mock_mode:
+        bag['MOCK_MODE'] = mock_mode
     
     # 5. [Phase 1/2] Segment Manifest Strategy
     # Merkle DAG 모드: segment_manifest는 이미 S3에 저장됨 (StateVersioningService)
