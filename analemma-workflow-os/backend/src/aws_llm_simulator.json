@@ -42,7 +42,7 @@
             "MaxConcurrency": 3,
             "Parameters": {
                 "scenario.$": "$$.Map.Item.Value",
-                "simulator_execution_id.$": "$.simulator_execution_id"
+                "simulator_execution_id.$": "$$.Execution.Name"
             },
             "ItemProcessor": {
                 "ProcessorConfig": {
