@@ -2749,22 +2749,6 @@ Resources:
         - CloudWatchPutMetricPolicy: {}
         - CloudWatchLogsFullAccess
 
-  ViewComprehensiveReportFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "ViewComprehensiveReport-${StageName}"
-      PackageType: Image
-      ImageUri: !Ref BackendLambdaImageUri
-      ImageConfig:
-        Command: ["src.handlers.simulator.view_comprehensive_report.lambda_handler"]
-      Timeout: 30
-      MemorySize: 256
-      Environment:
-        Variables:
-          STAGE_NAME: !Ref StageName
-      Policies:
-        - CloudWatchLogsFullAccess
-
   # LLM Simulator Step Functions State Machine
   LLMSimulatorStateMachine:
     Type: AWS::Serverless::StateMachine
@@ -2775,7 +2759,6 @@ Resources:
         PrepareLLMTestFunction: !GetAtt PrepareLLMTestFunction.Arn
         VerifyLLMTestFunction: !GetAtt VerifyLLMTestFunction.Arn
         AggregateLLMResultsFunction: !GetAtt AggregateLLMResultsFunction.Arn
-        ViewComprehensiveReportFunction: !GetAtt ViewComprehensiveReportFunction.Arn
       Policies:
         - LambdaInvokePolicy:
             FunctionName: !Ref PrepareLLMTestFunction
@@ -2783,8 +2766,6 @@ Resources:
             FunctionName: !Ref VerifyLLMTestFunction
         - LambdaInvokePolicy:
             FunctionName: !Ref AggregateLLMResultsFunction
-        - LambdaInvokePolicy:
-            FunctionName: !Ref ViewComprehensiveReportFunction
         - Statement:
           - Effect: Allow
             Action:
@@ -4661,122 +4642,6 @@ Resources:
                   "horizontal": [{"color": "#d62728", "value": 15000, "label": "⚠️ Warning (15s)"}]
                 },
                 "yAxis": {"left": {"label": "ms", "min": 0}}
-              }
-            },
-            {
-              "type": "metric",
-              "x": 0, "y": 18, "width": 6, "height": 6,
-              "properties": {
-                "title": "🎯 E2E Mission Success Rate",
-                "annotations": {
-                  "horizontal": [
-                    {"color": "#d62728", "value": 50, "label": "Critical"},
-                    {"color": "#ff7f0e", "value": 80, "label": "Warning"},
-                    {"color": "#2ca02c", "value": 100, "label": "Healthy"}
-                  ]
-                },
-                "metrics": [
-                  ["Analemma/MissionSimulator", "OverallSuccessRate", {"stat": "Average", "period": 3600}]
-                ],
-                "view": "gauge",
-                "yAxis": {"left": {"min": 0, "max": 100}},
-                "region": "${AWS::Region}"
-              }
-            },
-            {
-              "type": "metric",
-              "x": 6, "y": 18, "width": 9, "height": 6,
-              "properties": {
-                "title": "📊 E2E Scenario Results",
-                "metrics": [
-                  ["Analemma/MissionSimulator", "MissionResult", "Scenario", "HAPPY_PATH", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
-                  ["...", "HAPPY_PATH", "Result", "FAILURE", {"stat": "Sum", "period": 3600, "color": "#d62728"}],
-                  ["...", "PII_TEST", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
-                  ["...", "LARGE_PAYLOAD", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}],
-                  ["...", "COST_GUARDRAIL", "Result", "SUCCESS", {"stat": "Sum", "period": 3600, "color": "#2ca02c"}]
-                ],
-                "view": "timeSeries",
-                "stacked": true,
-                "region": "${AWS::Region}"
-              }
-            },
-            {
-              "type": "metric",
-              "x": 15, "y": 18, "width": 9, "height": 6,
-              "properties": {
-                "title": "⏱️ E2E Scenario Duration",
-                "metrics": [
-                  ["Analemma/MissionSimulator", "MissionDuration", "Scenario", "HAPPY_PATH", {"stat": "Average", "period": 3600, "label": "Happy Path"}],
-                  ["...", "PII_TEST", {"stat": "Average", "period": 3600, "label": "PII Test"}],
-                  ["...", "LARGE_PAYLOAD", {"stat": "Average", "period": 3600, "label": "Large Payload"}],
-                  ["...", "COST_GUARDRAIL", {"stat": "Average", "period": 3600, "label": "Cost Guardrail"}]
-                ],
-                "view": "timeSeries",
-                "region": "${AWS::Region}",
-                "yAxis": {"left": {"label": "Seconds", "min": 0}}
-              }
-            },
-            {
-              "type": "metric",
-              "x": 0, "y": 24, "width": 12, "height": 6,
-              "properties": {
-                "title": "📊 Full Scenario Success Matrix (All 17 Scenarios)",
-                "metrics": [
-                  ["Analemma/MissionSimulator", "MissionResult", "Scenario", "HAPPY_PATH", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "A: Happy Path", "color": "#2ca02c"}],
-                  ["...", "PII_TEST", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "B: PII", "color": "#2ca02c"}],
-                  ["...", "LARGE_PAYLOAD", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "C: Large", "color": "#2ca02c"}],
-                  ["...", "ERROR_HANDLING", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "D: Error", "color": "#2ca02c"}],
-                  ["...", "MAP_AGGREGATOR", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "E: Map", "color": "#2ca02c"}],
-                  ["...", "LOOP_LIMIT", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "F: Loop", "color": "#2ca02c"}],
-                  ["...", "API_CONNECTIVITY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "L: API", "color": "#1f77b4"}],
-                  ["...", "WEBSOCKET_CONNECT", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "M: WS", "color": "#1f77b4"}],
-                  ["...", "AUTH_FLOW", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "N: Auth", "color": "#ff7f0e"}],
-                  ["...", "REALTIME_NOTIFICATION", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "O: Notify", "color": "#ff7f0e"}],
-                  ["...", "IDEMPOTENCY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "P: Idemp", "color": "#9467bd"}],
-                  ["...", "CANCELLATION", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "Q: Cancel", "color": "#9467bd"}],
-                  ["...", "CORS_SECURITY", "Result", "SUCCESS", {"stat": "Sum", "period": 86400, "label": "R: CORS", "color": "#9467bd"}]
-                ],
-                "view": "bar",
-                "stacked": false,
-                "region": "${AWS::Region}"
-              }
-            },
-            {
-              "type": "metric",
-              "x": 12, "y": 24, "width": 6, "height": 6,
-              "properties": {
-                "title": "📡 Notification Latency (EventBridge → WS)",
-                "annotations": {
-                  "horizontal": [
-                    {"color": "#ff7f0e", "value": 1000, "label": "Warning (1s)"},
-                    {"color": "#d62728", "value": 3000, "label": "Critical (3s)"}
-                  ]
-                },
-                "metrics": [
-                  ["Analemma/MissionSimulator", "NotificationLatency", "Pipeline", "EventBridge-WebSocket", {"stat": "Average", "period": 300, "label": "Avg", "color": "#2ca02c"}],
-                  ["...", {"stat": "p90", "period": 300, "label": "P90", "color": "#ff7f0e"}],
-                  ["...", {"stat": "Maximum", "period": 300, "label": "Max", "color": "#d62728"}]
-                ],
-                "view": "timeSeries",
-                "region": "${AWS::Region}",
-                "yAxis": {"left": {"label": "ms", "min": 0}}
-              }
-            },
-            {
-              "type": "metric",
-              "x": 18, "y": 24, "width": 6, "height": 6,
-              "properties": {
-                "title": "💰 Bedrock Cost vs E2E Success",
-                "metrics": [
-                  ["Analemma/Engine", "TotalTokenUsage", {"stat": "Sum", "period": 3600, "label": "Tokens Used", "color": "#1f77b4", "yAxis": "left"}],
-                  ["Analemma/MissionSimulator", "MissionSuccessRate", {"stat": "Average", "period": 3600, "label": "Success Rate %", "color": "#2ca02c", "yAxis": "right"}]
-                ],
-                "view": "timeSeries",
-                "region": "${AWS::Region}",
-                "yAxis": {
-                  "left": {"label": "Tokens", "min": 0},
-                  "right": {"label": "%", "min": 0, "max": 100}
-                }
               }
             }
           ]
