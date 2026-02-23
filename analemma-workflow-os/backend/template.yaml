@@ -597,6 +597,17 @@ Resources:
         # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
         - SQSSendMessagePolicy:
             QueueName: !GetAtt GCDeadLetterQueue.QueueName
+        # 🏷️ [2PC Tagging] S3 object tagging for Merkle DAG pending/committed status
+        - Statement:
+          - Effect: Allow
+            Action:
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:DeleteObjectTagging
+            Resource: !If
+              - CreateWorkflowStateBucket
+              - !Sub "${WorkflowStateBucketResource.Arn}/*"
+              - !Sub "arn:aws:s3:::${WorkflowStateBucket}/*"
 
   # SegmentRunnerFunction - Heavy dependencies required (langgraph, etc.)
   # 🛡️ [1단계: Reserved Concurrency] 워크플로우 엔진 동시성 제한
@@ -705,6 +716,15 @@ Resources:
             Resource:
               - !GetAtt WorkflowManifestsV3.Arn
               - !GetAtt WorkflowBlockReferencesV3.Arn
+          - Effect: Allow
+            Action:
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:DeleteObjectTagging
+            Resource: !If
+              - CreateWorkflowStateBucket
+              - !Sub "${WorkflowStateBucketResource.Arn}/*"
+              - !Sub "arn:aws:s3:::${WorkflowStateBucket}/*"
         # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
         - SQSSendMessagePolicy:
             QueueName: !GetAtt GCDeadLetterQueue.QueueName
@@ -2466,6 +2486,15 @@ Resources:
             Resource:
               - !GetAtt WorkflowManifestsV3.Arn
               - !GetAtt WorkflowBlockReferencesV3.Arn
+          - Effect: Allow
+            Action:
+              - s3:PutObjectTagging
+              - s3:GetObjectTagging
+              - s3:DeleteObjectTagging
+            Resource: !If
+              - CreateWorkflowStateBucket
+              - !Sub "${WorkflowStateBucketResource.Arn}/*"
+              - !Sub "arn:aws:s3:::${WorkflowStateBucket}/*"
 
   # --- Scheduler Function (EventBridge Scheduled Trigger) ---
   SchedulerFunction:
