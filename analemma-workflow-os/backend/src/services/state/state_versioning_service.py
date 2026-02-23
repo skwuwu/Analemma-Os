@@ -246,8 +246,8 @@ class StateVersioningService:
             'total_segments': len(segment_manifest)
         }
         
-        # EventualConsistencyGuard로 2PC 실행
-        return self._consistency_guard.create_manifest_with_consistency(
+        # EventualConsistencyGuard로 2PC 실행 (반환값은 stored manifest_id str)
+        stored_manifest_id = self._consistency_guard.create_manifest_with_consistency(
             workflow_id=workflow_id,
             manifest_id=manifest_id,
             version=version,
@@ -255,6 +255,16 @@ class StateVersioningService:
             manifest_hash=manifest_hash,
             blocks=blocks,
             segment_hashes=segment_hashes,
+            metadata=metadata
+        )
+        # Wrap result in ManifestPointer so callers can access .manifest_id/.manifest_hash etc.
+        return ManifestPointer(
+            manifest_id=stored_manifest_id,
+            version=version,
+            parent_hash=parent_manifest_id,
+            manifest_hash=manifest_hash,
+            config_hash=config_hash,
+            blocks=[],  # blocks persisted to S3/DynamoDB; not needed in the pointer
             metadata=metadata
         )
     
@@ -560,15 +570,18 @@ class StateVersioningService:
                 raise ValueError(f"Manifest not found: {manifest_id}")
             
             item = response['Item']
-            
+
             # ContentBlock 재구성
+            # 2PC path stores manifest without 's3_pointers' (blocks in separate table).
+            # Legacy path may have 's3_pointers.state_blocks'. Use .get() to avoid KeyError.
             blocks = []
-            for s3_path in item['s3_pointers']['state_blocks']:
+            s3_pointers = item.get('s3_pointers') or {}
+            for s3_path in (s3_pointers.get('state_blocks') or []):
                 block_id = s3_path.split('/')[-1].replace('.json', '')
                 blocks.append(ContentBlock(
                     block_id=block_id,
                     s3_path=s3_path,
-                    size=0,  # 메타데이터에서 복원 가능
+                    size=0,
                     fields=[],
                     checksum=block_id
                 ))
