@@ -42,7 +42,7 @@ try:
     _HAS_PARTITION = True
 except ImportError:
     try:
-        from src.services.workflow.partition_service import partition_workflow_advanced
+        from services.workflow.partition_service import partition_workflow_advanced
         _HAS_PARTITION = True
     except ImportError:
         _HAS_PARTITION = False
@@ -68,9 +68,18 @@ from src.common.state_hydrator import StateHydrator, SmartStateBag
 try:
     from src.services.state.state_versioning_service import StateVersioningService
     _HAS_VERSIONING = True
-except ImportError:
+except ImportError as _versioning_import_err:
     _HAS_VERSIONING = False
     StateVersioningService = None
+    logger.error(
+        f"[initialize_state_data] StateVersioningService import FAILED: {_versioning_import_err}"
+    )
+
+# Startup diagnostics — all _HAS_* flags resolved, visible in CloudWatch cold-start logs
+logger.info(
+    f"[initialize_state_data] startup flags: "
+    f"_HAS_USC={_HAS_USC}, _HAS_PARTITION={_HAS_PARTITION}, _HAS_VERSIONING={_HAS_VERSIONING}"
+)
 
 # Environment variables for Merkle DAG
 MANIFESTS_TABLE = os.environ.get('MANIFESTS_TABLE', 'WorkflowManifests-v3-dev')
@@ -439,7 +448,7 @@ def lambda_handler(event, context):
     manifest_hash = None
     config_hash = None
     
-    if _HAS_VERSIONING and workflow_config and partition_map:
+    if _HAS_VERSIONING:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Merkle DAG 생성: 최초 1회 시도 + 실패 시 1회 재시도
         # 무결성 원칙: 재생성도 실패하면 워크플로우를 명시적으로 종료.
@@ -459,7 +468,7 @@ def lambda_handler(event, context):
 
                 # segment_manifest 생성 (먼저 계산)
                 segment_manifest = []
-                for idx, segment in enumerate(partition_map):
+                for idx, segment in enumerate(partition_map or []):
                     segment_manifest.append({
                         "segment_id": idx,
                         "segment_config": segment,
@@ -570,13 +579,12 @@ def lambda_handler(event, context):
     # [Phase 2] Merkle DAG Content-Addressable Storage
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     if not manifest_id:
-        # _HAS_VERSIONING=False 등 manifest가 생성되지 않은 경우.
-        # 재시도 로직은 _HAS_VERSIONING 블록 내에서 처리되며, 이 경로는
-        # StateVersioningService 자체가 비활성화된 환경에서만 도달함.
         raise RuntimeError(
-            "Merkle DAG manifest is required for workflow state integrity. "
-            "StateVersioningService is not available (_HAS_VERSIONING=False). "
-            "Check StateVersioningService import and dependencies."
+            f"Merkle DAG manifest is required for workflow state integrity. "
+            f"Diagnostics: _HAS_VERSIONING={_HAS_VERSIONING}, "
+            f"workflow_config={'present' if workflow_config else 'missing'}, "
+            f"partition_map={'present({} segs)'.format(len(partition_map)) if partition_map else 'empty/None'}. "
+            f"Check StateVersioningService import and dependencies."
         )
 
     # ✅ Merkle DAG Mode: Content-Addressable Storage
@@ -644,7 +652,7 @@ def lambda_handler(event, context):
     elif partition_map and hydrator.s3_client and bucket:
         # Legacy 모드: 기존 방식으로 segment_manifest 생성/저장
         segment_manifest = []
-        for idx, segment in enumerate(partition_map):
+        for idx, segment in enumerate(partition_map or []):
             segment_manifest.append({
                 "segment_id": idx,
                 "segment_config": segment,
@@ -687,7 +695,7 @@ def lambda_handler(event, context):
             # Legacy: 기존 방식
             segment_manifest = []
             if partition_map:
-                for idx, segment in enumerate(partition_map):
+                for idx, segment in enumerate(partition_map or []):
                     segment_manifest.append({
                         "segment_id": idx,
                         "segment_config": segment,
@@ -708,7 +716,7 @@ def lambda_handler(event, context):
         # Fallback to inline (only if S3 failed/missing)
         if partition_map:
             segment_manifest_pointers = []
-            for idx, segment in enumerate(partition_map):
+            for idx, segment in enumerate(partition_map or []):
                 segment_manifest_pointers.append({
                     "segment_id": idx,
                     "segment_config": segment,
