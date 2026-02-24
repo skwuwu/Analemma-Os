@@ -220,6 +220,10 @@ class EventualConsistencyGuard:
         # Phase 2.5: Manifest S3 마커 (pre-flight check 검증용)
         # Pre-flight check는 manifests/{manifest_id}.json 존재 여부를 확인하므로
         # DynamoDB 커밋 직후 S3에 마커 파일을 써서 강한 일관성 보장.
+        # 
+        # 🔧 [Hash Integrity] segment_hashes 포함 (Paranoid mode 검증용)
+        # initialize_state_data.py의 Paranoid mode가 segment_hashes를 사용하여
+        # manifest_hash의 무결성을 재검증할 수 있도록 함
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         try:
             manifest_marker = json.dumps({
@@ -228,6 +232,7 @@ class EventualConsistencyGuard:
                 'workflow_id': workflow_id,
                 'manifest_hash': manifest_hash,
                 'config_hash': config_hash,
+                'segment_hashes': segment_hashes,  # 🆕 Paranoid mode 검증용
                 'transaction_id': transaction_id,
                 'committed': True,
                 'committed_at': datetime.utcnow().isoformat()

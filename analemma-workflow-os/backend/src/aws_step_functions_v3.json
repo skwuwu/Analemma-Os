@@ -180,7 +180,7 @@
     },
     "HandleInitErrorResponse": {
       "Type": "Pass",
-      "Comment": "📋 Extract error details from Lambda response",
+      "Comment": "📋 Extract error details from Lambda response (Lambda now provides init_error directly)",
       "Parameters": {
         "error_type.$": "$.state_data.bag.error_type",
         "error_message.$": "$.state_data.bag.error_message",
@@ -188,7 +188,7 @@
         "workflowId.$": "$.state_data.bag.workflowId",
         "execution_id.$": "$.state_data.bag.execution_id"
       },
-      "ResultPath": "$.init_error_details",
+      "ResultPath": "$.init_error",
       "Next": "NotifyAndFailInit"
     },
     "NotifyAndFailInit": {

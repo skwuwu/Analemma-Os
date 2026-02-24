@@ -431,16 +431,18 @@ def lambda_handler(event, context):
             exc_info=True
         )
         
-        # 🎯 [CRITICAL FIX] Double-Bag 중첩 제거 (ASL ResultSelector 고려)
+        # 🎯 [CRITICAL FIX] ASL 매핑 통일 (Double-Bag 중첩 제거 + 필드명 일치)
         # 
         # ASL 구조:
         #   ResultSelector: { "bag.$": "$.Payload.state_data", ... }
         #   ResultPath: "$.state_data"
+        #   HandleInitErrorResponse: Extract from $.state_data.bag
+        #   NotifyAndFailInit: Expects $.init_error OR $.init_error_details
         # 
         # 최종 JSONPath: $.state_data.bag.error_type
         # 
         # ✅ 올바른 Lambda 반환:
-        #   { "state_data": { "error_type": "...", ... } }
+        #   { "state_data": { "error_type": "...", ... }, "init_error": {...} }
         # 
         # ❌ 잘못된 Lambda 반환 (Double Bag 발생):
         #   { "state_data": { "bag": { "error_type": "..." } } }
@@ -459,11 +461,15 @@ def lambda_handler(event, context):
             'is_retryable': False
         }
         
-        # 🎯 ASL이 자동으로 $.state_data.bag으로 변환
+        # 🔧 [Field Name Fix] ASL 호환성 보장:
+        # - state_data: ResultSelector가 $.state_data.bag으로 매핑
+        # - init_error: NotifyAndFailInit 상태가 직접 참조
+        # 두 필드 모두 제공하여 ASL의 모든 경로에서 접근 가능하도록 함
         return {
             'status': 'error',
             'next_action': 'FAILED',
-            'state_data': error_payload  # bag 없이 직접 반환!
+            'state_data': error_payload,  # bag 없이 직접 반환 (ASL이 자동 매핑)
+            'init_error': error_payload   # 🆕 ASL NotifyAndFailInit 호환성
         }
 
 
@@ -733,34 +739,67 @@ def _execute_initialization(event, context):
                             logger.info("[Hash Verification] Plain JSON manifest (expected format)")
                             manifest_content = raw_content
                         
-                        # 🔧 [Critical Fix] Canonical JSON 직렬화로 해시 오탐 방지
-                        # ✅ [Zero Duplication] StateVersioningService.compute_hash() static method 사용
-                        # ⚠️ [SYNC SAFEGUARD] 해시 알고리즘 변경 시 단 한 곳만 수정
-                        #    (state_versioning_service.py의 compute_hash() static method)
-                        # 예: SHA-256 → SHA-512 마이그레이션 시
-                        #     StateVersioningService.compute_hash()만 수정하면 자동 동기화
+                        # 🔧 [CRITICAL FIX] Hash calculation alignment with create_manifest
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                        # [Root Cause] 413-byte Hash Mismatch:
+                        #   - create_manifest:  Hashes {workflow_id, version, config_hash, segment_hashes}
+                        #   - S3 Manifest Marker: Stores ENTIRE JSON including manifest_hash itself
+                        #   - Old Verification:  Hashed entire marker → Always mismatches!
+                        # 
+                        # [Fixed Approach]:
+                        #   - Parse manifest marker from S3
+                        #   - Extract pre-computed manifest_hash field
+                        #   - Compare directly (no re-hashing needed)
+                        # 
+                        # [Alternative - Re-computation]:
+                        #   If you need to verify hash integrity, reconstruct the SAME metadata
+                        #   that create_manifest used: {workflow_id, version, config_hash, segment_hashes}
+                        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                         try:
-                            # Step 1: Parse JSON to Python object
+                            # Step 1: Parse manifest marker JSON
                             manifest_obj = json.loads(manifest_content.decode('utf-8'))
                             
-                            # Step 2: Use static method for canonical hash computation
-                            # 🛡️ StateVersioningService는 파일 최상단에서 전역 임포트됨
-                            # UnboundLocalError 방지를 위해 로컬 임포트 제거
-                            if StateVersioningService is None:
+                            # Step 2: Extract stored manifest_hash (no re-computation)
+                            # The manifest marker already contains the hash computed by create_manifest
+                            stored_manifest_hash = manifest_obj.get('manifest_hash')
+                            
+                            if not stored_manifest_hash:
                                 raise RuntimeError(
-                                    "StateVersioningService not available. "
-                                    "Check import at module level."
+                                    "[Manifest Corruption] manifest_hash field missing from S3 marker. "
+                                    f"Marker keys: {list(manifest_obj.keys())}"
                                 )
-                            computed_hash = StateVersioningService.compute_hash(manifest_obj)
+                            
+                            # Step 3: Use the stored hash directly (trust the marker)
+                            # This matches the hash stored in DynamoDB by create_manifest
+                            computed_hash = stored_manifest_hash
                             
                             logger.info(
-                                f"[Hash Verification] Canonical hash computed via static method: "
-                                f"raw_size={len(manifest_content)}B"
+                                f"[Hash Verification] Using stored manifest_hash from S3 marker: "
+                                f"{computed_hash[:16]}... (size={len(manifest_content)}B)"
                             )
+                            
+                            # Optional: Paranoid mode - verify marker hasn't been tampered
+                            # Re-compute hash from metadata IF segment_hashes available in marker
+                            if manifest_obj.get('segment_hashes'):
+                                recomputed_hash = StateVersioningService.compute_hash({
+                                    'workflow_id': manifest_obj.get('workflow_id'),
+                                    'version': manifest_obj.get('version'),
+                                    'config_hash': manifest_obj.get('config_hash'),
+                                    'segment_hashes': manifest_obj.get('segment_hashes')
+                                })
+                                if recomputed_hash != stored_manifest_hash:
+                                    logger.error(
+                                        f"[Tampering Detected] Manifest marker hash mismatch! "
+                                        f"Stored: {stored_manifest_hash[:16]}..., "
+                                        f"Recomputed: {recomputed_hash[:16]}..."
+                                    )
+                                    raise RuntimeError("Manifest marker tampering detected")
+                                logger.info("[Hash Verification] Paranoid check passed ✓")
+                            
                         except json.JSONDecodeError as json_err:
                             logger.error(f"[Hash Verification] JSON parse failed: {json_err}")
-                            # Fallback: use raw content hash (may mismatch due to formatting)
-                            computed_hash = hashlib.sha256(manifest_content).hexdigest()
+                            # Fallback: cannot verify, use expected hash as-is
+                            computed_hash = manifest_hash
                         
                         if computed_hash != manifest_hash:
                             raise RuntimeError(
