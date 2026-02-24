@@ -461,15 +461,23 @@ def lambda_handler(event, context):
             'is_retryable': False
         }
         
-        # 🔧 [Field Name Fix] ASL 호환성 보장:
-        # - state_data: ResultSelector가 $.state_data.bag으로 매핑
-        # - init_error: NotifyAndFailInit 상태가 직접 참조
-        # 두 필드 모두 제공하여 ASL의 모든 경로에서 접근 가능하도록 함
+        # 🎯 [Final Fix] ASL 모든 경로 대응 (Quadruple Mapping)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # ASL States that reference error data:
+        #   1. ResultSelector: $.Payload.state_data → $.state_data.bag
+        #   2. Catch block: $.error (standard AWS convention)
+        #   3. NotifyAndFailInit: $.init_error (v3.3+ custom field)
+        #   4. Legacy ASL: $.init_error_details (backward compatibility)
+        # 
+        # Solution: Provide ALL four fields to ensure complete ASL compatibility
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         return {
             'status': 'error',
             'next_action': 'FAILED',
-            'state_data': error_payload,  # bag 없이 직접 반환 (ASL이 자동 매핑)
-            'init_error': error_payload   # 🆕 ASL NotifyAndFailInit 호환성
+            'state_data': error_payload,         # ① $.state_data.bag path
+            'init_error': error_payload,         # ② $.init_error path (v3.3+)
+            'init_error_details': error_payload, # ③ $.init_error_details (legacy)
+            'error': str(business_error)         # ④ $.error path (standard Catch)
         }
 
 
@@ -491,11 +499,14 @@ def _execute_initialization(event, context):
     # ──────────────────────────────────────────────────────────────────────────────────
     
     # 1. State Hydrator Initialization
-    bucket = os.environ.get('WORKFLOW_STATE_BUCKET')
-    # Validate bucket early
+    # 🛡️ [P0 FIX] Environment variable consistency: Always use STATE_BUCKET
+    # Prevents "file created in bucketA but verified in bucketB" configuration drift
+    bucket = STATE_BUCKET  # Use pre-defined constant for consistency
     if not bucket:
-        raw_bucket = os.environ.get('S3_BUCKET') or os.environ.get('SKELETON_S3_BUCKET')
-        bucket = raw_bucket.strip() if raw_bucket else None
+        logger.warning(
+            "[Configuration Error] STATE_BUCKET is not set. "
+            "This will cause S3 operation failures. Check template.yaml environment variables."
+        )
     
     hydrator = StateHydrator(bucket_name=bucket)
     
@@ -739,28 +750,22 @@ def _execute_initialization(event, context):
                             logger.info("[Hash Verification] Plain JSON manifest (expected format)")
                             manifest_content = raw_content
                         
-                        # 🔧 [CRITICAL FIX] Hash calculation alignment with create_manifest
+                        # 🔧 [CRITICAL FIX] Hash Recursion Prevention
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        # [Root Cause] 413-byte Hash Mismatch:
-                        #   - create_manifest:  Hashes {workflow_id, version, config_hash, segment_hashes}
-                        #   - S3 Manifest Marker: Stores ENTIRE JSON including manifest_hash itself
-                        #   - Old Verification:  Hashed entire marker → Always mismatches!
+                        # [Root Cause] "Kernel Panic" from Hash Mismatch:
+                        #   - create_manifest hashes ONLY {workflow_id, version, config_hash, segment_hashes}
+                        #   - S3 marker includes manifest_hash, manifest_id, created_at, etc.
+                        #   - Hashing the entire marker → ALWAYS fails!
                         # 
-                        # [Fixed Approach]:
-                        #   - Parse manifest marker from S3
-                        #   - Extract pre-computed manifest_hash field
-                        #   - Compare directly (no re-hashing needed)
-                        # 
-                        # [Alternative - Re-computation]:
-                        #   If you need to verify hash integrity, reconstruct the SAME metadata
-                        #   that create_manifest used: {workflow_id, version, config_hash, segment_hashes}
+                        # [Fix Strategy]:
+                        #   1. Extract INVARIANT fields only (same as create_manifest)
+                        #   2. Normalize types (version must be int, not string)
+                        #   3. Re-compute hash from these exact fields
+                        #   4. Compare with stored manifest_hash
                         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                         try:
                             # Step 1: Parse manifest marker JSON
                             manifest_obj = json.loads(manifest_content.decode('utf-8'))
-                            
-                            # Step 2: Extract stored manifest_hash (no re-computation)
-                            # The manifest marker already contains the hash computed by create_manifest
                             stored_manifest_hash = manifest_obj.get('manifest_hash')
                             
                             if not stored_manifest_hash:
@@ -769,32 +774,38 @@ def _execute_initialization(event, context):
                                     f"Marker keys: {list(manifest_obj.keys())}"
                                 )
                             
-                            # Step 3: Use the stored hash directly (trust the marker)
-                            # This matches the hash stored in DynamoDB by create_manifest
-                            computed_hash = stored_manifest_hash
+                            # Step 2: Extract INVARIANT data (matching create_manifest exactly)
+                            # 🛡️ [Critical] Type normalization to prevent hash mismatch:
+                            #    - version: JSON deserializes as string, must convert to int
+                            #    - segment_hashes: Must be dict (not list)
+                            # 🛡️ [P1 FIX] None-safe type casting: int(manifest_obj.get('version') or 0)
+                            #    Prevents TypeError if version is None or ValueError if empty string
+                            verification_target = {
+                                'workflow_id': manifest_obj.get('workflow_id'),
+                                'version': int(manifest_obj.get('version') or 0),  # 🔧 None-safe normalization
+                                'config_hash': manifest_obj.get('config_hash'),
+                                'segment_hashes': manifest_obj.get('segment_hashes', {})  # 🔧 Default to dict
+                            }
+                            
+                            computed_hash = StateVersioningService.compute_hash(verification_target)
                             
                             logger.info(
-                                f"[Hash Verification] Using stored manifest_hash from S3 marker: "
-                                f"{computed_hash[:16]}... (size={len(manifest_content)}B)"
+                                f"[Hash Verification] Recomputed from invariant fields: "
+                                f"{computed_hash[:16]}... (version={verification_target['version']}, "
+                                f"segment_count={len(verification_target.get('segment_hashes', {}))})"
                             )
                             
-                            # Optional: Paranoid mode - verify marker hasn't been tampered
-                            # Re-compute hash from metadata IF segment_hashes available in marker
-                            if manifest_obj.get('segment_hashes'):
-                                recomputed_hash = StateVersioningService.compute_hash({
-                                    'workflow_id': manifest_obj.get('workflow_id'),
-                                    'version': manifest_obj.get('version'),
-                                    'config_hash': manifest_obj.get('config_hash'),
-                                    'segment_hashes': manifest_obj.get('segment_hashes')
-                                })
-                                if recomputed_hash != stored_manifest_hash:
-                                    logger.error(
-                                        f"[Tampering Detected] Manifest marker hash mismatch! "
-                                        f"Stored: {stored_manifest_hash[:16]}..., "
-                                        f"Recomputed: {recomputed_hash[:16]}..."
-                                    )
-                                    raise RuntimeError("Manifest marker tampering detected")
-                                logger.info("[Hash Verification] Paranoid check passed ✓")
+                            # Step 4: Paranoid mode - compare with stored hash
+                            if computed_hash != stored_manifest_hash:
+                                logger.error(
+                                    f"[Tampering Detected] Manifest hash mismatch!\n"
+                                    f"Stored:     {stored_manifest_hash[:16]}...\n"
+                                    f"Recomputed: {computed_hash[:16]}...\n"
+                                    f"Verification target: {verification_target.keys()}"
+                                )
+                                raise RuntimeError("Manifest marker tampering detected")
+                            
+                            logger.info("[Hash Verification] ✅ Paranoid check passed (hash matches)")
                             
                         except json.JSONDecodeError as json_err:
                             logger.error(f"[Hash Verification] JSON parse failed: {json_err}")
