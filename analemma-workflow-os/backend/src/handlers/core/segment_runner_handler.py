@@ -64,9 +64,10 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 action='error',
                 context={'error_type': 'NullEventError'}
             )
-        # Fallback: wrap in state_data for ASL compatibility
+        # Fallback: wrap in state_data.bag for ASL compatibility
+        # 🔧 [Fix] Match initialize_state_data error response structure
         return {
-            "state_data": error_result,
+            "state_data": {"bag": error_result},
             "next_action": "FAILED"
         }
     
@@ -209,9 +210,11 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 context={'error_type': type(e).__name__}
             )
         
-        # Fallback: wrap in state_data for ASL compatibility
+        # Fallback: wrap in state_data.bag for ASL compatibility
+        # 🔧 [Fix] Match initialize_state_data error response structure
+        # ASL JSONPath: $.state_data.bag.error_type
         return {
-            "state_data": error_result,
+            "state_data": {"bag": error_result},  # Wrap in bag for ASL
             "next_action": "FAILED"
         }
 

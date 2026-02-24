@@ -737,7 +737,17 @@ def aggregate_branches(event: Dict[str, Any]) -> Dict[str, Any]:
     # 에러 처리 (래퍼에서 빠른 반환)
     if map_error:
         logger.error(f"Map state error: {map_error}")
-        return {'state_data': state_data, 'next_action': 'FAILED'}
+        # 🔧 [Fix] Match ASL JSONPath structure: $.state_data.bag.error_type
+        error_bag = {
+            'status': 'FAILED',
+            'error_type': 'MapStateError',
+            'error_message': str(map_error),
+            'is_retryable': False
+        }
+        return {
+            'state_data': {'bag': error_bag},
+            'next_action': 'FAILED'
+        }
     
     # P0: 포인터 기반 vs 전체 결과 입력 정규화
     if load_from_s3_flag:

@@ -400,21 +400,22 @@ def lambda_handler(event, context):
         )
         
         # [Option B] Return error as JSON with explicit status field
-        # SFN will see Lambda success (200 OK) but Choice State will detect error
-        # Error details embedded in state_data.bag for ASL access
+        # 🔧 [Fix] Match success case structure: seal_state_bag returns state_data.bag
+        # ASL JSONPath: $.state_data.bag.error_type
+        # Provide both state_data.bag (primary) and bag (fallback) for robustness
+        error_bag = {
+            'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
+            'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
+            'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
+            'error_type': type(business_error).__name__,
+            'error_message': str(business_error),
+            'is_retryable': False
+        }
         return {
             'status': 'error',
             'next_action': 'FAILED',
-            'state_data': {
-                'bag': {
-                    'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
-                    'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
-                    'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
-                    'error_type': type(business_error).__name__,
-                    'error_message': str(business_error),
-                    'is_retryable': False
-                }
-            }
+            'state_data': {'bag': error_bag},  # Primary path for ASL
+            'bag': error_bag  # Fallback for legacy/direct access
         }
 
 
@@ -657,12 +658,27 @@ def _execute_initialization(event, context):
                     try:
                         import boto3
                         import hashlib
+                        import gzip
                         
                         s3_client = boto3.client('s3')
                         response = s3_client.get_object(Bucket=STATE_BUCKET, Key=manifest_s3_key)
-                        manifest_content = response['Body'].read()
+                        raw_content = response['Body'].read()
                         
-                        # SHA-256 해시 계산
+                        # 🔧 [Critical Fix] Gzip 압축 처리
+                        # 🚨 Note: EventualConsistencyGuard가 manifest를 S3에 저장할 때
+                        #    ContentEncoding 없이 평문 JSON으로 저장 (line 246)
+                        #    하지만 미래 변경 가능성을 대비하여 gzip 체크 유지
+                        # Magic number (0x1f 0x8b)로 Gzip 여부 확인
+                        is_gzipped = raw_content.startswith(b'\x1f\x8b')
+                        if is_gzipped:
+                            logger.info("[Hash Verification] Gzip-compressed manifest detected, decompressing...")
+                            manifest_content = gzip.decompress(raw_content)
+                        else:
+                            logger.info("[Hash Verification] Plain JSON manifest (expected format)")
+                            manifest_content = raw_content
+                        
+                        # SHA-256 해시 계산 (압축 해제된 원본 데이터)
+                        # StateVersioningService._compute_hash()는 압축 전 데이터로 해시 계산 (line 724-727)
                         computed_hash = hashlib.sha256(manifest_content).hexdigest()
                         
                         if computed_hash != manifest_hash:
@@ -670,12 +686,14 @@ def _execute_initialization(event, context):
                                 f"[Integrity Violation] Manifest hash mismatch! "
                                 f"Expected: {manifest_hash[:16]}..., "
                                 f"Computed: {computed_hash[:16]}... "
+                                f"Gzip: {is_gzipped}, "
+                                f"Size: raw={len(raw_content)}B, content={len(manifest_content)}B. "
                                 f"This indicates data corruption or tampering."
                             )
                         
                         logger.info(
                             f"[Hash Verification] ✅ Manifest integrity confirmed: "
-                            f"{computed_hash[:16]}..."
+                            f"{computed_hash[:16]}... (Gzipped: {is_gzipped}, Size: {len(manifest_content)}B)"
                         )
                     except s3_client.exceptions.NoSuchKey:
                         raise RuntimeError(
