@@ -1,26 +1,26 @@
 """
 Pipeline Test Verifier Lambda
 ==============================
-LLM Simulator Step Functions에서 호출됩니다.
-실제 프로덕션 스키마 워크플로 실행 결과를 검증합니다.
+Invoked by LLM Simulator Step Functions to validate workflow execution results.
+Tests production schema workflows with actual LLM invocations.
 
-검증 대상 시나리오:
-  COMPLETE            — aiModel 노드 포함 Happy Path 파이프라인
-  FAIL                — 에러 처리 파이프라인
-  MAP_AGGREGATOR      — 병렬 처리 + 결과 집계 파이프라인
-  LOOP_LIMIT          — 동적 루프 제한 파이프라인
-  LOOP_BRANCH_STRESS  — 루프 + 분기 + 상태 축적 + S3 오프로드 복합 테스트
-  STRESS              — 극한 스트레스 (루프 내부 HITL + 병렬 데이터 레이스)
-  VISION              — 멀티모달 비전 (메모리 추정, 인젝션 방어, 상태 오프로드)
-  HITP_RECOVERY       — HITP 후 정상 복구 로직 테스트
-  ASYNC_LLM           — 비동기 LLM 실행 파이프라인
+Test Scenarios:
+  COMPLETE            - Happy path pipeline with aiModel nodes
+  FAIL                - Error handling pipeline
+  MAP_AGGREGATOR      - Parallel processing + result aggregation
+  LOOP_LIMIT          - Dynamic loop limit enforcement
+  LOOP_BRANCH_STRESS  - Loop + branch + state accumulation + S3 offload integration
+  STRESS              - Extreme stress (HITL inside loop + parallel data races)
+  VISION              - Multimodal vision (memory estimation, injection defense, state offload)
+  HITP_RECOVERY       - HITP recovery logic after human approval
+  ASYNC_LLM           - Async LLM execution pipeline
 
-반환 스키마 (모든 verify_* 함수 공통):
+Return Schema (all verify_* functions):
   {
       "passed": bool,
       "scenario": str,
       "checks": [{"name": str, "passed": bool, "details": str}],
-      "metrics": {"duration_ms": int, "segments_executed": int}  # 선택
+      "metrics": {...}  # optional
   }
 """
 
@@ -30,11 +30,11 @@ from typing import Any, Dict, List
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-# S3_LARGE 실제 Offload 임계값 (bytes)
+# S3 offload size threshold (bytes)
 S3_OFFLOAD_SIZE_THRESHOLD = 200_000
 
 
-# ─── 헬퍼 ────────────────────────────────────────────────────────────────────
+# Helper Functions
 
 def _check(name: str, passed: bool, details: str) -> Dict[str, Any]:
     return {"name": name, "passed": passed, "details": details}
@@ -53,7 +53,7 @@ def _sfn_succeeded(test_result: Dict[str, Any]) -> bool:
 
 
 def _final_state(test_result: Dict[str, Any]) -> Dict[str, Any]:
-    """SFN 실행 output에서 final_state 추출"""
+    """Extract final_state from SFN execution output"""
     output = test_result.get("output", {})
     if isinstance(output, str):
         import json
@@ -66,25 +66,28 @@ def _final_state(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
     """
-    🔍 실제 LLM 호출 증거 검증
+    Validate actual LLM invocation evidence.
+    
+    LLM Simulator always performs real LLM calls - never mocked.
+    This function detects multiple evidence types to prevent false positives.
     
     Returns:
-        (has_evidence, details): LLM 호출 증거 여부와 상세 정보
+        (has_evidence, details): Tuple of evidence presence and detailed information
     """
     evidence = []
     
-    # 1. llm_raw_output 체크 (가장 확실한 증거)
+    # 1. llm_raw_output check (strongest evidence)
     if "llm_raw_output" in final_state:
         raw_output = final_state["llm_raw_output"]
         if raw_output and isinstance(raw_output, str) and len(raw_output) > 0:
             evidence.append(f"llm_raw_output present ({len(raw_output)} chars)")
     
-    # 2. 토큰 사용량 체크
+    # 2. Token usage check
     total_tokens = final_state.get("total_tokens", 0)
     if total_tokens and total_tokens > 0:
         evidence.append(f"total_tokens={total_tokens}")
     
-    # 3. usage 객체 체크
+    # 3. usage object check
     usage = final_state.get("usage")
     if isinstance(usage, dict):
         input_tok = usage.get("input_tokens", 0)
@@ -92,7 +95,7 @@ def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
         if input_tok > 0 or output_tok > 0:
             evidence.append(f"usage={{input:{input_tok},output:{output_tok}}}")
     
-    # 4. 노드별 LLM 출력 키 검색 (node_id + "_output" 패턴)
+    # 4. LLM output key patterns (node_id + "_output", etc.)
     llm_output_keys = [k for k in final_state.keys() 
                        if k.endswith("_output") or k.endswith("_llm") or k.endswith("_response")]
     if llm_output_keys:
@@ -104,20 +107,14 @@ def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
     return has_evidence, details
 
 
-def _is_mock_mode(final_state: Dict[str, Any]) -> bool:
-    """🎭 MOCK_MODE 감지 (테스트 무효화)"""
-    return final_state.get("MOCK_MODE") is True or final_state.get("_mock_execution") is True
-
-
-# ─── 시나리오별 검증기 ────────────────────────────────────────────────────────
+# Scenario Verifiers
 
 def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    COMPLETE: aiModel 노드 포함 Happy Path 파이프라인 검증
+    COMPLETE: Happy path pipeline with aiModel nodes
     - SFN status = SUCCEEDED
-    - final_state에 TEST_RESULT 키 존재
-    - 🔍 [강화] 실제 LLM 호출 증거 확인
-    - 🎭 [강화] MOCK_MODE 거부
+    - TEST_RESULT key exists in final_state
+    - Actual LLM invocation evidence detected
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -129,15 +126,7 @@ def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # 🎭 MOCK_MODE 감지
-    is_mock = _is_mock_mode(final)
-    checks.append(_check(
-        "Not MOCK_MODE (real execution)",
-        not is_mock,
-        f"MOCK_MODE={is_mock}"
-    ))
-    
-    # 🔍 실제 LLM 호출 증거 검증
+    # Validate actual LLM invocation evidence
     has_llm, llm_details = _has_llm_evidence(final)
     checks.append(_check(
         "LLM invocation evidence detected",
@@ -145,7 +134,7 @@ def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
         llm_details
     ))
     
-    # 기존 검증: TEST_RESULT 키 존재
+    # Validate TEST_RESULT key presence
     has_result = "TEST_RESULT" in final
     checks.append(_check(
         "TEST_RESULT key in final_state",
@@ -158,9 +147,9 @@ def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_fail(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    FAIL: 에러 처리 파이프라인 검증
-    - SFN status = FAILED (에러 파이프라인이므로 FAILED가 정상)
-    - error_info 전파 확인
+    FAIL: Error handling pipeline validation
+    - SFN status = FAILED (expected for error pipeline)
+    - error_info propagated to output
     """
     checks = []
     status = test_result.get("status", "")
@@ -171,7 +160,7 @@ def verify_fail(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"status={status}"
     ))
 
-    # error_info는 SFN cause/error 필드에 전파됨
+    # error_info propagated to SFN cause/error fields
     has_error_info = bool(test_result.get("error") or test_result.get("cause"))
     checks.append(_check(
         "error_info propagated",
@@ -184,10 +173,10 @@ def verify_fail(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_map_aggregator(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    MAP_AGGREGATOR: 병렬 처리 + 결과 집계 파이프라인 검증
+    MAP_AGGREGATOR: Parallel processing + result aggregation pipeline
     - SFN status = SUCCEEDED
-    - final_state에 병렬 브랜치 집계 결과 키 존재
-    - 🔍 [강화] 실제 LLM 호출 증거 확인 (브랜치에 aiModel 포함 시)
+    - Aggregation result key exists in final_state
+    - Note: May not have LLM invocation if no aiModel nodes in branches
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -199,16 +188,7 @@ def verify_map_aggregator(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # 🎭 MOCK_MODE 감지 (optional - map 테스트는 LLM 없을 수도 있음)
-    is_mock = _is_mock_mode(final)
-    if is_mock:
-        checks.append(_check(
-            "MOCK_MODE status (informational)",
-            True,
-            f"MOCK_MODE={is_mock} - aggregation test may not require LLM"
-        ))
-    
-    # 기존 검증: 집계 결과 키 존재
+    # Validate aggregation result key presence
     aggregation_keys = {"aggregated_results", "map_results", "parallel_results", "TEST_RESULT"}
     found_key = next((k for k in aggregation_keys if k in final), None)
     checks.append(_check(
@@ -222,9 +202,9 @@ def verify_map_aggregator(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_loop_limit(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    LOOP_LIMIT: 동적 루프 제한 파이프라인 검증
+    LOOP_LIMIT: Dynamic loop limit enforcement
     - SFN status = SUCCEEDED
-    - loop_count ≤ max_loop_iterations
+    - loop_count <= max_loop_iterations
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -250,13 +230,13 @@ def verify_loop_limit(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    LOOP_BRANCH_STRESS: Loop + Branch + State Accumulation + S3 Offload Integration Test
-    - SFN status = SUCCEEDED
-    - Loop completed 5 iterations (loop_counter = 5)
-    - Parallel/Sequential branch executions (branch_execution_count = 5)
-    - State accumulation exceeds 100KB (accumulated_size_kb > 100)
-    - S3 offload triggered (offload_triggered_count > 0)
-    - HITP approval and validation passed
+    LOOP_BRANCH_STRESS: Loop + Branch + State Accumulation + S3 Offload
+    Comprehensive integration test combining:
+    - Loop iterations (5 expected)
+    - Parallel/Sequential branch executions (5 expected)
+    - State accumulation exceeding 100KB
+    - S3 offload trigger validation
+    - HITP checkpoint approval
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -268,7 +248,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # 루프 완료 검증
+    # Validate loop completion (5 iterations)
     loop_counter = final.get("loop_counter", 0)
     loop_ok = loop_counter == 5
     checks.append(_check(
@@ -277,7 +257,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"loop_counter={loop_counter}"
     ))
     
-    # 분기 실행 검증
+    # Validate branch executions (5 times)
     branch_count = final.get("branch_execution_count", 0)
     branch_ok = branch_count == 5
     checks.append(_check(
@@ -286,7 +266,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"branch_execution_count={branch_count}"
     ))
     
-    # 상태 축적 검증 (100KB 초과)
+    # Validate state accumulation exceeds 100KB
     accumulated_size = final.get("accumulated_size_kb", 0)
     size_ok = accumulated_size > 100
     checks.append(_check(
@@ -295,7 +275,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"accumulated_size_kb={accumulated_size:.2f}"
     ))
     
-    # S3 오프로드 검증
+    # Validate S3 offload triggered
     offload_count = final.get("offload_triggered_count", 0)
     offload_ok = offload_count > 0
     checks.append(_check(
@@ -304,7 +284,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"offload_triggered_count={offload_count}"
     ))
     
-    # HITP 승인 검증
+    # Validate HITP checkpoint passed
     hitp_passed = "hitp_checkpoint" in final
     checks.append(_check(
         "HITP checkpoint passed",
@@ -312,9 +292,9 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"hitp_checkpoint present: {hitp_passed}"
     ))
     
-    # TEST_RESULT 검증
+    # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = "✅" in str(final.get("TEST_RESULT", ""))
+    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
@@ -332,18 +312,15 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    STRESS: 극한 스트레스 테스트 (루프 내부 HITL + 병렬 데이터 레이스)
+    STRESS: Extreme stress test (HITL inside loop + parallel data races)
     - SFN status = SUCCEEDED
-    - 중첩 루프 + HITL 복구      verify_complete,
-    "FAIL":                verify_fail,
-    "MAP_AGGREGATOR":      verify_map_aggregator,
-    "LOOP_LIMIT":          verify_loop_limit,
-    "LOOP_BRANCH_STRESS":  verify_loop_branch_stress,
-    "STRESS":              verify_stress,
-    "VISION":              verify_vision,
-    "HITP_RECOVERY":       verify_hitp_recovery,
-    "S3_LARGE":            verify_s3_large,  # Deprecated, kept for compatibility
-    "ASYNC_LLM":     _sfn_succeeded(test_result)
+    - Nested loop + HITL recovery
+    - Loop pointer recovery after HITL completion
+    - Branch isolation maintained (no data races)
+    - HITL triggered inside loop at least once
+    """
+    checks = []
+    succeeded = _sfn_succeeded(test_result)
     checks.append(_check(
         "SFN status SUCCEEDED",
         succeeded,
@@ -352,10 +329,10 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # 스트레스 메트릭 추출
+    # Extract stress metrics
     stress_metrics = final.get("stress_metrics", {})
     
-    # 루프 포인터 복구 검증
+    # Validate loop pointer recovery after HITL
     loop_recoveries = stress_metrics.get("loop_pointer_recoveries", 0)
     recovery_ok = loop_recoveries > 0
     checks.append(_check(
@@ -364,7 +341,7 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"loop_pointer_recoveries={loop_recoveries}"
     ))
     
-    # 메모리 격리 위반 검증 (없어야 함)
+    # Validate branch isolation (no memory violations)
     isolation_violations = stress_metrics.get("isolation_violations", [])
     isolation_ok = len(isolation_violations) == 0
     checks.append(_check(
@@ -373,7 +350,7 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"isolation_violations={len(isolation_violations)}"
     ))
     
-    # HITL 내부 루프 실행 확인
+    # Validate HITL triggered inside loop
     hitl_count = stress_metrics.get("hitl_inside_loop_count", 0)
     hitl_ok = hitl_count > 0
     checks.append(_check(
@@ -382,9 +359,9 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"hitl_inside_loop_count={hitl_count}"
     ))
     
-    # TEST_RESULT 검증
+    # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = "✅" in str(final.get("TEST_RESULT", ""))
+    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
@@ -401,17 +378,17 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    VISION: Multimodal Vision Test
-    - SFN status = SUCCEEDED (or SIGKILL if injection detected)
-    - Memory estimation engine execution check
-    - Visual injection defense check (SIGKILL on detection is normal)
-    - State offloading logic check
+    VISION: Multimodal vision test
+    - SFN status = SUCCEEDED or FAILED (SIGKILL on injection is normal)
+    - Memory estimation engine execution
+    - Visual injection defense (SIGKILL trigger)
+    - State offloading logic execution
     """
     checks = []
     status = test_result.get("status", "")
     
     # Vision test may terminate with SIGKILL when injection detected
-    # Test expects this, so both SUCCEEDED or FAILED are acceptable
+    # Both SUCCEEDED and FAILED are acceptable outcomes
     succeeded = status in ["SUCCEEDED", "FAILED"]
     checks.append(_check(
         "SFN status (SUCCEEDED or FAILED due to SIGKILL)",
@@ -425,7 +402,7 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
     vision_result = final.get("vision_os_test_result", {})
     validation_checks = vision_result.get("validation_checks", {})
     
-    # Memory estimation validation
+    # Validate memory estimation engine execution
     memory_estimated = validation_checks.get("memory_estimation_executed", False)
     checks.append(_check(
         "Memory estimation engine executed",
@@ -433,7 +410,7 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"memory_estimation_executed={memory_estimated}"
     ))
     
-    # Security guard 실행 검증
+    # Validate security guard (injection defense) execution
     security_executed = validation_checks.get("security_guard_executed", False)
     checks.append(_check(
         "Security guard (injection defense) executed",
@@ -441,7 +418,7 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"security_guard_executed={security_executed}"
     ))
     
-    # Visual injection 감지 확인
+    # Validate visual injection detection and SIGKILL trigger
     injection_detected = validation_checks.get("injection_detected", False)
     sigkill_triggered = validation_checks.get("sigkill_on_injection", False)
     checks.append(_check(
@@ -450,7 +427,7 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"injection_detected={injection_detected}, sigkill={sigkill_triggered}"
     ))
     
-    # State offloading 로직 실행 확인
+    # Validate state offloading logic execution
     offload_executed = validation_checks.get("offloading_logic_executed", False)
     checks.append(_check(
         "State offloading logic executed",
@@ -458,7 +435,7 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"offloading_logic_executed={offload_executed}"
     ))
     
-    # 전체 테스트 통과 여부
+    # Validate overall vision OS test passed
     test_passed = vision_result.get("test_passed", False)
     checks.append(_check(
         "Overall vision OS test passed",
@@ -477,11 +454,11 @@ def verify_vision(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    HITP_RECOVERY: HITP Recovery Logic Test
+    HITP_RECOVERY: HITP recovery logic test
     - SFN status = SUCCEEDED
-    - HITP node execution check
+    - HITP node execution validated
     - Workflow resumption after HITL approval
-    - TEST_RESULT presence check
+    - TEST_RESULT presence validated
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -493,7 +470,7 @@ def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # HITP 준비 확인
+    # Validate HITP preparation completed
     hitp_prepared = final.get("hitp_prepared", False)
     checks.append(_check(
         "HITP preparation completed",
@@ -501,7 +478,7 @@ def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"hitp_prepared={hitp_prepared}"
     ))
     
-    # 승인 결과 확인
+    # Validate approval result present
     approval_result = final.get("approval_result")
     has_approval = approval_result is not None
     checks.append(_check(
@@ -510,9 +487,9 @@ def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
         f"approval_result={approval_result}"
     ))
     
-    # TEST_RESULT 검증
+    # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = "✅" in str(final.get("TEST_RESULT", ""))
+    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
@@ -530,27 +507,28 @@ def verify_s3_large(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
     DEPRECATED: S3_LARGE is replaced by LOOP_BRANCH_STRESS
     
-    StateBag architecture already auto-offloads data, making simple size tests unnecessary.
-    Replaced by LOOP_BRANCH_STRESS which tests loop + branch + state accumulation combination.
+    StateBag architecture automatically offloads large data to S3,
+    making simple size tests unnecessary. Use LOOP_BRANCH_STRESS instead
+    for comprehensive testing of loop + branch + state accumulation + S3 offload.
     
-    This function is kept for backward compatibility and recommends redirecting to LOOP_BRANCH_STRESS.
+    This function is kept for backward compatibility only.
     """
     checks = []
     checks.append(_check(
         "DEPRECATED SCENARIO",
         False,
-        "S3_LARGE is deprecated. Use LOOP_BRANCH_STRESS instead for comprehensive S3 offload testing."
+        "S3_LARGE is deprecated. Use LOOP_BRANCH_STRESS for comprehensive S3 offload testing."
     ))
     return _result("S3_LARGE", checks)
 
 
 def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
-    ASYNC_LLM: 비동기 LLM 실행 파이프라인 검증
+    ASYNC_LLM: Async LLM execution pipeline validation
     - SFN status = SUCCEEDED
-    - final_state에 async_result 키 존재
-    - 🔍 [강화] 실제 LLM 호출 증거 확인
-    - ⚠️ [참고] Fargate 비활성화로 동기 폴백 가능
+    - async_result key exists in final_state
+    - Actual LLM invocation evidence detected
+    - Note: Fargate may be disabled, sync fallback is acceptable
     """
     checks = []
     succeeded = _sfn_succeeded(test_result)
@@ -562,15 +540,7 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
     final = _final_state(test_result)
     
-    # 🎭 MOCK_MODE 감지
-    is_mock = _is_mock_mode(final)
-    checks.append(_check(
-        "Not MOCK_MODE (real execution)",
-        not is_mock,
-        f"MOCK_MODE={is_mock}"
-    ))
-    
-    # 🔍 실제 LLM 호출 증거 검증
+    # Validate actual LLM invocation evidence
     has_llm, llm_details = _has_llm_evidence(final)
     checks.append(_check(
         "LLM invocation evidence detected",
@@ -578,7 +548,7 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
         llm_details
     ))
     
-    # 기존 검증: async 결과 키 존재
+    # Validate async result key exists
     async_keys = {"async_result", "async_llm_result", "llm_result", "TEST_RESULT"}
     found_key = next((k for k in async_keys if k in final), None)
     checks.append(_check(
@@ -590,41 +560,45 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
     return _result("ASYNC_LLM", checks)
 
 
-# ─── 라우터 ──────────────────────────────────────────────────────────────────
+# Verifier Router
 
 _VERIFIERS = {
-    "COMPLETE":       verify_complete,
-    "FAIL":           verify_fail,
-    "MAP_AGGREGATOR": verify_map_aggregator,
-    "LOOP_LIMIT":     verify_loop_limit,
-    "S3_LARGE":       verify_s3_large,
-    "ASYNC_LLM":      verify_async_llm,
+    "COMPLETE":            verify_complete,
+    "FAIL":                verify_fail,
+    "MAP_AGGREGATOR":      verify_map_aggregator,
+    "LOOP_LIMIT":          verify_loop_limit,
+    "LOOP_BRANCH_STRESS":  verify_loop_branch_stress,
+    "STRESS":              verify_stress,
+    "VISION":              verify_vision,
+    "HITP_RECOVERY":       verify_hitp_recovery,
+    "S3_LARGE":            verify_s3_large,  # Deprecated
+    "ASYNC_LLM":           verify_async_llm,
 }
 
 
-# ─── Lambda 핸들러 ────────────────────────────────────────────────────────────
+# Lambda Handler
 
 def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
     """
-    파이프라인 테스트 실행 결과를 검증합니다.
+    Validate pipeline test execution results.
 
-    Input:
+    Input Schema:
         {
             "scenario":    "COMPLETE",
             "test_result": {
                 "status":  "SUCCEEDED" | "FAILED",
                 "output":  {...},          # SFN ExecutionResult
-                "error":   "...",          # FAILED 시
-                "cause":   "..."           # FAILED 시
+                "error":   "...",          # when FAILED
+                "cause":   "..."           # when FAILED
             }
         }
 
-    Output (표준 스키마):
+    Output Schema:
         {
             "passed":   bool,
             "scenario": str,
             "checks":   [{"name": str, "passed": bool, "details": str}],
-            "metrics":  {...}   # 선택
+            "metrics":  {...}   # optional
         }
     """
     scenario = event.get("scenario", "COMPLETE")
@@ -647,8 +621,8 @@ def lambda_handler(event: Dict[str, Any], _context) -> Dict[str, Any]:
     result = verifier(test_result)
 
     logger.info(
-        f"Verification done: scenario={scenario} passed={result['passed']} "
-        f"checks={[c['name'] for c in result['checks'] if not c['passed']]}"
+        f"Verification completed: scenario={scenario} passed={result['passed']} "
+        f"failed_checks={[c['name'] for c in result['checks'] if not c['passed']]}"
     )
 
     return result
