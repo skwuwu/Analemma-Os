@@ -353,7 +353,55 @@ def lambda_handler(event, context):
     4. Dehydrate state (Offload large data to S3).
     5. Return safe payload to Step Functions.
     """
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # [Option B] False Success Prevention: Explicit Error Handling
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # Lambda를 전체 try-except로 감싸서 모든 에러를 JSON으로 변환
+    # ASL Choice State에서 status 필드를 체크하여 실패 감지
+    # 장점: 명시적 에러 상태 전달, SFN 로그에 명확한 실패 이유 기록
+    # 단점: Lambda Retry는 불가능 (항상 200 OK 반환)
+    try:
+        return _execute_initialization(event, context)
+    except Exception as critical_error:
+        logger.error(
+            f"🚨 [CRITICAL] Initialization failed: {critical_error}",
+            exc_info=True
+        )
+        
+        # [Option B] Return error as JSON with explicit status field
+        # SFN will see Lambda success (200 OK) but Choice State will detect error
+        # Error details embedded in state_data.bag for ASL access
+        return {
+            'status': 'error',
+            'next_action': 'FAILED',
+            'state_data': {
+                'bag': {
+                    'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
+                    'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
+                    'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
+                    'error_type': type(critical_error).__name__,
+                    'error_message': str(critical_error)
+                }
+            }
+        }
+
+
+def _execute_initialization(event, context):
+    """
+    Internal implementation of initialization logic.
+    Extracted to allow error handling wrapper.
+    """
     logger.info("Initializing state data with StateHydrator strategy")
+    
+    # ─── [P0 FIX] Safe-Init Pattern: 명시적 최상단 초기화 (UnboundLocalError 방지) ───
+    # 파이썬 스코프 엔진이 함수 내 할당문을 발견하면 로컬 변수로 간주하므로,
+    # 할당 전 참조 시 UnboundLocalError 발생을 방지하기 위해 명시적으로 초기화
+    partition_map = []
+    partition_result = {}
+    total_segments = 0
+    llm_segments = 0
+    hitp_segments = 0
+    # ──────────────────────────────────────────────────────────────────────────────────
     
     # 1. State Hydrator Initialization
     bucket = os.environ.get('WORKFLOW_STATE_BUCKET')
@@ -394,8 +442,11 @@ def lambda_handler(event, context):
 
     workflow_config = (raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
                        or event.get('test_workflow_config') or event.get('workflow_config'))
-    # [FIX] Initialize partition_map to empty list to prevent UnboundLocalError
-    partition_map = raw_input.get('partition_map') or event.get('partition_map') or []
+    
+    # 입력에서 partition_map 로드 시도 (Safe-Init 패턴 적용)
+    input_partition = raw_input.get('partition_map') or event.get('partition_map')
+    if input_partition:
+        partition_map = input_partition
     
     # DB Loader Fallback
     if not workflow_config and workflow_id and owner_id:
@@ -404,7 +455,9 @@ def lambda_handler(event, context):
             workflow_config = db_data.get('config')
             # Only use DB partition map if not provided in input
             if not partition_map: 
-                partition_map = db_data.get('partition_map')
+                db_partition = db_data.get('partition_map')
+                if db_partition:
+                    partition_map = db_partition
     
     # Robustness: Ensure workflow_config is dict
     if not workflow_config:
@@ -412,7 +465,6 @@ def lambda_handler(event, context):
         logger.warning("Proceeding with empty workflow_config")
     
     # Runtime Partitioning Fallback
-    partition_result = None  # Initialize to prevent UnboundLocalError
     if not partition_map and _HAS_PARTITION:
         logger.info("Calculating partition_map at runtime...")
         try:
@@ -421,12 +473,12 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.error(f"Partitioning failed: {e}")
             partition_map = []
-            partition_result = {}  # Set empty dict on failure
+            partition_result = {}
             
-    # Metadata Calculation
-    total_segments = len(partition_map) if partition_map else 0
-    llm_segments = sum(1 for seg in partition_map if seg.get('type') == 'llm') if partition_map else 0
-    hitp_segments = sum(1 for seg in partition_map if seg.get('type') == 'hitp') if partition_map else 0
+    # Metadata Calculation (partition_map이 이미 최상단에서 초기화되어 안전함)
+    total_segments = len(partition_map)
+    llm_segments = sum(1 for seg in partition_map if seg.get('type') == 'llm')
+    hitp_segments = sum(1 for seg in partition_map if seg.get('type') == 'hitp')
     
     # 3. Strategy Calculation
     try:
@@ -903,6 +955,9 @@ def lambda_handler(event, context):
         )
     elif response_size_kb > 200:
         logger.warning(f"⚠️ Response is {response_size_kb:.1f}KB (>200KB). Close to limit.")
+    
+    # [Option B] Add explicit success status for ASL Choice State validation
+    response_data['status'] = 'success'
     
     return response_data
 

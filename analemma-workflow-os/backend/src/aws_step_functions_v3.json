@@ -139,7 +139,8 @@
       },
       "ResultSelector": {
         "bag.$": "$.Payload.state_data",
-        "next_action.$": "$.Payload.next_action"
+        "next_action.$": "$.Payload.next_action",
+        "status.$": "$.Payload.status"
       },
       "ResultPath": "$.state_data",
       "Retry": [
@@ -163,7 +164,32 @@
           "Next": "NotifyAndFailInit"
         }
       ],
-      "Next": "NotifyWorkflowStarted"
+      "Next": "ValidateInitSuccess"
+    },
+    "ValidateInitSuccess": {
+      "Type": "Choice",
+      "Comment": "🛡️ [Option B] False Success Prevention: Explicit status check",
+      "Choices": [
+        {
+          "Variable": "$.state_data.status",
+          "StringEquals": "error",
+          "Next": "HandleInitErrorResponse"
+        }
+      ],
+      "Default": "NotifyWorkflowStarted"
+    },
+    "HandleInitErrorResponse": {
+      "Type": "Pass",
+      "Comment": "📋 Extract error details from Lambda response",
+      "Parameters": {
+        "error_type.$": "$.state_data.bag.error_type",
+        "error_message.$": "$.state_data.bag.error_message",
+        "ownerId.$": "$.state_data.bag.ownerId",
+        "workflowId.$": "$.state_data.bag.workflowId",
+        "execution_id.$": "$.state_data.bag.execution_id"
+      },
+      "ResultPath": "$.init_error_details",
+      "Next": "NotifyAndFailInit"
     },
     "NotifyAndFailInit": {
       "Type": "Task",
