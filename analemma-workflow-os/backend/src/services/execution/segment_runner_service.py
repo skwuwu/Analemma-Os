@@ -3031,6 +3031,14 @@ class SegmentRunnerService:
                 
                 # Build execution_result for sealing
                 status = res.get('status', 'CONTINUE')
+                
+                # 🔍 [v3.15 Debug] Enhanced status logging for loop limit troubleshooting
+                logger.info(f"[_finalize_response] segment_id={_segment_id}, "
+                           f"status={status}, "
+                           f"next_segment_to_run={res.get('next_segment_to_run')}, "
+                           f"current_segment_to_run={base_state.get('segment_to_run')}, "
+                           f"total_segments={_total_segments}")
+                
                 execution_result = {
                     'final_state': original_final_state,
                     'new_history_logs': res.get('new_history_logs', []),
@@ -3130,6 +3138,8 @@ class SegmentRunnerService:
                 
                 logger.info(f"[v3.13] 🎯 Kernel Protocol: sealed response - "
                            f"next_action={sealed_result.get('next_action')}, "
+                           f"original_status={status}, "
+                           f"segment_id={_segment_id}, "
                            f"state_size={len(json.dumps(sealed_result.get('state_data', {}), default=str))//1024}KB")
                 
                 return sealed_result

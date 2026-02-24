@@ -596,6 +596,11 @@
           "Variable": "$.state_data.next_action",
           "StringEquals": "PARALLEL_GROUP",
           "Next": "ProcessParallelBranches"
+        },
+        {
+          "Variable": "$.state_data.next_action",
+          "StringEquals": "CONTINUE",
+          "Next": "IncrementLoopCounter"
         }
       ],
       "Default": "IncrementLoopCounter"

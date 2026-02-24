@@ -495,6 +495,21 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['segment_to_run'] = 0
             delta['_status'] = payload.get('status', 'CONTINUE')
             
+            # �️ [v3.16 Fix] CONTINUE 상태일 때 next_segment_to_run 필수 검증
+            if delta['_status'] == 'CONTINUE' and payload.get('next_segment_to_run') is None:
+                _get_logger().error(
+                    f"[flatten_result] CRITICAL: status=CONTINUE but next_segment_to_run is None! "
+                    f"This will cause infinite loop. Payload keys: {list(payload.keys())[:20]}"
+                )
+                # 강제로 segment_to_run 유지 (무한 루프 방지)
+                if 'segment_to_run' not in delta or delta['segment_to_run'] is None:
+                    _get_logger().error(f"[flatten_result] EMERGENCY: Forcing status to FAILED to prevent infinite loop")
+                    delta['_status'] = 'FAILED'
+                    delta['_error'] = 'CONTINUE status without next_segment_to_run'
+            
+            # �🔍 [v3.15 Debug] Log status extraction for troubleshooting
+            _get_logger().info(f"[flatten_result sync] Extracted status={delta['_status']} from payload, next_segment={payload.get('next_segment_to_run')}")
+            
             # 🔑 [Critical Fix v3.20] Merge final_state into current_state
             # run_workflow returns results directly (e.g., {'llm_raw_output': '...'})
             # These should become part of current_state for verification to find them
@@ -1044,12 +1059,30 @@ def _compute_next_action(
     raw_status = delta.get('_status', 'CONTINUE')
     status = str(raw_status).upper() if raw_status is not None else 'CONTINUE'
     
-    # 명시적 실패/중단 상태
+    logger = _get_logger()
+    logger.info(f"[_compute_next_action] action={action}, raw_status={raw_status}, normalized_status={status}")
+    
+    # 명시적 실패/중단 상태 (🛡️ [v3.16] HALTED/SIGKILL → FAILED 정규화)
     if status in ('FAILED', 'HALTED', 'SIGKILL'):
+        # ASL에는 HALTED/SIGKILL case가 없으므로 FAILED로 통일
+        if status in ('HALTED', 'SIGKILL'):
+            logger.warning(f"[_compute_next_action] Normalizing {status} to FAILED for ASL compatibility")
+            return 'FAILED'
+        logger.info(f"[_compute_next_action] Returning failure status: {status}")
         return status
     
-    # 명시적 완료
-    if status == 'COMPLETE':
+    # 명시적 완료 (SUCCESS, SUCCEEDED도 COMPLETE로 처리)
+    if status in ('COMPLETE', 'SUCCESS', 'SUCCEEDED'):
+        # 🛡️ [v3.16 Fix] next_segment가 있으면 COMPLETE 무시 (조기 종료 방지)
+        if delta.get('segment_to_run') is not None:
+            next_seg = delta.get('segment_to_run')
+            logger.warning(
+                f"[_compute_next_action] Status is {status} but next_segment={next_seg} exists. "
+                f"This may indicate incorrect status. Treating as CONTINUE."
+            )
+            return 'CONTINUE'
+        
+        logger.info(f"[_compute_next_action] Workflow completed with status={status}, returning COMPLETE")
         return 'COMPLETE'
     
     # HITP 대기
@@ -1073,15 +1106,27 @@ def _compute_next_action(
             
             if total_segments_raw is not None:
                 total_segments = int(total_segments_raw)
-                if current_segment >= total_segments:
+                if current_segment >= total_segments - 1:
+                    logger.info(f"[_compute_next_action] Last segment reached: {current_segment + 1}/{total_segments}, returning COMPLETE")
                     return 'COMPLETE'
         except (ValueError, TypeError) as e:
-            _get_logger().warning(
+            logger.warning(
                 f"[_compute_next_action] Invalid segment numbers: "
                 f"segment_to_run={state.get('segment_to_run')}, "
                 f"total_segments={state.get('total_segments')}. Error: {e}. Defaulting to CONTINUE."
             )
     
+    # pending_branches가 있으면 병렬 처리
+    pending = state.get('pending_branches') or delta.get('pending_branches')
+    if pending:
+        # 🛡️ [v3.16 Fix] 빈 배열 체크 (무한 루프 방지)
+        if isinstance(pending, list) and len(pending) > 0:
+            logger.info(f"[_compute_next_action] Pending branches detected ({len(pending)}), returning PARALLEL_GROUP")
+            return 'PARALLEL_GROUP'
+        else:
+            logger.warning(f"[_compute_next_action] pending_branches is empty or invalid: {type(pending).__name__}, treating as CONTINUE")
+    
+    logger.info(f"[_compute_next_action] No special conditions matched, returning CONTINUE")
     return 'CONTINUE'
 
 
