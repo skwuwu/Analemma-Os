@@ -4,7 +4,6 @@ import json
 import logging
 import threading
 from typing import Dict, Any, List, Set, Optional, Tuple, FrozenSet
-from src.services.workflow.repository import WorkflowRepository
 
 logger = logging.getLogger(__name__)
 
@@ -1191,7 +1190,8 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     total_segments_recursive = count_segments_recursive(segments)
     
     # 🛡️ [Dynamic Loop Limit] Analyze loop structures for weighted execution count
-    loop_analysis = analyze_loop_structures(nodes)
+    # nodes is Dict[str, Dict], but analyze_loop_structures expects List[Dict]
+    loop_analysis = analyze_loop_structures(list(nodes.values()))
     
     # Calculate estimated executions: non-loop nodes + weighted loop executions
     non_loop_nodes = len(nodes) - loop_analysis["loop_count"]

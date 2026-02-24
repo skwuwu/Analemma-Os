@@ -411,6 +411,7 @@ def lambda_handler(event, context):
         logger.warning("Proceeding with empty workflow_config")
     
     # Runtime Partitioning Fallback
+    partition_result = None  # Initialize to prevent UnboundLocalError
     if not partition_map and _HAS_PARTITION:
         logger.info("Calculating partition_map at runtime...")
         try:
@@ -419,6 +420,7 @@ def lambda_handler(event, context):
         except Exception as e:
             logger.error(f"Partitioning failed: {e}")
             partition_map = []
+            partition_result = {}  # Set empty dict on failure
             
     # Metadata Calculation
     total_segments = len(partition_map) if partition_map else 0
@@ -646,9 +648,14 @@ def lambda_handler(event, context):
     # This prevents LoopLimitExceeded errors for complex workflows while
     # still blocking runaway processes (limit scales with workflow size).
     
-    # Extract loop analysis from partition_result
-    estimated_executions = partition_result.get("estimated_executions", total_segments)
-    loop_analysis = partition_result.get("loop_analysis", {})
+    # Extract loop analysis from partition_result (if available)
+    if partition_result:
+        estimated_executions = partition_result.get("estimated_executions", total_segments)
+        loop_analysis = partition_result.get("loop_analysis", {})
+    else:
+        # Fallback when partitioning failed
+        estimated_executions = total_segments
+        loop_analysis = {}
     
     # Apply safety margin: 20% of estimate or minimum 20
     safety_margin = max(int(estimated_executions * 0.2), 20)
