@@ -325,9 +325,43 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
                 "nested_loops": sub_analysis["loop_nodes"]
             })
             
-            # ✅ [FIX] for_each adds fixed 2: parallel_group + aggregator
-            # Internal Map iterations don't increase main loop counter
-            total_weighted += 2 + sub_analysis["total_loop_weighted_segments"]
+            # 🔧 [CRITICAL FIX] for_each must account for max_iterations × sub_workflow segment count
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # Previous logic: total_weighted += 2
+            #   - Assumed for_each adds fixed 2 segments (wrong!)
+            # 
+            # Reality: for_each is Distributed Map with sub_workflow
+            #   - Each iteration executes ALL sub_workflow segments
+            #   - Formula: sub_segment_count × max_iterations
+            #   - Plus nested loop overhead
+            # 
+            # Example: for_each with 5 iterations, 3-segment sub_workflow
+            #   - Old: +2
+            #   - New: 3 × 5 = 15
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            # Calculate sub_workflow segment count
+            if node_to_seg_map:
+                sub_node_ids = [n.get("id") for n in sub_nodes if n.get("id")]
+                sub_segments = set(node_to_seg_map.get(nid) for nid in sub_node_ids if node_to_seg_map.get(nid) is not None)
+                sub_segment_count = len(sub_segments) if sub_segments else max(1, len(sub_nodes))
+            else:
+                # Fallback: conservative estimate (each node = 1 segment)
+                sub_segment_count = max(1, len(sub_nodes))
+            
+            # for_each weighted calculation:
+            # - Main segment for for_each node: 1
+            # - Sub-workflow iterations: sub_segment_count × max_iterations
+            # - Nested loop overhead: sub_analysis["total_loop_weighted_segments"]
+            for_each_weighted = sub_segment_count * max_iter + sub_analysis["total_loop_weighted_segments"]
+            total_weighted += for_each_weighted
+            
+            logger.debug(
+                f"[Loop Analysis] for_each '{node.get('id')}': "
+                f"max_iter={max_iter}, sub_segments={sub_segment_count}, "
+                f"nested_overhead={sub_analysis['total_loop_weighted_segments']}, "
+                f"total_weighted={for_each_weighted}"
+            )
     
     return {
         "loop_nodes": loop_nodes,
