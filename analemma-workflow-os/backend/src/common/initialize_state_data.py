@@ -399,11 +399,10 @@ def lambda_handler(event, context):
             exc_info=True
         )
         
-        # [Option B] Return error as JSON with explicit status field
-        # 🔧 [Fix] Match success case structure: seal_state_bag returns state_data.bag
-        # ASL JSONPath: $.state_data.bag.error_type
-        # Provide both state_data.bag (primary) and bag (fallback) for robustness
-        error_bag = {
+        # [v3.16] ASL 구조와 1:1 매칭
+        # 🔧 [Critical Fix] Double-bag 중첩 제거
+        # ASL JSONPath: $.state_data.bag.error_type (bag는 단 1회만 감싼)
+        error_payload = {
             'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
             'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
             'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
@@ -411,11 +410,13 @@ def lambda_handler(event, context):
             'error_message': str(business_error),
             'is_retryable': False
         }
+        
         return {
             'status': 'error',
             'next_action': 'FAILED',
-            'state_data': {'bag': error_bag},  # Primary path for ASL
-            'bag': error_bag  # Fallback for legacy/direct access
+            'state_data': {
+                'bag': error_payload  # $.state_data.bag.error_type 경로 보장
+            }
         }
 
 
@@ -665,10 +666,6 @@ def _execute_initialization(event, context):
                         raw_content = response['Body'].read()
                         
                         # 🔧 [Critical Fix] Gzip 압축 처리
-                        # 🚨 Note: EventualConsistencyGuard가 manifest를 S3에 저장할 때
-                        #    ContentEncoding 없이 평문 JSON으로 저장 (line 246)
-                        #    하지만 미래 변경 가능성을 대비하여 gzip 체크 유지
-                        # Magic number (0x1f 0x8b)로 Gzip 여부 확인
                         is_gzipped = raw_content.startswith(b'\x1f\x8b')
                         if is_gzipped:
                             logger.info("[Hash Verification] Gzip-compressed manifest detected, decompressing...")
@@ -677,23 +674,42 @@ def _execute_initialization(event, context):
                             logger.info("[Hash Verification] Plain JSON manifest (expected format)")
                             manifest_content = raw_content
                         
-                        # SHA-256 해시 계산 (압축 해제된 원본 데이터)
-                        # StateVersioningService._compute_hash()는 압축 전 데이터로 해시 계산 (line 724-727)
-                        computed_hash = hashlib.sha256(manifest_content).hexdigest()
+                        # 🔧 [Critical Fix] Canonical JSON 직렬화로 해시 오탐 방지
+                        # ⚠️ [SYNC REQUIRED] StateVersioningService._compute_hash()와 100% 동일한 로직
+                        # 해시 알고리즘 변경 시 반드시 양쪽 동시 업데이트 필수
+                        # (예: SHA-256 → SHA-512 마이그레이션 시 state_versioning_service.py도 함께 변경)
+                        try:
+                            # Step 1: Parse JSON to Python object
+                            manifest_obj = json.loads(manifest_content.decode('utf-8'))
+                            
+                            # Step 2: Reuse StateVersioningService's canonical hash logic
+                            # ✅ [Zero Duplication] 직렬화 로직 재사용으로 동기화 위험 제거
+                            computed_hash = versioning_service._compute_hash(manifest_obj)
+                            
+                            logger.info(
+                                f"[Hash Verification] Canonical hash computed: "
+                                f"raw_size={len(manifest_content)}B"
+                            )
+                        except json.JSONDecodeError as json_err:
+                            logger.error(f"[Hash Verification] JSON parse failed: {json_err}")
+                            # Fallback: use raw content hash (may mismatch due to formatting)
+                            computed_hash = hashlib.sha256(manifest_content).hexdigest()
                         
                         if computed_hash != manifest_hash:
                             raise RuntimeError(
                                 f"[Integrity Violation] Manifest hash mismatch! "
                                 f"Expected: {manifest_hash[:16]}..., "
                                 f"Computed: {computed_hash[:16]}... "
-                                f"Gzip: {is_gzipped}, "
+                                f"Gzipped: {is_gzipped}, "
                                 f"Size: raw={len(raw_content)}B, content={len(manifest_content)}B. "
-                                f"This indicates data corruption or tampering."
+                                f"This indicates data corruption, tampering, or JSON serialization mismatch. "
+                                f"Verify StateVersioningService._compute_hash() consistency."
                             )
                         
                         logger.info(
                             f"[Hash Verification] ✅ Manifest integrity confirmed: "
-                            f"{computed_hash[:16]}... (Gzipped: {is_gzipped}, Size: {len(manifest_content)}B)"
+                            f"{computed_hash[:16]}... (Gzipped: {is_gzipped}, "
+                            f"Algorithm: StateVersioningService._compute_hash)"
                         )
                     except s3_client.exceptions.NoSuchKey:
                         raise RuntimeError(
