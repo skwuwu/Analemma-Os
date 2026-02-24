@@ -75,6 +75,16 @@ except ImportError as _versioning_import_err:
         f"[initialize_state_data] StateVersioningService import FAILED: {_versioning_import_err}"
     )
 
+# 🛡️ [UnboundLocalError Prevention] Pre-import for hash verification
+# StateVersioningService를 함수 내부 try 블록에서 임포트하면
+# 예외 발생 시 UnboundLocalError가 발생할 수 있으므로 전역 임포트 보장
+try:
+    if StateVersioningService is None:
+        from src.services.state.state_versioning_service import StateVersioningService as _StateVersioningService_Fallback
+        StateVersioningService = _StateVersioningService_Fallback
+except ImportError:
+    pass  # Already handled above
+
 # Startup diagnostics — all _HAS_* flags resolved, visible in CloudWatch cold-start logs
 logger.info(
     f"[initialize_state_data] startup flags: "
@@ -311,7 +321,9 @@ def _load_workflow_config(owner_id: str, workflow_id: str) -> dict:
         table = _dynamodb.Table(WORKFLOWS_TABLE)
         response = table.get_item(
             Key={'ownerId': owner_id, 'workflowId': workflow_id},
-            ProjectionExpression='config, partition_map, total_segments, llm_segments_count, hitp_segments_count'
+            # 🛡️ [P1 FIX] 지능형 루프 제한 필드 추가
+            # estimated_executions, loop_analysis 누락 시 재실행 시 LoopLimitExceeded 발생 가능
+            ProjectionExpression='config, partition_map, total_segments, llm_segments_count, hitp_segments_count, estimated_executions, loop_analysis'
         )
         item = response.get('Item')
         if item and item.get('config'):
@@ -326,7 +338,9 @@ def _load_workflow_config(owner_id: str, workflow_id: str) -> dict:
                 'partition_map': item.get('partition_map'),
                 'total_segments': item.get('total_segments'),
                 'llm_segments_count': item.get('llm_segments_count'),
-                'hitp_segments_count': item.get('hitp_segments_count')
+                'hitp_segments_count': item.get('hitp_segments_count'),
+                'estimated_executions': item.get('estimated_executions'),  # 🔧 Added
+                'loop_analysis': item.get('loop_analysis')  # 🔧 Added
             }
         return None
     except Exception as e:
@@ -346,7 +360,9 @@ def _load_precompiled_partition(owner_id: str, workflow_id: str) -> dict:
         table = _dynamodb.Table(WORKFLOWS_TABLE)
         response = table.get_item(
             Key={'ownerId': owner_id, 'workflowId': workflow_id},
-            ProjectionExpression='partition_map, total_segments, llm_segments_count, hitp_segments_count'
+            # 🛡️ [P1 FIX] 지능형 루프 제한 필드 추가
+            # DB에서 불러온 워크플로우 재실행 시 동적 제한 보장
+            ProjectionExpression='partition_map, total_segments, llm_segments_count, hitp_segments_count, estimated_executions, loop_analysis'
         )
         item = response.get('Item')
         if item and item.get('partition_map'):
@@ -378,6 +394,22 @@ def lambda_handler(event, context):
     # 
     # 시스템 에러 예시: ImportError, ConnectionError, S3/DynamoDB Timeout
     # 비즈니스 에러 예시: 잘못된 workflow_config, DAG cycle, validation 실패
+    
+    # 🛡️ [P0 FIX] 최상단에서 기본 컨텍스트 변수 미리 확보 (UnboundLocalError 원천 차단)
+    # _execute_initialization 내부에서 변수 정의 전에 예외 발생 시
+    # 에러 핸들러가 UnboundLocalError로 자폭하는 것을 방지
+    raw_input = event.get('input') or event.get('initial_state') or event
+    if not isinstance(raw_input, dict):
+        raw_input = {}
+    
+    # 에러 핸들러에서 안전하게 사용할 수 있도록 기본값 보장
+    safe_owner_id = raw_input.get('ownerId', '') or event.get('ownerId', 'system')
+    safe_workflow_id = raw_input.get('workflowId', '') or event.get('workflowId', 'unknown')
+    safe_exec_id = (
+        raw_input.get('idempotency_key') or event.get('idempotency_key') or
+        raw_input.get('execution_id') or event.get('execution_id') or 'unknown'
+    )
+    
     try:
         return _execute_initialization(event, context)
     
@@ -399,24 +431,39 @@ def lambda_handler(event, context):
             exc_info=True
         )
         
-        # [v3.16] ASL 구조와 1:1 매칭
-        # 🔧 [Critical Fix] Double-bag 중첩 제거
-        # ASL JSONPath: $.state_data.bag.error_type (bag는 단 1회만 감싼)
+        # 🎯 [CRITICAL FIX] Double-Bag 중첩 제거 (ASL ResultSelector 고려)
+        # 
+        # ASL 구조:
+        #   ResultSelector: { "bag.$": "$.Payload.state_data", ... }
+        #   ResultPath: "$.state_data"
+        # 
+        # 최종 JSONPath: $.state_data.bag.error_type
+        # 
+        # ✅ 올바른 Lambda 반환:
+        #   { "state_data": { "error_type": "...", ... } }
+        # 
+        # ❌ 잘못된 Lambda 반환 (Double Bag 발생):
+        #   { "state_data": { "bag": { "error_type": "..." } } }
+        # 
+        # ASL이 자동으로 bag 레이어를 추가하므로 Lambda는 평탄한 구조로 반환!
+        
+        # 🛡️ [P0 FIX] 최상단에서 미리 선언한 safe 변수 사용
+        # UnboundLocalError 원천 차단: _execute_initialization 내부에서
+        # 변수 정의 전에 예외가 발생해도 에러 핸들러가 안전하게 동작
         error_payload = {
-            'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
-            'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
-            'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
+            'ownerId': safe_owner_id,
+            'workflowId': safe_workflow_id,
+            'execution_id': safe_exec_id,
             'error_type': type(business_error).__name__,
             'error_message': str(business_error),
             'is_retryable': False
         }
         
+        # 🎯 ASL이 자동으로 $.state_data.bag으로 변환
         return {
             'status': 'error',
             'next_action': 'FAILED',
-            'state_data': {
-                'bag': error_payload  # $.state_data.bag.error_type 경로 보장
-            }
+            'state_data': error_payload  # bag 없이 직접 반환!
         }
 
 
@@ -492,6 +539,18 @@ def _execute_initialization(event, context):
                 db_partition = db_data.get('partition_map')
                 if db_partition:
                     partition_map = db_partition
+            
+            # 🛡️ [P1 FIX] DB에서 루프 분석 데이터 추출 (partition_result에 저장)
+            # 런타임 파티셔닝을 건너뛰었을 때도 동적 루프 제한 계산 가능
+            if db_data.get('estimated_executions') is not None:
+                partition_result = {
+                    'estimated_executions': db_data.get('estimated_executions'),
+                    'loop_analysis': db_data.get('loop_analysis', {})
+                }
+                logger.info(
+                    f"[DB Load] Restored loop analysis from DB: "
+                    f"estimated_executions={partition_result['estimated_executions']}"
+                )
     
     # Robustness: Ensure workflow_config is dict
     if not workflow_config:
@@ -685,8 +744,13 @@ def _execute_initialization(event, context):
                             manifest_obj = json.loads(manifest_content.decode('utf-8'))
                             
                             # Step 2: Use static method for canonical hash computation
-                            # 인스턴스 생성 불필요 - 직접 클래스 메서드 호출
-                            from src.services.state.state_versioning_service import StateVersioningService
+                            # 🛡️ StateVersioningService는 파일 최상단에서 전역 임포트됨
+                            # UnboundLocalError 방지를 위해 로컬 임포트 제거
+                            if StateVersioningService is None:
+                                raise RuntimeError(
+                                    "StateVersioningService not available. "
+                                    "Check import at module level."
+                                )
                             computed_hash = StateVersioningService.compute_hash(manifest_obj)
                             
                             logger.info(
@@ -770,29 +834,42 @@ def _execute_initialization(event, context):
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # [Phase 2] Merkle DAG Content-Addressable Storage
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 🛡️ [P1 FIX] manifest_id 필수 조건 완화 (Safe Fallback 보장)
+    # _HAS_VERSIONING=False 환경(import 실패 등)에서도 Legacy 모드로 동작 가능
+    # manifest_id가 없으면 경고 로그만 남기고 계속 진행 (Legacy 모드)
     if not manifest_id:
-        raise RuntimeError(
-            f"Merkle DAG manifest is required for workflow state integrity. "
+        logger.warning(
+            f"⚠️ [Legacy Mode] Merkle DAG manifest unavailable, falling back to legacy state storage. "
             f"Diagnostics: _HAS_VERSIONING={_HAS_VERSIONING}, "
             f"workflow_config={'present' if workflow_config else 'missing'}, "
             f"partition_map={'present({} segs)'.format(len(partition_map)) if partition_map else 'empty/None'}. "
-            f"Check StateVersioningService import and dependencies."
+            f"This reduces state integrity guarantees but allows workflow to proceed."
         )
+        # Legacy 모드에서는 manifest 관련 필드를 null로 설정
+        manifest_hash = None
+        config_hash = None
 
     # ✅ Merkle DAG Mode: Content-Addressable Storage
     # - workflow_config/partition_map → S3 블록으로 저장됨
     # - StateBag에는 manifest_id 포인터만 저장 (93% 크기 감소)
     # - segment_runner는 manifest에서 segment_config 로드
-    bag['manifest_id'] = manifest_id
-    bag['manifest_hash'] = manifest_hash
-    bag['config_hash'] = config_hash
+    if manifest_id:
+        bag['manifest_id'] = manifest_id
+        bag['manifest_hash'] = manifest_hash
+        bag['config_hash'] = config_hash
 
-    logger.info(
-        f"[Merkle DAG] State storage optimized: "
-        f"manifest_id={manifest_id[:8]}..., "
-        f"hash={manifest_hash[:8]}..., "
-        f"StateBag reduction: ~93%"
-    )
+        logger.info(
+            f"[Merkle DAG] State storage optimized: "
+            f"manifest_id={manifest_id[:8]}..., "
+            f"hash={manifest_hash[:8]}..., "
+            f"StateBag reduction: ~93%"
+        )
+    else:
+        # Legacy mode: no manifest optimization
+        logger.info("[Legacy Mode] No manifest optimization, using direct state storage")
+        bag['manifest_id'] = None
+        bag['manifest_hash'] = None
+        bag['config_hash'] = None
     
     bag['current_state'] = workflow_config.get('initial_state', {})
     
@@ -837,13 +914,35 @@ def _execute_initialization(event, context):
     
     # Extract loop analysis from partition_result (if available)
     # 🛡️ [Type Safety] Validate partition_result is dict before accessing
+    # 🛡️ [P1 FIX] DB에서 불러온 경우도 고려 (db_data에서 estimated_executions 추출)
     if partition_result and isinstance(partition_result, dict):
         estimated_executions = partition_result.get("estimated_executions", total_segments)
         loop_analysis = partition_result.get("loop_analysis", {})
     else:
-        # Fallback when partitioning failed or returned non-dict
-        estimated_executions = total_segments
-        loop_analysis = {}
+        # Fallback: DB에서 불러온 데이터 확인 (db_data 변수가 있을 수 있음)
+        # DB 로드 시 db_data에 estimated_executions가 있을 수 있음
+        try:
+            # DB에서 불러온 partition_result 데이터 확인
+            db_estimated = None
+            db_loop_analysis = None
+            
+            # 이전 DB 로드 과정에서 db_data 변수가 설정되었는지 확인
+            # _load_workflow_config 호출 결과를 저장한 db_data가 있다면 거기서 가져오기
+            # (현재 코드 구조상 db_data는 로컬 변수로만 존재하므로 직접 접근 불가)
+            # 대신 total_segments로 폴백
+            db_estimated = total_segments
+            db_loop_analysis = {}
+        except:
+            db_estimated = total_segments
+            db_loop_analysis = {}
+        
+        estimated_executions = db_estimated
+        loop_analysis = db_loop_analysis
+        
+        logger.info(
+            f"[Dynamic Loop Limit] Using fallback: estimated_executions={estimated_executions} "
+            f"(from total_segments, DB fields may be unavailable)"
+        )
     
     # Apply safety margin: 20% of estimate or minimum 20
     safety_margin = max(int(estimated_executions * 0.2), 20)
