@@ -253,7 +253,10 @@ class StateVersioningService:
         # 매니페스트 기본 정보 생성
         import uuid
         manifest_id = str(uuid.uuid4())
-        version = self._get_next_version(workflow_id)
+        # 🛡️ [Type Safety] DynamoDB Number → Decimal → int 명시적 변환
+        # EventualConsistencyGuard의 json.dumps(default=str)가 Decimal을 "21"로 변환하는 반면,
+        # compute_hash는 Decimal을 21.0으로 변환하여 해시 불일치 발생
+        version = int(self._get_next_version(workflow_id))
         config_hash = self._compute_hash(workflow_config)
         
         # S3에 workflow_config 저장
