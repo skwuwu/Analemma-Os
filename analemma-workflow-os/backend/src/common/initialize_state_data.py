@@ -394,7 +394,8 @@ def lambda_handler(event, context):
 
     workflow_config = (raw_input.get('test_workflow_config') or raw_input.get('workflow_config')
                        or event.get('test_workflow_config') or event.get('workflow_config'))
-    partition_map = raw_input.get('partition_map') or event.get('partition_map')
+    # [FIX] Initialize partition_map to empty list to prevent UnboundLocalError
+    partition_map = raw_input.get('partition_map') or event.get('partition_map') or []
     
     # DB Loader Fallback
     if not workflow_config and workflow_id and owner_id:
