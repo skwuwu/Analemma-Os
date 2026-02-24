@@ -235,6 +235,9 @@ def _calculate_dynamic_concurrency(
         calculated_concurrency = min(30, int(max_parallel_branches * 0.5))
     
     # 3. Adjust based on user tier (optional)
+    tier_concurrency_multiplier = 1.0
+    subscription_plan = 'free'
+    
     try:
         user_table = _dynamodb.Table(os.environ.get('USERS_TABLE', 'UsersTableV3'))
         user_response = user_table.get_item(Key={'userId': owner_id})
@@ -251,17 +254,30 @@ def _calculate_dynamic_concurrency(
                 'enterprise': 1.5 # 150% (up to 50 max)
             }
             
-            multiplier = tier_multipliers.get(subscription_plan, 1.0)
-            calculated_concurrency = int(calculated_concurrency * multiplier)
+            tier_concurrency_multiplier = tier_multipliers.get(subscription_plan, 1.0)
+            calculated_concurrency = int(calculated_concurrency * tier_concurrency_multiplier)
             
-            logger.info(f"User tier '{subscription_plan}' applied multiplier {multiplier}")
+            logger.info(f"User tier '{subscription_plan}' applied multiplier {tier_concurrency_multiplier}")
     except Exception as e:
         logger.warning(f"Failed to load user tier for concurrency calculation: {e}")
     
-    # 4. 🛡️ [Concurrency Protection] OS-level upper limit clamping
-    # Ensure overall system stability according to account concurrency limit
-    # Increased from 2 to 5 to enable proper testing of parallel scheduling strategies
-    MAX_OS_LIMIT = 5  # Allows testing of batch splitting and speed guardrails
+    # 4. 🛡️ [Concurrency Protection] Dynamic OS-level limit by tier
+    # Ensures system stability while allowing tier-based scaling
+    # 
+    # 🚨 [Production Note] Tier-based limits:
+    # - free/basic: MAX_OS_LIMIT = 5 (testing/small workflows)
+    # - pro: MAX_OS_LIMIT = 20 (medium parallelism)
+    # - enterprise: MAX_OS_LIMIT = 50 (high parallelism)
+    # 
+    # AWS Lambda concurrent execution limit: ~1000 (account-level)
+    # Monitor CloudWatch metrics: ConcurrentExecutions, Throttles
+    tier_limits = {
+        'free': 5,
+        'basic': 5,
+        'pro': 20,
+        'enterprise': 50
+    }
+    MAX_OS_LIMIT = tier_limits.get(subscription_plan, 5)
     clamped_concurrency = min(calculated_concurrency, MAX_OS_LIMIT)
     
     if calculated_concurrency > MAX_OS_LIMIT:
@@ -354,17 +370,32 @@ def lambda_handler(event, context):
     5. Return safe payload to Step Functions.
     """
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # [Option B] False Success Prevention: Explicit Error Handling
+    # [Option B Enhanced] Hybrid Error Handling Strategy
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    # Lambda를 전체 try-except로 감싸서 모든 에러를 JSON으로 변환
-    # ASL Choice State에서 status 필드를 체크하여 실패 감지
-    # 장점: 명시적 에러 상태 전달, SFN 로그에 명확한 실패 이유 기록
-    # 단점: Lambda Retry는 불가능 (항상 200 OK 반환)
+    # 시스템 에러 vs 비즈니스 에러 구분:
+    # - 시스템 에러: Exception raise → SFN Retry 작동 (일시적 장애 복구)
+    # - 비즈니스 에러: JSON 반환 → ASL Choice State 감지 (구조적 문제)
+    # 
+    # 시스템 에러 예시: ImportError, ConnectionError, S3/DynamoDB Timeout
+    # 비즈니스 에러 예시: 잘못된 workflow_config, DAG cycle, validation 실패
     try:
         return _execute_initialization(event, context)
-    except Exception as critical_error:
+    
+    except (ImportError, ConnectionError, TimeoutError) as system_error:
+        # 🔄 [System Error] Lambda Retry 활성화
+        # 일시적 장애 가능성 → SFN이 자동 재시도
         logger.error(
-            f"🚨 [CRITICAL] Initialization failed: {critical_error}",
+            f"🔄 [SYSTEM ERROR] Transient failure detected: {system_error}. "
+            f"Allowing SFN to retry automatically.",
+            exc_info=True
+        )
+        raise  # Re-raise to trigger SFN Retry mechanism
+    
+    except Exception as business_error:
+        # 🛡️ [Business Error] Soft-fail with explicit status
+        # 구조적 문제 → 재시도 불필요, ASL Choice State로 처리
+        logger.error(
+            f"🛡️ [BUSINESS ERROR] Workflow initialization failed: {business_error}",
             exc_info=True
         )
         
@@ -379,8 +410,9 @@ def lambda_handler(event, context):
                     'ownerId': event.get('ownerId', '') or event.get('input', {}).get('ownerId', ''),
                     'workflowId': event.get('workflowId', '') or event.get('input', {}).get('workflowId', ''),
                     'execution_id': event.get('idempotency_key', 'unknown') or event.get('input', {}).get('idempotency_key', 'unknown'),
-                    'error_type': type(critical_error).__name__,
-                    'error_message': str(critical_error)
+                    'error_type': type(business_error).__name__,
+                    'error_message': str(business_error),
+                    'is_retryable': False
                 }
             }
         }
@@ -469,9 +501,29 @@ def _execute_initialization(event, context):
         logger.info("Calculating partition_map at runtime...")
         try:
             partition_result = partition_workflow_advanced(workflow_config)
+            
+            # 🛡️ [Type Validation] Ensure partition_result is dict
+            # Prevents AttributeError if old version returns list
+            if not isinstance(partition_result, dict):
+                raise ValueError(
+                    f"partition_workflow_advanced returned {type(partition_result).__name__}, "
+                    f"expected dict. Check partition_service.py version sync."
+                )
+            
             partition_map = partition_result.get('partition_map', [])
+            
+            # Validate partition_map is list
+            if not isinstance(partition_map, list):
+                raise ValueError(
+                    f"partition_map is {type(partition_map).__name__}, expected list"
+                )
+                
         except Exception as e:
             logger.error(f"Partitioning failed: {e}")
+            # Re-raise if it's a validation error (business logic issue)
+            if isinstance(e, (ValueError, TypeError)):
+                raise
+            # Otherwise set empty fallback (allows workflow to fail gracefully)
             partition_map = []
             partition_result = {}
             
@@ -513,17 +565,28 @@ def _execute_initialization(event, context):
         # Merkle DAG 생성: 최초 1회 시도 + 실패 시 1회 재시도
         # 무결성 원칙: 재생성도 실패하면 워크플로우를 명시적으로 종료.
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        
+        # 🛡️ [Infrastructure Validation] GC_DLQ_URL 사전 검증
+        # use_2pc=True를 사용하려면 GC_DLQ_URL이 필수
+        # 런타임 에러 대신 명확한 설정 오류 메시지 제공
+        gc_dlq_url = os.environ.get('GC_DLQ_URL')
+        if not gc_dlq_url:
+            raise RuntimeError(
+                "[Infrastructure Error] GC_DLQ_URL environment variable is required "
+                "when using 2-Phase Commit (use_2pc=True). "
+                "Please configure GC_DLQ_URL in template.yaml or environment settings."
+            )
+        
         _manifest_last_error = None
         for _attempt in range(1, 3):  # 1회차, 2회차
             try:
-                # [BUG-INIT-01 FIX] gc_dlq_url 및 use_2pc 누락 → create_manifest()가
-                # "GC DLQ URL is required for 2-Phase Commit" RuntimeError를 항상 발생시킴.
-                # segment_runner_service.py와 동일한 설정을 사용해야 함.
+                # [BUG-INIT-01 FIX] gc_dlq_url 및 use_2pc 명시적 설정
+                # segment_runner_service.py와 동일한 설정 사용
                 versioning_service = StateVersioningService(
                     dynamodb_table=MANIFESTS_TABLE,
                     s3_bucket=STATE_BUCKET,
                     use_2pc=True,
-                    gc_dlq_url=os.environ.get('GC_DLQ_URL')
+                    gc_dlq_url=gc_dlq_url
                 )
 
                 # segment_manifest 생성 (먼저 계산)
@@ -555,10 +618,11 @@ def _execute_initialization(event, context):
                 )
 
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # [Phase 8.1] Pre-flight Check: S3 Strong Consistency 검증
+                # [Phase 8.1] Pre-flight Check: S3 Strong Consistency + Hash Integrity
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 # "데이터가 준비되지 않았다면 실행조차 하지 않는다"
                 # - S3 Propagation Delay 방어
+                # - Manifest Hash Verification (무결성 보장)
                 # - Fail-fast: 700ms 내 검증 완료 (3회 재시도)
                 # - Trust Chain의 첫 번째 검증 지점
                 try:
@@ -586,6 +650,37 @@ def _execute_initialization(event, context):
                             f"(total_wait={commit_status.total_wait_ms:.1f}ms). "
                             f"S3 Strong Consistency violation! "
                             f"Manifest: {manifest_id[:8]}..."
+                        )
+                    
+                    # 🛡️ [Hash Integrity Verification] 추가 무결성 검증
+                    # S3 존재 확인 후 manifest 다운로드하여 해시 대조
+                    try:
+                        import boto3
+                        import hashlib
+                        
+                        s3_client = boto3.client('s3')
+                        response = s3_client.get_object(Bucket=STATE_BUCKET, Key=manifest_s3_key)
+                        manifest_content = response['Body'].read()
+                        
+                        # SHA-256 해시 계산
+                        computed_hash = hashlib.sha256(manifest_content).hexdigest()
+                        
+                        if computed_hash != manifest_hash:
+                            raise RuntimeError(
+                                f"[Integrity Violation] Manifest hash mismatch! "
+                                f"Expected: {manifest_hash[:16]}..., "
+                                f"Computed: {computed_hash[:16]}... "
+                                f"This indicates data corruption or tampering."
+                            )
+                        
+                        logger.info(
+                            f"[Hash Verification] ✅ Manifest integrity confirmed: "
+                            f"{computed_hash[:16]}..."
+                        )
+                    except s3_client.exceptions.NoSuchKey:
+                        raise RuntimeError(
+                            f"[System Fault] Manifest disappeared after availability check! "
+                            f"Key: {manifest_s3_key}"
                         )
 
                     logger.info(
@@ -704,11 +799,12 @@ def _execute_initialization(event, context):
     # This prevents LoopLimitExceeded errors while maintaining safety bounds.
     
     # Extract loop analysis from partition_result (if available)
-    if partition_result:
+    # 🛡️ [Type Safety] Validate partition_result is dict before accessing
+    if partition_result and isinstance(partition_result, dict):
         estimated_executions = partition_result.get("estimated_executions", total_segments)
         loop_analysis = partition_result.get("loop_analysis", {})
     else:
-        # Fallback when partitioning failed
+        # Fallback when partitioning failed or returned non-dict
         estimated_executions = total_segments
         loop_analysis = {}
     

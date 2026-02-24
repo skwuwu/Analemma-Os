@@ -2171,11 +2171,15 @@ class SegmentRunnerService:
             
             logger.info(f"[Aggregator] ✅ Parallel S3 fetch completed")
         
-        # 1. 모든 브랜치 결과 병합
+        # 🛡️ [Asymmetric Branch Handling] will be processed after partition_map is loaded
+        # (Moved to line ~2400 to avoid undefined variable error)
+        
+        # 1. 모든 브랜치 결과 병합 (terminates_early 브랜치는 Optional)
         aggregated_state = base_state.copy()
         all_history_logs = []
         branch_errors = []
         successful_branches = 0
+        optional_branches_skipped = 0
         
         # [Guard] Map 에러가 있으면 기록
         if map_error:
@@ -2188,8 +2192,19 @@ class SegmentRunnerService:
         for i, branch_result in enumerate(parallel_results):
             # 1. Null Guard (루프 시작하자마자 체크)
             if branch_result is None or not isinstance(branch_result, dict):
+                # 🛡️ [Asymmetric Branch] terminates_early 브랜치는 Optional
+                # 해당 브랜치가 명시적 END로 종료되었을 수 있음
+                branch_id_temp = f'branch_{i}'
+                if branch_id_temp in terminates_early_branches:
+                    logger.info(
+                        f"[Aggregator] Branch {branch_id_temp} (terminates_early) skipped - "
+                        f"terminated with explicit END before aggregator."
+                    )
+                    optional_branches_skipped += 1
+                    continue
+                
                 logger.error(f"[Aggregator] Branch {i} is None or invalid.")
-                branch_errors.append({'branch_id': f'branch_{i}', 'error': 'Null Result'})
+                branch_errors.append({'branch_id': branch_id_temp, 'error': 'Null Result'})
                 continue
 
             # 2. 컨텍스트 추출 (루프 내부)
@@ -2260,6 +2275,7 @@ class SegmentRunnerService:
             'total_branches': len(parallel_results),
             'successful_branches': successful_branches,
             'failed_branches': len(branch_errors),
+            'optional_branches_skipped': optional_branches_skipped,  # 🛡️ terminates_early 브랜치 수
             'aggregated_at': time.time(),
             'logs_truncated': len(all_history_logs) >= 100 
         }
@@ -2360,6 +2376,32 @@ class SegmentRunnerService:
         total_segments = _safe_get_total_segments(event)
         next_segment = segment_to_run + 1
         
+        # 🛡️ [Asymmetric Branch Handling] terminates_early 브랜치 처리
+        # partition_service에서 설정된 terminates_early 플래그 확인
+        # 비대칭 브랜치(한쪽은 END, 다른쪽은 aggregator 합류)를 Optional로 처리
+        terminates_early_branches = {}
+        if segment_to_run < len(partition_map):
+            current_seg = partition_map[segment_to_run]
+            if current_seg and current_seg.get('type') == 'aggregator':
+                # Find the source parallel_group segment
+                source_p_seg_id = current_seg.get('source_parallel_group')
+                if source_p_seg_id is not None and source_p_seg_id < len(partition_map):
+                    source_p_seg = partition_map[source_p_seg_id]
+                    if source_p_seg and source_p_seg.get('type') == 'parallel_group':
+                        branches_meta = source_p_seg.get('branches', [])
+                        terminates_early_branches = {
+                            b.get('branch_id'): b 
+                            for b in branches_meta 
+                            if b.get('terminates_early', False)
+                        }
+                        
+                        if terminates_early_branches:
+                            logger.warning(
+                                f"[Aggregator] ⚠️ Asymmetric branch termination detected: "
+                                f"{len(terminates_early_branches)} branches terminate early. "
+                                f"These will be treated as OPTIONAL to prevent Wait-for-all deadlock."
+                            )
+        
         # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
         # Uses partition_map.outgoing_edges instead of scanning workflow_config.edges
         hitp_detected = False
@@ -2380,7 +2422,8 @@ class SegmentRunnerService:
         is_complete = next_segment >= total_segments
         
         logger.info(f"[Aggregator] [Success] Aggregation complete: "
-                   f"{successful_branches}/{len(parallel_results)} branches succeeded, "
+                   f"{successful_branches}/{len(parallel_results)} branches succeeded"
+                   f"{f', {optional_branches_skipped} optional branches skipped (terminates_early)' if optional_branches_skipped > 0 else ''}, "
                    f"next_segment={next_segment if not is_complete else 'COMPLETE'}, "
                    f"hitp_detected={hitp_detected}")
         

@@ -17,6 +17,10 @@ MAX_PARTITION_DEPTH = int(os.environ.get("MAX_PARTITION_DEPTH", "50"))
 # 최대 노드 수 제한 (대규모 그래프 보호)
 MAX_NODES_LIMIT = int(os.environ.get("MAX_NODES_LIMIT", "500"))
 
+# 성능 경고 임계값 (100개 노드 초과 시 경고)
+# 복잡한 그래프에서 위상 정렬/사이클 감지 latency 증가
+PERFORMANCE_WARNING_NODE_COUNT = int(os.environ.get("PERFORMANCE_WARNING_NODE_COUNT", "100"))
+
 # LLM 노드 타입들 - 이 타입들을 만날 때마다 세그먼트를 분할합니다
 # Note: Specific vendor types (openai_chat, anthropic_chat, etc.) are mapped to llm_chat via NODE_TYPE_ALIASES
 LLM_NODE_TYPES: FrozenSet[str] = frozenset({
@@ -529,6 +533,25 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
             f"Workflow has {len(nodes)} nodes, exceeding maximum limit of {MAX_NODES_LIMIT}. "
             f"Consider splitting into subgraphs."
         )
+    
+    # 🚨 [Performance Warning] 100개 노드 초과 시 경고
+    # Lambda 실행 시간(15분)보다 latency가 먼저 문제될 수 있음
+    # 복잡한 그래프일 경우 위상 정렬/사이클 감지 단계에서 지연 발생
+    performance_warnings = []
+    if len(nodes) > PERFORMANCE_WARNING_NODE_COUNT:
+        warning_msg = (
+            f"⚠️ Workflow has {len(nodes)} nodes (threshold: {PERFORMANCE_WARNING_NODE_COUNT}). "
+            f"Complex graphs may experience increased latency during topological sort and cycle detection. "
+            f"Consider splitting into smaller subworkflows for better performance."
+        )
+        performance_warnings.append({
+            "type": "high_node_count",
+            "severity": "warning",
+            "node_count": len(nodes),
+            "threshold": PERFORMANCE_WARNING_NODE_COUNT,
+            "message": warning_msg
+        })
+        logger.warning(warning_msg)
     
     # [Performance Optimization] 엣지 맵 생성 (Pre-indexed)
     # 향후 워크플로우 저장 시점에 메타데이터로 추출하여 재사용 가능
@@ -1198,6 +1221,16 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     
     total_segments_recursive = count_segments_recursive(segments)
     
+    # 🛡️ [Critical Fix] Step Functions Loop Control requires Top-Level Count
+    # execution_segments_count must be defined BEFORE use in loop limit calculation
+    # It must match len(partition_map), otherwise loop will try to access non-existent indices.
+    execution_segments_count = len(segments)
+    
+    # 🛡️ [P2 Fix] execution_segments_count가 0이면 최소 1로 보장 (빈 워크플로우 방어)
+    if execution_segments_count < 1:
+        logger.warning(f"execution_segments_count calculated as {execution_segments_count}, forcing to 1")
+        execution_segments_count = 1
+    
     # 🛡️ [Dynamic Loop Limit] Analyze loop structures for segment-based counting
     # nodes is Dict[str, Dict], but analyze_loop_structures expects List[Dict]
     loop_analysis = analyze_loop_structures(list(nodes.values()), node_to_seg_map)
@@ -1215,16 +1248,6 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
         f"estimated_executions={estimated_executions}"
     )
     
-    # 🛡️ [Critical Fix] Step Functions Loop Control requires Top-Level Count
-    # total_segments returned here drives the main execution loop (0..N-1).
-    # It must match len(partition_map), otherwise loop will try to access non-existent indices.
-    execution_segments_count = len(segments)
-    
-    # 🛡️ [P2 Fix] execution_segments_count가 0이면 최소 1로 보장 (빈 워크플로우 방어)
-    if execution_segments_count < 1:
-        logger.warning(f"execution_segments_count calculated as {execution_segments_count}, forcing to 1")
-        execution_segments_count = 1
-    
     # [Performance Optimization] Pre-indexed 메타데이터 반환
     return {
         "partition_map": segments,
@@ -1240,14 +1263,18 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
         # 🛡️ [Dynamic Loop Limit] Loop analysis results
         "loop_analysis": loop_analysis,
         "estimated_executions": estimated_executions,
+        # 🚨 [Performance Warnings] 대규모 워크플로우 경고
+        "performance_warnings": performance_warnings,
         "metadata": {
             "max_partition_depth": MAX_PARTITION_DEPTH,
             "max_nodes_limit": MAX_NODES_LIMIT,
+            "performance_warning_threshold": PERFORMANCE_WARNING_NODE_COUNT,
             "nodes_processed": len(visited_nodes),
             "total_nodes": len(nodes),
             "total_segments_recursive": total_segments_recursive,  # [Fix] Store recursive count in metadata
             "loop_nodes_count": loop_analysis["loop_count"],
-            "weighted_execution_estimate": estimated_executions
+            "weighted_execution_estimate": estimated_executions,
+            "has_performance_warnings": len(performance_warnings) > 0
         }
     }
 
