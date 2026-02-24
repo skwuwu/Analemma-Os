@@ -1,0 +1,171 @@
+{
+    "workflow_name": "Loop + Branch + Stress Test",
+    "description": "[Complex] 루프 내부 분기 + 상태 축적 + S3 오프로드 복구 + HITL 중첩 테스트",
+    "version": "1.0.0",
+    "test_category": "complex_integration",
+    "nodes": [
+        {
+            "id": "stress_init",
+            "type": "operator",
+            "label": "복합 스트레스 초기화",
+            "config": {
+                "language": "python",
+                "code": "import json\nimport time\n\nprint('[LOOP+BRANCH STRESS] Complex integration test initialization')\n\n# 루프 설정: 5회 반복\nstate['loop_items'] = list(range(5))\nstate['loop_counter'] = 0\nstate['max_loop_iterations'] = 5\n\n# 상태 축적용 배열 (점진적으로 100KB 넘도록 설계)\nstate['accumulated_results'] = []\nstate['offload_triggered_count'] = 0\nstate['branch_execution_count'] = 0\n\n# 각 루프 반복마다 ~25KB 데이터 축적 (5회 반복 = 125KB)\nstate['data_per_iteration_kb'] = 25\n\nprint(f'Configured: {len(state[\"loop_items\"])} loop iterations, {state[\"data_per_iteration_kb\"]}KB per iteration')\nprint(f'Expected total size: {len(state[\"loop_items\"]) * state[\"data_per_iteration_kb\"]}KB (should trigger S3 offload)')",
+                "output_key": "init_config"
+            }
+        },
+        {
+            "id": "loop_processor",
+            "type": "for_each",
+            "label": "루프 프로세서 (내부 분기 포함)",
+            "config": {
+                "input_list_key": "loop_items",
+                "output_key": "loop_results",
+                "max_iterations": 5,
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "loop_iteration_start",
+                            "type": "operator",
+                            "label": "반복 시작",
+                            "config": {
+                                "language": "python",
+                                "code": "import time\nimport json\n\niteration_idx = state.get('_for_each_index', 0)\nstate['current_iteration'] = iteration_idx\nstate['iteration_start_time'] = time.time()\n\n# 25KB 데이터 생성 (큰 문자열)\ndata_size_kb = state.get('data_per_iteration_kb', 25)\nlarge_data = 'X' * (data_size_kb * 1024)  # 25KB 문자열\n\nstate['current_iteration_data'] = {\n    'iteration': iteration_idx,\n    'timestamp': time.time(),\n    'large_payload': large_data\n}\n\nprint(f'[Loop {iteration_idx}] Generated {data_size_kb}KB payload')",
+                                "output_key": "iteration_start_result"
+                            }
+                        },
+                        {
+                            "id": "branch_decision",
+                            "type": "operator",
+                            "label": "분기 결정 (짝수/홀수)",
+                            "config": {
+                                "language": "python",
+                                "code": "import time\n\niteration_idx = state.get('current_iteration', 0)\n\n# 짝수/홀수로 분기 결정\nif iteration_idx % 2 == 0:\n    state['branch_route'] = 'even_path'\n    state['branch_action'] = 'parallel_processing'\nelse:\n    state['branch_route'] = 'odd_path'\n    state['branch_action'] = 'sequential_processing'\n\nprint(f'[Loop {iteration_idx}] Branch decision: {state[\"branch_route\"]}')",
+                                "output_key": "branch_decision_result"
+                            }
+                        },
+                        {
+                            "id": "parallel_branch_node",
+                            "type": "parallel_group",
+                            "label": "병렬 분기 (짝수 반복)",
+                            "branches": [
+                                {
+                                    "id": "branch_a",
+                                    "name": "Branch A",
+                                    "nodes": [
+                                        {
+                                            "id": "branch_a_llm",
+                                            "type": "llm",
+                                            "label": "Branch A LLM",
+                                            "config": {
+                                                "model": "gemini-2.0-flash-exp",
+                                                "system_prompt": "You are a test assistant for Branch A. Return JSON only.",
+                                                "user_prompt": "Analyze iteration {{current_iteration}} and return {\"branch\": \"A\", \"status\": \"processed\"}",
+                                                "output_key": "branch_a_result",
+                                                "max_tokens": 100
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "id": "branch_b",
+                                    "name": "Branch B",
+                                    "nodes": [
+                                        {
+                                            "id": "branch_b_llm",
+                                            "type": "llm",
+                                            "label": "Branch B LLM",
+                                            "config": {
+                                                "model": "gemini-2.0-flash-exp",
+                                                "system_prompt": "You are a test assistant for Branch B. Return JSON only.",
+                                                "user_prompt": "Analyze iteration {{current_iteration}} and return {\"branch\": \"B\", \"status\": \"processed\"}",
+                                                "output_key": "branch_b_result",
+                                                "max_tokens": 100
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        {
+                            "id": "sequential_branch_node",
+                            "type": "llm",
+                            "label": "순차 처리 (홀수 반복)",
+                            "config": {
+                                "model": "gemini-2.0-flash-exp",
+                                "system_prompt": "You are a sequential processor. Return JSON only.",
+                                "user_prompt": "Process odd iteration {{current_iteration}} and return {\"branch\": \"sequential\", \"status\": \"processed\"}",
+                                "output_key": "sequential_result",
+                                "max_tokens": 100
+                            }
+                        },
+                        {
+                            "id": "accumulate_results",
+                            "type": "operator",
+                            "label": "결과 축적 (S3 오프로드 트리거)",
+                            "config": {
+                                "language": "python",
+                                "code": "import json\nimport time\n\niteration_idx = state.get('current_iteration', 0)\niteration_data = state.get('current_iteration_data', {})\nbranch_route = state.get('branch_route', 'unknown')\n\n# 병렬 분기 결과 또는 순차 결과 수집\nif branch_route == 'even_path':\n    branch_a_result = state.get('branch_a_result', {})\n    branch_b_result = state.get('branch_b_result', {})\n    processing_result = {\n        'type': 'parallel',\n        'branch_a': branch_a_result,\n        'branch_b': branch_b_result\n    }\nelse:\n    sequential_result = state.get('sequential_result', {})\n    processing_result = {\n        'type': 'sequential',\n        'result': sequential_result\n    }\n\n# 누적 배열에 추가 (25KB 데이터 포함)\naccumulated = state.get('accumulated_results', [])\naccumulated.append({\n    'iteration': iteration_idx,\n    'timestamp': time.time(),\n    'branch_route': branch_route,\n    'processing_result': processing_result,\n    'large_payload': iteration_data.get('large_payload', '')\n})\nstate['accumulated_results'] = accumulated\n\n# 상태 크기 추정\ntotal_size_kb = len(json.dumps(accumulated)) / 1024\nstate['accumulated_size_kb'] = total_size_kb\n\n# S3 오프로드 감지 (100KB 임계값)\nif total_size_kb > 100:\n    state['offload_triggered_count'] = state.get('offload_triggered_count', 0) + 1\n    state['offload_expected'] = True\n    print(f'[Loop {iteration_idx}] S3 offload expected: {total_size_kb:.2f}KB > 100KB')\nelse:\n    state['offload_expected'] = False\n    print(f'[Loop {iteration_idx}] Current size: {total_size_kb:.2f}KB (below threshold)')\n\nstate['branch_execution_count'] = state.get('branch_execution_count', 0) + 1\nstate['loop_counter'] = iteration_idx + 1\n\nprint(f'[Loop {iteration_idx}] Accumulated {len(accumulated)} results, total size: {total_size_kb:.2f}KB')",
+                                "output_key": "accumulate_result"
+                            }
+                        }
+                    ],
+                    "edges": [
+                        {"source": "loop_iteration_start", "target": "branch_decision"},
+                        {
+                            "type": "conditional_edge",
+                            "source": "branch_decision",
+                            "router_func": "route_by_state_key",
+                            "state_key": "branch_route",
+                            "mapping": {
+                                "even_path": "parallel_branch_node",
+                                "odd_path": "sequential_branch_node"
+                            }
+                        },
+                        {"source": "parallel_branch_node", "target": "accumulate_results"},
+                        {"source": "sequential_branch_node", "target": "accumulate_results"}
+                    ]
+                }
+            }
+        },
+        {
+            "id": "hitp_checkpoint",
+            "type": "operator",
+            "hitp": true,
+            "label": "HITL 체크포인트 (루프 완료 후 승인)",
+            "config": {
+                "language": "python",
+                "code": "import json\n\naccumulated = state.get('accumulated_results', [])\ntotal_size_kb = state.get('accumulated_size_kb', 0)\noffload_count = state.get('offload_triggered_count', 0)\n\nstate['hitp_checkpoint'] = {\n    'total_iterations': len(accumulated),\n    'accumulated_size_kb': total_size_kb,\n    'offload_triggered_times': offload_count,\n    'requires_approval': True,\n    'approval_message': f'Loop completed: {len(accumulated)} iterations, {total_size_kb:.2f}KB accumulated. S3 offload triggered {offload_count} times. Approve?'\n}\n\nprint(f'[HITL] Checkpoint: {state[\"hitp_checkpoint\"][\"approval_message\"]}')",
+                "output_key": "hitp_checkpoint_result"
+            }
+        },
+        {
+            "id": "final_validator",
+            "type": "operator",
+            "label": "통합 검증",
+            "config": {
+                "language": "python",
+                "code": "import json\n\naccumulated = state.get('accumulated_results', [])\ntotal_size_kb = state.get('accumulated_size_kb', 0)\noffload_count = state.get('offload_triggered_count', 0)\nbranch_executions = state.get('branch_execution_count', 0)\nloop_counter = state.get('loop_counter', 0)\n\n# 검증 체크리스트\nvalidation = {\n    'loop_completed': loop_counter == 5,\n    'all_iterations_accumulated': len(accumulated) == 5,\n    'offload_triggered': offload_count > 0,\n    'size_exceeded_threshold': total_size_kb > 100,\n    'branch_executions_correct': branch_executions == 5,\n    'hitp_checkpoint_passed': 'hitp_checkpoint' in state\n}\n\nall_passed = all(validation.values())\n\nif all_passed:\n    state['TEST_RESULT'] = f'✅ LOOP+BRANCH STRESS PASSED: {loop_counter} loops, {total_size_kb:.2f}KB accumulated, S3 offload {offload_count}x, HITP passed'\n    print(f'[SUCCESS] {state[\"TEST_RESULT\"]}')\nelse:\n    failed_checks = [k for k, v in validation.items() if not v]\n    state['TEST_RESULT'] = f'❌ LOOP+BRANCH STRESS FAILED: {failed_checks}'\n    print(f'[FAILURE] {state[\"TEST_RESULT\"]}')\n\nstate['validation_details'] = validation\nstate['test_metrics'] = {\n    'total_iterations': loop_counter,\n    'accumulated_size_kb': total_size_kb,\n    'offload_count': offload_count,\n    'branch_executions': branch_executions\n}\n\nprint(f'Validation: {json.dumps(validation, indent=2)}')"
+            }
+        }
+    ],
+    "edges": [
+        {"source": "stress_init", "target": "loop_processor"},
+        {"source": "loop_processor", "target": "hitp_checkpoint", "type": "hitp"},
+        {"source": "hitp_checkpoint", "target": "final_validator"}
+    ],
+    "start_node": "stress_init",
+    "metadata": {
+        "test_features": [
+            "loop_processing",
+            "conditional_branching",
+            "parallel_execution",
+            "state_accumulation",
+            "s3_offload_trigger",
+            "hitp_after_loop",
+            "llm_in_branches"
+        ],
+        "expected_behavior": "루프 5회 반복, 각 반복마다 25KB 축적 (총 125KB), 짝수는 병렬 분기, 홀수는 순차 처리, 100KB 초과 시 S3 오프로드, HITL 승인 후 검증",
+        "complexity_score": 9.5
+    }
+}

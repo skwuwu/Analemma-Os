@@ -3872,17 +3872,18 @@ class SegmentRunnerService:
                 else:
                     logger.warning(f"[Kernel] [Warning] Skipping empty branch: {branch.get('branch_id', 'unknown')}")
             
-            # [Guard] 유효한 브랜치가 없으면 SUCCEEDED로 진행
+            # [Guard] 유효한 브랜치가 없으면 다음 세그먼트로 진행
             if not valid_branches:
                 logger.info(f"[Kernel] ⏭️ No valid branches to execute, skipping parallel group")
                 
                 # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
                 next_segment = segment_id + 1
                 total_segments = _safe_get_total_segments(event)
+                has_more_segments = next_segment < total_segments
                 hitp_detected = False
                 
                 # Use partition_map.outgoing_edges instead of scanning workflow_config.edges
-                if partition_map and isinstance(partition_map, list) and next_segment < total_segments:
+                if has_more_segments and partition_map and isinstance(partition_map, list):
                     current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
                     next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
                     
@@ -3911,11 +3912,12 @@ class SegmentRunnerService:
                         }
                     })
                 
+                # 🛡️ [v3.17 Fix] Check if more segments exist before returning CONTINUE
                 return _finalize_with_offload({
-                    "status": "CONTINUE",  # [Guard] [Fix] Use CONTINUE for ASL routing
+                    "status": "CONTINUE" if has_more_segments else "COMPLETE",
                     "final_state": mask_pii_in_state(initial_state),
                     "final_state_s3_path": None,
-                    "next_segment_to_run": next_segment,
+                    "next_segment_to_run": next_segment if has_more_segments else None,
                     "new_history_logs": [],
                     "error_info": None,
                     "branches": None,

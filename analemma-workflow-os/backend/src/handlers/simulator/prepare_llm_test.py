@@ -6,12 +6,15 @@ LLM Simulator Step Functions에서 호출됩니다.
 MOCK_MODE=false로 분산 오케스트레이터에 실행을 위임합니다.
 
 실행 파이프라인 점검 시나리오 (tests/backend/workflows/ 사용):
-  COMPLETE       — aiModel 노드 포함 Happy Path 파이프라인
-  FAIL           — 에러 처리 파이프라인
-  MAP_AGGREGATOR — 병렬 처리 + 결과 집계 파이프라인
-  LOOP_LIMIT     — 동적 루프 제한 파이프라인
-  S3_LARGE       — S3 Offload 파이프라인 (300KB+ 페이로드)
-  ASYNC_LLM      — 비동기 LLM 실행 파이프라인
+  COMPLETE            — aiModel 노드 포함 Happy Path 파이프라인
+  FAIL                — 에러 처리 파이프라인
+  MAP_AGGREGATOR      — 병렬 처리 + 결과 집계 파이프라인
+  LOOP_LIMIT          — 동적 루프 제한 파이프라인
+  LOOP_BRANCH_STRESS  — 루프 + 분기 + 상태 축적 + S3 오프로드 복합 테스트
+  STRESS              — 극한 스트레스 (루프 내부 HITL + 병렬 데이터 레이스)
+  VISION              — 멀티모달 비전 (메모리 추정, 인젝션 방어, 상태 오프로드)
+  HITP_RECOVERY       — HITP 후 정상 복구 로직 테스트
+  ASYNC_LLM           — 비동기 LLM 실행 파이프라인
 """
 
 import json
@@ -32,12 +35,15 @@ AUTO_RESUME_HITP = 'true' # HITP 자동 승인 (무한대기 방지)
 # 실제 프로덕션 스키마 워크플로 파일 (tests/backend/workflows/*.json)
 
 PIPELINE_TEST_MAPPINGS: Dict[str, str] = {
-    'COMPLETE':       'test_complete_workflow',
-    'FAIL':           'test_fail_workflow',
-    'MAP_AGGREGATOR': 'test_map_aggregator_workflow',
-    'LOOP_LIMIT':     'test_loop_limit_dynamic_workflow',
-    'S3_LARGE':       'test_s3_large_workflow',
-    'ASYNC_LLM':      'test_async_llm_workflow',
+    'COMPLETE':            'test_complete_workflow',
+    'FAIL':                'test_fail_workflow',
+    'MAP_AGGREGATOR':      'test_map_aggregator_workflow',
+    'LOOP_LIMIT':          'test_loop_limit_dynamic_workflow',
+    'LOOP_BRANCH_STRESS':  'test_loop_branch_stress_workflow',
+    'STRESS':              'test_hyper_stress_workflow',
+    'VISION':              'test_vision_workflow',
+    'HITP_RECOVERY':       'test_hitp_workflow',
+    'ASYNC_LLM':           'test_async_llm_workflow',
 }
 
 # 시나리오별 추가 initial_state 주입값
@@ -57,10 +63,25 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
         'pipeline_test_enabled': True,
         'verify_loop_count': True,
     },
-    'S3_LARGE': {
+    'LOOP_BRANCH_STRESS': {
         'pipeline_test_enabled': True,
+        'verify_loop_branch_integration': True,
         'verify_s3_offload': True,
-        'expected_payload_size_kb': 300,
+        'expected_outer_count': 5,
+    },
+    'STRESS': {
+        'pipeline_test_enabled': True,
+        'verify_extreme_stress': True,
+        'expected_outer_count': 4,
+    },
+    'VISION': {
+        'pipeline_test_enabled': True,
+        'verify_multimodal': True,
+        'product_image': 's3://test-bucket/large_product_8mb.jpg',
+    },
+    'HITP_RECOVERY': {
+        'pipeline_test_enabled': True,
+        'verify_hitp_recovery': True,
     },
     'ASYNC_LLM': {
         'pipeline_test_enabled': True,

@@ -150,7 +150,9 @@ def _dispatch_worker(payload: Dict[str, Any], context: Any) -> Dict[str, Any]:
                     segment_event[key] = payload[key]
                     
             result = segment_runner(segment_event, context)
-            final_payload = _build_final_payload(result, segment_to_run)
+            # 🛡️ [v3.17 Fix] Pass total_segments to prevent loop limit exceeded
+            total_segments = result.get('total_segments', segment_to_run + 2)  # Safe default
+            final_payload = _build_final_payload(result, segment_to_run, total_segments)
             # Preserve existing messages/system_data before sending to Step Functions
             final_payload = _merge_state_preserving_messages(final_payload, current_state)
             _send_task_success(task_token, final_payload)
@@ -345,7 +347,9 @@ def _execute_worker(payload: Dict[str, Any], context: Any = None) -> Dict[str, A
         _send_task_failure(task_token, "AsyncLLMProcessingFailed", "Failed to evaluate runner result")
         return {"status": "CALLBACK_SENT_FAILURE"}
 
-    final_payload = _build_final_payload(result, segment_to_run)
+    # 🛡️ [v3.17 Fix] Pass total_segments to prevent loop limit exceeded
+    total_segments = result.get('total_segments', segment_to_run + 2)  # Safe default
+    final_payload = _build_final_payload(result, segment_to_run, total_segments)
     # Ensure messages/system_data are preserved so States.JsonMerge does not discard history
     final_payload = _merge_state_preserving_messages(final_payload, current_state)
 
@@ -360,14 +364,22 @@ def _execute_worker(payload: Dict[str, Any], context: Any = None) -> Dict[str, A
     return {"status": "CALLBACK_SENT"}
 
 
-def _build_final_payload(result: Any, segment_index: int) -> Dict[str, Any]:
+def _build_final_payload(result: Any, segment_index: int, total_segments: Optional[int] = None) -> Dict[str, Any]:
     """
     세그먼트 실행 결과를 Step Functions 호환 페이로드로 변환.
     
     🚨 [Critical Fix] States.JsonMerge 호환성을 위해 final_state는 항상 dict 보장
+    🛡️ [v3.17 Fix] total_segments 체크로 무한 루프 방지
     """
+    # 🛡️ [v3.17 Fix] Check if this is the last segment
+    next_segment_num = segment_index + 1
+    is_last_segment = False
+    
+    if total_segments is not None and next_segment_num >= total_segments:
+        is_last_segment = True
+    
     payload: Dict[str, Any] = {
-        "next_segment_to_run": segment_index + 1,
+        "next_segment_to_run": None if is_last_segment else next_segment_num,
         "status": "COMPLETE",
     }
 
