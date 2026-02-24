@@ -89,6 +89,79 @@ class StateVersioningService:
     ✅ v3.3: 급진적 재설계 (마이그레이션 족쇄 제거)
     """
     
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # [v3.3] 전역 표준 직렬화: 1비트의 오차도 없는 해시 생성 보장
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 외부 호출자(예: initialize_state_data.py)가 객체 생성 없이
+    # 동일한 해시를 계산할 수 있도록 @staticmethod로 제공
+    # ⚠️ [CRITICAL] 해시 알고리즘 변경 시 이 메서드만 수정하면 됨
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    @staticmethod
+    def get_canonical_json(data: Any) -> bytes:
+        """
+        [v3.3] 전역 표준 직렬화: 1비트의 오차도 없는 해시 생성 보장
+        
+        외부 호출 예시:
+        ```python
+        from src.services.state.state_versioning_service import StateVersioningService
+        canonical_data = StateVersioningService.get_canonical_json(manifest_obj)
+        hash_value = StateVersioningService.compute_hash(manifest_obj)
+        ```
+        
+        Args:
+            data: 직렬화할 파이썬 객체 (dict, list, etc.)
+        
+        Returns:
+            bytes: UTF-8 인코딩된 표준 JSON (키 정렬, 공백 제거)
+        
+        Note:
+            - sort_keys=True: 키 순서로 인한 해시 불일치 방지
+            - separators=(',', ':'): 공백 제거로 해시 일관성 확보
+            - ensure_ascii=False: UTF-8 보존 (한글 등 멀티바이트 문자)
+            - datetime → ISO 8601 표준화
+            - Decimal → float 변환 (DynamoDB 호환)
+        """
+        from datetime import datetime, date
+        from decimal import Decimal
+        
+        def default_handler(obj):
+            if isinstance(obj, (datetime, date)):
+                return obj.isoformat()  # ISO 8601 표준화
+            if isinstance(obj, Decimal):
+                return float(obj)       # DynamoDB Decimal 호환
+            if hasattr(obj, '__dict__'):
+                return obj.__dict__
+            return str(obj)
+        
+        return json.dumps(
+            data,
+            sort_keys=True,             # 키 정렬 필수
+            separators=(',', ':'),      # 공백 제거로 해시 일관성 확보
+            ensure_ascii=False,         # UTF-8 보존
+            default=default_handler
+        ).encode('utf-8')
+    
+    @staticmethod
+    def compute_hash(data: dict) -> str:
+        """
+        [v3.3] 표준 해시 계산 (SHA-256)
+        
+        ⚠️ [CRITICAL] 해시 알고리즘 변경 시 이 메서드만 수정
+        예: SHA-256 → SHA-512 마이그레이션 시
+        ```python
+        return hashlib.sha512(canonical_json).hexdigest()
+        ```
+        
+        Args:
+            data: 해시를 계산할 파이썬 딕셔너리
+        
+        Returns:
+            str: SHA-256 해시 (hex digest)
+        """
+        canonical_json = StateVersioningService.get_canonical_json(data)
+        return hashlib.sha256(canonical_json).hexdigest()
+    
     def __init__(
         self,
         dynamodb_table: str,
@@ -405,6 +478,13 @@ class StateVersioningService:
         # ✅ [피드백 ③] TransactWriteItems 100개 제한 대응
         # 제한: DynamoDB 트랜잭션은 최대 100개 아이템
         # 해결: 블록이 100개 초과 시 배치 분할
+        # 
+        # ⚠️ [RISK] 100개 초과 시 전체 원자성 보장 불가
+        # - 첫 트랜잭션: 매니페스트 + 첫 99개 블록 (원자적)
+        # - 이후 배치: 나머지 블록 참조 카운트 (별도 트랜잭션)
+        # - 중간 실패 시: 매니페스트는 생성되었지만 일부 블록 참조 미증가 가능
+        # - 완화책: GC Grace Period 동안 미참조 블록도 유지 (Phase 10)
+        # - 권장: 필드 수가 극단적으로 많다면 필드 그룹화 고려
         MAX_TRANSACTION_ITEMS = 100
         
         for attempt in range(VERSION_RETRY_ATTEMPTS):
@@ -703,28 +783,21 @@ class StateVersioningService:
     
     def _canonical_json_serialize(self, data: Any) -> str:
         """
-        [Fix #3] 표준 직렬화 포맷 (100% 해시 일관성 보장)
+        [Deprecated] Legacy wrapper for get_canonical_json()
         
-        피드백 반영:
-        - ❌ 기존: default=str로 datetime 포맷 불일치 가능
-        - ✅ 개선: ISO 8601 강제, Decimal → float 표준화
+        ⚠️ Use StateVersioningService.get_canonical_json() instead
+        This method is kept for backward compatibility only.
         """
-        def default_handler(obj):
-            if isinstance(obj, datetime):
-                return obj.isoformat()  # ISO 8601 강제
-            elif isinstance(obj, Decimal):
-                return float(obj)  # DynamoDB Decimal 처리
-            elif hasattr(obj, '__dict__'):
-                return obj.__dict__
-            else:
-                return str(obj)
-        
-        return json.dumps(data, sort_keys=True, default=default_handler, ensure_ascii=False)
+        return StateVersioningService.get_canonical_json(data).decode('utf-8')
     
     def _compute_hash(self, data: dict) -> str:
-        """JSON 데이터의 SHA256 해시 계산 (표준 직렬화 사용)"""
-        json_str = self._canonical_json_serialize(data)
-        return hashlib.sha256(json_str.encode('utf-8')).hexdigest()
+        """
+        [Wrapper] Instance method wrapper for static compute_hash()
+        
+        ✅ 내부적으로 StateVersioningService.compute_hash() 호출
+        ✅ 해시 알고리즘 변경 시 static method만 수정하면 자동 동기화
+        """
+        return StateVersioningService.compute_hash(data)
     
     def _compute_merkle_root(
         self,
@@ -1995,7 +2068,20 @@ class StateVersioningService:
                 
                 if content_encoding == 'gzip':
                     import gzip
-                    block_data = gzip.decompress(raw_data).decode('utf-8')
+                    # 🛡️ [RISK] Gzip 손상 데이터 처리 (EOFError 방어)
+                    # 재시도 로직은 상위 ThreadPoolExecutor에서 처리
+                    try:
+                        block_data = gzip.decompress(raw_data).decode('utf-8')
+                    except (EOFError, OSError) as decomp_err:
+                        logger.error(
+                            f"[Gzip Decompression] Failed for block {block_info.get('block_id', 'unknown')}: "
+                            f"{decomp_err}. Data size: {len(raw_data)}B. "
+                            f"This indicates data corruption or incomplete S3 write."
+                        )
+                        raise RuntimeError(
+                            f"Gzip decompression failed: {decomp_err}. "
+                            f"Block {block_info.get('block_id', 'unknown')} may be corrupted."
+                        ) from decomp_err
                 elif content_encoding == 'zstd':
                     # 🔄 하위 호환: 기존 Zstd 블록 지원 (점진적 마이그레이션)
                     try:

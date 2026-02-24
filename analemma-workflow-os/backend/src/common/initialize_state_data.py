@@ -675,19 +675,22 @@ def _execute_initialization(event, context):
                             manifest_content = raw_content
                         
                         # 🔧 [Critical Fix] Canonical JSON 직렬화로 해시 오탐 방지
-                        # ⚠️ [SYNC REQUIRED] StateVersioningService._compute_hash()와 100% 동일한 로직
-                        # 해시 알고리즘 변경 시 반드시 양쪽 동시 업데이트 필수
-                        # (예: SHA-256 → SHA-512 마이그레이션 시 state_versioning_service.py도 함께 변경)
+                        # ✅ [Zero Duplication] StateVersioningService.compute_hash() static method 사용
+                        # ⚠️ [SYNC SAFEGUARD] 해시 알고리즘 변경 시 단 한 곳만 수정
+                        #    (state_versioning_service.py의 compute_hash() static method)
+                        # 예: SHA-256 → SHA-512 마이그레이션 시
+                        #     StateVersioningService.compute_hash()만 수정하면 자동 동기화
                         try:
                             # Step 1: Parse JSON to Python object
                             manifest_obj = json.loads(manifest_content.decode('utf-8'))
                             
-                            # Step 2: Reuse StateVersioningService's canonical hash logic
-                            # ✅ [Zero Duplication] 직렬화 로직 재사용으로 동기화 위험 제거
-                            computed_hash = versioning_service._compute_hash(manifest_obj)
+                            # Step 2: Use static method for canonical hash computation
+                            # 인스턴스 생성 불필요 - 직접 클래스 메서드 호출
+                            from src.services.state.state_versioning_service import StateVersioningService
+                            computed_hash = StateVersioningService.compute_hash(manifest_obj)
                             
                             logger.info(
-                                f"[Hash Verification] Canonical hash computed: "
+                                f"[Hash Verification] Canonical hash computed via static method: "
                                 f"raw_size={len(manifest_content)}B"
                             )
                         except json.JSONDecodeError as json_err:
@@ -703,13 +706,13 @@ def _execute_initialization(event, context):
                                 f"Gzipped: {is_gzipped}, "
                                 f"Size: raw={len(raw_content)}B, content={len(manifest_content)}B. "
                                 f"This indicates data corruption, tampering, or JSON serialization mismatch. "
-                                f"Verify StateVersioningService._compute_hash() consistency."
+                                f"Verify StateVersioningService.compute_hash() consistency (static method)."
                             )
                         
                         logger.info(
                             f"[Hash Verification] ✅ Manifest integrity confirmed: "
                             f"{computed_hash[:16]}... (Gzipped: {is_gzipped}, "
-                            f"Algorithm: StateVersioningService._compute_hash)"
+                            f"Method: StateVersioningService.compute_hash [static])"
                         )
                     except s3_client.exceptions.NoSuchKey:
                         raise RuntimeError(
