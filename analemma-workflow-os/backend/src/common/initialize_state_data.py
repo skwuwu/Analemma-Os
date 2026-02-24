@@ -634,19 +634,21 @@ def lambda_handler(event, context):
     bag['input'] = raw_input
     bag['loop_counter'] = 0
     
-    # 🛡️ [Dynamic Loop Limit] Weighted execution count calculation
-    # Formula: NonLoopNodes + Σ(LoopNodes × MaxIterations) + SafetyMargin(20%)
+    # 🛡️ [Dynamic Loop Limit] Segment-based weighted execution counting
+    # Formula: (TotalSegments + LoopWeightedSegments) × 1.2 + 20
+    # where LoopWeightedSegments = Σ(SegCount × (MaxIter-1)) + 2×ForEachCount
     # 
-    # Example:
-    #   - 5 nodes total, 3 in loop with max_iterations=50
-    #   - Non-loop: 2
-    #   - Loop weighted: 3 × 50 = 150
-    #   - Total estimate: 2 + 150 = 152
-    #   - Safety margin (20%): 152 × 0.2 = 30.4 ≈ 30
-    #   - Final limit: 152 + 30 = 182
+    # Example 1 - for_each with 30 iterations:
+    #   - 3 base segments (prep, for_each, validator)
+    #   - for_each adds 2 (parallel_group + aggregator)
+    #   - Estimated: (3 + 2) × 1.2 + 20 = 26
     #
-    # This prevents LoopLimitExceeded errors for complex workflows while
-    # still blocking runaway processes (limit scales with workflow size).
+    # Example 2 - Sequential loop with 5 iterations, 2 internal segments:
+    #   - 4 base segments (prep, loop, seg1, seg2, validator)
+    #   - loop adds 2 × (5-1) = 8
+    #   - Estimated: (4 + 8) × 1.2 + 20 = 34.4 ≈ 35
+    #
+    # This prevents LoopLimitExceeded errors while maintaining safety bounds.
     
     # Extract loop analysis from partition_result (if available)
     if partition_result:

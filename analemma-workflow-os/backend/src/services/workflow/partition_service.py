@@ -249,27 +249,28 @@ def estimate_node_duration(node: Dict[str, Any]) -> float:
     return base_duration
 
 
-def analyze_loop_structures(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[str, int] = None) -> Dict[str, Any]:
     """
     Analyze loop structures to estimate weighted execution count.
     
-    🛡️ [Dynamic Loop Limit] Physical segment calculation for loop/for_each nodes
-    - Counts actual segment executions, not logical node count
-    - Formula: Σ(nodes_in_loop × max_iterations) for each loop
-    - Handles nested loops recursively
+    🛡️ [Dynamic Loop Limit] Segment-based iteration counting
+    - for_each: Adds fixed 2 (parallel_group + aggregator)
+    - Sequential loop: Adds (internal_segment_count × max_iterations)
+    - Formula: 2 × for_each_count + Σ(segment_count × max_iter) for loops
     
     Args:
         nodes: List of workflow nodes
+        node_to_seg_map: Mapping of node_id → segment_id (optional)
         
     Returns:
         {
             "loop_nodes": [...],
-            "total_loop_executions": int,  # Weighted sum
+            "total_loop_weighted_segments": int,  # Weighted segment count
             "loop_count": int
         }
     """
     loop_nodes = []
-    total_weighted_count = 0
+    total_weighted = 0
     
     for node in nodes:
         node_type = node.get("type", "")
@@ -279,20 +280,30 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
             max_iter = config.get("max_iterations", 5)
             sub_nodes = config.get("nodes", [])
             
+            # Calculate how many segments this loop's internal nodes span
+            if node_to_seg_map:
+                sub_node_ids = [n.get("id") for n in sub_nodes if n.get("id")]
+                sub_segments = set(node_to_seg_map.get(nid) for nid in sub_node_ids if node_to_seg_map.get(nid) is not None)
+                segment_count = len(sub_segments) if sub_segments else len(sub_nodes)
+            else:
+                # Fallback: estimate based on node count
+                segment_count = max(1, len(sub_nodes))
+            
             # Recursive analysis for nested loops
-            sub_analysis = analyze_loop_structures(sub_nodes)
+            sub_analysis = analyze_loop_structures(sub_nodes, node_to_seg_map)
             
             loop_nodes.append({
                 "node_id": node.get("id"),
                 "type": "loop",
                 "max_iterations": max_iter,
                 "sub_node_count": len(sub_nodes),
+                "sub_segment_count": segment_count,
                 "nested_loops": sub_analysis["loop_nodes"]
             })
             
-            # Weighted count: (sub_nodes + nested_loop_executions) × max_iterations
-            inner_total = len(sub_nodes) + sub_analysis["total_loop_executions"]
-            total_weighted_count += inner_total * max_iter
+            # ✅ [FIX] Segment-based counting: segment_count × (max_iter - 1)
+            # Subtract 1 because total_segments already includes the first execution
+            total_weighted += segment_count * (max_iter - 1) + sub_analysis["total_loop_weighted_segments"]
             
         elif node_type == "for_each":
             max_iter = config.get("max_iterations", 20)
@@ -300,7 +311,7 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
             sub_nodes = sub_workflow.get("nodes", [])
             
             # Recursive analysis
-            sub_analysis = analyze_loop_structures(sub_nodes)
+            sub_analysis = analyze_loop_structures(sub_nodes, node_to_seg_map)
             
             loop_nodes.append({
                 "node_id": node.get("id"),
@@ -310,15 +321,13 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
                 "nested_loops": sub_analysis["loop_nodes"]
             })
             
-            # ✅ [FIX] for_each uses SUM, not MAX
-            # Even parallel execution creates separate segments for each node
-            # 30 items × 3 nodes = 90 segments (not 3)
-            inner_total = len(sub_nodes) + sub_analysis["total_loop_executions"]
-            total_weighted_count += inner_total * max_iter
+            # ✅ [FIX] for_each adds fixed 2: parallel_group + aggregator
+            # Internal Map iterations don't increase main loop counter
+            total_weighted += 2 + sub_analysis["total_loop_weighted_segments"]
     
     return {
         "loop_nodes": loop_nodes,
-        "total_loop_executions": total_weighted_count,
+        "total_loop_weighted_segments": total_weighted,
         "loop_count": len(loop_nodes)
     }
 
@@ -1189,21 +1198,21 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     
     total_segments_recursive = count_segments_recursive(segments)
     
-    # 🛡️ [Dynamic Loop Limit] Analyze loop structures for weighted execution count
+    # 🛡️ [Dynamic Loop Limit] Analyze loop structures for segment-based counting
     # nodes is Dict[str, Dict], but analyze_loop_structures expects List[Dict]
-    loop_analysis = analyze_loop_structures(list(nodes.values()))
+    loop_analysis = analyze_loop_structures(list(nodes.values()), node_to_seg_map)
     
-    # Calculate estimated executions: non-loop nodes + weighted loop executions
-    non_loop_nodes = len(nodes) - loop_analysis["loop_count"]
-    estimated_executions = non_loop_nodes + loop_analysis["total_loop_executions"]
+    # Calculate estimated executions using accurate segment-based formula
+    # Formula: total_segments + Σ(segment_count × (max_iter - 1)) + 2 × for_each_count
+    weighted_loop_segments = loop_analysis["total_loop_weighted_segments"]
+    estimated_executions = execution_segments_count + weighted_loop_segments
     
     logger.info(
-        f"[Dynamic Loop Limit] Loop analysis: "
-        f"total_nodes={len(nodes)}, "
-        f"loop_nodes={loop_analysis['loop_count']}, "
-        f"non_loop_nodes={non_loop_nodes}, "
-        f"weighted_loop_executions={loop_analysis['total_loop_executions']}, "
-        f"estimated_total={estimated_executions}"
+        f"[Dynamic Loop Limit] Segment-based analysis: "
+        f"base_segments={execution_segments_count}, "
+        f"loop_count={loop_analysis['loop_count']}, "
+        f"weighted_loop_segments={weighted_loop_segments}, "
+        f"estimated_executions={estimated_executions}"
     )
     
     # 🛡️ [Critical Fix] Step Functions Loop Control requires Top-Level Count
