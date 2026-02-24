@@ -46,8 +46,9 @@ Ring 0 — KERNEL (Immutable System Core)
     v
 Ring 1 — GOVERNOR (Deterministic Gatekeeper)
     |   governor_runner       Post-execution output validation
-    |   trust_score_manager   EMA-based agent trust accounting
+    |   governance_engine     Article 1–6 parallel validation (asyncio.gather)
     |   constitution.py       Constitutional AI clause enforcement
+    |   prompt_security_guard Capability map + semantic injection shield
     |
     v
 Ring 2 — TRUSTED TOOLS
@@ -197,24 +198,71 @@ The Governor (Ring 1) validates agent output after every segment execution.
 | Plan drift | SHA-256 hash comparison + keyword-overlap Intent Retention Rate | 0.7 IRR minimum |
 | Gas fee | Accumulated `total_tokens_used * cost_per_token` | Configurable, default $100 USD |
 | Circuit breaker | Per-agent retry counter from workflow state | Configurable, default 3 retries |
+| Constitutional articles (1–6) | `GovernanceEngine.verify()` — asyncio.gather parallel validators | CRITICAL → anomaly_score ≥ 0.8 |
 | Kernel command forgery | Intersection of agent output keys with `KERNEL_CONTROL_KEYS` set | Zero tolerance |
 
-### Trust Score Model
+### Anomaly Score Model
 
-Agent trust scores use an Exponential Moving Average to solve the asymmetric recovery problem inherent in fixed-increment systems:
+The Governor produces an `anomaly_score` (0.0–1.0) for every agent output. Each violation adds 0.2, capped at 1.0. Two classes of violations trigger hard boosts:
 
 ```
-delta_S = BASE_INCREMENT * (1 + 2.0 * streak_ratio)
-          where streak_ratio = consecutive_successes / recent_window (last 10)
+anomaly_score = min(len(violations) * 0.2, 1.0)
 
-T_new = clamp(T_old + delta_S - (PENALTY_MULTIPLIER * anomaly_score), 0.0, 1.0)
+# Hard boosts (applied after base calculation)
+KERNEL_COMMAND_FORGERY      → anomaly_score = 1.0   (immediate SIGKILL)
+CONSTITUTIONAL_VIOLATION    → anomaly_score = max(anomaly_score, 0.8)
 ```
 
-With a 5-step consecutive success streak, `delta_S = 0.03` (vs. the fixed baseline of `0.01`). Trust restoration from 0.4 to 0.8 converges in **14 iterations instead of 40** — a 65% reduction in recovery steps. This figure is derived directly from the model parameters in `trust_score_manager.py`.
+Decision thresholds: `≥ 0.8` → REJECTED, `≥ 0.5` → ESCALATED, `< 0.5` → APPROVED.
 
-Ring-level penalty multipliers: Ring 0 = 2.0x, Ring 1 = 1.5x, Ring 2 = 0.8x, Ring 3 = 0.5x.
+### GovernanceEngine — Parallel Article Enforcement
 
-Scores below 0.4 force STRICT governance mode regardless of ring level.
+`GovernanceEngine` (`governance_engine.py`) bridges the gap between Article definitions and runtime enforcement. All six articles are validated in parallel via `asyncio.gather()`:
+
+| Article | Validator | Logic |
+|---|---|---|
+| 1 — Tone | `Article1ToneValidator` | Profanity keyword patterns |
+| 2 — Harmful | `Article2HarmfulContentValidator` | `INJECTION_PATTERNS` + harmful keyword set |
+| 3 — User Protection | `Article3UserProtectionValidator` | PII solicitation regex (card numbers, passwords) |
+| 4 — Transparency | `Article4TransparencyValidator` | Over-certainty phrase detection |
+| 5 — Security | `Article5SecurityPolicyValidator` | Reuses `INJECTION_PATTERNS` |
+| 6 — PII Leakage | `Article6PIILeakageValidator` | `RetroactiveMaskingService.scan()` + regex fallback |
+
+LOW-severity violations accumulate: 10 or more LOW hits within a single verify call are upgraded to MEDIUM automatically.
+
+### SemanticShield — 3-Stage Injection Defense
+
+`SemanticShield` (`semantic_shield.py`) replaces the static blocklist with a layered normalization-then-match pipeline:
+
+```
+Stage 1 — Normalization (all rings)
+    Zero-Width Space removal (U+200B/C/D, FEFF, 2060)
+    RTL Override removal (U+202E/D)
+    Base64 decode attempt (injection extraction)
+    Homoglyph normalization (Cyrillic/Greek/Full-width → Latin)
+
+Stage 2 — Pattern Matching (all rings)
+    English INJECTION_PATTERNS + 8 Korean injection patterns
+    Matching runs on normalized text → bypass-resistant
+
+Stage 3 — Semantic LLM Classification (Ring 2 / Ring 3 only)
+    Bedrock Guardrails or Gemini ShieldGemma
+    Intent classification: BENIGN | INJECTION | JAILBREAK
+    Skipped for Ring 0/1 to reduce inference cost
+```
+
+Graceful degradation: if Stage 3 is unavailable, the shield continues with Stage 1+2.
+
+### Ring-fenced Capability Map
+
+Every tool call from any agent is gated by `validate_capability(ring_level, tool_name)` — Default-Deny: any tool not explicitly listed returns `False`.
+
+| Ring | Allowed Tools |
+|---|---|
+| 0 — KERNEL | All (unrestricted) |
+| 1 — DRIVER | `filesystem_read/write`, `subprocess_call`, `network_limited`, `database_*`, `config_*`, `s3_read`, `cache_*`, `event_publish` |
+| 2 — SERVICE | `network_read`, `database_query/read`, `cache_read`, `event_publish`, `s3_read`, `config_read` |
+| 3 — USER | `basic_query`, `read_only` |
 
 ### Constitutional AI Clauses
 
@@ -230,6 +278,19 @@ Six default articles are enforced at Ring 1. CRITICAL-severity violations produc
 | 6 | No PII in output text (email, phone, SSN detected via regex) | CRITICAL |
 
 Custom clauses can be added per-workflow via `governance_policies.constitution[]` with article numbers above 6.
+
+### Distributed CircuitBreaker (Redis-backed)
+
+`RedisCircuitBreaker` (`retry_utils.py`) provides cross-worker Circuit Breaker consensus using Lua atomic scripts and Redis Pub/Sub:
+
+- **Lua INCR + EXPIRE**: failure count increment and TTL window reset are atomic — no race condition between concurrent workers.
+- **Pub/Sub broadcast**: when any worker opens a circuit, all other workers receive the `cb:state_changes` event and update their local state immediately.
+- **Graceful degradation**: if Redis is unreachable, the factory falls back to in-memory CircuitBreaker automatically.
+
+```
+REDIS_URL set → RedisCircuitBreaker (distributed, cross-worker consensus)
+REDIS_URL unset → CircuitBreaker (in-memory, single-worker)
+```
 
 ---
 

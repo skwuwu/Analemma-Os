@@ -118,6 +118,25 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 result['state_size_threshold'] = getattr(service, 'threshold', 180)
         
         logger.info("✅ Segment Runner finished successfully.")
+
+        # 🎒 [v3.13] ASL contract enforcement: ensure result has next_action
+        # service.execute_segment() has multiple return paths:
+        #   - kernel protocol path already returns sealed {state_data, next_action}
+        #   - all other paths return raw {status, final_state, ...} without next_action
+        # If raw, seal now so SFN ResultSelector can find $.Payload.next_action.
+        # Without this, EvaluateNextAction always hits Default→IncrementLoopCounter→loop limit.
+        if KERNEL_PROTOCOL_AVAILABLE and isinstance(result, dict) and 'next_action' not in result:
+            try:
+                base_state = open_state_bag(event)
+            except Exception:
+                base_state = {}
+            result = seal_state_bag(
+                base_state=base_state,
+                result_delta=result,
+                action='sync',
+                context={}
+            )
+
         return result
 
     except Exception as e:
