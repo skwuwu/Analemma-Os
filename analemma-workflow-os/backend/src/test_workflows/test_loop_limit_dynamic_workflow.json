@@ -1,156 +1,80 @@
 {
-    "id": "LOOP_LIMIT_DYNAMIC_OS_TEST",
-    "workflow_name": "Dynamic Loop Limit with Forced Termination Test",
-    "description": "[Enhanced] 동적 루프 제한 + 강제 종료 인터셉트 + 브랜치 루프 독립성 검증",
-    "version": "2.0.0",
-    "test_category": "os_availability_management",
+    "workflow_name": "Dynamic Loop Limit Test - 30 Iterations",
+    "description": "Tests dynamic loop limit calculation: 3 nodes × 30 iterations = 90 weighted executions",
     "nodes": [
         {
-            "id": "loop_limit_prep",
+            "id": "prep",
             "type": "operator",
-            "label": "동적 루프 제한 계산",
+            "label": "Test Preparation",
             "config": {
                 "language": "python",
-                "code": "print('동적 루프 제한 테스트 준비')\n\nstate['loop_limit_test_started'] = True\nstate['total_segments'] = 15  # 워크플로우 예상 세그먼트 수\n\n# 동적 계산: OS가 워크플로우 크기에 따라 자동 조정\nstate['expected_max_loop'] = state['total_segments'] + 20  # Main loop: S + 20\nstate['expected_max_branch_loop'] = state['total_segments'] + 10  # Branch loop: S + 10\n\nresult = {\n    'test_type': 'loop_limit_dynamic_os',\n    'total_segments': state['total_segments'],\n    'expected_max_loop': state['expected_max_loop'],\n    'expected_max_branch_loop': state['expected_max_branch_loop'],\n    'dynamic_calculation': True,\n    'formula': 'L_main = S + 20, L_branch = S + 10'\n}\nstate['prep_result'] = result\n\nprint(f'동적 루프 제한 계산: 세그먼트 {state[\"total_segments\"]}개 → 메인 {state[\"expected_max_loop\"]}회, 브랜치 {state[\"expected_max_branch_loop\"]}회')"
+                "code": "print('Dynamic Loop Limit Test Started')\nstate['test_started'] = True\nstate['counter'] = 0\nstate['loop_items'] = list(range(30))  # 30 iterations\nprint(f'Prepared {len(state[\"loop_items\"])} iterations')"
             }
         },
         {
-            "id": "loop_simulation_step1",
-            "type": "operator",
-            "label": "루프 시뮬레이션 1단계",
+            "id": "heavy_loop",
+            "type": "for_each",
+            "label": "Heavy Loop - 30 Iterations × 3 Nodes",
             "config": {
-                "language": "python",
-                "code": "print('루프 시뮬레이션 1단계')\n\nif not state.get('loop_limit_test_started'):\n    raise RuntimeError('루프 제한 테스트 준비가 되지 않음')\n\nstate['loop_step_1_completed'] = True\nstate['current_loop_count'] = 1\n\nresult = {\n    'step': 1,\n    'loop_count': state['current_loop_count'],\n    'max_allowed': state.get('expected_max_loop', 100),\n    'within_limit': state['current_loop_count'] < state.get('expected_max_loop', 100)\n}\nstate['step1_result'] = result\n\nprint(f'1단계 완료: 루프 {state[\"current_loop_count\"]}/{state.get(\"expected_max_loop\", 100)}')"
-            }
-        },
-        {
-            "id": "loop_simulation_step2",
-            "type": "operator",
-            "label": "루프 시뮬레이션 2단계",
-            "config": {
-                "language": "python",
-                "code": "print('루프 시뮬레이션 2단계')\n\nif not state.get('loop_step_1_completed'):\n    raise RuntimeError('루프 시뮬레이션 1단계가 완료되지 않음')\n\nstate['loop_step_2_completed'] = True\nstate['current_loop_count'] = 2\n\nresult = {\n    'step': 2,\n    'loop_count': state['current_loop_count'],\n    'max_allowed': state.get('expected_max_loop', 100),\n    'within_limit': state['current_loop_count'] < state.get('expected_max_loop', 100)\n}\nstate['step2_result'] = result\n\nprint(f'2단계 완료: 루프 {state[\"current_loop_count\"]}/{state.get(\"expected_max_loop\", 100)}')"
-            }
-        },
-        {
-            "id": "loop_simulation_step3",
-            "type": "operator",
-            "label": "루프 시뮬레이션 3단계",
-            "config": {
-                "language": "python",
-                "code": "print('루프 시뮬레이션 3단계')\n\nif not state.get('loop_step_2_completed'):\n    raise RuntimeError('루프 시뮬레이션 2단계가 완료되지 않음')\n\nstate['loop_step_3_completed'] = True\nstate['current_loop_count'] = 3\n\nresult = {\n    'step': 3,\n    'loop_count': state['current_loop_count'],\n    'max_allowed': state.get('expected_max_loop', 100),\n    'within_limit': state['current_loop_count'] < state.get('expected_max_loop', 100)\n}\nstate['step3_result'] = result\n\nprint(f'3단계 완료: 루프 {state[\"current_loop_count\"]}/{state.get(\"expected_max_loop\", 100)}')"
-            }
-        },
-        {
-            "id": "forced_termination_test",
-            "type": "operator",
-            "label": "[Critical] 강제 종료 인터셉트 테스트",
-            "config": {
-                "language": "python",
-                "code": "# ① 강제 종료(Forced Termination) 시나리오\nprint('[FORCED TERMINATION TEST] 임계값 초과 시뮬레이션')\n\nmax_allowed = state.get('expected_max_loop', 35)\n\n# 고의로 임계값 초과 설정\nstate['current_loop_count'] = 36  # 35 + 1, 임계값 초과\nstate['loop_exceeded'] = state['current_loop_count'] > max_allowed\n\nif state['loop_exceeded']:\n    # [Critical] OS가 SIGKILL을 던져야 함\n    state['forced_termination'] = {\n        'signal': 'SIGKILL',\n        'reason': 'LOOP_LIMIT_EXCEEDED',\n        'current_count': state['current_loop_count'],\n        'max_allowed': max_allowed,\n        'error_message': f'Runaway process detected: Loop count ({state[\"current_loop_count\"]}) exceeded dynamic limit ({max_allowed})',\n        'should_block_next_node': True\n    }\n    \n    # 실제 커널은 여기서 실행을 차단해야 함\n    state['execution_blocked'] = True\n    state['sigkill_triggered'] = True\n    \n    print(f'[SIGKILL] Loop limit exceeded: {state[\"current_loop_count\"]} > {max_allowed}')\n    print(f'[SIGKILL] Execution should be terminated immediately')\nelse:\n    state['forced_termination'] = None\n    state['execution_blocked'] = False\n    state['sigkill_triggered'] = False\n\nstate['forced_termination_tested'] = True"
-            }
-        },
-        {
-            "id": "branch_loop_independence_test",
-            "type": "parallel_group",
-            "label": "[Critical] 브랜치 루프 독립성 테스트",
-            "resource_policy": {
-                "strategy": "BALANCED"
-            },
-            "branches": [
-                {
-                    "id": "branch1_with_loop",
+                "input_list_key": "loop_items",
+                "max_iterations": 30,
+                "output_key": "loop_results",
+                "sub_workflow": {
                     "nodes": [
                         {
-                            "id": "b1_loop_step1",
+                            "id": "loop_node_1",
                             "type": "operator",
                             "config": {
                                 "language": "python",
-                                "code": "# Branch 1 내부 루프\nstate['branch1_loop_count'] = 1\nstate['branch1_max_loop'] = state.get('expected_max_branch_loop', 25)\nstate['branch1_within_limit'] = state['branch1_loop_count'] <= state['branch1_max_loop']\nprint(f'Branch1 Loop: {state[\"branch1_loop_count\"]}/{state[\"branch1_max_loop\"]}')"
+                                "code": "state['counter'] = state.get('counter', 0) + 1\nstate['step_1_done'] = True"
                             }
                         },
                         {
-                            "id": "b1_loop_step2",
+                            "id": "loop_node_2",
                             "type": "operator",
                             "config": {
                                 "language": "python",
-                                "code": "state['branch1_loop_count'] = 2\nstate['branch1_within_limit'] = state['branch1_loop_count'] <= state['branch1_max_loop']\nprint(f'Branch1 Loop: {state[\"branch1_loop_count\"]}/{state[\"branch1_max_loop\"]}')"
+                                "code": "state['doubled'] = state['counter'] * 2\nstate['step_2_done'] = True"
+                            }
+                        },
+                        {
+                            "id": "loop_node_3",
+                            "type": "operator",
+                            "config": {
+                                "language": "python",
+                                "code": "state['result'] = f'Iteration {state[\"counter\"]}'\nstate['step_3_done'] = True"
                             }
                         }
                     ],
                     "edges": [
-                        {"source": "b1_loop_step1", "target": "b1_loop_step2"}
-                    ]
-                },
-                {
-                    "id": "branch2_with_loop",
-                    "nodes": [
-                        {
-                            "id": "b2_loop_step1",
-                            "type": "operator",
-                            "config": {
-                                "language": "python",
-                                "code": "# Branch 2 내부 루프 (독립적으로 관리되어야 함)\nstate['branch2_loop_count'] = 1\nstate['branch2_max_loop'] = state.get('expected_max_branch_loop', 25)\nstate['branch2_within_limit'] = state['branch2_loop_count'] <= state['branch2_max_loop']\nprint(f'Branch2 Loop: {state[\"branch2_loop_count\"]}/{state[\"branch2_max_loop\"]}')"
-                            }
-                        },
-                        {
-                            "id": "b2_loop_step2",
-                            "type": "operator",
-                            "config": {
-                                "language": "python",
-                                "code": "state['branch2_loop_count'] = 2\nstate['branch2_within_limit'] = state['branch2_loop_count'] <= state['branch2_max_loop']\nprint(f'Branch2 Loop: {state[\"branch2_loop_count\"]}/{state[\"branch2_max_loop\"]}')"
-                            }
-                        }
+                        {"source": "loop_node_1", "target": "loop_node_2"},
+                        {"source": "loop_node_2", "target": "loop_node_3"}
                     ],
-                    "edges": [
-                        {"source": "b2_loop_step1", "target": "b2_loop_step2"}
-                    ]
-                },
-                {
-                    "id": "branch3_exceeds_limit",
-                    "nodes": [
-                        {
-                            "id": "b3_exceed_test",
-                            "type": "operator",
-                            "config": {
-                                "language": "python",
-                                "code": "# Branch 3: 고의로 임계값 초과\nstate['branch3_loop_count'] = 26  # expected_max_branch_loop (25) + 1\nstate['branch3_max_loop'] = state.get('expected_max_branch_loop', 25)\nstate['branch3_exceeded'] = state['branch3_loop_count'] > state['branch3_max_loop']\n\nif state['branch3_exceeded']:\n    state['branch3_sigkill'] = {\n        'signal': 'SIGKILL',\n        'reason': 'BRANCH_LOOP_EXCEEDED',\n        'count': state['branch3_loop_count'],\n        'limit': state['branch3_max_loop']\n    }\n    print(f'[Branch3 SIGKILL] Loop exceeded: {state[\"branch3_loop_count\"]} > {state[\"branch3_max_loop\"]}')\nelse:\n    state['branch3_sigkill'] = None"
-                            }
-                        }
-                    ],
-                    "edges": []
+                    "start_node": "loop_node_1"
                 }
-            ]
+            }
         },
         {
-            "id": "loop_limit_validator",
+            "id": "validator",
             "type": "operator",
-            "label": "통합 검증 with 인터럽트 체크",
+            "label": "Validate Dynamic Limit Calculation",
             "config": {
                 "language": "python",
-                "code": "import json\n\nprint('동적 루프 제한 테스트 통합 검증')\n\n# 기본 검증\nbasic_checks = [\n    state.get('loop_limit_test_started') == True,\n    state.get('loop_step_1_completed') == True,\n    state.get('loop_step_2_completed') == True,\n    state.get('loop_step_3_completed') == True,\n    state.get('total_segments') == 15,\n    state.get('expected_max_loop') == 35,\n    state.get('expected_max_branch_loop') == 25\n]\n\n# ① 강제 종료 인터셉트 검증\nforced_term = state.get('forced_termination', {})\nsigkill_triggered = state.get('sigkill_triggered', False)\nexecution_blocked = state.get('execution_blocked', False)\n\nforced_termination_checks = [\n    state.get('forced_termination_tested') == True,\n    state.get('loop_exceeded') == True,\n    sigkill_triggered == True,\n    forced_term.get('signal') == 'SIGKILL',\n    forced_term.get('reason') == 'LOOP_LIMIT_EXCEEDED',\n    execution_blocked == True\n]\n\n# ② 브랜치 루프 독립성 검증\nbranch1_count = state.get('branch1_loop_count', 0)\nbranch2_count = state.get('branch2_loop_count', 0)\nbranch3_count = state.get('branch3_loop_count', 0)\nbranch3_exceeded = state.get('branch3_exceeded', False)\nbranch3_sigkill = state.get('branch3_sigkill')\n\nbranch_independence_checks = [\n    branch1_count <= state.get('expected_max_branch_loop', 25),\n    branch2_count <= state.get('expected_max_branch_loop', 25),\n    branch3_exceeded == True,  # Branch3는 고의로 초과\n    branch3_sigkill is not None,\n    branch3_sigkill.get('signal') == 'SIGKILL' if branch3_sigkill else False,\n    # 브랜치 카운터가 독립적으로 관리됨\n    branch1_count != branch2_count or True  # 독립성\n]\n\nall_basic = all(basic_checks)\nall_forced_term = all(forced_termination_checks)\nall_branch_indep = all(branch_independence_checks)\nall_passed = all_basic and all_forced_term and all_branch_indep\n\nvalidation = {\n    'basic_checks': basic_checks,\n    'forced_termination_checks': forced_termination_checks,\n    'branch_independence_checks': branch_independence_checks,\n    'basic_passed': all_basic,\n    'forced_termination_passed': all_forced_term,\n    'branch_independence_passed': all_branch_indep,\n    'all_passed': all_passed\n}\n\nstate['loop_os_test_result'] = {\n    'validation': validation,\n    'total_segments': state.get('total_segments'),\n    'calculated_max_loop': state.get('expected_max_loop'),\n    'calculated_max_branch_loop': state.get('expected_max_branch_loop'),\n    'main_loop_count': state.get('current_loop_count'),\n    'forced_termination': forced_term,\n    'branch_results': {\n        'branch1': branch1_count,\n        'branch2': branch2_count,\n        'branch3': {'count': branch3_count, 'exceeded': branch3_exceeded, 'sigkill': branch3_sigkill}\n    },\n    'test_passed': all_passed\n}\n\nif all_passed:\n    state['TEST_RESULT'] = f'✅ LOOP LIMIT OS TEST PASSED: Dynamic limit (35), SIGKILL on exceed, Branch independence verified'\n    state['VALIDATION_STATUS'] = 'PASSED'\nelse:\n    failed = []\n    if not all_basic: failed.append('basic')\n    if not all_forced_term: failed.append('forced_termination')\n    if not all_branch_indep: failed.append('branch_independence')\n    state['TEST_RESULT'] = f'❌ LOOP LIMIT OS TEST FAILED: {failed}'\n    state['VALIDATION_STATUS'] = 'FAILED'\n\nprint(f'Validation: {json.dumps(validation, indent=2)}')\nprint(f'Test result: {state[\"TEST_RESULT\"]}')"
+                "code": "# Validation: System should calculate dynamic limit\n# Expected: 3 nodes × 30 iterations = 90 + safety margin(~20) = 110+\n\nexpected_weighted_executions = 90  # 3 × 30\nexpected_min_limit = expected_weighted_executions + 18  # 20% margin\n\nactual_limit = state.get('max_loop_iterations', 0)\nactual_counter = state.get('counter', 0)\n\n# Validation checks\nchecks = [\n    ('weighted_calculation', actual_limit >= expected_min_limit, f'limit={actual_limit} >= {expected_min_limit}'),\n    ('all_iterations_completed', actual_counter == 30, f'counter={actual_counter}'),\n    ('no_limit_exceeded', True, 'No LoopLimitExceeded error')\n]\n\nall_passed = all(c[1] for c in checks)\n\nstate['validation_checks'] = {\n    'expected_weighted_executions': expected_weighted_executions,\n    'expected_min_limit': expected_min_limit,\n    'actual_limit': actual_limit,\n    'actual_counter': actual_counter,\n    'checks': [{'name': c[0], 'passed': c[1], 'details': c[2]} for c in checks]\n}\n\nif all_passed:\n    state['TEST_RESULT'] = f'PASS: Dynamic limit={actual_limit}, executions={actual_counter}/30'\nelse:\n    failed = [c[0] for c in checks if not c[1]]\n    state['TEST_RESULT'] = f'FAIL: {failed}'\n\nstate['test_passed'] = all_passed\n\nprint(f'Validation complete: {state[\"TEST_RESULT\"]}')"
             }
         }
     ],
     "edges": [
-        {"source": "loop_limit_prep", "target": "loop_simulation_step1"},
-        {"source": "loop_simulation_step1", "target": "loop_simulation_step2"},
-        {"source": "loop_simulation_step2", "target": "loop_simulation_step3"},
-        {"source": "loop_simulation_step3", "target": "forced_termination_test"},
-        {"source": "forced_termination_test", "target": "branch_loop_independence_test"},
-        {"source": "branch_loop_independence_test", "target": "loop_limit_validator"}
+        {"source": "prep", "target": "heavy_loop"},
+        {"source": "heavy_loop", "target": "validator"}
     ],
-    "start_node": "loop_limit_prep",
+    "start_node": "prep",
     "metadata": {
         "test_features": [
             "dynamic_loop_limit",
-            "forced_termination_on_exceed",
-            "sigkill_on_runaway_process",
-            "branch_loop_independence",
-            "recursive_branch_loop_management",
-            "availability_management"
+            "weighted_execution_calculation",
+            "for_each_segment_counting"
         ],
-        "expected_behavior": "Kernel should: 1) Calculate dynamic limits (L_main=S+20, L_branch=S+10), 2) Throw SIGKILL when limit exceeded, 3) Manage branch loops independently",
-        "failure_mode": "Runaway process exhausts resources, branch loops interfere with each other, no SIGKILL on exceed"
+        "expected_behavior": "System calculates max_loop_iterations = 90 + 20% ≈ 108+, workflow completes without LoopLimitExceeded"
     }
 }

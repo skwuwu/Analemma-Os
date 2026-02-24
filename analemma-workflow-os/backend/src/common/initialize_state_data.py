@@ -631,8 +631,45 @@ def lambda_handler(event, context):
     # Embed raw input into the bag so it can be offloaded if large
     bag['input'] = raw_input
     bag['loop_counter'] = 0
-    bag['max_loop_iterations'] = workflow_config.get('max_loop_iterations', 100)
-    bag['max_branch_iterations'] = workflow_config.get('max_branch_iterations', 100)
+    
+    # 🛡️ [Dynamic Loop Limit] Weighted execution count calculation
+    # Formula: NonLoopNodes + Σ(LoopNodes × MaxIterations) + SafetyMargin(20%)
+    # 
+    # Example:
+    #   - 5 nodes total, 3 in loop with max_iterations=50
+    #   - Non-loop: 2
+    #   - Loop weighted: 3 × 50 = 150
+    #   - Total estimate: 2 + 150 = 152
+    #   - Safety margin (20%): 152 × 0.2 = 30.4 ≈ 30
+    #   - Final limit: 152 + 30 = 182
+    #
+    # This prevents LoopLimitExceeded errors for complex workflows while
+    # still blocking runaway processes (limit scales with workflow size).
+    
+    # Extract loop analysis from partition_result
+    estimated_executions = partition_result.get("estimated_executions", total_segments)
+    loop_analysis = partition_result.get("loop_analysis", {})
+    
+    # Apply safety margin: 20% of estimate or minimum 20
+    safety_margin = max(int(estimated_executions * 0.2), 20)
+    default_loop_limit = estimated_executions + safety_margin
+    
+    # Branch loop limit: 50% of main limit or minimum 50
+    default_branch_limit = max(int(default_loop_limit * 0.5), 50)
+    
+    # User can override via workflow_config, otherwise use dynamic calculation
+    bag['max_loop_iterations'] = workflow_config.get('max_loop_iterations', default_loop_limit)
+    bag['max_branch_iterations'] = workflow_config.get('max_branch_iterations', default_branch_limit)
+    
+    logger.info(
+        f"[Dynamic Loop Limit] "
+        f"estimated_executions={estimated_executions}, "
+        f"safety_margin={safety_margin}, "
+        f"loop_limit={bag['max_loop_iterations']}, "
+        f"branch_limit={bag['max_branch_iterations']}, "
+        f"loop_nodes={loop_analysis.get('loop_count', 0)}"
+    )
+    
     bag['start_time'] = current_time
     bag['last_update_time'] = current_time
     bag['state_durations'] = {}

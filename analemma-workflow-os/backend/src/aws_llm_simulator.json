@@ -21,7 +21,10 @@
                     "FAIL",
                     "MAP_AGGREGATOR",
                     "LOOP_LIMIT",
-                    "S3_LARGE",
+                    "LOOP_BRANCH_STRESS",
+                    "STRESS",
+                    "VISION",
+                    "HITP_RECOVERY",
                     "ASYNC_LLM"
                 ]
             },

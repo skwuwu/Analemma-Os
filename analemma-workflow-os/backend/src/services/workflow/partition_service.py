@@ -250,6 +250,80 @@ def estimate_node_duration(node: Dict[str, Any]) -> float:
     return base_duration
 
 
+def analyze_loop_structures(nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Analyze loop structures to estimate weighted execution count.
+    
+    🛡️ [Dynamic Loop Limit] Physical segment calculation for loop/for_each nodes
+    - Counts actual segment executions, not logical node count
+    - Formula: Σ(nodes_in_loop × max_iterations) for each loop
+    - Handles nested loops recursively
+    
+    Args:
+        nodes: List of workflow nodes
+        
+    Returns:
+        {
+            "loop_nodes": [...],
+            "total_loop_executions": int,  # Weighted sum
+            "loop_count": int
+        }
+    """
+    loop_nodes = []
+    total_weighted_count = 0
+    
+    for node in nodes:
+        node_type = node.get("type", "")
+        config = node.get("config", {})
+        
+        if node_type == "loop":
+            max_iter = config.get("max_iterations", 5)
+            sub_nodes = config.get("nodes", [])
+            
+            # Recursive analysis for nested loops
+            sub_analysis = analyze_loop_structures(sub_nodes)
+            
+            loop_nodes.append({
+                "node_id": node.get("id"),
+                "type": "loop",
+                "max_iterations": max_iter,
+                "sub_node_count": len(sub_nodes),
+                "nested_loops": sub_analysis["loop_nodes"]
+            })
+            
+            # Weighted count: (sub_nodes + nested_loop_executions) × max_iterations
+            inner_total = len(sub_nodes) + sub_analysis["total_loop_executions"]
+            total_weighted_count += inner_total * max_iter
+            
+        elif node_type == "for_each":
+            max_iter = config.get("max_iterations", 20)
+            sub_workflow = config.get("sub_workflow", {})
+            sub_nodes = sub_workflow.get("nodes", [])
+            
+            # Recursive analysis
+            sub_analysis = analyze_loop_structures(sub_nodes)
+            
+            loop_nodes.append({
+                "node_id": node.get("id"),
+                "type": "for_each",
+                "max_iterations": max_iter,
+                "sub_node_count": len(sub_nodes),
+                "nested_loops": sub_analysis["loop_nodes"]
+            })
+            
+            # ✅ [FIX] for_each uses SUM, not MAX
+            # Even parallel execution creates separate segments for each node
+            # 30 items × 3 nodes = 90 segments (not 3)
+            inner_total = len(sub_nodes) + sub_analysis["total_loop_executions"]
+            total_weighted_count += inner_total * max_iter
+    
+    return {
+        "loop_nodes": loop_nodes,
+        "total_loop_executions": total_weighted_count,
+        "loop_count": len(loop_nodes)
+    }
+
+
 def validate_atomic_group_timeout(
     group_id: str,
     nodes: List[Dict[str, Any]],
@@ -1116,6 +1190,22 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     
     total_segments_recursive = count_segments_recursive(segments)
     
+    # 🛡️ [Dynamic Loop Limit] Analyze loop structures for weighted execution count
+    loop_analysis = analyze_loop_structures(nodes)
+    
+    # Calculate estimated executions: non-loop nodes + weighted loop executions
+    non_loop_nodes = len(nodes) - loop_analysis["loop_count"]
+    estimated_executions = non_loop_nodes + loop_analysis["total_loop_executions"]
+    
+    logger.info(
+        f"[Dynamic Loop Limit] Loop analysis: "
+        f"total_nodes={len(nodes)}, "
+        f"loop_nodes={loop_analysis['loop_count']}, "
+        f"non_loop_nodes={non_loop_nodes}, "
+        f"weighted_loop_executions={loop_analysis['total_loop_executions']}, "
+        f"estimated_total={estimated_executions}"
+    )
+    
     # 🛡️ [Critical Fix] Step Functions Loop Control requires Top-Level Count
     # total_segments returned here drives the main execution loop (0..N-1).
     # It must match len(partition_map), otherwise loop will try to access non-existent indices.
@@ -1138,12 +1228,17 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
         "forced_segment_starts": list(forced_segment_starts),
         # [Performance] Pre-indexed 데이터 (재사용 가능)
         "node_to_segment_map": node_to_seg_map,
+        # 🛡️ [Dynamic Loop Limit] Loop analysis results
+        "loop_analysis": loop_analysis,
+        "estimated_executions": estimated_executions,
         "metadata": {
             "max_partition_depth": MAX_PARTITION_DEPTH,
             "max_nodes_limit": MAX_NODES_LIMIT,
             "nodes_processed": len(visited_nodes),
             "total_nodes": len(nodes),
-            "total_segments_recursive": total_segments_recursive  # [Fix] Store recursive count in metadata
+            "total_segments_recursive": total_segments_recursive,  # [Fix] Store recursive count in metadata
+            "loop_nodes_count": loop_analysis["loop_count"],
+            "weighted_execution_estimate": estimated_executions
         }
     }
 
