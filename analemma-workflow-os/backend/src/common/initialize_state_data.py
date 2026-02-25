@@ -542,9 +542,36 @@ def _execute_initialization(event, context):
                        or event.get('test_workflow_config') or event.get('workflow_config'))
     
     # 입력에서 partition_map 로드 시도 (Safe-Init 패턴 적용)
+    # [v3.18.4 Fix] content partition_map vs workflow segment partition_map 구별
+    # LLM_STAGE6 등에서 content partition ({ partition_id, items })이 입력으로 들어오는 경우,
+    # initialize_state_data가 workflow segment partition으로 오인하면:
+    #   - 런타임 파티셔닝 SKIP → total_segments = 3(content) ← 틀림
+    #   - estimated_executions = floor(50) → max_loop_iterations = 70 (기존 버그 재발)
+    # 판별 기준: workflow segment 아이템은 반드시 'nodes' 또는 'id' 키를 가짐.
+    #            content partition 아이템은 'partition_id' + 'items' 구조.
+    def _is_workflow_segment_partition(pm):
+        """partition_map이 workflow segment 구조인지 판별"""
+        if not isinstance(pm, list) or len(pm) == 0:
+            return False
+        first = pm[0]
+        if not isinstance(first, dict):
+            return False
+        # workflow segment: nodes 또는 id(정수)+type 키 조재
+        # content partition: partition_id + items 키 조합
+        has_content_keys = 'partition_id' in first or 'items' in first
+        has_segment_keys = 'nodes' in first or ('id' in first and 'type' in first)
+        if has_content_keys and not has_segment_keys:
+            return False  # content partition → workflow segment로 사용하지 않음
+        return True
+
     input_partition = raw_input.get('partition_map') or event.get('partition_map')
-    if input_partition:
+    if input_partition and _is_workflow_segment_partition(input_partition):
         partition_map = input_partition
+    elif input_partition:
+        logger.info(
+            "[v3.18.4] input partition_map detected as CONTENT partition (partition_id/items structure), "
+            "not using as workflow segment partition → runtime partitioning will run"
+        )
     
     # DB Loader Fallback
     if not workflow_config and workflow_id and owner_id:
