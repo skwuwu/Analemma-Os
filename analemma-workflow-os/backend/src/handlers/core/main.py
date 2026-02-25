@@ -3377,11 +3377,6 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     elif inner_config.get("sub_workflow"):
         sw_def = inner_config["sub_workflow"]
         sub_nodes = sw_def.get("nodes", [])
-    else:
-        # [FALLBACK] sub_node_config (Legacy)
-        sub_processor = inner_config.get("sub_node_config")
-        if sub_processor: 
-            sub_nodes = [sub_processor]
 
     if not sub_nodes:
         logger.error(f"[ForEach] No executable nodes found for {node_id}")
