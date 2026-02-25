@@ -357,7 +357,12 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
             # for_each / loop 노드가 parallel_group.branches[].nodes[] 안에
             # 중첩된 경우, 상위 레벨 스캔에서는 완전히 누락된다.
             # → branches를 재귀적으로 탐색해 weighted 합산.
-            branches = node.get("branches", [])
+            #
+            # [v3.18.1 Fix] branches 위치 이중 탐색:
+            #   - 일부 워크플로우: branches가 노드 최상위에 위치 (STRESS 스타일)
+            #   - 일부 워크플로우: branches가 config 하위에 위치 (MAP_AGGREGATOR 스타일)
+            #   → 둘 다 확인하지 않으면 config.branches 안의 for_each가 누락됨
+            branches = node.get("branches") or node.get("config", {}).get("branches") or []
             for branch in branches:
                 branch_nodes = branch.get("nodes", [])
                 if branch_nodes:

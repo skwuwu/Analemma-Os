@@ -597,13 +597,13 @@ def _execute_initialization(event, context):
                 )
                 
         except Exception as e:
-            logger.error(f"Partitioning failed: {e}")
-            # Re-raise if it's a validation error (business logic issue)
-            if isinstance(e, (ValueError, TypeError)):
-                raise
-            # Otherwise set empty fallback (allows workflow to fail gracefully)
-            partition_map = []
-            partition_result = {}
+            logger.error(f"Partitioning failed: {e}", exc_info=True)
+            # [v3.18.3 Fix] Re-raise ALL exceptions from runtime partitioning.
+            # An empty partition_map is non-recoverable: the workflow WILL fail later
+            # during SFN execution with an obscure error. Failing fast here surfaces
+            # the real cause (recursion error, import error, etc.) immediately
+            # instead of silently degrading to a broken estimated_executions=floor(50).
+            raise
             
     # Metadata Calculation (partition_map이 이미 최상단에서 초기화되어 안전함)
     total_segments = len(partition_map)
@@ -966,33 +966,77 @@ def _execute_initialization(event, context):
     # 🛡️ [Type Safety] Validate partition_result is dict before accessing
     # 🛡️ [P1 FIX] DB에서 불러온 경우도 고려 (db_data에서 estimated_executions 추출)
     if partition_result and isinstance(partition_result, dict):
-        estimated_executions = partition_result.get("estimated_executions", total_segments)
+        # 🛡️ [v3.18.1 Fix] estimated_executions 안전 추출
+        # 버그: partition_result.get(key, default) 는 키가 없을 때만 default 사용.
+        #       DB 재로드 시 estimated_executions 컬럼이 없으면 키 자체가 없어
+        #       total_segments(예: 3)로 폴백 → max_loop_iterations = 3+20 = 23
+        # 수정: 값이 None이거나 floor(50) 미만인 경우 안전한 최솟값으로 대체
+        _raw_est = partition_result.get("estimated_executions")
+        if isinstance(_raw_est, (int, float)) and _raw_est >= 50:  # LOOP_LIMIT_FLOOR = 50
+            estimated_executions = int(_raw_est)
+        else:
+            # estimated_executions 누락(DB 구 스키마) 또는 비정상 값
+            # total_segments만으로 계산하면 너무 낮은 한도가 설정됨
+            # → max(total_segments * 10, 50) 으로 최소 floor 보장
+            estimated_executions = max(total_segments * 10, 50)  # 절대 50 미만 불가
+            logger.warning(
+                f"[Dynamic Loop Limit] estimated_executions missing/low in partition_result "
+                f"(raw={_raw_est}). Using safe fallback: {estimated_executions} "
+                f"(total_segments={total_segments} × 10, min=50)"
+            )
         loop_analysis = partition_result.get("loop_analysis", {})
     else:
-        # Fallback: DB에서 불러온 데이터 확인 (db_data 변수가 있을 수 있음)
-        # DB 로드 시 db_data에 estimated_executions가 있을 수 있음
-        try:
-            # DB에서 불러온 partition_result 데이터 확인
-            db_estimated = None
-            db_loop_analysis = None
-            
-            # 이전 DB 로드 과정에서 db_data 변수가 설정되었는지 확인
-            # _load_workflow_config 호출 결과를 저장한 db_data가 있다면 거기서 가져오기
-            # (현재 코드 구조상 db_data는 로컬 변수로만 존재하므로 직접 접근 불가)
-            # 대신 total_segments로 폴백
-            db_estimated = total_segments
-            db_loop_analysis = {}
-        except:
-            db_estimated = total_segments
-            db_loop_analysis = {}
-        
-        estimated_executions = db_estimated
-        loop_analysis = db_loop_analysis
-        
-        logger.info(
-            f"[Dynamic Loop Limit] Using fallback: estimated_executions={estimated_executions} "
-            f"(from total_segments, DB fields may be unavailable)"
-        )
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # [v3.18.2 Fix] DB 재로드 경로 — estimated_executions 미저장 구형 레코드 대응
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # 버그 경로:
+        #   1. save_workflow.py가 v3.17 이전에 estimated_executions를 DB에 저장 안 했음
+        #   2. DB 재로드 시 estimated_executions=None → partition_result={} (빈 dict)
+        #   3. {} is falsy → 이 else 브랜치 진입
+        #   4. 기존 코드: estimated_executions = total_segments (예: 3)
+        #      → max_loop_iterations = 3 + 20 = 23 → LoopLimitExceeded (23회)
+        #
+        # 수정: workflow_config가 있으면 analyze_loop_structures 재실행으로 정확한 값 산출
+        # (full partition 재실행 없이 loop 가중치만 계산 — 가볍고 정확)
+        if workflow_config and _HAS_PARTITION:
+            try:
+                from src.services.workflow.partition_service import (
+                    analyze_loop_structures,
+                    LOOP_LIMIT_SAFETY_MULTIPLIER,
+                    LOOP_LIMIT_FLAT_BONUS,
+                    LOOP_LIMIT_FLOOR,
+                )
+                _nodes = workflow_config.get("nodes", [])
+                loop_analysis = analyze_loop_structures(_nodes)
+                _weighted = loop_analysis["total_loop_weighted_segments"]
+                _base = max(total_segments, 1)
+                _raw = _base + _weighted
+                estimated_executions = max(
+                    int(_raw * LOOP_LIMIT_SAFETY_MULTIPLIER) + LOOP_LIMIT_FLAT_BONUS,
+                    LOOP_LIMIT_FLOOR,
+                )
+                logger.info(
+                    f"[Dynamic Loop Limit] Re-computed from workflow_config nodes "
+                    f"(DB record missing estimated_executions): "
+                    f"base={_base}, weighted={_weighted}, raw={_raw}, "
+                    f"estimated_executions={estimated_executions}"
+                )
+            except Exception as _e:
+                logger.warning(
+                    f"[Dynamic Loop Limit] analyze_loop_structures fallback failed: {_e}. "
+                    f"Using safe floor."
+                )
+                estimated_executions = max(total_segments * 10, 50)
+                loop_analysis = {}
+        else:
+            # workflow_config도 없는 최후 폴백
+            estimated_executions = max(total_segments * 10, 50)
+            loop_analysis = {}
+            logger.warning(
+                f"[Dynamic Loop Limit] No partition_result and no workflow_config. "
+                f"Using floor fallback: estimated_executions={estimated_executions} "
+                f"(total_segments={total_segments} × 10, min=50)"
+            )
     
     # Apply safety margin: 20% of estimate or minimum 20
     safety_margin = max(int(estimated_executions * 0.2), 20)

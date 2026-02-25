@@ -694,6 +694,11 @@ def lambda_handler(event, context):
                     body['total_segments'] = partition_result.get('total_segments') or 0
                     body['llm_segments_count'] = partition_result.get('llm_segments') or 0
                     body['hitp_segments_count'] = partition_result.get('hitp_segments') or 0
+                    # 🛡️ [v3.18.2 Fix] estimated_executions / loop_analysis DB 저장
+                    # initialize_state_data가 DB 재로드 시 이 필드들을 읽는다.
+                    # 저장 안 하면 estimated_executions=None → limit=total_segments+20 → LoopLimitExceeded.
+                    body['estimated_executions'] = partition_result.get('estimated_executions') or 0
+                    body['loop_analysis'] = partition_result.get('loop_analysis') or {}
                     
                     partition_time = time.time() - partition_start
                     logger.info(f"Pre-compiled partition_map: {body['total_segments']} segments "
