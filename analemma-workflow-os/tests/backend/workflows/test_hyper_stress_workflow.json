@@ -17,12 +17,17 @@
                 "input_list_key": "outer_loop_items",
                 "output_key": "outer_map_results",
                 "max_iterations": 5,
-                "sub_node_config": {
-                    "type": "operator",
-                    "config": {
-                        "code": "outer_idx = state.get('item', 0)\ninner_items_per_outer = state.get('inner_items_per_outer', [2, 3, 2, 3])\ninner_count = inner_items_per_outer[outer_idx] if outer_idx < len(inner_items_per_outer) else 2\nstate['current_inner_items'] = list(range(inner_count))\nstate['outer_idx_processed'] = outer_idx\nstate['nested_map_count'] = state.get('nested_map_count', 0) + 1\nprint(f\"Processing outer item {outer_idx} with {inner_count} inner items\")",
-                        "output_key": "inner_config"
-                    }
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "stress_outer_unit",
+                            "type": "operator",
+                            "config": {
+                                "code": "outer_idx = state.get('item', 0)\ninner_items_per_outer = state.get('inner_items_per_outer', [2, 3, 2, 3])\ninner_count = inner_items_per_outer[outer_idx] if outer_idx < len(inner_items_per_outer) else 2\nstate['current_inner_items'] = list(range(inner_count))\nstate['outer_idx_processed'] = outer_idx\nstate['nested_map_count'] = state.get('nested_map_count', 0) + 1\nprint(f\"Processing outer item {outer_idx} with {inner_count} inner items\")",
+                                "output_key": "inner_config"
+                            }
+                        }
+                    ]
                 }
             }
         },

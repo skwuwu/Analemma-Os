@@ -350,6 +350,27 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
             # Subtract 1 because total_segments already includes the first execution
             total_weighted += segment_count * (max_iter - 1) + sub_analysis["total_loop_weighted_segments"]
             
+        elif node_type == "parallel_group":
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [v3.18 Fix] Inline Parallel Group → branches 재귀 탐색
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # for_each / loop 노드가 parallel_group.branches[].nodes[] 안에
+            # 중첩된 경우, 상위 레벨 스캔에서는 완전히 누락된다.
+            # → branches를 재귀적으로 탐색해 weighted 합산.
+            branches = node.get("branches", [])
+            for branch in branches:
+                branch_nodes = branch.get("nodes", [])
+                if branch_nodes:
+                    branch_analysis = analyze_loop_structures(branch_nodes, node_to_seg_map)
+                    total_weighted += branch_analysis["total_loop_weighted_segments"]
+                    loop_nodes.extend(branch_analysis["loop_nodes"])
+                    logger.debug(
+                        f"[Loop Analysis] parallel_group '{node.get('id')}' "
+                        f"branch '{branch.get('id', '?')}': "
+                        f"nested_weight={branch_analysis['total_loop_weighted_segments']}, "
+                        f"nested_loops={branch_analysis['loop_count']}"
+                    )
+
         elif node_type == "for_each":
             max_iter = config.get("max_iterations", 20)
             sub_workflow = config.get("sub_workflow", {})

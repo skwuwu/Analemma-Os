@@ -30,16 +30,21 @@
                 "input_list_key": "image_uris",
                 "output_key": "image_batch_results",
                 "max_iterations": 5,
-                "sub_node_config": {
-                    "type": "aiModel",
-                    "config": {
-                        "model": "gemini-1.5-flash",
-                        "max_tokens": 500,
-                        "prompt": "이미지에서 제품 스펙을 추출해주세요. 이미지: {item}",
-                        "temperature": 0.2,
-                        "multimodal": true,
-                        "vision_enabled": true
-                    }
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "image_analysis_unit",
+                            "type": "aiModel",
+                            "config": {
+                                "model": "gemini-1.5-flash",
+                                "max_tokens": 500,
+                                "prompt": "이미지에서 제품 스펙을 추출해주세요. 이미지: {item}",
+                                "temperature": 0.2,
+                                "multimodal": true,
+                                "vision_enabled": true
+                            }
+                        }
+                    ]
                 }
             }
         },

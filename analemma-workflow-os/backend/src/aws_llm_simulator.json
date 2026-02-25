@@ -25,7 +25,15 @@
                     "STRESS",
                     "VISION",
                     "HITP_RECOVERY",
-                    "ASYNC_LLM"
+                    "ASYNC_LLM",
+                    "LLM_STAGE1",
+                    "LLM_STAGE2",
+                    "LLM_STAGE3",
+                    "LLM_STAGE4",
+                    "LLM_STAGE5",
+                    "LLM_STAGE6",
+                    "LLM_STAGE7",
+                    "LLM_STAGE8"
                 ]
             },
             "Next": "InitializeSimulator"

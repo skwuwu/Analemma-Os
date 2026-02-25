@@ -95,17 +95,22 @@
                 "item_key": "current_item",
                 "max_iterations": 3,
                 "output_key": "processed_items",
-                "sub_node_config": {
-                    "type": "llm_chat",
-                    "config": {
-                        "provider": "gemini",
-                        "model": "gemini-2.0-flash",
-                        "system_prompt": "You are a text quality analyzer. Rate the given text and improve it if quality is below threshold. Always respond with a JSON object containing 'quality_score' (0-1), 'improved_text', and 'reason'.",
-                        "prompt_content": "Analyze and improve this text. Quality threshold: {{item.quality_threshold}}\n\nText: {{item.text}}\n\nRespond with JSON: {quality_score, improved_text, reason}",
-                        "max_tokens": 300,
-                        "temperature": 0.3,
-                        "output_key": "item_result"
-                    }
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "quality_llm",
+                            "type": "llm_chat",
+                            "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.0-flash",
+                                "system_prompt": "You are a text quality analyzer. Rate the given text and improve it if quality is below threshold. Always respond with a JSON object containing 'quality_score' (0-1), 'improved_text', and 'reason'.",
+                                "prompt_content": "Analyze and improve this text. Quality threshold: {{item.quality_threshold}}\n\nText: {{item.text}}\n\nRespond with JSON: {quality_score, improved_text, reason}",
+                                "max_tokens": 300,
+                                "temperature": 0.3,
+                                "output_key": "item_result"
+                            }
+                        }
+                    ]
                 },
                 "cost_policy": {
                     "max_tokens_per_node": 2000,
