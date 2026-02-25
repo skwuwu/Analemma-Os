@@ -258,9 +258,14 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
     Analyze loop structures to estimate weighted execution count.
     
     🛡️ [Dynamic Loop Limit] Segment-based iteration counting
-    - for_each: Adds fixed 2 (parallel_group + aggregator)
-    - Sequential loop: Adds (internal_segment_count × max_iterations)
-    - Formula: 2 × for_each_count + Σ(segment_count × max_iter) for loops
+    - for_each: Adds 2 base segments (parallel_group + aggregator)
+      * PLUS runtime sub_workflow execution: estimated_sub_segments × max_iterations
+      * PLUS nested loop weights from sub_workflow
+      * Critical: sub_workflow is PARTITIONED at runtime, creating additional segments
+    - Sequential loop: Adds (internal_segment_count × (max_iterations - 1))
+      * First iteration included in base segment count
+      * Additional iterations = (max_iter - 1) × segment_count
+    - Formula: Σ(2 + sub_segments × max_iter + nested_weights) for for_each + Σ(seg_count × (max_iter - 1)) for loops
     
     Args:
         nodes: List of workflow nodes
@@ -314,52 +319,71 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
             sub_workflow = config.get("sub_workflow", {})
             sub_nodes = sub_workflow.get("nodes", [])
             
-            # Recursive analysis
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # 🚨 [CRITICAL] for_each Runtime Partition Analysis
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # for_each executes sub_workflow at RUNTIME:
+            #   1. sub_workflow is PARTITIONED at runtime
+            #   2. Each partition creates N segments (including parallel_groups)
+            #   3. Each of max_iterations iterations executes ALL N segments
+            #   4. Parent loop_counter increments for EACH segment execution
+            # 
+            # Formula:
+            #   - Compile-time for_each weight: 2 (parallel_group + aggregator)  
+            #   - Runtime execution weight: estimated_sub_segments × max_iterations
+            # 
+            # Example (test_loop_branch_stress_workflow):
+            #   - for_each with max_iterations=5
+            #   - sub_workflow: 5 nodes → ~5 segments (rough estimate)
+            #   - Runtime execution: 5 iterations × 5 segments = 25 segments
+            #   - Total weight: 2 + 25 = 27 segments
+            # 
+            # Estimation heuristic:
+            #   - 1-2 nodes: 1 segment
+            #   - 3-5 nodes: likely has branch/parallel → 3-5 segments
+            #   - 6+ nodes: ~node_count segments
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            
+            # Estimate sub_workflow segment count (conservative approximation)
+            sub_node_count = len(sub_nodes)
+            if sub_node_count == 0:
+                estimated_sub_segments = 1
+            elif sub_node_count <= 2:
+                estimated_sub_segments = 1
+            else:
+                # Conservative estimate: assume some branching/parallelism
+                # Typical partition creates ~1 segment per node for simple workflows
+                # +1-2 segments for branches/parallel_groups
+                estimated_sub_segments = sub_node_count
+                
+                # Check for parallel_group nodes in sub_workflow (adds +2 per group)
+                for sn in sub_nodes:
+                    if sn.get("type") == "parallel_group":
+                        estimated_sub_segments += 1  # +1 for aggregator
+            
+            # Recursive analysis for nested loops within sub_workflow
             sub_analysis = analyze_loop_structures(sub_nodes, node_to_seg_map)
             
             loop_nodes.append({
                 "node_id": node.get("id"),
                 "type": "for_each",
                 "max_iterations": max_iter,
-                "sub_node_count": len(sub_nodes),
+                "sub_node_count": sub_node_count,
+                "estimated_sub_segments": estimated_sub_segments,
                 "nested_loops": sub_analysis["loop_nodes"]
             })
             
-            # 🔧 [CRITICAL FIX] for_each must account for max_iterations × sub_workflow segment count
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # Previous logic: total_weighted += 2
-            #   - Assumed for_each adds fixed 2 segments (wrong!)
-            # 
-            # Reality: for_each is Distributed Map with sub_workflow
-            #   - Each iteration executes ALL sub_workflow segments
-            #   - Formula: sub_segment_count × max_iterations
-            #   - Plus nested loop overhead
-            # 
-            # Example: for_each with 5 iterations, 3-segment sub_workflow
-            #   - Old: +2
-            #   - New: 3 × 5 = 15
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            
-            # Calculate sub_workflow segment count
-            if node_to_seg_map:
-                sub_node_ids = [n.get("id") for n in sub_nodes if n.get("id")]
-                sub_segments = set(node_to_seg_map.get(nid) for nid in sub_node_ids if node_to_seg_map.get(nid) is not None)
-                sub_segment_count = len(sub_segments) if sub_segments else max(1, len(sub_nodes))
-            else:
-                # Fallback: conservative estimate (each node = 1 segment)
-                sub_segment_count = max(1, len(sub_nodes))
-            
-            # for_each weighted calculation:
-            # - Main segment for for_each node: 1
-            # - Sub-workflow iterations: sub_segment_count × max_iterations
-            # - Nested loop overhead: sub_analysis["total_loop_weighted_segments"]
-            for_each_weighted = sub_segment_count * max_iter + sub_analysis["total_loop_weighted_segments"]
+            # for_each weight: 2 (compile-time) + estimated_sub_segments × max_iterations (runtime)
+            # PLUS nested loop weights from sub_analysis
+            for_each_weighted = 2 + (estimated_sub_segments * max_iter) + sub_analysis["total_loop_weighted_segments"]
             total_weighted += for_each_weighted
             
             logger.debug(
                 f"[Loop Analysis] for_each '{node.get('id')}': "
-                f"max_iter={max_iter}, sub_segments={sub_segment_count}, "
-                f"nested_overhead={sub_analysis['total_loop_weighted_segments']}, "
+                f"max_iter={max_iter}, sub_node_count={sub_node_count}, "
+                f"estimated_sub_segments={estimated_sub_segments}, "
+                f"runtime_weight={estimated_sub_segments * max_iter}, "
+                f"nested_weight={sub_analysis['total_loop_weighted_segments']}, "
                 f"total_weighted={for_each_weighted}"
             )
     
