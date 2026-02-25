@@ -164,19 +164,23 @@
                 "max_iterations": 5,
                 "max_concurrency": 3,
                 "output_key": "depth_1_results",
-                "recursion_depth": 1,
-                "sub_node_config": {
-                    "type": "llm_chat",
-                    "config": {
-                        "provider": "gemini",
-                        "model": "gemini-2.0-flash",
-                        "enable_context_caching": true,
-                        "system_prompt": "You are analyzing an issue that requires visual evidence. Describe what evidence would be needed and provide a mock analysis result.",
-                        "prompt_content": "Issue: {{item.title}}\nSeverity: {{item.severity}}\nImage Hint: {{item.image_hint}}\n\nProvide analysis with: evidence_found (boolean), confidence (0-1), findings (string), requires_deeper_analysis (boolean).",
-                        "max_tokens": 512,
-                        "temperature": 0.3,
-                        "output_key": "vision_evidence"
-                    }
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "vision_evidence_llm",
+                            "type": "llm_chat",
+                            "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.0-flash",
+                                "enable_context_caching": true,
+                                "system_prompt": "You are analyzing an issue that requires visual evidence. Describe what evidence would be needed and provide a mock analysis result.",
+                                "prompt_content": "Issue: {{item.title}}\nSeverity: {{item.severity}}\nImage Hint: {{item.image_hint}}\n\nProvide analysis with: evidence_found (boolean), confidence (0-1), findings (string), requires_deeper_analysis (boolean).",
+                                "max_tokens": 512,
+                                "temperature": 0.3,
+                                "output_key": "vision_evidence"
+                            }
+                        }
+                    ]
                 },
                 "partial_failure_config": {
                     "enabled": true,
@@ -221,19 +225,23 @@
                 "item_key": "deep_item",
                 "max_iterations": 3,
                 "output_key": "depth_2_results",
-                "recursion_depth": 2,
-                "sub_node_config": {
-                    "type": "llm_chat",
-                    "config": {
-                        "provider": "gemini",
-                        "model": "gemini-2.0-flash",
-                        "enable_context_caching": true,
-                        "system_prompt": "You are performing deep analysis. This is Depth 2 of recursive analysis.",
-                        "prompt_content": "Deep analyze: {{item.findings}}\n\nProvide: root_cause, recommended_action, requires_human_approval (boolean).",
-                        "max_tokens": 512,
-                        "temperature": 0.2,
-                        "output_key": "deep_analysis"
-                    }
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "deep_analysis_llm",
+                            "type": "llm_chat",
+                            "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.0-flash",
+                                "enable_context_caching": true,
+                                "system_prompt": "You are performing deep analysis. This is Depth 2 of recursive analysis.",
+                                "prompt_content": "Deep analyze: {{item.findings}}\n\nProvide: root_cause, recommended_action, requires_human_approval (boolean).",
+                                "max_tokens": 512,
+                                "temperature": 0.2,
+                                "output_key": "deep_analysis"
+                            }
+                        }
+                    ]
                 }
             }
         },

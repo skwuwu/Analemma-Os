@@ -1,6 +1,6 @@
 {
     "workflow_name": "test_llm_stage2_flow_control",
-    "description": "Stage 2: Flow Control (Map/Loop/HITL) + COST_GUARDRAIL - 토큰 제한 및 상태 복구 검증",
+    "description": "Stage 2: Flow Control (ForEach + HITL) + COST_GUARDRAIL - for_each 병렬 LLM 처리 + HITP 승인 검증 (DAG 호환 스키마 v2)",
     "version": "1.0.0",
     "metadata": {
         "stage": 2,
@@ -141,36 +141,6 @@
             }
         },
         {
-            "id": "loop_decision",
-            "type": "operator_official",
-            "label": "재시도 결정 (COST_GUARDRAIL 체크)",
-            "config": {
-                "strategy": "if_else",
-                "params": {
-                    "condition": "$.quality_check_result == 'quality_passed' || $.guardrail_state.iteration_count >= $.guardrail_state.max_iterations",
-                    "then": "proceed_to_hitl",
-                    "else": "retry_processing"
-                },
-                "output_key": "_routing_decision"
-            }
-        },
-        {
-            "id": "increment_counter",
-            "type": "operator_official",
-            "label": "반복 카운터 증가",
-            "config": {
-                "strategy": "merge_objects",
-                "params": {
-                    "objects": [
-                        {
-                            "iteration_incremented": true
-                        }
-                    ]
-                },
-                "output_key": "counter_update"
-            }
-        },
-        {
             "id": "record_state_for_hitl",
             "type": "operator_official",
             "label": "HITL 전 상태 스냅샷",
@@ -262,20 +232,7 @@
         },
         {
             "source": "check_quality",
-            "target": "loop_decision"
-        },
-        {
-            "type": "conditional_edge",
-            "source": "loop_decision",
-            "router_func": "route_by_state_key",
-            "mapping": {
-                "proceed_to_hitl": "record_state_for_hitl",
-                "retry_processing": "increment_counter"
-            }
-        },
-        {
-            "source": "increment_counter",
-            "target": "parallel_process"
+            "target": "record_state_for_hitl"
         },
         {
             "source": "record_state_for_hitl",

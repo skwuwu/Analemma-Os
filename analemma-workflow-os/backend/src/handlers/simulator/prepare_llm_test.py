@@ -15,7 +15,15 @@ MOCK_MODE=false로 분산 오케스트레이터에 실행을 위임합니다.
   VISION              — 멀티모달 비전 (메모리 추정, 인젝션 방어, 상태 오프로드)
   HITP_RECOVERY       — HITP 후 정상 복구 로직 테스트
   ASYNC_LLM           — 비동기 LLM 실행 파이프라인
-"""
+LLM Stage 시리즈 (점진적 토합 스테이지 테스트):
+  LLM_STAGE1          — LLM 기초: Response Schema 준수 + json_parse 성능
+  LLM_STAGE2          — ForEach 병렬 LLM + COST_GUARDRAIL + HITP 승인
+  LLM_STAGE3          — 멀티모달 기초: S3 이미지 하이드레이션 + Vision JSON 추출
+  LLM_STAGE4          — 5장 이미지 병렬 분석 + SPEED_GUARDRAIL 동시성 제어
+  LLM_STAGE5          — 3단계 재귀 + Partial Failure + Context Caching + ALL_GUARDRAILS
+  LLM_STAGE6          — 분산 MAP_REDUCE + Loop + HITL 통합
+  LLM_STAGE7          — 동시 다중 LLM 호출 + StateBag 병합 검증
+  LLM_STAGE8          — 쉘렛 탐지 & 품질 게이트 (_kernel_quality_check)"""
 
 import json
 import os
@@ -35,6 +43,7 @@ AUTO_RESUME_HITP = 'true' # HITP 자동 승인 (무한대기 방지)
 # 실제 프로덕션 스키마 워크플로 파일 (tests/backend/workflows/*.json)
 
 PIPELINE_TEST_MAPPINGS: Dict[str, str] = {
+    # 파이프라인 기본 시나리오
     'COMPLETE':            'test_complete_workflow',
     'FAIL':                'test_fail_workflow',
     'MAP_AGGREGATOR':      'test_map_aggregator_workflow',
@@ -44,6 +53,15 @@ PIPELINE_TEST_MAPPINGS: Dict[str, str] = {
     'VISION':              'test_vision_workflow',
     'HITP_RECOVERY':       'test_hitp_workflow',
     'ASYNC_LLM':           'test_async_llm_workflow',
+    # LLM Stage 시리즈 (점진적 토합 스테이지 테스트)
+    'LLM_STAGE1':          'test_llm_stage1_basic',
+    'LLM_STAGE2':          'test_llm_stage2_flow_control',
+    'LLM_STAGE3':          'test_llm_stage3_vision_basic',
+    'LLM_STAGE4':          'test_llm_stage4_vision_map',
+    'LLM_STAGE5':          'test_llm_stage5_hyper_stress',
+    'LLM_STAGE6':          'test_llm_stage6_distributed_map_reduce',
+    'LLM_STAGE7':          'test_llm_stage7_parallel_multi_llm',
+    'LLM_STAGE8':          'test_llm_stage8_slop_detection',
 }
 
 # 시나리오별 추가 initial_state 주입값
@@ -86,6 +104,64 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
     'ASYNC_LLM': {
         'pipeline_test_enabled': True,
         'verify_async_result': True,
+    },
+    # LLM Stage 시리즈
+    'LLM_STAGE1': {
+        'pipeline_test_enabled': True,
+        'input_text': 'Artificial intelligence is transforming the software industry by automating complex tasks, enabling natural language interfaces, and accelerating development workflows.',
+    },
+    'LLM_STAGE2': {
+        'pipeline_test_enabled': True,
+        'verify_for_each_parallel': True,
+        'verify_hitl': True,
+        'hitl_decision': 'approve',
+    },
+    'LLM_STAGE3': {
+        'pipeline_test_enabled': True,
+        'image_uri': 's3://analemma-test-assets/sample_receipt.jpg',
+        'verify_vision_extraction': True,
+    },
+    'LLM_STAGE4': {
+        'pipeline_test_enabled': True,
+        'image_uri_1': 's3://analemma-test-assets/product_electronics_1.jpg',
+        'image_uri_2': 's3://analemma-test-assets/product_clothing_1.jpg',
+        'image_uri_3': 's3://analemma-test-assets/product_food_1.jpg',
+        'image_uri_4': 's3://analemma-test-assets/product_electronics_2.jpg',
+        'image_uri_5': 's3://analemma-test-assets/product_furniture_1.jpg',
+        'verify_concurrency_limit': True,
+    },
+    'LLM_STAGE5': {
+        'pipeline_test_enabled': True,
+        'document_content': 'Project Alpha Q4 Report: Critical infrastructure vulnerabilities detected in authentication module (image evidence required). Performance degradation observed in payment processing (screenshot needed).',
+        'verify_partial_failure_recovery': True,
+        'verify_context_caching': True,
+    },
+    'LLM_STAGE6': {
+        'pipeline_test_enabled': True,
+        'partition_map': [
+            {'partition_id': 0, 'items': [{'content': 'Cloud scalability enables elastic workloads.'}, {'content': 'Serverless reduces operational overhead.'}]},
+            {'partition_id': 1, 'items': [{'content': 'Distributed systems require careful consistency management.'}, {'content': 'Event sourcing provides complete audit trails.'}]},
+            {'partition_id': 2, 'items': [{'content': 'Microservices decouple business capabilities.'}, {'content': 'API gateways centralize cross-cutting concerns.'}]},
+        ],
+        'loop_convergence_threshold': 0.8,
+        'max_loop_per_partition': 2,
+        'verify_distributed_reduce': True,
+    },
+    'LLM_STAGE7': {
+        'pipeline_test_enabled': True,
+        'verify_statebag_merge': True,
+        'verify_state_isolation': True,
+        'max_loop_per_branch': 2,
+        'hitl_decision': 'approve',
+    },
+    'LLM_STAGE8': {
+        'pipeline_test_enabled': True,
+        'test_cases': [
+            {'case_id': 'CASE_001', 'domain': 'TECHNICAL_WRITING', 'system_prompt': 'You are a technical writer.', 'prompt': 'Explain what a REST API is.', 'expected_is_slop': False, 'inject_slop': False},
+            {'case_id': 'CASE_002', 'domain': 'CREATIVE', 'system_prompt': 'Be very verbose and use filler phrases.', 'prompt': 'Describe the sunset.', 'expected_is_slop': True, 'inject_slop': True},
+            {'case_id': 'CASE_003', 'domain': 'CODE_REVIEW', 'system_prompt': 'You are a code reviewer.', 'prompt': 'Review this Python function: def add(a, b): return a + b', 'expected_is_slop': False, 'inject_slop': False},
+        ],
+        'verify_slop_detection_accuracy': True,
     },
 }
 

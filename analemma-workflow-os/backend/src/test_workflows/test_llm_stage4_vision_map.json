@@ -84,44 +84,49 @@
                 "max_iterations": 5,
                 "max_concurrency": 3,
                 "output_key": "vision_results",
-                "sub_node_config": {
-                    "type": "llm_chat",
-                    "config": {
-                        "provider": "gemini",
-                        "model": "gemini-2.0-flash",
-                        "vision_enabled": true,
-                        "image_sources": [
-                            "{{item.uri}}"
-                        ],
-                        "system_prompt": "You are a product categorizer. Analyze the image and classify the product. Always respond with JSON.",
-                        "prompt_content": "Analyze this product image and provide:\n1. category (electronics/clothing/food/furniture/other)\n2. product_name\n3. estimated_price_range\n4. condition (new/used/unknown)\n5. confidence_score (0-1)\n\nRespond with JSON.",
-                        "max_tokens": 512,
-                        "temperature": 0.3,
-                        "response_schema": {
-                            "type": "object",
-                            "properties": {
-                                "category": {
-                                    "type": "string"
+                "sub_workflow": {
+                    "nodes": [
+                        {
+                            "id": "vision_llm",
+                            "type": "llm_chat",
+                            "config": {
+                                "provider": "gemini",
+                                "model": "gemini-2.0-flash",
+                                "vision_enabled": true,
+                                "image_sources": [
+                                    "{{item.uri}}"
+                                ],
+                                "system_prompt": "You are a product categorizer. Analyze the image and classify the product. Always respond with JSON.",
+                                "prompt_content": "Analyze this product image and provide:\n1. category (electronics/clothing/food/furniture/other)\n2. product_name\n3. estimated_price_range\n4. condition (new/used/unknown)\n5. confidence_score (0-1)\n\nRespond with JSON.",
+                                "max_tokens": 512,
+                                "temperature": 0.3,
+                                "response_schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "category": {
+                                            "type": "string"
+                                        },
+                                        "product_name": {
+                                            "type": "string"
+                                        },
+                                        "estimated_price_range": {
+                                            "type": "string"
+                                        },
+                                        "condition": {
+                                            "type": "string"
+                                        },
+                                        "confidence_score": {
+                                            "type": "number"
+                                        },
+                                        "analysis_timestamp_ms": {
+                                            "type": "integer"
+                                        }
+                                    }
                                 },
-                                "product_name": {
-                                    "type": "string"
-                                },
-                                "estimated_price_range": {
-                                    "type": "string"
-                                },
-                                "condition": {
-                                    "type": "string"
-                                },
-                                "confidence_score": {
-                                    "type": "number"
-                                },
-                                "analysis_timestamp_ms": {
-                                    "type": "integer"
-                                }
+                                "output_key": "image_analysis"
                             }
-                        },
-                        "output_key": "image_analysis"
-                    }
+                        }
+                    ]
                 },
                 "speed_policy": {
                     "max_concurrency": 3,

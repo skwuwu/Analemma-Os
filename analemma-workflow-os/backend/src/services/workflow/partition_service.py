@@ -38,26 +38,30 @@ SEGMENT_TYPES: FrozenSet[str] = frozenset({
 
 
 # ============================================================================
-# [v3.16] Loop Limit Constants — Physics-based Counting
+# [v3.17] Loop Limit Constants — Complexity-Budget Counting
 # ============================================================================
 #
-# 핵심 원칙: loop_counter는 SFN 엔진이 EvaluateNextAction → CONTINUE 경로를
-# 통과한 횟수만 셉니다. 따라서 공식은 "실제 SFN 상태 전이 횟수"에 기반해야 합니다.
+# max_loop_iterations는 두 가지 역할을 합니다:
+#   1. SFN loop_counter가 이 값을 초과하면 LoopLimitExceeded 발생 (안전 장치)
+#   2. 워크플로우 복잡도에 비례하는 충분한 실행 여유를 제공 (예산 역할)
 #
 # [분석] for_each 처리 방식:
 #   - for_each_runner는 Lambda 내부 ThreadPoolExecutor로 모든 아이템 처리
-#   - SFN 관점: parallel_group 세그먼트(PARALLEL_GROUP 경로, 카운터 0) +
-#               aggregator 세그먼트(CONTINUE 경로, 카운터 +1)
-#   - 즉 max_iterations는 loop_counter와 무관 → 가중치 0
+#   - SFN loop_counter 관점: parallel_group(PARALLEL_GROUP 경로, +0) +
+#     aggregator(CONTINUE 경로, +1) = 총 1~2회 증가 (SFN 전이 무관)
+#   - 그러나 Lambda 내부에서 sub_node_count × max_iterations 만큼 실행 발생
+#   - 이 내부 복잡도를 무시하면 limit이 너무 낮아 테스트/안전 기준 미달
+#   - 따라서 Lambda-internal 복잡도 예산: sub_node_count × max_iterations
 #
 # [분석] sequential loop 처리 방식:
-#   - 각 반복마다 loop body 세그먼트들이 개별 SFN 전이를 발생시킴
+#   - 각 반복마다 loop body 세그먼트들이 실제 SFN CONTINUE 전이 발생
 #   - weight = segment_count × (max_iter - 1) (첫 번째 반복은 base count에 포함)
 #
-# [공식] loop_limit = max(int(raw_segments * 1.5) + 20, 50)
-#   - 1.5x: API 재시도·마이너 세그먼트 분할에 대비한 여유
-#   - +20: 최소 복구 기회 보장 (규모 무관)
-#   - floor=50: 실질적 무한루프 차단 (50회 CONTINUE면 설계 오류 가능성 높음)
+# [공식] loop_limit = max(int(raw * 1.5) + 20, 50)
+#   - raw = base_segments + sequential_loop_weight + for_each_complexity_budget
+#   - 1.5x: API 재시도·마이너 세그먼트 분할 여유
+#   - +20: 규모 무관 최소 완충
+#   - floor=50: 실질적 무한루프 차단
 
 # 최종 estimated_executions에 곱할 안전 배수 (1.5x)
 LOOP_LIMIT_SAFETY_MULTIPLIER: float = float(os.environ.get("LOOP_LIMIT_SAFETY_MULTIPLIER", "1.5"))
@@ -352,16 +356,16 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
             sub_nodes = sub_workflow.get("nodes", [])
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # [v3.16] Physics-based for_each Weight = 0
+            # [v3.17] for_each Lambda-Internal Complexity Budget
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # for_each_runner는 Lambda 내부 ThreadPoolExecutor로 실행됨.
-            # SFN 관점에서는 단 2번의 상태 전이만 발생:
-            #   1. parallel_group 세그먼트 → PARALLEL_GROUP 경로 (loop_counter 증가 없음)
-            #   2. aggregator 세그먼트    → CONTINUE 경로 (loop_counter +1)
-            # 이 2개는 이미 execution_segments_count(top-level base)에 포함됨.
-            # max_iterations는 SFN loop_counter와 완전히 무관 → 추가 가중치 0.
-            # 중첩 루프 분석은 재귀적으로 유지 (nested sequential loop 대비).
+            # SFN loop_counter 증가: 최대 2회 (parallel_group + aggregator).
+            # 그러나 Lambda 내부에서 sub_node_count × max_iterations 회 실행 발생.
+            # max_loop_iterations는 SFN 전이 카운터이자 복잡도 예산이므로,
+            # Lambda 내부 실행량을 complexity_budget으로 반영:
+            #   self_weight = sub_node_count × max_iterations
             sub_node_count = len(sub_nodes)
+            for_each_self_weight = sub_node_count * max_iter
             
             # Recursive analysis for nested loops (sequential loop inside for_each 대비)
             sub_analysis = analyze_loop_structures(sub_nodes, node_to_seg_map)
@@ -371,19 +375,18 @@ def analyze_loop_structures(nodes: List[Dict[str, Any]], node_to_seg_map: Dict[s
                 "type": "for_each",
                 "max_iterations": max_iter,
                 "sub_node_count": sub_node_count,
-                "self_weight": 0,  # Lambda 내부 처리 → SFN 전이 없음
+                "self_weight": for_each_self_weight,  # Lambda-internal complexity budget
                 "nested_loops": sub_analysis["loop_nodes"]
             })
             
-            # for_each 자체 가중치 = 0 (base count에 이미 포함)
-            # 중첩된 sequential loop 가중치만 전파
-            for_each_weighted = sub_analysis["total_loop_weighted_segments"]
+            # for_each 복잡도 예산 + 중첩 sequential loop 가중치
+            for_each_weighted = for_each_self_weight + sub_analysis["total_loop_weighted_segments"]
             total_weighted += for_each_weighted
             
             logger.debug(
-                f"[Loop Analysis] for_each '{node.get('id')}' (physics-based): "
-                f"max_iter={max_iter} (irrelevant to SFN counter), "
-                f"self_weight=0 (Lambda-internal), "
+                f"[Loop Analysis] for_each '{node.get('id')}' (v3.17 complexity-budget): "
+                f"max_iter={max_iter}, sub_nodes={sub_node_count}, "
+                f"self_weight={for_each_self_weight} (Lambda-internal budget), "
                 f"nested_weight={sub_analysis['total_loop_weighted_segments']}"
             )
     
@@ -1293,26 +1296,27 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
     # nodes is Dict[str, Dict], but analyze_loop_structures expects List[Dict]
     loop_analysis = analyze_loop_structures(list(nodes.values()), node_to_seg_map)
     
-    # [v3.16] Physics-based loop limit calculation
-    # for_each: Lambda 내부 처리 → 가중치 0 (분석 완료)
-    # sequential loop: 각 반복이 실제 SFN 전이 발생 → segment_count × (max_iter - 1)
+    # [v3.17] Complexity-budget loop limit calculation
+    # for_each: Lambda-internal budget = sub_node_count × max_iterations
+    # sequential loop: SFN CONTINUE 전이 = segment_count × (max_iter - 1)
+    # 두 가중치 모두 raw에 합산 → 복잡도 예산 기반 limit 계산
     weighted_loop_segments = loop_analysis["total_loop_weighted_segments"]
     raw_estimated_executions = execution_segments_count + weighted_loop_segments
     
     # loop_limit = max(raw × 1.5 + 20, 50)
     # - 1.5x: API 재시도·마이너 분할 여유
     # - +20: 규모 무관 최소 완충
-    # - floor=50: 실질적 무한루프 차단 (50 CONTINUE = 설계 오류 가능성)
+    # - floor=50: 실질적 무한루프 차단
     estimated_executions = max(
         int(raw_estimated_executions * LOOP_LIMIT_SAFETY_MULTIPLIER) + LOOP_LIMIT_FLAT_BONUS,
         LOOP_LIMIT_FLOOR
     )
     
     logger.info(
-        f"[Dynamic Loop Limit] Physics-based analysis (v3.16): "
+        f"[Dynamic Loop Limit] Complexity-budget analysis (v3.17): "
         f"base_segments={execution_segments_count}, "
         f"loop_count={loop_analysis['loop_count']}, "
-        f"sequential_loop_weight={weighted_loop_segments}, "
+        f"total_complexity_weight={weighted_loop_segments}, "
         f"raw_estimate={raw_estimated_executions}, "
         f"formula=max(int({raw_estimated_executions}*{LOOP_LIMIT_SAFETY_MULTIPLIER})+{LOOP_LIMIT_FLAT_BONUS}, {LOOP_LIMIT_FLOOR}), "
         f"estimated_executions={estimated_executions}"
@@ -1345,7 +1349,7 @@ def partition_workflow_advanced(config: Dict[str, Any]) -> Dict[str, Any]:
             "loop_nodes_count": loop_analysis["loop_count"],
             "weighted_execution_estimate": estimated_executions,
             "has_performance_warnings": len(performance_warnings) > 0,
-            # [v3.16] Physics-based Loop Limit metadata
+            # [v3.17] Complexity-Budget Loop Limit metadata
             "raw_estimated_executions": raw_estimated_executions,
             "loop_limit_safety_multiplier": LOOP_LIMIT_SAFETY_MULTIPLIER,
             "loop_limit_flat_bonus": LOOP_LIMIT_FLAT_BONUS,
