@@ -57,11 +57,12 @@ SEGMENT_TYPES: FrozenSet[str] = frozenset({
 #   - 각 반복마다 loop body 세그먼트들이 실제 SFN CONTINUE 전이 발생
 #   - weight = segment_count × (max_iter - 1) (첫 번째 반복은 base count에 포함)
 #
-# [공식] loop_limit = max(int(raw * 1.5) + 20, 50)
+# [공식] loop_limit = max(int(raw * 1.5) + 20, 100)
 #   - raw = base_segments + sequential_loop_weight + for_each_complexity_budget
 #   - 1.5x: API 재시도·마이너 세그먼트 분할 여유
 #   - +20: 규모 무관 최소 완충
-#   - floor=50: 실질적 무한루프 차단
+#   - floor=100: 복잡도가 낮더라도 최소 120 여유 확보
+#              (floor=50이면 max=70이 되어 aiModel/async 워크플로에서 부족)
 
 # 최종 estimated_executions에 곱할 안전 배수 (1.5x)
 LOOP_LIMIT_SAFETY_MULTIPLIER: float = float(os.environ.get("LOOP_LIMIT_SAFETY_MULTIPLIER", "1.5"))
@@ -70,7 +71,9 @@ LOOP_LIMIT_SAFETY_MULTIPLIER: float = float(os.environ.get("LOOP_LIMIT_SAFETY_MU
 LOOP_LIMIT_FLAT_BONUS: int = int(os.environ.get("LOOP_LIMIT_FLAT_BONUS", "20"))
 
 # loop_limit 절대 하한선 — 어떤 경우에도 이 값 이상을 보장
-LOOP_LIMIT_FLOOR: int = int(os.environ.get("LOOP_LIMIT_FLOOR", "50"))
+# [v3.18.5] 50 → 100: floor=50이면 max_loop_iterations = 70이 되어
+#   aiModel/async 노드 포함 단순 워크플로도 반복적 오류를 유발하는 것을 방지
+LOOP_LIMIT_FLOOR: int = int(os.environ.get("LOOP_LIMIT_FLOOR", "100"))
 
 
 # ============================================================================

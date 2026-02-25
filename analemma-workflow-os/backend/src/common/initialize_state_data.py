@@ -1065,8 +1065,10 @@ def _execute_initialization(event, context):
                 f"(total_segments={total_segments} × 10, min=50)"
             )
     
-    # Apply safety margin: 20% of estimate or minimum 20
-    safety_margin = max(int(estimated_executions * 0.2), 20)
+    # Apply safety margin: 25% of estimate or minimum 20
+    # [v3.18.5] 20% → 25%: stage6 등 고복잡도 워크플로에서 estimate가
+    #   실제 실행 횟수에 근소하게 못 미치는 사례 방지 (예: estimate=297, 실행=360)
+    safety_margin = max(int(estimated_executions * 0.25), 20)
     default_loop_limit = estimated_executions + safety_margin
     
     # Branch loop limit: 50% of main limit or minimum 50
