@@ -4,12 +4,13 @@
     "nodes": [
         {
             "id": "prep_node",
-            "type": "sets",
-            "config": {
-                "sets": [
-                    {"key": "hitp_prepared", "value": true},
-                    {"key": "prep_result", "value": {"status": "hitp_prep_completed", "ready_for_segmentation": true}}
-                ]
+            "type": "operator",
+            "sets": {
+                "hitp_prepared": true,
+                "prep_result": {
+                    "status": "hitp_prep_completed",
+                    "ready_for_segmentation": true
+                }
             }
         },
         {
@@ -19,21 +20,21 @@
                 "strategy": "if_else",
                 "params": {
                     "condition": "$.hitp_prepared and $.prep_result.ready_for_segmentation",
-                    "then": "\u2705 SUCCESS: HITP preparation status confirmed",
-                    "else": "\u274c FAILURE: HITP preparation failed"
+                    "then": "✅ SUCCESS: HITP preparation status confirmed",
+                    "else": "❌ FAILURE: HITP preparation failed"
                 },
                 "output_key": "TEST_RESULT"
             }
         },
         {
             "id": "approval_required_node",
-            "type": "sets",
-            "hitp": true,
-            "config": {
-                "sets": [
-                    {"key": "requires_approval", "value": true},
-                    {"key": "approval_result", "value": {"status": "awaiting_human_approval", "approval_type": "manual_review_required"}}
-                ]
+            "type": "operator",
+            "sets": {
+                "requires_approval": true,
+                "approval_result": {
+                    "status": "awaiting_human_approval",
+                    "approval_type": "manual_review_required"
+                }
             }
         }
     ],

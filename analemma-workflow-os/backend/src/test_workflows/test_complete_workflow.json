@@ -4,12 +4,12 @@
     "nodes": [
         {
             "id": "complete_prep",
-            "type": "sets",
-            "config": {
-                "sets": [
-                    {"key": "prep_done", "value": true},
-                    {"key": "prep_result", "value": {"status": "ready_for_completion"}}
-                ]
+            "type": "operator",
+            "sets": {
+                "prep_done": true,
+                "prep_result": {
+                    "status": "ready_for_completion"
+                }
             }
         },
         {
@@ -24,11 +24,9 @@
         },
         {
             "id": "validator_node",
-            "type": "sets",
-            "config": {
-                "sets": [
-                    {"key": "TEST_RESULT", "value": "SUCCESS: complete test workflow finished"}
-                ]
+            "type": "operator",
+            "sets": {
+                "TEST_RESULT": "SUCCESS: complete test workflow finished"
             }
         }
     ],

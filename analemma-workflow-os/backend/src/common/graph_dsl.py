@@ -133,7 +133,7 @@ class WorkflowNode(BaseModel):
     id: str
     type: Literal[
         # === 사용자가 프론트엔드에서 생성하는 핵심 타입 ===
-        "operator",        # 범용 연산자
+        "operator",        # 범용 연산자 (config.sets dict/list 포함)
         "llm_chat",        # LLM 채팅 (aiModel → llm_chat로 변환됨)
         "for_each",        # 리스트 반복 (control.loop → for_each로 변환됨)
         "loop",            # 조건부 반복 (control.loop → loop로 변환됨)

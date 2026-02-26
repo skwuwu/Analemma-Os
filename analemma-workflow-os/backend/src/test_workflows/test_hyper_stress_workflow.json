@@ -6,61 +6,38 @@
     "nodes": [
         {
             "id": "stress_init",
-            "type": "sets",
+            "type": "operator",
             "label": "극한 스트레스 테스트 초기화",
-            "config": {
-                "sets": [
-                    {
-                        "key": "outer_loop_items",
-                        "value": [
-                            0,
-                            1,
-                            2,
-                            3
-                        ]
-                    },
-                    {
-                        "key": "inner_items_per_outer",
-                        "value": [
-                            2,
-                            3,
-                            2,
-                            3
-                        ]
-                    },
-                    {
-                        "key": "hitl_trigger_positions",
-                        "value": [
-                            1,
-                            3
-                        ]
-                    },
-                    {
-                        "key": "branch_isolation_tokens",
-                        "value": {
-                            "branch_alpha": "ALPHA_TOKEN",
-                            "branch_beta": "BETA_TOKEN"
-                        }
-                    },
-                    {
-                        "key": "stress_metrics",
-                        "value": {
-                            "nested_map_count": 0,
-                            "hitl_inside_loop_count": 0,
-                            "loop_pointer_recoveries": 0,
-                            "parallel_race_detected": false,
-                            "isolation_violations": []
-                        }
-                    },
-                    {
-                        "key": "loop_state_checkpoints",
-                        "value": []
-                    },
-                    {
-                        "key": "stress_config",
-                        "value": "initialized"
-                    }
-                ]
+            "sets": {
+                "outer_loop_items": [
+                    0,
+                    1,
+                    2,
+                    3
+                ],
+                "inner_items_per_outer": [
+                    2,
+                    3,
+                    2,
+                    3
+                ],
+                "hitl_trigger_positions": [
+                    1,
+                    3
+                ],
+                "branch_isolation_tokens": {
+                    "branch_alpha": "ALPHA_TOKEN",
+                    "branch_beta": "BETA_TOKEN"
+                },
+                "stress_metrics": {
+                    "nested_map_count": 0,
+                    "hitl_inside_loop_count": 0,
+                    "loop_pointer_recoveries": 0,
+                    "parallel_race_detected": false,
+                    "isolation_violations": []
+                },
+                "loop_state_checkpoints": [],
+                "stress_config": "initialized"
             }
         },
         {
@@ -95,36 +72,17 @@
                                     "nodes": [
                                         {
                                             "id": "alpha_pre_process",
-                                            "type": "sets",
-                                            "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "alpha_current_loop_pointer",
-                                                        "value": 0
-                                                    },
-                                                    {
-                                                        "key": "alpha_pre_processed",
-                                                        "value": true
-                                                    }
-                                                ]
+                                            "type": "operator",
+                                            "sets": {
+                                                "alpha_current_loop_pointer": 0,
+                                                "alpha_pre_processed": true
                                             }
                                         },
                                         {
                                             "id": "alpha_hitl_inside_loop",
-                                            "type": "sets",
-                                            "hitp": true,
+                                            "type": "operator",
                                             "label": "[극한] 루프 내부 HITL",
                                             "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "alpha_hitl_triggered",
-                                                        "value": true
-                                                    },
-                                                    {
-                                                        "key": "alpha_hitl_count",
-                                                        "value": 1
-                                                    }
-                                                ],
                                                 "wait_timeout_seconds": 30,
                                                 "auto_approve_on_timeout": true,
                                                 "approval_message": "[Alpha] 루프 내부 HITL - 현재 포인터 복구 테스트",
@@ -133,22 +91,18 @@
                                                     "save_iteration_state": true,
                                                     "recovery_validation": true
                                                 }
+                                            },
+                                            "sets": {
+                                                "alpha_hitl_triggered": true,
+                                                "alpha_hitl_count": 1
                                             }
                                         },
                                         {
                                             "id": "alpha_post_process",
-                                            "type": "sets",
-                                            "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "alpha_processed_count",
-                                                        "value": 1
-                                                    },
-                                                    {
-                                                        "key": "loop_pointer_recoveries",
-                                                        "value": 1
-                                                    }
-                                                ]
+                                            "type": "operator",
+                                            "sets": {
+                                                "alpha_processed_count": 1,
+                                                "loop_pointer_recoveries": 1
                                             }
                                         }
                                     ],
@@ -190,36 +144,17 @@
                                     "nodes": [
                                         {
                                             "id": "beta_pre_process",
-                                            "type": "sets",
-                                            "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "beta_current_loop_pointer",
-                                                        "value": 0
-                                                    },
-                                                    {
-                                                        "key": "beta_pre_processed",
-                                                        "value": true
-                                                    }
-                                                ]
+                                            "type": "operator",
+                                            "sets": {
+                                                "beta_current_loop_pointer": 0,
+                                                "beta_pre_processed": true
                                             }
                                         },
                                         {
                                             "id": "beta_hitl_inside_loop",
-                                            "type": "sets",
-                                            "hitp": true,
+                                            "type": "operator",
                                             "label": "[극한] 루프 내부 HITL (Beta)",
                                             "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "beta_hitl_triggered",
-                                                        "value": true
-                                                    },
-                                                    {
-                                                        "key": "beta_hitl_count",
-                                                        "value": 1
-                                                    }
-                                                ],
                                                 "wait_timeout_seconds": 30,
                                                 "auto_approve_on_timeout": true,
                                                 "approval_message": "[Beta] 루프 내부 HITL - 역순 포인터 복구 테스트",
@@ -228,22 +163,18 @@
                                                     "save_iteration_state": true,
                                                     "recovery_validation": true
                                                 }
+                                            },
+                                            "sets": {
+                                                "beta_hitl_triggered": true,
+                                                "beta_hitl_count": 1
                                             }
                                         },
                                         {
                                             "id": "beta_post_process",
-                                            "type": "sets",
-                                            "config": {
-                                                "sets": [
-                                                    {
-                                                        "key": "beta_processed_count",
-                                                        "value": 1
-                                                    },
-                                                    {
-                                                        "key": "loop_pointer_recoveries",
-                                                        "value": 1
-                                                    }
-                                                ]
+                                            "type": "operator",
+                                            "sets": {
+                                                "beta_processed_count": 1,
+                                                "loop_pointer_recoveries": 1
                                             }
                                         }
                                     ],
@@ -267,65 +198,49 @@
         },
         {
             "id": "isolation_validator",
-            "type": "sets",
+            "type": "operator",
             "label": "[Kernel] 메모리 격리 및 데이터 레이스 검증",
-            "config": {
-                "sets": [
-                    {
-                        "key": "isolation_validation",
-                        "value": {
-                            "isolation_checks": {
-                                "alpha_isolated": true,
-                                "beta_isolated": true,
-                                "no_cross_contamination": true
-                            },
-                            "pointer_checks": {
-                                "alpha_checkpoints_saved": true,
-                                "beta_checkpoints_saved": true,
-                                "loop_pointers_recovered": true
-                            },
-                            "race_checks": {
-                                "no_race_detected": true,
-                                "no_isolation_violations": true
-                            },
-                            "violations_detail": [],
-                            "failure_details": []
-                        }
-                    }
-                ]
+            "sets": {
+                "isolation_validation": {
+                    "isolation_checks": {
+                        "alpha_isolated": true,
+                        "beta_isolated": true,
+                        "no_cross_contamination": true
+                    },
+                    "pointer_checks": {
+                        "alpha_checkpoints_saved": true,
+                        "beta_checkpoints_saved": true,
+                        "loop_pointers_recovered": true
+                    },
+                    "race_checks": {
+                        "no_race_detected": true,
+                        "no_isolation_violations": true
+                    },
+                    "violations_detail": [],
+                    "failure_details": []
+                }
             }
         },
         {
             "id": "stress_validator",
-            "type": "sets",
+            "type": "operator",
             "label": "극한 스트레스 테스트 종합 검증",
-            "config": {
-                "sets": [
-                    {
-                        "key": "stress_test_result",
-                        "value": {
-                            "loop_checks": {
-                                "alpha_loop_complete": true,
-                                "beta_loop_complete": true,
-                                "parallel_loops_synchronized": true
-                            },
-                            "hitl_checks": {
-                                "hitl_triggered_inside_loop": true,
-                                "loop_pointer_preserved_after_hitl": true
-                            },
-                            "all_passed": true,
-                            "failure_report": null
-                        }
+            "sets": {
+                "stress_test_result": {
+                    "loop_checks": {
+                        "alpha_loop_complete": true,
+                        "beta_loop_complete": true,
+                        "parallel_loops_synchronized": true
                     },
-                    {
-                        "key": "TEST_RESULT",
-                        "value": "HYPER STRESS V4 PASSED"
+                    "hitl_checks": {
+                        "hitl_triggered_inside_loop": true,
+                        "loop_pointer_preserved_after_hitl": true
                     },
-                    {
-                        "key": "VALIDATION_STATUS",
-                        "value": "PASSED"
-                    }
-                ]
+                    "all_passed": true,
+                    "failure_report": null
+                },
+                "TEST_RESULT": "HYPER STRESS V4 PASSED",
+                "VALIDATION_STATUS": "PASSED"
             }
         }
     ],

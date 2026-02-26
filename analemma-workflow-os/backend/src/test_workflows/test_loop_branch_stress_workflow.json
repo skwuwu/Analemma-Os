@@ -6,18 +6,22 @@
     "nodes": [
         {
             "id": "stress_init",
-            "type": "sets",
+            "type": "operator",
             "label": "복합 스트레스 초기화",
-            "config": {
-                "sets": [
-                    {"key": "loop_items", "value": [0, 1, 2, 3, 4]},
-                    {"key": "loop_counter", "value": 0},
-                    {"key": "max_loop_iterations", "value": 5},
-                    {"key": "accumulated_results", "value": []},
-                    {"key": "offload_triggered_count", "value": 0},
-                    {"key": "branch_execution_count", "value": 0},
-                    {"key": "data_per_iteration_kb", "value": 25}
-                ]
+            "sets": {
+                "loop_items": [
+                    0,
+                    1,
+                    2,
+                    3,
+                    4
+                ],
+                "loop_counter": 0,
+                "max_loop_iterations": 5,
+                "accumulated_results": [],
+                "offload_triggered_count": 0,
+                "branch_execution_count": 0,
+                "data_per_iteration_kb": 25
             }
         },
         {
@@ -32,22 +36,18 @@
                     "nodes": [
                         {
                             "id": "loop_iteration_start",
-                            "type": "sets",
+                            "type": "operator",
                             "label": "반복 시작",
-                            "config": {
-                                "sets": [
-                                    {"key": "step_1_done", "value": true}
-                                ]
+                            "sets": {
+                                "step_1_done": true
                             }
                         },
                         {
                             "id": "branch_decision",
-                            "type": "sets",
+                            "type": "operator",
                             "label": "분기 결정",
-                            "config": {
-                                "sets": [
-                                    {"key": "branch_route", "value": "even_path"}
-                                ]
+                            "sets": {
+                                "branch_route": "even_path"
                             }
                         },
                         {
@@ -95,51 +95,66 @@
                         },
                         {
                             "id": "accumulate_results",
-                            "type": "sets",
+                            "type": "operator",
                             "label": "결과 축적",
-                            "config": {
-                                "sets": [
-                                    {"key": "step_accumulated", "value": true}
-                                ]
+                            "sets": {
+                                "step_accumulated": true
                             }
                         }
                     ],
                     "edges": [
-                        {"source": "loop_iteration_start", "target": "branch_decision"},
-                        {"source": "branch_decision", "target": "parallel_branch_node"},
-                        {"source": "parallel_branch_node", "target": "accumulate_results"}
+                        {
+                            "source": "loop_iteration_start",
+                            "target": "branch_decision"
+                        },
+                        {
+                            "source": "branch_decision",
+                            "target": "parallel_branch_node"
+                        },
+                        {
+                            "source": "parallel_branch_node",
+                            "target": "accumulate_results"
+                        }
                     ]
                 }
             }
         },
         {
             "id": "hitp_checkpoint",
-            "type": "sets",
-            "hitp": true,
+            "type": "operator",
             "label": "HITL 체크포인트 (루프 완료 후 승인)",
-            "config": {
-                "sets": [
-                    {"key": "hitp_checkpoint", "value": {"requires_approval": true, "approval_message": "Loop completed. Approve?"}},
-                    {"key": "hitp_triggered", "value": true}
-                ]
+            "sets": {
+                "hitp_checkpoint": {
+                    "requires_approval": true,
+                    "approval_message": "Loop completed. Approve?"
+                },
+                "hitp_triggered": true
             }
         },
         {
             "id": "final_validator",
-            "type": "sets",
+            "type": "operator",
             "label": "통합 검증",
-            "config": {
-                "sets": [
-                    {"key": "TEST_RESULT", "value": "LOOP+BRANCH STRESS PASSED"},
-                    {"key": "VALIDATION_STATUS", "value": "PASSED"}
-                ]
+            "sets": {
+                "TEST_RESULT": "LOOP+BRANCH STRESS PASSED",
+                "VALIDATION_STATUS": "PASSED"
             }
         }
     ],
     "edges": [
-        {"source": "stress_init", "target": "loop_processor"},
-        {"source": "loop_processor", "target": "hitp_checkpoint", "type": "hitp"},
-        {"source": "hitp_checkpoint", "target": "final_validator"}
+        {
+            "source": "stress_init",
+            "target": "loop_processor"
+        },
+        {
+            "source": "loop_processor",
+            "target": "hitp_checkpoint",
+            "type": "hitp"
+        },
+        {
+            "source": "hitp_checkpoint",
+            "target": "final_validator"
+        }
     ],
     "start_node": "stress_init",
     "metadata": {

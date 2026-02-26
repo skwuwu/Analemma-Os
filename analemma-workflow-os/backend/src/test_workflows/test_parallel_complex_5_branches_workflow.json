@@ -4,14 +4,16 @@
     "nodes": [
         {
             "id": "parallel_prep",
-            "type": "sets",
-            "config": {
-                "sets": [
-                    {"key": "parallel_test_started", "value": true},
-                    {"key": "expected_branches", "value": 5},
-                    {"key": "expected_child_workflow", "value": true},
-                    {"key": "prep_result", "value": {"test_type": "parallel_complex_5_branches", "branch_count": 5, "should_use_child_workflow": true}}
-                ]
+            "type": "operator",
+            "sets": {
+                "parallel_test_started": true,
+                "expected_branches": 5,
+                "expected_child_workflow": true,
+                "prep_result": {
+                    "test_type": "parallel_complex_5_branches",
+                    "branch_count": 5,
+                    "should_use_child_workflow": true
+                }
             }
         },
         {
@@ -23,40 +25,54 @@
                         "branch_id": "branch_1",
                         "total_segments": 15,
                         "partition_map": {
-                            "seg_1_1": {"type": "operator", "complexity": "medium"},
-                            "seg_1_2": {"type": "operator", "complexity": "high"},
-                            "seg_1_3": {"type": "aiModel", "complexity": "medium"}
+                            "seg_1_1": {
+                                "type": "operator",
+                                "complexity": "medium"
+                            },
+                            "seg_1_2": {
+                                "type": "operator",
+                                "complexity": "high"
+                            },
+                            "seg_1_3": {
+                                "type": "aiModel",
+                                "complexity": "medium"
+                            }
                         },
                         "nodes": [
                             {
                                 "id": "branch_1_work",
-                                "type": "sets",
-                                "config": {
-                                    "sets": [
-                                        {"key": "branch_1_result", "value": "Success_1"},
-                                        {"key": "branch_1_completed", "value": true}
-                                    ]
+                                "type": "operator",
+                                "sets": {
+                                    "branch_1_result": "Success_1",
+                                    "branch_1_completed": true
                                 }
                             }
                         ]
                     },
                     {
-                        "branch_id": "branch_2", 
+                        "branch_id": "branch_2",
                         "total_segments": 20,
                         "partition_map": {
-                            "seg_2_1": {"type": "operator", "complexity": "high"},
-                            "seg_2_2": {"type": "aiModel", "complexity": "high"},
-                            "seg_2_3": {"type": "operator", "complexity": "medium"}
+                            "seg_2_1": {
+                                "type": "operator",
+                                "complexity": "high"
+                            },
+                            "seg_2_2": {
+                                "type": "aiModel",
+                                "complexity": "high"
+                            },
+                            "seg_2_3": {
+                                "type": "operator",
+                                "complexity": "medium"
+                            }
                         },
                         "nodes": [
                             {
                                 "id": "branch_2_work",
-                                "type": "sets",
-                                "config": {
-                                    "sets": [
-                                        {"key": "branch_2_result", "value": "Success_2"},
-                                        {"key": "branch_2_completed", "value": true}
-                                    ]
+                                "type": "operator",
+                                "sets": {
+                                    "branch_2_result": "Success_2",
+                                    "branch_2_completed": true
                                 }
                             }
                         ]
@@ -65,18 +81,22 @@
                         "branch_id": "branch_3",
                         "total_segments": 18,
                         "partition_map": {
-                            "seg_3_1": {"type": "aiModel", "complexity": "high"},
-                            "seg_3_2": {"type": "operator", "complexity": "medium"}
+                            "seg_3_1": {
+                                "type": "aiModel",
+                                "complexity": "high"
+                            },
+                            "seg_3_2": {
+                                "type": "operator",
+                                "complexity": "medium"
+                            }
                         },
                         "nodes": [
                             {
                                 "id": "branch_3_work",
-                                "type": "sets",
-                                "config": {
-                                    "sets": [
-                                        {"key": "branch_3_result", "value": "Success_3"},
-                                        {"key": "branch_3_completed", "value": true}
-                                    ]
+                                "type": "operator",
+                                "sets": {
+                                    "branch_3_result": "Success_3",
+                                    "branch_3_completed": true
                                 }
                             }
                         ]
@@ -85,18 +105,22 @@
                         "branch_id": "branch_4",
                         "total_segments": 22,
                         "partition_map": {
-                            "seg_4_1": {"type": "operator", "complexity": "very_high"},
-                            "seg_4_2": {"type": "aiModel", "complexity": "high"}
+                            "seg_4_1": {
+                                "type": "operator",
+                                "complexity": "very_high"
+                            },
+                            "seg_4_2": {
+                                "type": "aiModel",
+                                "complexity": "high"
+                            }
                         },
                         "nodes": [
                             {
                                 "id": "branch_4_work",
-                                "type": "sets",
-                                "config": {
-                                    "sets": [
-                                        {"key": "branch_4_result", "value": "Success_4"},
-                                        {"key": "branch_4_completed", "value": true}
-                                    ]
+                                "type": "operator",
+                                "sets": {
+                                    "branch_4_result": "Success_4",
+                                    "branch_4_completed": true
                                 }
                             }
                         ]
@@ -105,18 +129,22 @@
                         "branch_id": "branch_5",
                         "total_segments": 25,
                         "partition_map": {
-                            "seg_5_1": {"type": "aiModel", "complexity": "very_high"},
-                            "seg_5_2": {"type": "operator", "complexity": "high"}
+                            "seg_5_1": {
+                                "type": "aiModel",
+                                "complexity": "very_high"
+                            },
+                            "seg_5_2": {
+                                "type": "operator",
+                                "complexity": "high"
+                            }
                         },
                         "nodes": [
                             {
                                 "id": "branch_5_work",
-                                "type": "sets",
-                                "config": {
-                                    "sets": [
-                                        {"key": "branch_5_result", "value": "Success_5"},
-                                        {"key": "branch_5_completed", "value": true}
-                                    ]
+                                "type": "operator",
+                                "sets": {
+                                    "branch_5_result": "Success_5",
+                                    "branch_5_completed": true
                                 }
                             }
                         ]
@@ -133,12 +161,10 @@
         },
         {
             "id": "parallel_validator",
-            "type": "sets",
-            "config": {
-                "sets": [
-                    {"key": "TEST_RESULT", "value": "SUCCESS: 복잡한 5개 브랜치 병렬 처리 성공"},
-                    {"key": "VALIDATION_STATUS", "value": "PASSED"}
-                ]
+            "type": "operator",
+            "sets": {
+                "TEST_RESULT": "SUCCESS: 복잡한 5개 브랜치 병렬 처리 성공",
+                "VALIDATION_STATUS": "PASSED"
             }
         }
     ],
