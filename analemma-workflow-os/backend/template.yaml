@@ -842,15 +842,19 @@ Resources:
           - Effect: Allow
             Action: bedrock:InvokeModel*
             Resource: "*"
+          # FIX: states:SendTaskSuccess/Failure is "not resource-type specific" per AWS IAM docs.
+          # Task tokens are not ARN-addressable → Resource: "*" is the only valid form.
+          # Using a stateMachine/execution ARN causes resource type mismatch → AccessDeniedException.
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
               - states:SendTaskFailure
+            Resource: "*"
+          - Effect: Allow
+            Action:
               - states:GetExecutionHistory
               - states:DescribeExecution
             Resource:
-              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
-              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
               - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowOrchestrator-${StageName}:*"
               - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:execution:WorkflowDistributedOrchestrator-${StageName}:*"
           - Effect: Allow
@@ -2479,11 +2483,13 @@ Resources:
         - S3CrudPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
         - Statement:
+          # FIX: states:SendTaskSuccess/Failure is "not resource-type specific" per AWS IAM docs.
+          # Task tokens are not ARN-addressable → Resource: "*" is the only valid form.
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
               - states:SendTaskFailure
-            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+            Resource: "*"
           - Effect: Allow
             Action:
               - dynamodb:TransactWriteItems
