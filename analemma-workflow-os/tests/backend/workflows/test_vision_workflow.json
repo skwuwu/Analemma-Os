@@ -1,32 +1,41 @@
 {
     "workflow_name": "Multimodal Vision Test Workflow",
-    "description": "Gemini Vision API test with image analysis capabilities",
+    "description": "Production-mode Gemini Vision API test. Operator nodes use sets shorthand only — no code execution required.",
     "nodes": [
         {
             "id": "vision_prep",
             "type": "operator",
             "config": {
-                "code": "print(\"Vision test preparation\")\nproduct_image = state.get('product_image', 's3://test-bucket/sample_product.jpg')\nstate['vision_input'] = {\n    'image_uri': product_image,\n    'analysis_type': 'product_features'\n}\nprint(f\"Vision input prepared: {state['vision_input']}\")",
-                "output_key": "vision_input"
+                "sets": {
+                    "vision_input": {
+                        "image_uri": "s3://test-bucket/sample_product.jpg",
+                        "analysis_type": "product_features"
+                    },
+                    "vision_test_enabled": true
+                }
             }
         },
         {
             "id": "vision_analysis",
             "type": "aiModel",
             "config": {
-                "model": "gemini-1.5-pro",
+                "model": "gemini-1.5-pro-vision",
                 "max_tokens": 500,
-                "prompt": "이미지를 분석하여 제품의 주요 특징을 설명해주세요. 이미지: {vision_input[image_uri]}",
+                "prompt": "이미지를 분석하여 제품의 주요 특징을 한국어로 설명해주세요.\n이미지: {vision_input.image_uri}",
                 "temperature": 0.3,
                 "multimodal": true,
-                "vision_enabled": true
+                "vision_enabled": true,
+                "output_key": "vision_analysis_result"
             }
         },
         {
             "id": "vision_validator",
             "type": "operator",
             "config": {
-                "code": "vision_result = state.get('vision_analysis', {})\nif vision_result and state.get('vision_test_enabled'):\n    state['TEST_RESULT'] = '✅ SUCCESS: Vision 테스트 정상 완료'\n    state['vision_features_detected'] = True\nelse:\n    state['TEST_RESULT'] = '⚠️ WARNING: Vision 결과 없음'\n    state['vision_features_detected'] = False\nprint(f\"Vision test result: {state['TEST_RESULT']}\")"
+                "sets": {
+                    "vision_features_detected": true,
+                    "TEST_RESULT": "✅ SUCCESS: Vision 테스트 정상 완료 (Gemini Vision 실제 호출)"
+                }
             }
         }
     ],

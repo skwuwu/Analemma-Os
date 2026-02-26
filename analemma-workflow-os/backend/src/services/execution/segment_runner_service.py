@@ -3759,6 +3759,16 @@ class SegmentRunnerService:
             logger.info(f"[Kernel] 🧩 Aggregator segment {segment_id} detected (Resolved). Delegating to _handle_aggregator.")
             return _finalize_response(self._handle_aggregator(event), force_offload=True)
 
+        # [Issue-2 Fix] 'branches' 키가 있는 세그먼트는 type 값에 무관하게 parallel_group으로 처리
+        # 파티셔너가 type을 'parallel_group'으로 마킹하지 않아도 branches 키 존재 시 동일 경로로 라우팅
+        has_branches = isinstance(segment_config.get('branches'), list) and len(segment_config.get('branches', [])) > 0
+        if segment_type != 'parallel_group' and has_branches:
+            logger.info(
+                f"[Parallel] segment_type='{segment_type}' but 'branches' key found "
+                f"({len(segment_config['branches'])} branches) — rerouting to parallel_group handler"
+            )
+            segment_type = 'parallel_group'
+
         if segment_type == 'parallel_group':
             branches = segment_config.get('branches', [])
             logger.info(f"[Parallel] Parallel group detected with {len(branches)} branches")

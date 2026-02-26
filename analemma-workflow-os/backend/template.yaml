@@ -2443,14 +2443,15 @@ Resources:
               - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
               - AccountId: !Ref "AWS::AccountId"
         # AUTO_RESUME_HITP: Allow StoreTaskToken to call SendTaskSuccess for BOTH orchestrators
+        # states:SendTaskSuccess is "not resource-type specific" per AWS IAM docs:
+        # task tokens are not ARN-addressable → Resource: "*" is the only valid form.
+        # Using a stateMachine ARN here causes a resource type mismatch → AccessDeniedException.
         - Statement:
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
               - states:SendTaskFailure
-            Resource:
-              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
-              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+            Resource: "*"
 
   # --- Manifest Regenerator Function (Dynamic Re-partitioning) ---
   ManifestRegeneratorFunction:
