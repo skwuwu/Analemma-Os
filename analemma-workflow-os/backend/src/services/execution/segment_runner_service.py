@@ -4577,11 +4577,30 @@ class SegmentRunnerService:
                 logger.info(f"[GetObject] Small manifest ({object_size}B)")
                 obj = s3.get_object(Bucket=bucket_name, Key=key_name)
                 content = obj['Body'].read().decode('utf-8')
-                manifest = self._safe_json_load(content)
+                manifest_obj = self._safe_json_load(content)
                 
                 # 4. segment_config 추출
-                if not isinstance(manifest, list):
-                    raise ValueError(f"Invalid manifest: expected list, got {type(manifest)}")
+                # 형식 규약: manifests/{id}.json 은 항상 dict (Envelope 패턴)
+                # 'segments' 키에 segment_id 오름차순 정렬된 리스트 포함.
+                # list 형식은 규격 위반으로 에러 처리 (legacy 호환성 부담 거부).
+                if not isinstance(manifest_obj, dict):
+                    raise ValueError(
+                        f"Invalid manifest format: expected dict (Merkle DAG envelope), "
+                        f"got {type(manifest_obj)}. "
+                        f"Manifest at {manifest_s3_path} may be a legacy bare list."
+                    )
+                segments = manifest_obj.get('segments')
+                if segments is None:
+                    raise ValueError(
+                        f"Manifest missing 'segments' key. "
+                        f"Available keys: {list(manifest_obj.keys())[:10]}"
+                    )
+                if not isinstance(segments, list):
+                    raise ValueError(
+                        f"Manifest 'segments' must be list, got {type(segments)}"
+                    )
+                manifest = segments
+                logger.info(f"[_load_segment_config_from_manifest] Loaded {len(manifest)} segments from envelope")
                 if not (0 <= segment_index < len(manifest)):
                     raise ValueError(f"Index {segment_index} out of range (manifest has {len(manifest)} segments)")
                 segment_entry = manifest[segment_index]

@@ -226,16 +226,31 @@ class EventualConsistencyGuard:
         # manifest_hash의 무결성을 재검증할 수 있도록 함
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         try:
+            # 🌐 [v3.21] Unified Manifest Envelope (dict-only standard)
+            # 형식 규약: manifests/{id}.json 은 항상 dict 형식.
+            # ├─ 메타데이터: manifest_id, version, manifest_hash, config_hash, ...
+            # └─ 데이터 본체: segments (list) ← segment_id 오름차순 정렬 보장
+            #
+            # 해시 검증 대상: {workflow_id, version, config_hash, segment_hashes} 4필드만
+            # segments 키는 해시 대상이 아니므로 Envelope에 추가해도 무결성에 영향 없음.
+            segments = sorted(
+                [
+                    b['data'] for b in blocks
+                    if isinstance(b.get('data'), dict) and '__chunk__' not in b['data']
+                ],
+                key=lambda s: s.get('segment_id', s.get('execution_order', 0))
+            )
             manifest_marker = json.dumps({
                 'manifest_id': manifest_id,
                 'version': version,
                 'workflow_id': workflow_id,
                 'manifest_hash': manifest_hash,
                 'config_hash': config_hash,
-                'segment_hashes': segment_hashes,  # 🆕 Paranoid mode 검증용
+                'segment_hashes': segment_hashes,
                 'transaction_id': transaction_id,
                 'committed': True,
-                'committed_at': datetime.utcnow().isoformat()
+                'committed_at': datetime.utcnow().isoformat(),
+                'segments': segments
             }, default=str)
             self.s3.put_object(
                 Bucket=self.bucket,
@@ -243,7 +258,7 @@ class EventualConsistencyGuard:
                 Body=manifest_marker,
                 ContentType='application/json'
             )
-            logger.info(f"Phase 2.5 Complete: Manifest marker written to S3 (manifests/{manifest_id[:8]}...json)")
+            logger.info(f"Phase 2.5 Complete: Manifest envelope written to S3 (manifests/{manifest_id[:8]}...json, segments={len(segments)})")
         except Exception as e:
             logger.warning(
                 f"Phase 2.5 Failed: Manifest S3 marker write error - {e}. "
