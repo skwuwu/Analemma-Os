@@ -492,7 +492,7 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                  delta['segment_manifest_s3_path'] = payload['segment_manifest_s3_path']
             if payload.get('inner_partition_map'):
                 delta['partition_map'] = payload['inner_partition_map']
-                delta['segment_to_run'] = 0
+                delta['segment_to_run'] = 0  # restart from inner partition segment 0
             delta['_status'] = payload.get('status', 'CONTINUE')
             
             # �️ [v3.16 Fix] CONTINUE 상태일 때 next_segment_to_run 필수 검증
@@ -594,6 +594,25 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta = result['execution_result']
             else:
                 delta = result
+            
+            # 🛡️ [v3.21 Fix] else 브랜치에서 _status가 없으면 status 값을 승격
+            # action='error' 등 비표준 액션이 여기 떨어질 때 _status 미설정 시
+            # _compute_next_action이 CONTINUE를 기본값으로 사용해 무한루프 유발
+            # 해결: delta에 _status가 없으면 delta.status → 'FAILED' 순으로 폴백
+            if isinstance(delta, dict) and '_status' not in delta:
+                fallback_status = delta.get('status')
+                if isinstance(fallback_status, str) and fallback_status.upper() in (
+                    'FAILED', 'COMPLETE', 'SUCCESS', 'SUCCEEDED', 'PAUSED_FOR_HITP', 'CONTINUE'
+                ):
+                    delta['_status'] = fallback_status.upper()
+                elif action == 'error':
+                    # action='error'는 항상 FAILED여야 함 — 루프 방지
+                    delta['_status'] = 'FAILED'
+                    _get_logger().warning(
+                        f"[flatten_result] action='error' had no _status. "
+                        f"Forcing _status=FAILED to prevent infinite loop. "
+                        f"delta keys: {list(delta.keys())[:10]}"
+                    )
         
         return delta
     

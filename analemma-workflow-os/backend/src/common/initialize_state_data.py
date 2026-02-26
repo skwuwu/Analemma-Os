@@ -998,18 +998,26 @@ def _execute_initialization(event, context):
         #       DB 재로드 시 estimated_executions 컬럼이 없으면 키 자체가 없어
         #       total_segments(예: 3)로 폴백 → max_loop_iterations = 3+20 = 23
         # 수정: 값이 None이거나 floor(50) 미만인 경우 안전한 최솟값으로 대체
+        # 🛡️ [v3.18.6 Fix] Import LOOP_LIMIT_FLOOR from partition_service to stay in sync
+        _loop_floor = 100  # default fallback
+        if _HAS_PARTITION:
+            try:
+                from src.services.workflow.partition_service import LOOP_LIMIT_FLOOR as _IMPORTED_FLOOR
+                _loop_floor = _IMPORTED_FLOOR
+            except Exception:
+                pass
         _raw_est = partition_result.get("estimated_executions")
-        if isinstance(_raw_est, (int, float)) and _raw_est >= 50:  # LOOP_LIMIT_FLOOR = 50
+        if isinstance(_raw_est, (int, float)) and _raw_est >= _loop_floor:  # sync with partition_service LOOP_LIMIT_FLOOR
             estimated_executions = int(_raw_est)
         else:
             # estimated_executions 누락(DB 구 스키마) 또는 비정상 값
             # total_segments만으로 계산하면 너무 낮은 한도가 설정됨
-            # → max(total_segments * 10, 50) 으로 최소 floor 보장
-            estimated_executions = max(total_segments * 10, 50)  # 절대 50 미만 불가
+            # → max(total_segments * 10, LOOP_LIMIT_FLOOR) 으로 최소 floor 보장
+            estimated_executions = max(total_segments * 10, _loop_floor)  # 절대 FLOOR 미만 불가
             logger.warning(
                 f"[Dynamic Loop Limit] estimated_executions missing/low in partition_result "
-                f"(raw={_raw_est}). Using safe fallback: {estimated_executions} "
-                f"(total_segments={total_segments} × 10, min=50)"
+                f"(raw={_raw_est}, floor={_loop_floor}). Using safe fallback: {estimated_executions} "
+                f"(total_segments={total_segments} × 10, min={_loop_floor})"
             )
         loop_analysis = partition_result.get("loop_analysis", {})
     else:
@@ -1053,16 +1061,22 @@ def _execute_initialization(event, context):
                     f"[Dynamic Loop Limit] analyze_loop_structures fallback failed: {_e}. "
                     f"Using safe floor."
                 )
-                estimated_executions = max(total_segments * 10, 50)
+                estimated_executions = max(total_segments * 10, LOOP_LIMIT_FLOOR)
                 loop_analysis = {}
         else:
             # workflow_config도 없는 최후 폴백
-            estimated_executions = max(total_segments * 10, 50)
+            _fl2 = 100
+            if _HAS_PARTITION:
+                try:
+                    from src.services.workflow.partition_service import LOOP_LIMIT_FLOOR as _fl2
+                except Exception:
+                    pass
+            estimated_executions = max(total_segments * 10, _fl2)
             loop_analysis = {}
             logger.warning(
                 f"[Dynamic Loop Limit] No partition_result and no workflow_config. "
                 f"Using floor fallback: estimated_executions={estimated_executions} "
-                f"(total_segments={total_segments} × 10, min=50)"
+                f"(total_segments={total_segments} × 10, min={_fl2})"
             )
     
     # Apply safety margin: 25% of estimate or minimum 20

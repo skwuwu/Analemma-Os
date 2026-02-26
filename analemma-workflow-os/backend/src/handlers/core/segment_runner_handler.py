@@ -45,6 +45,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
         logger.error("🚨 [CRITICAL] Received NULL event from Step Functions! Check ASL mapping.")
         error_result = {
             "status": "FAILED",
+            "_status": "FAILED",  # 🛡️ [v3.21 Fix] USC reads _status (not status) for next_action
             "error": "Event is None. Check ASL ResultPath/Payload mapping.",
             "error_type": "NullEventError",
             "final_state": {},
@@ -182,8 +183,12 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 )
         
         # 🎒 [v3.13] Build error result for seal_state_bag
+        # 🛡️ [v3.21 Fix] Must include '_status' = 'FAILED' so USC _compute_next_action
+        # reads the correct status from delta._status (not delta.status which USC ignores).
+        # Without _status, USC defaults to 'CONTINUE' and the SFN loops forever.
         error_result = {
             "status": "FAILED",
+            "_status": "FAILED",  # 🛡️ [v3.21] USC reads _status, not status
             "error": str(e),
             "error_type": type(e).__name__,
             "final_state": event.get('current_state', {}) if event else {},

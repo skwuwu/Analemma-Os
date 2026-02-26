@@ -3503,6 +3503,9 @@ class SegmentRunnerService:
         # 👉 [Critical Fix] Branch Execution: partition_map fallback from branch_config
         # ASL의 ProcessParallelSegments에서 branch_config에 전체 브랜치 정보가 전달됨
         # partition_map이 null이면 branch_config.partition_map을 사용
+        # 🛡️ [v3.21 Fix] Initialize partition_map from bag BEFORE referencing it
+        # Previously uninitialized → UnboundLocalError → caught as exception → infinite CONTINUE loop
+        partition_map = _safe_get_from_bag(event, 'partition_map') or event.get('partition_map') or []
         branch_config = event.get('branch_config')
         if not partition_map and branch_config and isinstance(branch_config, dict):
             branch_partition_map = branch_config.get('partition_map')
