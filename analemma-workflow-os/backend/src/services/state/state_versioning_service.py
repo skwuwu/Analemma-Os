@@ -1500,12 +1500,13 @@ class StateVersioningService:
     # [NEW] Block Reference Counting (Garbage Collection 지원)
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    def increment_block_references(self, block_ids: List[str]) -> int:
+    def increment_block_references(self, block_ids: List[str], workflow_id: str) -> int:
         """
         블록 참조 카운트 증가 (매니페스트 생성 시)
         
         Args:
             block_ids: 참조 카운트를 증가시킬 블록 ID 리스트
+            workflow_id: 복합키의 HASH key (WorkflowBlockReferencesV3 스키마 필수)
         
         Returns:
             업데이트된 블록 수
@@ -1514,8 +1515,12 @@ class StateVersioningService:
         
         for block_id in block_ids:
             try:
+                # [FIX] WorkflowBlockReferencesV3 복합키: HASH=workflow_id, RANGE=block_id
                 self.block_refs_table.update_item(
-                    Key={'block_id': block_id},
+                    Key={
+                        'workflow_id': workflow_id,  # HASH key (필수)
+                        'block_id': block_id          # RANGE key
+                    },
                     UpdateExpression='ADD reference_count :inc SET last_referenced = :now',
                     ExpressionAttributeValues={
                         ':inc': 1,
@@ -1530,12 +1535,13 @@ class StateVersioningService:
         logger.info(f"[Reference Counting] Incremented {updated_count}/{len(block_ids)} blocks")
         return updated_count
     
-    def decrement_block_references(self, block_ids: List[str]) -> int:
+    def decrement_block_references(self, block_ids: List[str], workflow_id: str) -> int:
         """
         블록 참조 카운트 감소 (매니페스트 무효화 시)
         
         Args:
             block_ids: 참조 카운트를 감소시킬 블록 ID 리스트
+            workflow_id: 복합키의 HASH key (WorkflowBlockReferencesV3 스키마 필수)
         
         Returns:
             업데이트된 블록 수
@@ -1544,8 +1550,12 @@ class StateVersioningService:
         
         for block_id in block_ids:
             try:
+                # [FIX] WorkflowBlockReferencesV3 복합키: HASH=workflow_id, RANGE=block_id
                 response = self.block_refs_table.update_item(
-                    Key={'block_id': block_id},
+                    Key={
+                        'workflow_id': workflow_id,  # HASH key (필수)
+                        'block_id': block_id          # RANGE key
+                    },
                     UpdateExpression='ADD reference_count :dec SET last_dereferenced = :now',
                     ExpressionAttributeValues={
                         ':dec': -1,
@@ -1583,29 +1593,41 @@ class StateVersioningService:
         
         cutoff_date = (datetime.utcnow() - timedelta(days=older_than_days)).isoformat()
         
+        from boto3.dynamodb.conditions import Attr
+
         try:
-            # GSI ReferenceCountIndex로 reference_count = 0 블록 조회
-            response = self.block_refs_table.query(
-                IndexName='ReferenceCountIndex',
-                KeyConditionExpression='reference_count = :zero',
-                FilterExpression='last_dereferenced < :cutoff',
-                ExpressionAttributeValues={
-                    ':zero': 0,
-                    ':cutoff': cutoff_date
-                }
+            # [FIX] GSI 'ReferenceCountIndex'는 template.yaml에 정의되지 않음.
+            # scan + FilterExpression으로 대체 (GC 경로는 latency-insensitive).
+            response = self.block_refs_table.scan(
+                FilterExpression=(
+                    Attr('reference_count').lte(0) &
+                    Attr('last_dereferenced').lt(cutoff_date)
+                )
             )
-            
-            gc_candidates = [item['block_id'] for item in response.get('Items', [])]
-            
+            items = response.get('Items', [])
+
+            # Paginate if needed
+            while 'LastEvaluatedKey' in response:
+                response = self.block_refs_table.scan(
+                    FilterExpression=(
+                        Attr('reference_count').lte(0) &
+                        Attr('last_dereferenced').lt(cutoff_date)
+                    ),
+                    ExclusiveStartKey=response['LastEvaluatedKey']
+                )
+                items.extend(response.get('Items', []))
+
+            gc_candidates = [item['block_id'] for item in items]
+
             logger.info(
                 f"[Garbage Collection] Found {len(gc_candidates)} blocks with 0 references "
                 f"older than {older_than_days} days"
             )
-            
+
             return gc_candidates
-            
+
         except Exception as e:
-            logger.error(f"Failed to query unreferenced blocks: {e}")
+            logger.error(f"Failed to scan unreferenced blocks: {e}")
             return []
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1654,7 +1676,13 @@ class StateVersioningService:
             )
             
             # 3. 블록 참조 카운트 감소 (Garbage Collection 준비)
-            decremented = self.decrement_block_references(block_ids)
+            # workflow_id는 manifest DynamoDB item에서 추출 (block_refs_table 복합키 필수)
+            manifest_item_resp = self.table.get_item(Key={'manifest_id': manifest_id})
+            workflow_id_for_refs = (
+                manifest_item_resp.get('Item', {}).get('workflow_id', '')
+                if 'Item' in manifest_item_resp else ''
+            )
+            decremented = self.decrement_block_references(block_ids, workflow_id=workflow_id_for_refs)
             
             logger.info(
                 f"[Manifest Invalidation] ✅ {manifest_id} invalidated: {reason}. "
@@ -1820,13 +1848,20 @@ class StateVersioningService:
             # 효과: 부분 실패 시 매니페스트 미생성 → 데이터 무결성 보장
             
             # 2-2. 블록 참조 카운트 증가 (100개씩 배치 처리)
+            # [FIX] WorkflowBlockReferencesV3 테이블은 복합키 구조:
+            #   HASH: workflow_id  /  RANGE: block_id
+            # Key에 HASH key(workflow_id)가 누락되면 DynamoDB가 ValidationException을 발생시키고
+            # TransactWriteItems 전체가 TransactionCanceledException으로 취소됨.
             for i in range(0, len(uploaded_block_ids), 100):
                 batch = uploaded_block_ids[i:i+100]
                 for block_id in batch:
                     transact_items.append({
                         'Update': {
                             'TableName': self.block_refs_table.name,
-                            'Key': {'block_id': {'S': block_id}},  # 🔑 [결함 #2] 단일키로 통일
+                            'Key': {
+                                'workflow_id': {'S': workflow_id},  # HASH key (복합키 필수)
+                                'block_id': {'S': block_id}         # RANGE key
+                            },
                             'UpdateExpression': 'ADD ref_count :inc SET last_referenced = :now',
                             'ExpressionAttributeValues': {
                                 ':inc': {'N': '1'},
@@ -2008,7 +2043,10 @@ class StateVersioningService:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # Phase 1: DynamoDB에서 latest_manifest_id 조회
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            workflows_table_name = self.table.name.replace('Manifests', 'WorkflowsTableV3')
+            # [FIX] 문자열 치환으로 테이블명을 유도하면
+            # 'WorkflowManifests-v3-dev' → 'WorkflowWorkflowsTableV3-v3-dev' 처럼 잘못됨.
+            # save_state_delta() 경로와 동일하게 환경변수에서 직접 읽는다.
+            workflows_table_name = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
             workflows_table = self.dynamodb.Table(workflows_table_name)
             
             response = workflows_table.get_item(

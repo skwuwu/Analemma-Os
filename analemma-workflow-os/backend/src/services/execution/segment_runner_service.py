@@ -4565,66 +4565,46 @@ class SegmentRunnerService:
         bucket_name = manifest_s3_path.replace("s3://", "").split("/")[0]
         key_name = "/".join(manifest_s3_path.replace("s3://", "").split("/")[1:])
         
-        # 3. Size-based routing (레이턴시 지터 대응)
+        # 3. GetObject로 전체 로드
+        # [FIX] S3 Select 제거: MethodNotAllowed 오류 방지.
+        # - S3 Select는 s3:SelectObjectContent 권한 + 별도 요금이 필요하며
+        #   SSE-KMS 객체 및 Object Lock 버킷에서 동작하지 않음.
+        # - Manifest envelope(dict)은 S3 Select SQL(bare list 가정)와 호환 불가.
+        # - Manifest 파일 크기는 수백KB 이하로 GetObject로 충분히 처리 가능.
         s3 = boto3.client('s3')
         
         try:
-            head_obj = s3.head_object(Bucket=bucket_name, Key=key_name)
-            object_size = head_obj['ContentLength']
-            
-            if object_size < 10 * 1024:  # 10KB 미만
-                # 전체 로드가 더 효율적 (S3 Select 오버헤드 방지)
-                logger.info(f"[GetObject] Small manifest ({object_size}B)")
-                obj = s3.get_object(Bucket=bucket_name, Key=key_name)
-                content = obj['Body'].read().decode('utf-8')
-                manifest_obj = self._safe_json_load(content)
-                
-                # 4. segment_config 추출
-                # 형식 규약: manifests/{id}.json 은 항상 dict (Envelope 패턴)
-                # 'segments' 키에 segment_id 오름차순 정렬된 리스트 포함.
-                # list 형식은 규격 위반으로 에러 처리 (legacy 호환성 부담 거부).
-                if not isinstance(manifest_obj, dict):
-                    raise ValueError(
-                        f"Invalid manifest format: expected dict (Merkle DAG envelope), "
-                        f"got {type(manifest_obj)}. "
-                        f"Manifest at {manifest_s3_path} may be a legacy bare list."
-                    )
-                segments = manifest_obj.get('segments')
-                if segments is None:
-                    raise ValueError(
-                        f"Manifest missing 'segments' key. "
-                        f"Available keys: {list(manifest_obj.keys())[:10]}"
-                    )
-                if not isinstance(segments, list):
-                    raise ValueError(
-                        f"Manifest 'segments' must be list, got {type(segments)}"
-                    )
-                manifest = segments
-                logger.info(f"[_load_segment_config_from_manifest] Loaded {len(manifest)} segments from envelope")
-                if not (0 <= segment_index < len(manifest)):
-                    raise ValueError(f"Index {segment_index} out of range (manifest has {len(manifest)} segments)")
-                segment_entry = manifest[segment_index]
-            else:
-                # S3 Select로 특정 세그먼트만 추출
-                logger.info(f"[S3 Select] Large manifest ({object_size}B)")
-                response = s3.select_object_content(
-                    Bucket=bucket_name,
-                    Key=key_name,
-                    ExpressionType='SQL',
-                    Expression=f"SELECT * FROM s3object[*][{segment_index}]",
-                    InputSerialization={
-                        'JSON': {'Type': 'DOCUMENT'},
-                        'CompressionType': 'GZIP'  # 🔄 v3.3 KernelStateManager 호환
-                    },
-                    OutputSerialization={'JSON': {}}
+            obj = s3.get_object(Bucket=bucket_name, Key=key_name)
+            object_size = obj['ContentLength']
+            content = obj['Body'].read().decode('utf-8')
+            manifest_obj = self._safe_json_load(content)
+            logger.info(f"[GetObject] Loaded manifest ({object_size}B)")
+
+            # 4. segment_config 추출
+            # 형식 규약: manifests/{id}.json 은 항상 dict (Envelope 패턴)
+            # 'segments' 키에 segment_id 오름차순 정렬된 리스트 포함.
+            # list 형식은 규격 위반으로 에러 처리 (legacy 호환성 부담 거부).
+            if not isinstance(manifest_obj, dict):
+                raise ValueError(
+                    f"Invalid manifest format: expected dict (Merkle DAG envelope), "
+                    f"got {type(manifest_obj)}. "
+                    f"Manifest at {manifest_s3_path} may be a legacy bare list."
                 )
-                
-                # S3 Select 응답 파싱
-                result = []
-                for event in response['Payload']:
-                    if 'Records' in event:
-                        result.append(event['Records']['Payload'].decode('utf-8'))
-                segment_entry = json.loads(''.join(result))
+            segments = manifest_obj.get('segments')
+            if segments is None:
+                raise ValueError(
+                    f"Manifest missing 'segments' key. "
+                    f"Available keys: {list(manifest_obj.keys())[:10]}"
+                )
+            if not isinstance(segments, list):
+                raise ValueError(
+                    f"Manifest 'segments' must be list, got {type(segments)}"
+                )
+            manifest = segments
+            logger.info(f"[_load_segment_config_from_manifest] Loaded {len(manifest)} segments from envelope")
+            if not (0 <= segment_index < len(manifest)):
+                raise ValueError(f"Index {segment_index} out of range (manifest has {len(manifest)} segments)")
+            segment_entry = manifest[segment_index]
             
             # 5. Nested 구조 처리
             if 'segment_config' in segment_entry:

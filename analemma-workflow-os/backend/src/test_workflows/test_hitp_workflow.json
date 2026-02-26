@@ -1,29 +1,41 @@
-{
+﻿{
     "workflow_name": "HITP Segmentation Test Workflow",
     "description": "Human-in-the-loop segmentation test workflow",
     "nodes": [
         {
             "id": "prep_node",
             "type": "operator",
-            "config": {
-                "code": "print(\"Preparing HITP test...\")\nstate['hitp_prepared'] = True\nresult = {\n    'status': 'hitp_prep_completed',\n    'ready_for_segmentation': True\n}\nstate['prep_result'] = result\nprint(\"HITP preparation complete - waiting for segmentation\")",
-                "output_key": "prep_result"
+            "sets": {
+                "hitp_prepared": true,
+                "prep_result": {
+                    "status": "hitp_prep_completed",
+                    "ready_for_segmentation": true
+                }
             }
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "safe_operator",
             "config": {
-                "code": "if state.get('hitp_prepared') and state.get('prep_result', {}).get('ready_for_segmentation'):\n    state['TEST_RESULT'] = '✅ SUCCESS: HITP preparation status confirmed'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: HITP preparation failed'"
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.hitp_prepared and $.prep_result.ready_for_segmentation",
+                    "then": "\u2705 SUCCESS: HITP preparation status confirmed",
+                    "else": "\u274c FAILURE: HITP preparation failed"
+                },
+                "output_key": "TEST_RESULT"
             }
         },
         {
             "id": "approval_required_node",
             "type": "operator",
             "hitp": true,
-            "config": {
-                "code": "print(\"Approval required node executing...\")\nstate['requires_approval'] = True\nresult = {\n    'status': 'awaiting_human_approval',\n    'approval_type': 'manual_review_required'\n}\nstate['approval_result'] = result\nprint(\"Waiting for human approval\")",
-                "output_key": "approval_result"
+            "sets": {
+                "requires_approval": true,
+                "approval_result": {
+                    "status": "awaiting_human_approval",
+                    "approval_type": "manual_review_required"
+                }
             }
         }
     ],

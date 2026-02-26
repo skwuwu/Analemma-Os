@@ -23,6 +23,7 @@ Integration:
 
 import asyncio
 import json
+import os
 import time
 import logging
 from typing import Dict, Any, List, Optional, Tuple
@@ -286,9 +287,41 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
                         # Continue execution (don't block rollback)
     
     # ────────────────────────────────────────────────────────────────────
-    # 6. Persist Audit Log (DynamoDB)
+    # 6. Persist Audit Log (DynamoDB) + Update Manifest with governance_decision
     # ────────────────────────────────────────────────────────────────────
     _save_governance_audit_log(decision.audit_log)
+
+    # [FIX] GovernanceDecisionIndex GSI는 workflow_id + governance_decision 복합키로
+    # WorkflowManifestsV3 항목에서 governance_decision 필드를 조회한다.
+    # 하지만 manifest 저장 코드에서 이 필드를 쓰지 않았으므로 GSI가 항상 빈 결과를 반환함.
+    # Governor 결정 시 manifest 항목에 governance_decision을 기록해 rollback 복원 경로를 살린다.
+    manifest_id_for_decision = state.get("manifest_id") or state.get("current_manifest_id")
+    if manifest_id_for_decision:
+        try:
+            import boto3 as _boto3
+            from datetime import datetime as _datetime
+            _manifests_table_name = os.environ.get(
+                "WORKFLOW_MANIFESTS_TABLE", "WorkflowManifests-v3-dev"
+            )
+            _manifests_table = _boto3.resource("dynamodb").Table(_manifests_table_name)
+            _manifests_table.update_item(
+                Key={"manifest_id": manifest_id_for_decision},
+                UpdateExpression=(
+                    "SET governance_decision = :decision, "
+                    "governed_at = :now"
+                ),
+                ExpressionAttributeValues={
+                    ":decision": decision.decision,
+                    ":now": _datetime.utcnow().isoformat(),
+                },
+            )
+            logger.info(
+                f"✅ [Governor] Manifest {manifest_id_for_decision} tagged with "
+                f"governance_decision={decision.decision}"
+            )
+        except Exception as _ge:
+            # Non-blocking — manifest tag failure must not break the execution flow
+            logger.warning(f"⚠️ [Governor] Failed to tag manifest with governance_decision: {_ge}")
     
     # ────────────────────────────────────────────────────────────────────
     # 7. Return _kernel Commands
