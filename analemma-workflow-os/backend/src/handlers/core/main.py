@@ -2276,14 +2276,15 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
                     
                     # Map model string to GeminiModel enum
+                    # Note: gemini-1.5-* deprecated on Vertex AI — enum values already remapped to 2.0-flash
                     model_mapping = {
                         "gemini-2.0-flash": GeminiModel.GEMINI_2_0_FLASH,
-                        "gemini-1.5-pro": GeminiModel.GEMINI_1_5_PRO,
-                        "gemini-1.5-flash": GeminiModel.GEMINI_1_5_FLASH,
-                        "gemini-1.5-flash-8b": GeminiModel.GEMINI_1_5_FLASH_8B,
+                        "gemini-1.5-pro": GeminiModel.GEMINI_1_5_PRO,    # remapped → 2.0-flash
+                        "gemini-1.5-flash": GeminiModel.GEMINI_1_5_FLASH,  # remapped → 2.0-flash
+                        "gemini-1.5-flash-8b": GeminiModel.GEMINI_1_5_FLASH_8B,  # remapped → 2.0-flash
                     }
-                    
-                    gemini_model = model_mapping.get(model, GeminiModel.GEMINI_1_5_FLASH)
+
+                    gemini_model = model_mapping.get(model, GeminiModel.GEMINI_2_0_FLASH)  # default: 2.0-flash
                     
                     # Extract thinking mode config
                     enable_thinking = actual_config.get("enable_thinking", False)
@@ -4507,11 +4508,11 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
         from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
         
         # Vision 지원 모델 사용
-        model_name = vision_config.get("model", "gemini-1.5-flash")
+        model_name = vision_config.get("model", "gemini-2.0-flash")  # 1.5-flash deprecated
         # Model selection logic... (simplified mapping)
-        model_enum = GeminiModel.GEMINI_1_5_FLASH
-        if "pro" in model_name: model_enum = GeminiModel.GEMINI_1_5_PRO
-        elif "2.0" in model_name: model_enum = GeminiModel.GEMINI_2_0_FLASH
+        model_enum = GeminiModel.GEMINI_2_0_FLASH  # default: 2.0-flash
+        if "2.0" in model_name: model_enum = GeminiModel.GEMINI_2_0_FLASH
+        elif "pro" in model_name: model_enum = GeminiModel.GEMINI_1_5_PRO  # remapped → 2.0-flash
         
         gemini_config = GeminiConfig(
             model=model_enum,

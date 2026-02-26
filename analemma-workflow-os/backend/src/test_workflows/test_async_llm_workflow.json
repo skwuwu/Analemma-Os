@@ -4,10 +4,12 @@
     "nodes": [
         {
             "id": "async_prep",
-            "type": "operator",
+            "type": "sets",
             "config": {
-                "code": "print(\"비동기 LLM 테스트 준비\")\nstate['async_ready'] = True\nresult = {'status': 'prepared_for_async', 'test_type': 'async_llm'}\nstate['async_prep_result'] = result\nprint(\"비동기 LLM 준비 완료\")",
-                "output_key": "async_prep_result"
+                "sets": [
+                    {"key": "async_ready", "value": true},
+                    {"key": "async_prep_result", "value": {"status": "prepared_for_async", "test_type": "async_llm"}}
+                ]
             }
         },
         {

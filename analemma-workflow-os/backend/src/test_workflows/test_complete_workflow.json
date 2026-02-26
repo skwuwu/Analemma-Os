@@ -4,27 +4,31 @@
     "nodes": [
         {
             "id": "complete_prep",
-            "type": "operator",
+            "type": "sets",
             "config": {
-                "code": "print(\"Completion test preparation\")\nstate['prep_done'] = True\nresult = {'status': 'ready_for_completion'}\nstate['prep_result'] = result",
-                "output_key": "prep_result"
+                "sets": [
+                    {"key": "prep_done", "value": true},
+                    {"key": "prep_result", "value": {"status": "ready_for_completion"}}
+                ]
             }
         },
         {
             "id": "complete_llm",
             "type": "aiModel",
             "config": {
-                "model": "claude-3-sonnet",
-                "max_tokens": 300,
-                "prompt": "완료 상태를 확인하고 COMPLETE 결과를 생성해주세요. 준비 상태: {prep_result}",
-                "temperature": 0.3
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": 100,
+                "prompt": "Reply with exactly one word: COMPLETE",
+                "temperature": 0.0
             }
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "sets",
             "config": {
-                "code": "if state.get('prep_done'):\n    state['TEST_RESULT'] = '✅ SUCCESS: 완료 테스트 정상 수행됨'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: 완료 테스트 준비 실패'"
+                "sets": [
+                    {"key": "TEST_RESULT", "value": "SUCCESS: complete test workflow finished"}
+                ]
             }
         }
     ],

@@ -4,13 +4,12 @@
     "nodes": [
         {
             "id": "prep_node",
-            "type": "operator",
-            "sets": {
-                "hitp_prepared": true,
-                "prep_result": {
-                    "status": "hitp_prep_completed",
-                    "ready_for_segmentation": true
-                }
+            "type": "sets",
+            "config": {
+                "sets": [
+                    {"key": "hitp_prepared", "value": true},
+                    {"key": "prep_result", "value": {"status": "hitp_prep_completed", "ready_for_segmentation": true}}
+                ]
             }
         },
         {
@@ -28,14 +27,13 @@
         },
         {
             "id": "approval_required_node",
-            "type": "operator",
+            "type": "sets",
             "hitp": true,
-            "sets": {
-                "requires_approval": true,
-                "approval_result": {
-                    "status": "awaiting_human_approval",
-                    "approval_type": "manual_review_required"
-                }
+            "config": {
+                "sets": [
+                    {"key": "requires_approval", "value": true},
+                    {"key": "approval_result", "value": {"status": "awaiting_human_approval", "approval_type": "manual_review_required"}}
+                ]
             }
         }
     ],

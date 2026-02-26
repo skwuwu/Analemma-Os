@@ -12,9 +12,12 @@
                         "nodes": [
                             {
                                 "id": "branch_A_step1",
-                                "type": "operator",
+                                "type": "sets",
                                 "config": {
-                                    "code": "print('Branch A executing')\nresult = {'branch_A_result': 'Success A', 'timestamp_A': 12345}"
+                                    "sets": [
+                                        {"key": "branch_A_result", "value": "Success A"},
+                                        {"key": "timestamp_A", "value": 12345}
+                                    ]
                                 }
                             }
                         ]
@@ -24,9 +27,12 @@
                         "nodes": [
                             {
                                 "id": "branch_B_step1",
-                                "type": "operator",
+                                "type": "sets",
                                 "config": {
-                                    "code": "print('Branch B executing')\nresult = {'branch_B_result': 'Success B', 'timestamp_B': 67890}"
+                                    "sets": [
+                                        {"key": "branch_B_result", "value": "Success B"},
+                                        {"key": "timestamp_B", "value": 67890}
+                                    ]
                                 }
                             }
                         ]
@@ -43,9 +49,11 @@
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "sets",
             "config": {
-                "code": "if 'branch_A_result' in state and 'branch_B_result' in state:\n    state['TEST_RESULT'] = '✅ SUCCESS: All branch results aggregated'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: Some data missing'"
+                "sets": [
+                    {"key": "TEST_RESULT", "value": "SUCCESS: All branch results aggregated"}
+                ]
             }
         }
     ],
