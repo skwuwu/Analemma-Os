@@ -2264,6 +2264,14 @@ Resources:
         # 🚨 [Critical Fix] 대용량 상태 S3 저장 권한 추가
         - S3CrudPolicy:
             BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # AUTO_RESUME_HITP: 분산 청크/브랜치 HITP 자동 승인용 SFN 권한
+        # states:SendTaskSuccess는 리소스 유형을 지원하지 않으므로 Resource: "*" 필요
+        - Statement:
+          - Effect: Allow
+            Action:
+              - states:SendTaskSuccess
+              - states:SendTaskFailure
+            Resource: "*"
 
   # Express Workflow removed - using alternative Event History mitigation strategies
 

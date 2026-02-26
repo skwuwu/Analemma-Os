@@ -28,6 +28,54 @@ import boto3
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
+_sfn_client = None
+
+
+def _get_sfn_client():
+    global _sfn_client
+    if _sfn_client is None:
+        _sfn_client = boto3.client('stepfunctions')
+    return _sfn_client
+
+
+def _auto_resume_distributed(task_token: str, max_retries: int = 3) -> dict:
+    """
+    AUTO_RESUME_HITP 모드에서 분산 청크/브랜치 HITP 자동 승인.
+    store_task_token.py의 _mock_auto_resume()와 동일한 역할.
+    """
+    resume_output = {
+        "status": "APPROVED",
+        "user_response": {
+            "action": "APPROVED",
+            "comment": "Auto-approved by Simulator (AUTO_RESUME_HITP - distributed)",
+            "approved_at": int(time.time()),
+            "auto_resume": True
+        },
+        "segment_to_run": None
+    }
+
+    sfn = _get_sfn_client()
+    for attempt in range(max_retries):
+        try:
+            if attempt > 0:
+                time.sleep(1.0 * attempt)
+            sfn.send_task_success(
+                taskToken=task_token,
+                output=json.dumps(resume_output, ensure_ascii=False, default=str)
+            )
+            logger.info(f"[AUTO_RESUME] Distributed HITP auto-resumed (attempt {attempt + 1})")
+            return {"status": "AUTO_RESUMED", "attempt": attempt + 1}
+        except sfn.exceptions.InvalidToken:
+            if attempt == max_retries - 1:
+                logger.error("[AUTO_RESUME] Failed after max retries (InvalidToken)")
+                return {"status": "AUTO_RESUME_FAILED", "error": "InvalidToken"}
+        except sfn.exceptions.TaskTimedOut:
+            return {"status": "AUTO_RESUME_SKIPPED", "reason": "Task already timed out"}
+        except Exception as exc:
+            logger.error(f"[AUTO_RESUME] Unexpected error (re-raising): {exc}")
+            raise
+    return {"status": "AUTO_RESUME_FAILED"}
+
 
 def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
@@ -157,7 +205,34 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             f"Task token stored successfully: conversation_id={conversation_id}, "
             f"chunk={chunk_id}, segment={paused_segment_id}"
         )
-        
+
+        # --- AUTO_RESUME_HITP: 분산 실행 자동 승인 ---
+        # state_data.bag.AUTO_RESUME_HITP 또는 env var AUTO_RESUME_HITP 가 true일 때 자동 승인.
+        # 이 Lambda는 WaitForChunkCallback / WaitForBranchCallback 둘 다 처리하므로
+        # store_task_token.py와 동일한 auto-resume 패턴을 적용합니다.
+        state_data = event.get('state_data', {})
+        bag = state_data.get('bag', {}) if isinstance(state_data, dict) else {}
+        auto_resume_value = (
+            bag.get('AUTO_RESUME_HITP') or
+            state_data.get('AUTO_RESUME_HITP') or
+            os.environ.get('AUTO_RESUME_HITP', 'false')
+        )
+        auto_resume = str(auto_resume_value).lower() == 'true'
+
+        mock_value = (
+            bag.get('MOCK_MODE') or
+            state_data.get('MOCK_MODE') or
+            os.environ.get('MOCK_MODE', 'false')
+        )
+        mock_mode = str(mock_value).lower() == 'true'
+
+        auto_resume_result = None
+        if auto_resume or mock_mode:
+            resume_mode = "MOCK_MODE" if mock_mode else "AUTO_RESUME_HITP"
+            logger.info(f"🤖 {resume_mode} detected - auto-resuming distributed HITP")
+            auto_resume_result = _auto_resume_distributed(task_token=task_token)
+            logger.info(f"🤖 Distributed auto-resume result: {auto_resume_result}")
+
         # 콜백 완료 시 Step Functions에 전달될 결과
         return {
             "stored": True,
@@ -167,6 +242,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "parent_execution_id": parent_execution_id,
             "owner_id": owner_id,
             "workflow_id": workflow_id,
+            "auto_resume_result": auto_resume_result,
             "callback_info": {
                 "table_name": token_table_name,
                 "conversation_id": conversation_id,

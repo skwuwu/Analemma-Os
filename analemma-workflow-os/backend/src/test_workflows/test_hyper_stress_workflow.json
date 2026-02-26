@@ -109,8 +109,7 @@
                                     "edges": [
                                         {
                                             "source": "alpha_pre_process",
-                                            "target": "alpha_hitl_inside_loop",
-                                            "type": "hitp"
+                                            "target": "alpha_hitl_inside_loop"
                                         },
                                         {
                                             "source": "alpha_hitl_inside_loop",
@@ -181,8 +180,7 @@
                                     "edges": [
                                         {
                                             "source": "beta_pre_process",
-                                            "target": "beta_hitl_inside_loop",
-                                            "type": "hitp"
+                                            "target": "beta_hitl_inside_loop"
                                         },
                                         {
                                             "source": "beta_hitl_inside_loop",
