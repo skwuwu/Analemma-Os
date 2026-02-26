@@ -226,7 +226,7 @@ def lambda_handler(event: Dict[str, Any], _context: Any) -> Dict[str, Any]:
             f"Valid scenarios: {list(PIPELINE_TEST_MAPPINGS.keys())}"
         )
 
-    with open(workflow_path, 'r', encoding='utf-8') as f:
+    with open(workflow_path, 'r', encoding='utf-8-sig') as f:
         workflow_config = json.load(f)
 
     logger.info(f"Loaded workflow: {workflow_path}")

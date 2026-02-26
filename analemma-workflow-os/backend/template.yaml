@@ -2419,6 +2419,7 @@ Resources:
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
         Command: ["src.handlers.core.store_task_token.lambda_handler"]
+      Timeout: 30  # auto_resume_delay(5s) + retries(3x) + WebSocket/DDB overhead
       Environment:
         Variables:
           TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
@@ -2441,13 +2442,15 @@ Resources:
             Resource: !Sub
               - "arn:aws:execute-api:${AWS::Region}:${AccountId}:${WebsocketApi}/*/@connections/*"
               - AccountId: !Ref "AWS::AccountId"
-        # AUTO_RESUME_HITP: Allow StoreTaskToken to call SendTaskSuccess (v3.24)
+        # AUTO_RESUME_HITP: Allow StoreTaskToken to call SendTaskSuccess for BOTH orchestrators
         - Statement:
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
               - states:SendTaskFailure
-            Resource: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
+            Resource:
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowOrchestrator-${StageName}"
+              - !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:WorkflowDistributedOrchestrator-${StageName}"
 
   # --- Manifest Regenerator Function (Dynamic Re-partitioning) ---
   ManifestRegeneratorFunction:

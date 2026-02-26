@@ -480,7 +480,7 @@
       },
       "ResultSelector": {
         "bag.$": "$.Payload.state_data",
-        "next_action.$": "$.Payload.final_status"
+        "next_action.$": "$.Payload.next_action"
       },
       "ResultPath": "$.state_data",
       "Next": "NotifyWorkflowCompleted"
@@ -779,9 +779,18 @@
             "Default": "ExecuteBranchSegment"
           },
           "FailBranchLoopLimit": {
-            "Type": "Fail",
-            "Error": "BranchLoopLimitExceeded",
-            "Cause": "Branch exceeded maximum iterations"
+            "Type": "Pass",
+            "Comment": "Convert loop limit to graceful end so Map does not throw ExceedToleratedFailureThreshold",
+            "Parameters": {
+              "branch_id.$": "$.branch_state.branch_id",
+              "status": "LOOP_LIMIT_EXCEEDED",
+              "error_info": {
+                "Error": "BranchLoopLimitExceeded",
+                "Cause": "Branch exceeded maximum iterations"
+              },
+              "final_state_s3_path.$": "$.branch_state.state_data.state_s3_path"
+            },
+            "End": true
           },
           "HandleBranchError": {
             "Type": "Pass",
@@ -806,6 +815,9 @@
           }
         }
       },
+      "ResultSelector": {
+        "branches.$": "$"
+      },
       "ResultPath": "$.parallel_results",
       "Catch": [
         {
@@ -816,13 +828,25 @@
           "Next": "HandleMapError"
         }
       ],
+      "Next": "NormalizeMapSuccess"
+    },
+    "NormalizeMapSuccess": {
+      "Type": "Pass",
+      "Comment": "Inject map_error: null on success path so AggregateParallelResults can always reference $.map_error",
+      "Parameters": {
+        "parallel_results.$": "$.parallel_results",
+        "map_error": null,
+        "state_data.$": "$.state_data"
+      },
       "Next": "AggregateParallelResults"
     },
     "HandleMapError": {
       "Type": "Pass",
-      "Comment": "Convert Map error to aggregatable result while preserving bag layer",
+      "Comment": "Convert Map error to aggregatable result while preserving bag layer. parallel_results must be {branches:[]} not [] so $.parallel_results.branches resolves in AggregateParallelResults.",
       "Parameters": {
-        "parallel_results": [],
+        "parallel_results": {
+          "branches": []
+        },
         "map_error.$": "$.map_error",
         "state_data": {
           "bag.$": "$.state_data.bag"
@@ -871,6 +895,17 @@
             "States.Timeout",
             "States.HeartbeatTimeout"
           ],
+          "ResultPath": "$.last_error",
+          "Next": "HandleHITPTimeout"
+        },
+        {
+          "ErrorEquals": [
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "Comment": "Lambda error (e.g., IAM AccessDenied on SendTaskSuccess, timeout) — treat as HITP timeout",
           "ResultPath": "$.last_error",
           "Next": "HandleHITPTimeout"
         }

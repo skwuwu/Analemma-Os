@@ -280,11 +280,11 @@ def _mock_auto_resume(task_token: str, bag: dict, max_retries: int = 3) -> dict:
                 "reason": "Task already timed out"
             }
         except Exception as e:
-            logger.error(f"[v3.22] Unexpected error in auto-resume: {e}")
-            return {
-                "status": "AUTO_RESUME_FAILED",
-                "error": str(e)
-            }
+            # [Fix] Re-raise non-InvalidToken exceptions so waitForTaskToken state fails
+            # immediately instead of hanging for 24h (HeartbeatSeconds).
+            # AccessDeniedException on states:SendTaskSuccess is the most common cause.
+            logger.error(f"[v3.22] Unexpected error in auto-resume (re-raising): {e}")
+            raise
     
     return {"status": "AUTO_RESUME_FAILED", "error": "Unknown error"}
 

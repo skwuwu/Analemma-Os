@@ -822,6 +822,9 @@
           }
         }
       },
+      "ResultSelector": {
+        "branches.$": "$"
+      },
       "ResultPath": "$.parallel_results",
       "Catch": [
         {
@@ -832,13 +835,25 @@
           "Next": "HandleParallelMapError"
         }
       ],
+      "Next": "NormalizeMapSuccess"
+    },
+    "NormalizeMapSuccess": {
+      "Type": "Pass",
+      "Comment": "Inject map_error: null on success path so AggregateParallelResults can always reference $.map_error",
+      "Parameters": {
+        "parallel_results.$": "$.parallel_results",
+        "map_error": null,
+        "state_data.$": "$.state_data"
+      },
       "Next": "AggregateParallelResults"
     },
     "HandleParallelMapError": {
       "Type": "Pass",
-      "Comment": "🛡️ Preserve bag layer on parallel map failure",
+      "Comment": "🛡️ Preserve bag layer on parallel map failure. parallel_results must be {branches:[]} not [] so $.parallel_results.branches resolves in AggregateParallelResults.",
       "Parameters": {
-        "parallel_results": [],
+        "parallel_results": {
+          "branches": []
+        },
         "map_error.$": "$.map_error",
         "state_data": {
           "bag.$": "$.state_data.bag"
@@ -881,7 +896,32 @@
         }
       },
       "ResultPath": "$.callback_result",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.Timeout",
+            "States.HeartbeatTimeout",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "Lambda.TooManyRequestsException",
+            "States.TaskFailed"
+          ],
+          "Comment": "Lambda error or timeout — treat as HITP timeout, notify and fail",
+          "ResultPath": "$.last_error",
+          "Next": "HandleCallbackTimeout"
+        }
+      ],
       "Next": "MergeCallbackResult"
+    },
+    "HandleCallbackTimeout": {
+      "Type": "Pass",
+      "Comment": "HITP callback timed out or Lambda failed — escalate to NotifyAndFail",
+      "Parameters": {
+        "error_type": "HITP_CALLBACK_TIMEOUT",
+        "error_info.$": "$.last_error",
+        "state_data.$": "$.state_data"
+      },
+      "Next": "NotifyAndFail"
     },
     "MergeCallbackResult": {
       "Type": "Task",

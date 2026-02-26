@@ -133,6 +133,7 @@ LIST_FIELD_STRATEGIES: Dict[str, str] = {
     'distributed_outputs': 'append',
     'branches': 'replace',                 # 교체 (최신 브랜치 정보)
     'chunk_results': 'replace',
+    '_failed_segments': 'replace',         # 매 aggregate마다 최신 값으로 교체 (누적 방지)
 }
 
 # 크기 임계값 (KB)
@@ -549,12 +550,59 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                         # final_state에 실행 결과가 있으면 current_state로 승격
                         delta['current_state'] = final_state
                         _get_logger().info(f"[v3.20] Promoted final_state to current_state, keys: {list(final_state.keys())[:10]}")
-            
+
+        elif action == 'sync_branch':
+            # [C-1/C-2 Fix] sync_branch를 sync와 동일한 1급 시민으로 격상
+            # 브랜치 전용 next_segment_to_run → segment_to_run 명시적 매핑
+            payload = result.get('execution_result', result)
+            if payload.get('final_state_s3_path'):
+                delta['state_s3_path'] = payload['final_state_s3_path']
+            if payload.get('next_segment_to_run') is not None:
+                delta['segment_to_run'] = payload['next_segment_to_run']
+            if payload.get('new_history_logs'):
+                delta['new_history_logs'] = payload['new_history_logs']
+            delta['_status'] = payload.get('status', 'CONTINUE')
+            # 브랜치 LLM 실행 결과 보존 (sync와 동일한 final_state 승격 로직)
+            final_state = payload.get('final_state')
+            if isinstance(final_state, dict):
+                current_state = final_state.get('current_state')
+                if isinstance(current_state, dict):
+                    delta['current_state'] = current_state
+                elif final_state:
+                    delta['current_state'] = final_state
+            _get_logger().info(
+                f"[flatten_result sync_branch] status={delta['_status']}, "
+                f"next_segment={payload.get('next_segment_to_run')}, "
+                f"state_s3_path={'set' if delta.get('state_s3_path') else 'unset'}"
+            )
+
         elif action == 'aggregate_branches':
             # 병렬 브랜치 결과 (포인터 배열)
             pointers = result.get('parallel_results', result.get('branch_pointers', []))
             if isinstance(pointers, list):
-                return flatten_result(pointers, context)  # 리스트 처리로 위임
+                list_delta = flatten_result(pointers, context)  # 리스트 처리로 위임
+                # [Soft-fail] _soft_fail_branches를 리스트 결과에 병합
+                # state_data_manager.aggregate_branches()가 채워서 넘긴 값 보존
+                soft_fail = result.get('_soft_fail_branches')
+                if soft_fail:
+                    existing = list_delta.get('_failed_segments', [])
+                    # _soft_fail_branches가 _failed_segments와 중복될 수 있으므로
+                    # branch_id 기준 deduplicate (soft_fail 정보가 더 풍부함)
+                    existing_ids = {s.get('branch_id') for s in existing if isinstance(s, dict)}
+                    extra = [s for s in soft_fail if s.get('branch_id') not in existing_ids]
+                    list_delta['_failed_segments'] = existing + extra
+                    _get_logger().warning(
+                        f"[flatten_result aggregate_branches] "
+                        f"{len(soft_fail)} soft-fail branch(es) added to _failed_segments: "
+                        f"{[s['branch_id'] for s in soft_fail]}"
+                    )
+                # new_history_logs도 전달 (S3에서 로드한 partial 로그)
+                if result.get('new_history_logs'):
+                    list_delta.setdefault('new_history_logs', [])
+                    list_delta['new_history_logs'] = (
+                        list_delta['new_history_logs'] + result['new_history_logs']
+                    )
+                return list_delta
             delta = result
             
         elif action == 'create_snapshot':
@@ -698,6 +746,24 @@ def _merge_list_field(
     return base_list + delta_list
 
 
+def _deep_merge_dicts(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    🔀 재귀적 딕셔너리 딥 머지
+
+    [M-1 Fix] dict.update()는 2단계 아래 키를 삭제합니다.
+    current_state처럼 중첩 구조가 깊은 필드는 서브키를 보존해야 합니다:
+        - 두 값이 모두 dict이면 → 재귀 딥 머지 (서브키 보존)
+        - 그 외 → delta 값이 base 값을 대체
+    """
+    merged = base.copy()
+    for k, v in delta.items():
+        if isinstance(v, dict) and isinstance(merged.get(k), dict):
+            merged[k] = _deep_merge_dicts(merged[k], v)
+        else:
+            merged[k] = v
+    return merged
+
+
 # 필수 메타데이터 기본값 (action='init' 전용)
 INIT_REQUIRED_METADATA = {
     'segment_to_run': 0,
@@ -796,13 +862,17 @@ def merge_logic(
             else:
                 updated_state[key] = value.copy()
         
-        # 딕셔너리 필드 (Shallow Merge)
+        # 딕셔너리 필드: current_state는 딥 머지, 나머지는 Shallow Merge
         elif isinstance(value, dict):
             if isinstance(base_value, dict):
-                # Shallow merge: delta 키가 base 키를 덮어씀
-                merged = base_value.copy()
-                merged.update(value)
-                updated_state[key] = merged
+                if key == 'current_state':
+                    # [M-1 Fix] current_state 딥 머지로 서브키 보존
+                    updated_state[key] = _deep_merge_dicts(base_value, value)
+                else:
+                    # Shallow merge: delta 키가 base 키를 덮어씀
+                    merged = base_value.copy()
+                    merged.update(value)
+                    updated_state[key] = merged
             else:
                 updated_state[key] = value.copy() if isinstance(value, dict) else value
         
@@ -1047,9 +1117,19 @@ def universal_sync_core(
     if action == 'aggregate_branches' and normalized_delta.get('_aggregation_complete'):
         optimized_state.pop('pending_branches', None)
         optimized_state['segment_to_run'] = int(optimized_state.get('segment_to_run', 0)) + 1
-    
+
+    # [H-1 Delayed Deletion] 파이프라인 내부 제어 신호를 Persist 직전에 제거
+    # _compute_next_action이 normalized_delta에서 읽으므로 state에서 제거해도 안전
+    # _failed_segments/_error는 추적 목적으로 보존
+    _PIPELINE_INTERNAL_KEYS = frozenset({
+        '_status', '_is_init', '_increment_segment', '_increment_loop',
+        '_aggregation_complete', '_is_pointer_mode', '_soft_fail_branches',
+    })
+    for _k in _PIPELINE_INTERNAL_KEYS:
+        optimized_state.pop(_k, None)
+
     logger.info(f"UniversalSyncCore complete: action={action}, next={next_action}, size={optimized_state.get('payload_size_kb', 0)}KB")
-    
+
     return {
         'state_data': optimized_state,
         'next_action': next_action
@@ -1080,7 +1160,23 @@ def _compute_next_action(
     
     logger = _get_logger()
     logger.info(f"[_compute_next_action] action={action}, raw_status={raw_status}, normalized_status={status}")
-    
+
+    # [C-3 Fix] 브랜치 전용 탈출 조건: _status만으로 결정
+    # main workflow의 total_segments/segment_to_run 오염 방지
+    if action == 'sync_branch':
+        if status in ('COMPLETE', 'SUCCESS', 'SUCCEEDED'):
+            logger.info(f"[_compute_next_action sync_branch] Branch completed: status={status}")
+            return 'COMPLETE'
+        if status in ('FAILED', 'HALTED', 'SIGKILL', 'LOOP_LIMIT_EXCEEDED', 'PARTIAL_FAILURE'):
+            logger.warning(f"[_compute_next_action sync_branch] Branch failed: status={status}")
+            return 'FAILED'
+        if status in ('PAUSED_FOR_HITP', 'PAUSE'):
+            logger.info(f"[_compute_next_action sync_branch] Branch paused for HITP")
+            return 'PAUSED_FOR_HITP'
+        # CONTINUE 또는 기타 → 브랜치 루프 계속
+        logger.info(f"[_compute_next_action sync_branch] Branch continues: status={status}")
+        return 'CONTINUE'
+
     # 명시적 실패/중단 상태 (🛡️ [v3.16] HALTED/SIGKILL → FAILED 정규화)
     if status in ('FAILED', 'HALTED', 'SIGKILL'):
         # ASL에는 HALTED/SIGKILL case가 없으므로 FAILED로 통일

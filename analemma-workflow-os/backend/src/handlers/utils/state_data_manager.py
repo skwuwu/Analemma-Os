@@ -754,14 +754,72 @@ def aggregate_branches(event: Dict[str, Any]) -> Dict[str, Any]:
         branch_pointers = event.get('branch_pointers', [])
         # 포인터 모드: S3에서 로그 로드
         all_logs = []
+        soft_fail_branches = []  # LOOP_LIMIT_EXCEEDED / PARTIAL_FAILURE 추적
+
         for pointer in branch_pointers:
-            if pointer.get('status') == 'COMPLETE':
+            status = pointer.get('status')
+
+            if status == 'COMPLETE':
                 s3_path = pointer.get('s3_path') or pointer.get('final_state_s3_path')
                 if s3_path:
                     branch_data = cached_load_from_s3(s3_path)
                     if branch_data:
                         all_logs.extend(branch_data.get('new_history_logs', []))
-        normalized_result = {'parallel_results': branch_pointers, 'new_history_logs': all_logs}
+
+            elif status == 'LOOP_LIMIT_EXCEEDED':
+                # [Soft-fail] 브랜치가 루프 한계 초과로 graceful 종료됨
+                # final_state_s3_path에서 마지막 정상 상태 로그 로드 시도
+                branch_id = pointer.get('branch_id', 'unknown')
+                error_info = pointer.get('error_info', {})
+                logger.warning(
+                    f"[aggregate_branches] Soft-fail: branch={branch_id} "
+                    f"status=LOOP_LIMIT_EXCEEDED cause={error_info.get('Cause', 'unknown')}"
+                )
+                s3_path = pointer.get('s3_path') or pointer.get('final_state_s3_path')
+                if s3_path:
+                    branch_data = cached_load_from_s3(s3_path)
+                    if branch_data:
+                        all_logs.extend(branch_data.get('new_history_logs', []))
+                soft_fail_branches.append({
+                    'branch_id': branch_id,
+                    'reason': 'LOOP_LIMIT_EXCEEDED',
+                    'error_info': error_info,
+                    'final_state_s3_path': s3_path,
+                })
+
+            elif status == 'PARTIAL_FAILURE':
+                # [Soft-fail] 브랜치 내부 오류로 실패했지만 Map 전체는 계속 진행됨
+                branch_id = pointer.get('branch_id', 'unknown')
+                error_info = pointer.get('error_info', {})
+                logger.warning(
+                    f"[aggregate_branches] Soft-fail: branch={branch_id} "
+                    f"status=PARTIAL_FAILURE error={error_info}"
+                )
+                soft_fail_branches.append({
+                    'branch_id': branch_id,
+                    'reason': 'PARTIAL_FAILURE',
+                    'error_info': error_info,
+                    'final_state_s3_path': pointer.get('final_state_s3_path'),
+                })
+
+            else:
+                # 알 수 없는 상태 — 경고만 기록
+                logger.warning(
+                    f"[aggregate_branches] Unknown branch status: "
+                    f"branch_id={pointer.get('branch_id', 'unknown')} status={status}"
+                )
+
+        if soft_fail_branches:
+            logger.error(
+                f"[aggregate_branches] {len(soft_fail_branches)} branch(es) ended as soft-fail: "
+                f"{[b['branch_id'] for b in soft_fail_branches]}"
+            )
+
+        normalized_result = {
+            'parallel_results': branch_pointers,
+            'new_history_logs': all_logs,
+            '_soft_fail_branches': soft_fail_branches,  # universal_sync_core에 전달
+        }
     else:
         normalized_result = {'parallel_results': event.get('parallel_results', [])}
     
@@ -852,10 +910,11 @@ def aggregate_distributed_results(event: Dict[str, Any]) -> Dict[str, Any]:
             logger.error(f"Failed to create post-snapshot: {e}")
     
     logger.info(f"Aggregated distributed results: {chunk_summary.get('succeeded', 0)} success, {chunk_summary.get('failed', 0)} failed")
-    
+
     return {
         'state_data': updated_state,
         'final_status': final_status,
+        'next_action': result['next_action'],  # [M-2/L-1 Fix] USC의 실제 결정 위임 (PAUSED_FOR_HITP 등 지원)
         'post_snapshot': post_snapshot_path
     }
 

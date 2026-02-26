@@ -1,4 +1,4 @@
-﻿{
+{
     "workflow_name": "HITP Segmentation Test Workflow",
     "description": "Human-in-the-loop segmentation test workflow",
     "nodes": [
