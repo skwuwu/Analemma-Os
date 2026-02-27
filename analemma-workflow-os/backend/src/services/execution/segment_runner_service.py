@@ -4407,17 +4407,19 @@ class SegmentRunnerService:
         new_history_logs = result_state.get('__new_history_logs', []) if isinstance(result_state, dict) else []
         
         # [Critical Fix] 워크플로우 완료 여부 결정
-        # 1. test_workflow_config가 주입된 경우 (E2E 테스트): 한 번에 전체 실행 후 완료
-        # 2. partition_map이 없는 경우: 전체 워크플로우를 한 번에 실행했으므로 완료
-        # 3. partition_map이 있는 경우: 다음 세그먼트가 있는지 확인
-        is_e2e_test = event.get('test_workflow_config') is not None
+        # 1. partition_map이 없는 경우: 전체 워크플로우를 한 번에 실행했으므로 완료
+        # 2. partition_map이 있는 경우: 다음 세그먼트가 있는지 확인
+        # [Bug Fix] test_workflow_config 존재 여부(is_e2e_test)는 판단 기준에서 제거.
+        # test_workflow_config는 시뮬레이터 실행 시 state_bag 전체에 항상 포함되므로
+        # is_e2e_test=True가 모든 세그먼트에서 발생 → segment 0 이후 조기 COMPLETE 반환 버그.
+        # partition_map이 있으면 항상 세그먼트 루프를 통해 순차 실행해야 함.
         has_partition_map = partition_map is not None and len(partition_map) > 0
         
         # 커널 메타데이터 추출 (있는 경우)
         kernel_actions = result_state.get('__kernel_actions', []) if isinstance(result_state, dict) else []
         
-        if is_e2e_test or not has_partition_map:
-            # E2E 테스트 또는 파티션 없는 단일 실행: 워크플로우 완료
+        if not has_partition_map:
+            # 파티션 없는 단일 실행: 워크플로우 완료
             # [Critical Fix] S3 offload 시 final_state 비우기 (256KB 제한 회피)
             response_final_state = final_state
             if output_s3_path:

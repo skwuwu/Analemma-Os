@@ -107,6 +107,21 @@ def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
     return has_evidence, details
 
 
+def _check_no_init_error(final: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ghost-Success 탐지: SFN=SUCCEEDED이지만 InitializeStateData가 실제로 실패한 경우.
+    init 실패 시 Lambda는 soft-fail JSON을 반환하고 SFN은 이를 성공으로 처리.
+    그 결과 final_state에 'error' 또는 'error_type' 필드가 존재함.
+    """
+    has_error = "error" in final or "error_type" in final
+    err_val = str(final.get("error") or final.get("error_type") or "")[:120]
+    return _check(
+        "no initialization error (ghost-success guard)",
+        not has_error,
+        err_val if has_error else "clean"
+    )
+
+
 # Scenario Verifiers
 
 def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -125,6 +140,7 @@ def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Validate actual LLM invocation evidence
     has_llm, llm_details = _has_llm_evidence(final)
@@ -187,6 +203,7 @@ def verify_map_aggregator(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Validate aggregation result key presence
     aggregation_keys = {"aggregated_results", "map_results", "parallel_results", "TEST_RESULT"}
@@ -215,8 +232,19 @@ def verify_loop_limit(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
+
     loop_count = final.get("loop_count", 0)
     max_iterations = final.get("max_loop_iterations", final.get("loop_limit", 10))
+
+    # 최소 1회 이상 루프 실행 여부 (0 loops → 허위 통과 방지)
+    actually_ran = loop_count >= 1
+    checks.append(_check(
+        "loop_count >= 1 (actually executed)",
+        actually_ran,
+        f"loop_count={loop_count}"
+    ))
+
     within_limit = loop_count <= max_iterations
     checks.append(_check(
         "loop_count within limit",
@@ -247,6 +275,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Validate loop completion (5 iterations)
     loop_counter = final.get("loop_counter", 0)
@@ -328,6 +357,7 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Extract stress metrics
     stress_metrics = final.get("stress_metrics", {})
@@ -469,6 +499,7 @@ def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Validate HITP preparation completed
     hitp_prepared = final.get("hitp_prepared", False)
@@ -539,6 +570,7 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
     
     # Validate actual LLM invocation evidence
     has_llm, llm_details = _has_llm_evidence(final)
@@ -561,10 +593,16 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def verify_llm_stage_generic(test_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Generic verifier for LLM_STAGE1~8: checks no error in final_state."""
-    final = test_result.get("output", {}).get("final_state", {})
-    no_error = "error" not in final
-    checks = [_check("no_error", no_error, f"final_state keys: {list(final.keys())[:10]}")]
+    """Generic verifier for LLM_STAGE1~8: SFN succeeded + no init error in final_state."""
+    checks = []
+    succeeded = _sfn_succeeded(test_result)
+    checks.append(_check(
+        "SFN status SUCCEEDED",
+        succeeded,
+        f"status={test_result.get('status')}"
+    ))
+    final = _final_state(test_result)  # 문자열 output 파싱 포함
+    checks.append(_check_no_init_error(final))
     return _result("LLM_STAGE_GENERIC", checks)
 
 
