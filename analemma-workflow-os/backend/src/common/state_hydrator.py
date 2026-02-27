@@ -194,6 +194,7 @@ CONTROL_PLANE_FIELDS = frozenset({
     
     # 전략 및 모드
     "distributed_strategy", "distributed_mode", "MOCK_MODE",
+    "AUTO_RESUME_HITP",   # 시뮬레이터 HITP 자동 승인 플래그 (StateHydrator 경로 보존)
     
     # 세그먼트 메타데이터
     "llm_segments", "hitp_segments", "segment_type",

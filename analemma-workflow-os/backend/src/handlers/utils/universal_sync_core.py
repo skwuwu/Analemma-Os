@@ -122,7 +122,9 @@ CONTROL_FIELDS_NEVER_OFFLOAD = frozenset({
     'pre_snapshot_s3_path',
     'post_snapshot_s3_path',
     'last_update_time',
-    'payload_size_kb'
+    'payload_size_kb',
+    'AUTO_RESUME_HITP',  # 시뮬레이터 HITP 자동 승인 플래그 (USC 경로 보존)
+    'MOCK_MODE',         # 모의 실행 모드 플래그 (USC 경로 보존)
 })
 
 # 리스트 필드 기본 병합 전략
