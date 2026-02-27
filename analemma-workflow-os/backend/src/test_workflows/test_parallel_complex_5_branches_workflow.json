@@ -4,16 +4,42 @@
     "nodes": [
         {
             "id": "parallel_prep",
-            "type": "operator",
-            "sets": {
-                "parallel_test_started": true,
-                "expected_branches": 5,
-                "expected_child_workflow": true,
-                "prep_result": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "parallel_test_started"
+            }
+        },
+        {
+            "id": "parallel_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 5,
+                "output_key": "expected_branches"
+            }
+        },
+        {
+            "id": "parallel_prep_3",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "expected_child_workflow"
+            }
+        },
+        {
+            "id": "parallel_prep_4",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "test_type": "parallel_complex_5_branches",
                     "branch_count": 5,
                     "should_use_child_workflow": true
-                }
+                },
+                "output_key": "prep_result"
             }
         },
         {
@@ -41,10 +67,20 @@
                         "nodes": [
                             {
                                 "id": "branch_1_work",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_1_result": "Success_1",
-                                    "branch_1_completed": true
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success_1",
+                                    "output_key": "branch_1_result"
+                                }
+                            },
+                            {
+                                "id": "branch_1_work_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": true,
+                                    "output_key": "branch_1_completed"
                                 }
                             }
                         ]
@@ -69,10 +105,20 @@
                         "nodes": [
                             {
                                 "id": "branch_2_work",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_2_result": "Success_2",
-                                    "branch_2_completed": true
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success_2",
+                                    "output_key": "branch_2_result"
+                                }
+                            },
+                            {
+                                "id": "branch_2_work_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": true,
+                                    "output_key": "branch_2_completed"
                                 }
                             }
                         ]
@@ -93,10 +139,20 @@
                         "nodes": [
                             {
                                 "id": "branch_3_work",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_3_result": "Success_3",
-                                    "branch_3_completed": true
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success_3",
+                                    "output_key": "branch_3_result"
+                                }
+                            },
+                            {
+                                "id": "branch_3_work_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": true,
+                                    "output_key": "branch_3_completed"
                                 }
                             }
                         ]
@@ -117,10 +173,20 @@
                         "nodes": [
                             {
                                 "id": "branch_4_work",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_4_result": "Success_4",
-                                    "branch_4_completed": true
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success_4",
+                                    "output_key": "branch_4_result"
+                                }
+                            },
+                            {
+                                "id": "branch_4_work_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": true,
+                                    "output_key": "branch_4_completed"
                                 }
                             }
                         ]
@@ -141,10 +207,20 @@
                         "nodes": [
                             {
                                 "id": "branch_5_work",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_5_result": "Success_5",
-                                    "branch_5_completed": true
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success_5",
+                                    "output_key": "branch_5_result"
+                                }
+                            },
+                            {
+                                "id": "branch_5_work_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": true,
+                                    "output_key": "branch_5_completed"
                                 }
                             }
                         ]
@@ -161,16 +237,42 @@
         },
         {
             "id": "parallel_validator",
-            "type": "operator",
-            "sets": {
-                "TEST_RESULT": "SUCCESS: 복잡한 5개 브랜치 병렬 처리 성공",
-                "VALIDATION_STATUS": "PASSED"
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "SUCCESS: 복잡한 5개 브랜치 병렬 처리 성공",
+                "output_key": "TEST_RESULT"
+            }
+        },
+        {
+            "id": "parallel_validator_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "PASSED",
+                "output_key": "VALIDATION_STATUS"
             }
         }
     ],
     "edges": [
         {
             "source": "parallel_prep",
+            "target": "parallel_prep_2"
+        },
+        {
+            "source": "parallel_prep_2",
+            "target": "parallel_prep_3"
+        },
+        {
+            "source": "parallel_prep_3",
+            "target": "parallel_prep_4"
+        },
+        {
+            "source": "parallel_validator",
+            "target": "parallel_validator_2"
+        },
+        {
+            "source": "parallel_prep_4",
             "target": "complex_parallel_group",
             "type": "normal"
         },

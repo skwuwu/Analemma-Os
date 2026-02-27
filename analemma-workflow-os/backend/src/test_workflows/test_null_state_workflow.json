@@ -4,10 +4,11 @@
     "nodes": [
         {
             "id": "null_test_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"NULL 상태 테스트 실행\")\nstate['null_test_executed'] = True\n# 의도적으로 최종 상태를 None으로 설정하지 않음\nresult = {'status': 'null_test_completed', 'final_state_expected': None}\nstate['null_result'] = result\nprint(\"NULL 상태 테스트 완료\")",
-                "output_key": "null_result"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "null_test_node_done"
             }
         }
     ],

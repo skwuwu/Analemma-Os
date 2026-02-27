@@ -6,22 +6,72 @@
     "nodes": [
         {
             "id": "stress_init",
-            "type": "operator",
-            "label": "복합 스트레스 초기화",
-            "sets": {
-                "loop_items": [
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": [
                     0,
                     1,
                     2,
                     3,
                     4
                 ],
-                "loop_counter": 0,
-                "max_loop_iterations": 5,
-                "accumulated_results": [],
-                "offload_triggered_count": 0,
-                "branch_execution_count": 0,
-                "data_per_iteration_kb": 25
+                "output_key": "loop_items"
+            },
+            "label": "복합 스트레스 초기화"
+        },
+        {
+            "id": "stress_init_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 0,
+                "output_key": "loop_counter"
+            }
+        },
+        {
+            "id": "stress_init_3",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 5,
+                "output_key": "max_loop_iterations"
+            }
+        },
+        {
+            "id": "stress_init_4",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": [],
+                "output_key": "accumulated_results"
+            }
+        },
+        {
+            "id": "stress_init_5",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 0,
+                "output_key": "offload_triggered_count"
+            }
+        },
+        {
+            "id": "stress_init_6",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 0,
+                "output_key": "branch_execution_count"
+            }
+        },
+        {
+            "id": "stress_init_7",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 25,
+                "output_key": "data_per_iteration_kb"
             }
         },
         {
@@ -36,19 +86,23 @@
                     "nodes": [
                         {
                             "id": "loop_iteration_start",
-                            "type": "operator",
-                            "label": "반복 시작",
-                            "sets": {
-                                "step_1_done": true
-                            }
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": true,
+                                "output_key": "step_1_done"
+                            },
+                            "label": "반복 시작"
                         },
                         {
                             "id": "branch_decision",
-                            "type": "operator",
-                            "label": "분기 결정",
-                            "sets": {
-                                "branch_route": "even_path"
-                            }
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": "even_path",
+                                "output_key": "branch_route"
+                            },
+                            "label": "분기 결정"
                         },
                         {
                             "id": "parallel_branch_node",
@@ -95,11 +149,13 @@
                         },
                         {
                             "id": "accumulate_results",
-                            "type": "operator",
-                            "label": "결과 축적",
-                            "sets": {
-                                "step_accumulated": true
-                            }
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": true,
+                                "output_key": "step_accumulated"
+                            },
+                            "label": "결과 축적"
                         }
                     ],
                     "edges": [
@@ -121,29 +177,81 @@
         },
         {
             "id": "hitp_checkpoint",
-            "type": "operator",
-            "label": "HITL 체크포인트 (루프 완료 후 승인)",
-            "sets": {
-                "hitp_checkpoint": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "requires_approval": true,
                     "approval_message": "Loop completed. Approve?"
                 },
-                "hitp_triggered": true
+                "output_key": "hitp_checkpoint"
+            },
+            "label": "HITL 체크포인트 (루프 완료 후 승인)"
+        },
+        {
+            "id": "hitp_checkpoint_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "hitp_triggered"
             }
         },
         {
             "id": "final_validator",
-            "type": "operator",
-            "label": "통합 검증",
-            "sets": {
-                "TEST_RESULT": "LOOP+BRANCH STRESS PASSED",
-                "VALIDATION_STATUS": "PASSED"
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "LOOP+BRANCH STRESS PASSED",
+                "output_key": "TEST_RESULT"
+            },
+            "label": "통합 검증"
+        },
+        {
+            "id": "final_validator_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "PASSED",
+                "output_key": "VALIDATION_STATUS"
             }
         }
     ],
     "edges": [
         {
+            "source": "final_validator",
+            "target": "final_validator_2"
+        },
+        {
+            "source": "hitp_checkpoint",
+            "target": "hitp_checkpoint_2"
+        },
+        {
+            "source": "stress_init_6",
+            "target": "stress_init_7"
+        },
+        {
+            "source": "stress_init_5",
+            "target": "stress_init_6"
+        },
+        {
+            "source": "stress_init_4",
+            "target": "stress_init_5"
+        },
+        {
+            "source": "stress_init_3",
+            "target": "stress_init_4"
+        },
+        {
+            "source": "stress_init_2",
+            "target": "stress_init_3"
+        },
+        {
             "source": "stress_init",
+            "target": "stress_init_2"
+        },
+        {
+            "source": "stress_init_7",
             "target": "loop_processor"
         },
         {
@@ -152,7 +260,7 @@
             "type": "hitp"
         },
         {
-            "source": "hitp_checkpoint",
+            "source": "hitp_checkpoint_2",
             "target": "final_validator"
         }
     ],

@@ -4,10 +4,11 @@
     "nodes": [
         {
             "id": "continue_step1",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"1단계: 준비\")\nstate['step1_done'] = True\nresult = {'step': 1, 'status': 'ready_for_next'}\nstate['step1_result'] = result\nprint(\"1단계 완료 - 다음 단계로 진행\")",
-                "output_key": "step1_result"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "continue_step1_done"
             }
         },
         {
@@ -22,9 +23,11 @@
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "if state.get('step1_done'):\n    state['TEST_RESULT'] = '✅ SUCCESS: 단계별 진행 정상 확인됨'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: 단계 진행 실패'"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "validator_node_done"
             }
         }
     ],

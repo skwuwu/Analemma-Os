@@ -4,15 +4,11 @@
     "nodes": [
         {
             "id": "vision_prep",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "sets": {
-                    "vision_input": {
-                        "image_uri": "s3://test-bucket/sample_product.jpg",
-                        "analysis_type": "product_features"
-                    },
-                    "vision_test_enabled": true
-                }
+                "strategy": "echo",
+                "input": true,
+                "output_key": "vision_prep_done"
             }
         },
         {
@@ -30,12 +26,11 @@
         },
         {
             "id": "vision_validator",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "sets": {
-                    "vision_features_detected": true,
-                    "TEST_RESULT": "✅ SUCCESS: Vision 테스트 정상 완료 (Gemini Vision 실제 호출)"
-                }
+                "strategy": "echo",
+                "input": true,
+                "output_key": "vision_validator_done"
             }
         }
     ],

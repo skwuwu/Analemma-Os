@@ -4,13 +4,23 @@
     "nodes": [
         {
             "id": "prep_node",
-            "type": "operator",
-            "sets": {
-                "hitp_prepared": true,
-                "prep_result": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "hitp_prepared"
+            }
+        },
+        {
+            "id": "prep_node_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "status": "hitp_prep_completed",
                     "ready_for_segmentation": true
-                }
+                },
+                "output_key": "prep_result"
             }
         },
         {
@@ -20,28 +30,45 @@
                 "strategy": "if_else",
                 "params": {
                     "condition": "$.hitp_prepared and $.prep_result.ready_for_segmentation",
-                    "then": "\u2705 SUCCESS: HITP preparation status confirmed",
-                    "else": "\u274c FAILURE: HITP preparation failed"
+                    "then": "✅ SUCCESS: HITP preparation status confirmed",
+                    "else": "❌ FAILURE: HITP preparation failed"
                 },
                 "output_key": "TEST_RESULT"
             }
         },
         {
             "id": "approval_required_node",
-            "type": "operator",
-            "hitp": true,
-            "sets": {
-                "requires_approval": true,
-                "approval_result": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "requires_approval"
+            }
+        },
+        {
+            "id": "approval_required_node_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "status": "awaiting_human_approval",
                     "approval_type": "manual_review_required"
-                }
+                },
+                "output_key": "approval_result"
             }
         }
     ],
     "edges": [
         {
             "source": "prep_node",
+            "target": "prep_node_2"
+        },
+        {
+            "source": "approval_required_node",
+            "target": "approval_required_node_2"
+        },
+        {
+            "source": "prep_node_2",
             "target": "validator_node",
             "type": "normal"
         },

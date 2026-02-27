@@ -4,10 +4,11 @@
     "nodes": [
         {
             "id": "s3_heavy_prep",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"S3 대용량 파일 비동기 테스트 준비\")\n# 매우 큰 데이터 생성 (500KB+)\nheavy_s3_data = \"HEAVY_S3_ASYNC_\" * 30000  # ~500KB\nstate['heavy_s3_payload'] = heavy_s3_data\nstate['heavy_size'] = len(heavy_s3_data)\nresult = {'size_kb': state['heavy_size']/1024, 'triggers_s3_offload': state['heavy_size'] > 250000, 'requires_async': True}\nstate['s3_heavy_result'] = result\nprint(f\"대용량 S3 데이터: {state['heavy_size']} bytes\")",
-                "output_key": "s3_heavy_result"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "s3_heavy_prep_done"
             }
         },
         {

@@ -4,10 +4,20 @@
     "nodes": [
         {
             "id": "complete_prep",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"Completion test preparation\")\nstate['prep_done'] = True\nresult = {'status': 'ready_for_completion'}\nstate['prep_result'] = result",
-                "output_key": "prep_result"
+                "strategy": "echo",
+                "input": "ready_for_completion",
+                "output_key": "status"
+            }
+        },
+        {
+            "id": "complete_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "prep_done"
             }
         },
         {
@@ -22,15 +32,25 @@
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "if state.get('prep_done'):\n    state['TEST_RESULT'] = '✅ SUCCESS: 완료 테스트 정상 수행됨'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: 완료 테스트 준비 실패'"
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.prep_done == true",
+                    "then": "SUCCESS",
+                    "else": "FAIL"
+                },
+                "output_key": "TEST_RESULT"
             }
         }
     ],
     "edges": [
         {
             "source": "complete_prep",
+            "target": "complete_prep_2"
+        },
+        {
+            "source": "complete_prep_2",
             "target": "complete_llm",
             "type": "normal"
         },

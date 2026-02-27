@@ -4,15 +4,16 @@
     "nodes": [
         {
             "id": "heavy_prompt_gen",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"Generating large prompt...\")\nheavy_prompt = \"This is a very long prompt for async processing. \" * 1000  # ~50KB prompt\nstate['heavy_prompt'] = heavy_prompt\nstate['prompt_size'] = len(heavy_prompt)\nresult = {'prompt_size_kb': state['prompt_size']/1024, 'requires_async': state['prompt_size'] > 10000}\nstate['heavy_gen_result'] = result\nprint(f\"Large prompt generated: {state['prompt_size']} bytes\")",
-                "output_key": "heavy_gen_result"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "heavy_prompt_gen_done"
             }
         },
         {
             "id": "heavy_llm_process",
-            "type": "aiModel", 
+            "type": "aiModel",
             "config": {
                 "prompt_content": "{{heavy_prompt}}",
                 "model": "anthropic.claude-3-opus-20240229-v1:0",

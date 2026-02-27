@@ -560,6 +560,14 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
     return _result("ASYNC_LLM", checks)
 
 
+def verify_llm_stage_generic(test_result: Dict[str, Any]) -> Dict[str, Any]:
+    """Generic verifier for LLM_STAGE1~8: checks no error in final_state."""
+    final = test_result.get("output", {}).get("final_state", {})
+    no_error = "error" not in final
+    checks = [_check("no_error", no_error, f"final_state keys: {list(final.keys())[:10]}")]
+    return _result("LLM_STAGE_GENERIC", checks)
+
+
 # Verifier Router
 
 _VERIFIERS = {
@@ -574,6 +582,10 @@ _VERIFIERS = {
     "S3_LARGE":            verify_s3_large,  # Deprecated
     "ASYNC_LLM":           verify_async_llm,
 }
+
+# Register generic LLM stage verifier for LLM_STAGE1 ~ LLM_STAGE8
+for _i in range(1, 9):
+    _VERIFIERS[f"LLM_STAGE{_i}"] = verify_llm_stage_generic
 
 
 # Lambda Handler

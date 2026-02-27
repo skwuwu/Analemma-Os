@@ -4,10 +4,13 @@
     "nodes": [
         {
             "id": "fail_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"FAIL 테스트 노드 실행 중...\")\nprint(\"Step Functions를 거쳐 실제 실패를 발생시킵니다\")\nraise RuntimeError(\"FAIL_TEST: 의도적인 워크플로우 실패\")",
-                "output_key": "fail_result"
+                "strategy": "assert",
+                "input": false,
+                "params": {
+                    "message": "FAIL_TEST: 의도적인 워크플로우 실패"
+                }
             }
         }
     ],

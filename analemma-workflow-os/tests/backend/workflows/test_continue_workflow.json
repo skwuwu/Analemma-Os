@@ -4,10 +4,29 @@
     "nodes": [
         {
             "id": "continue_step1",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"1단계: 준비\")\nstate['step1_done'] = True\nresult = {'step': 1, 'status': 'ready_for_next'}\nstate['step1_result'] = result\nprint(\"1단계 완료 - 다음 단계로 진행\")",
-                "output_key": "step1_result"
+                "strategy": "echo",
+                "input": 1,
+                "output_key": "step"
+            }
+        },
+        {
+            "id": "continue_step1_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "ready_for_next",
+                "output_key": "status"
+            }
+        },
+        {
+            "id": "continue_step1_3",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "step1_done"
             }
         },
         {
@@ -22,15 +41,29 @@
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "if state.get('step1_done'):\n    state['TEST_RESULT'] = '✅ SUCCESS: 단계별 진행 정상 확인됨'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: 단계 진행 실패'"
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.step1_done == true",
+                    "then": "SUCCESS",
+                    "else": "FAIL"
+                },
+                "output_key": "TEST_RESULT"
             }
         }
     ],
     "edges": [
         {
             "source": "continue_step1",
+            "target": "continue_step1_2"
+        },
+        {
+            "source": "continue_step1_2",
+            "target": "continue_step1_3"
+        },
+        {
+            "source": "continue_step1_3",
             "target": "continue_step2",
             "type": "normal"
         },

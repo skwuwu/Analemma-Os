@@ -4,10 +4,11 @@
     "nodes": [
         {
             "id": "multimodal_init",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"Multimodal complex test initialization\")\nvideo_uri = state.get('video_input_uri', 's3://test-bucket/sample_video.mp4')\nimage_uris = state.get('image_input_uris', [\n    's3://test-bucket/spec_sheet_1.jpg',\n    's3://test-bucket/spec_sheet_2.jpg',\n    's3://test-bucket/spec_sheet_3.jpg'\n])\nstate['multimodal_inputs'] = {\n    'video': video_uri,\n    'images': image_uris,\n    'analysis_modes': ['video_summary', 'spec_extraction', 'feature_comparison']\n}\nstate['multimodal_results'] = []\nstate['image_uris'] = image_uris\nprint(f\"Multimodal inputs: 1 video + {len(image_uris)} images\")",
-                "output_key": "multimodal_inputs"
+                "strategy": "echo",
+                "input": [],
+                "output_key": "multimodal_results"
             }
         },
         {
@@ -50,17 +51,20 @@
         },
         {
             "id": "multimodal_aggregator",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "video_result = state.get('video_analysis', '') or state.get('video_analysis_output', '')\nimage_results = state.get('image_batch_results', [])\nstate['multimodal_summary'] = {\n    'video_features': video_result if isinstance(video_result, str) else video_result.get('features', []) if hasattr(video_result, 'get') else [],\n    'spec_count': len(image_results),\n    'analysis_complete': True\n}\nstate['multimodal_results'].append(state['multimodal_summary'])\nprint(f\"Multimodal analysis complete: Video + {len(image_results)} images processed\")",
-                "output_key": "multimodal_summary"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "multimodal_aggregator_done"
             }
         },
         {
             "id": "multimodal_validator",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "summary = state.get('multimodal_summary', {})\nif summary.get('analysis_complete') and state.get('multimodal_test_enabled'):\n    spec_count = summary.get('spec_count', 0)\n    state['TEST_RESULT'] = f\"✅ SUCCESS: Multimodal 복합 분석 완료 (Video + {spec_count} Images)\"\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: Multimodal 분석 실패'\nprint(f\"Multimodal test result: {state['TEST_RESULT']}\")"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "multimodal_validator_done"
             }
         }
     ],

@@ -4,31 +4,50 @@
     "nodes": [
         {
             "id": "idempotency_prep",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"멱등성 중복 실행 테스트 준비\")\nstate['idempotency_test_started'] = True\nstate['execution_attempt'] = 1\nresult = {\n    'test_type': 'idempotency_duplicate',\n    'should_be_blocked_on_retry': True,\n    'execution_id': state.get('execution_id', 'unknown')\n}\nstate['prep_result'] = result\nprint(f\"첫 번째 실행 준비 완료: {result}\")",
-                "output_key": "prep_result"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "idempotency_test_started"
+            }
+        },
+        {
+            "id": "idempotency_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 1,
+                "output_key": "execution_attempt"
             }
         },
         {
             "id": "idempotency_main_work",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"멱등성 테스트 메인 작업 실행\")\nif state.get('idempotency_test_started'):\n    state['main_work_completed'] = True\n    state['unique_execution_marker'] = f\"exec_{hash(str(state.get('execution_id', 'unknown')))}_{state.get('execution_attempt', 1)}\"\n    result = {\n        'status': 'main_work_done',\n        'execution_marker': state['unique_execution_marker'],\n        'timestamp': str(hash('idempotency_test'))\n    }\n    state['main_result'] = result\n    print(f\"메인 작업 완료: {result}\")\nelse:\n    raise RuntimeError(\"멱등성 테스트 준비가 되지 않음\")",
-                "output_key": "main_result"
+                "strategy": "assert",
+                "input": false,
+                "params": {
+                    "message": "멱등성 테스트 준비가 되지 않음"
+                }
             }
         },
         {
             "id": "idempotency_validator",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"멱등성 테스트 검증 시작\")\nsuccess_conditions = [\n    state.get('idempotency_test_started') == True,\n    state.get('main_work_completed') == True,\n    'unique_execution_marker' in state,\n    'prep_result' in state,\n    'main_result' in state\n]\n\nall_passed = all(success_conditions)\nprint(f\"검증 조건들: {success_conditions}\")\nprint(f\"모든 조건 통과: {all_passed}\")\n\nif all_passed:\n    state['TEST_RESULT'] = '✅ SUCCESS: 멱등성 테스트 첫 실행 성공 - 중복 실행 시 차단되어야 함'\n    state['VALIDATION_STATUS'] = 'PASSED'\n    print(\"✅ 멱등성 테스트 검증 성공\")\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: 멱등성 테스트 실패 - 조건 미충족'\n    state['VALIDATION_STATUS'] = 'FAILED'\n    print(\"❌ 멱등성 테스트 검증 실패\")\n\nstate['validation_details'] = {\n    'test_type': 'idempotency_duplicate',\n    'conditions_checked': len(success_conditions),\n    'conditions_passed': sum(success_conditions),\n    'execution_marker': state.get('unique_execution_marker', 'none')\n}"
+                "strategy": "echo",
+                "input": "FAILED",
+                "output_key": "VALIDATION_STATUS"
             }
         }
     ],
     "edges": [
         {
             "source": "idempotency_prep",
+            "target": "idempotency_prep_2"
+        },
+        {
+            "source": "idempotency_prep_2",
             "target": "idempotency_main_work",
             "type": "normal"
         },

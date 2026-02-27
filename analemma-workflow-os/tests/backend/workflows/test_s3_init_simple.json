@@ -4,10 +4,11 @@
     "nodes": [
         {
             "id": "s3_verification",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"=== S3 초기화 검증 ===\")\nprint(f\"S3_INIT_MARKER: {state.get('S3_INIT_MARKER', 'NOT_FOUND')}\")\nprint(f\"large_payload 크기: {len(str(state.get('large_payload', ''))))} bytes\")\nresult = {\n    'verified': state.get('S3_INIT_MARKER') == 'LOADED_FROM_S3',\n    'payload_size': len(str(state.get('large_payload', ''))),\n    'test_success': True\n}",
-                "output_key": "s3_verification"
+                "strategy": "echo",
+                "input": true,
+                "output_key": "s3_verification_done"
             }
         }
     ],

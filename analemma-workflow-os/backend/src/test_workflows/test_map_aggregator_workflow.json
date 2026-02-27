@@ -12,10 +12,20 @@
                         "nodes": [
                             {
                                 "id": "branch_A_step1",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_A_result": "Success A",
-                                    "timestamp_A": 12345
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success A",
+                                    "output_key": "branch_A_result"
+                                }
+                            },
+                            {
+                                "id": "branch_A_step1_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": 12345,
+                                    "output_key": "timestamp_A"
                                 }
                             }
                         ]
@@ -25,10 +35,20 @@
                         "nodes": [
                             {
                                 "id": "branch_B_step1",
-                                "type": "operator",
-                                "sets": {
-                                    "branch_B_result": "Success B",
-                                    "timestamp_B": 67890
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": "Success B",
+                                    "output_key": "branch_B_result"
+                                }
+                            },
+                            {
+                                "id": "branch_B_step1_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": 67890,
+                                    "output_key": "timestamp_B"
                                 }
                             }
                         ]
@@ -38,16 +58,15 @@
         },
         {
             "id": "aggregator_node",
-            "type": "aggregator",
-            "config": {
-                "code": "print('Aggregator node (placeholder code, logic handled by segment runner)')"
-            }
+            "type": "aggregator"
         },
         {
             "id": "validator_node",
-            "type": "operator",
-            "sets": {
-                "TEST_RESULT": "SUCCESS: All branch results aggregated"
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "SUCCESS: All branch results aggregated",
+                "output_key": "TEST_RESULT"
             }
         }
     ],

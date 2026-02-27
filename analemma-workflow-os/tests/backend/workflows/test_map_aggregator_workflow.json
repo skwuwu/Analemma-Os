@@ -12,9 +12,20 @@
                         "nodes": [
                             {
                                 "id": "branch_A_step1",
-                                "type": "operator",
+                                "type": "operator_official",
                                 "config": {
-                                    "code": "print('Branch A executing')\nresult = {'branch_A_result': 'Success A', 'timestamp_A': 12345}"
+                                    "strategy": "echo",
+                                    "input": "Success A",
+                                    "output_key": "branch_A_result"
+                                }
+                            },
+                            {
+                                "id": "branch_A_step1_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": 12345,
+                                    "output_key": "timestamp_A"
                                 }
                             }
                         ]
@@ -24,9 +35,20 @@
                         "nodes": [
                             {
                                 "id": "branch_B_step1",
-                                "type": "operator",
+                                "type": "operator_official",
                                 "config": {
-                                    "code": "print('Branch B executing')\nresult = {'branch_B_result': 'Success B', 'timestamp_B': 67890}"
+                                    "strategy": "echo",
+                                    "input": "Success B",
+                                    "output_key": "branch_B_result"
+                                }
+                            },
+                            {
+                                "id": "branch_B_step1_2",
+                                "type": "operator_official",
+                                "config": {
+                                    "strategy": "echo",
+                                    "input": 67890,
+                                    "output_key": "timestamp_B"
                                 }
                             }
                         ]
@@ -43,9 +65,15 @@
         },
         {
             "id": "validator_node",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "if 'branch_A_result' in state and 'branch_B_result' in state:\n    state['TEST_RESULT'] = '✅ SUCCESS: All branch results aggregated'\nelse:\n    state['TEST_RESULT'] = '❌ FAILURE: Some data missing'"
+                "strategy": "if_else",
+                "params": {
+                    "condition": "$.branch_A_result != null",
+                    "then": "SUCCESS",
+                    "else": "FAIL"
+                },
+                "output_key": "TEST_RESULT"
             }
         }
     ],

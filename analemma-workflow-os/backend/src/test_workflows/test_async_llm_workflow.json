@@ -4,13 +4,23 @@
     "nodes": [
         {
             "id": "async_prep",
-            "type": "operator",
-            "sets": {
-                "async_ready": true,
-                "async_prep_result": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "async_ready"
+            }
+        },
+        {
+            "id": "async_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "status": "prepared_for_async",
                     "test_type": "async_llm"
-                }
+                },
+                "output_key": "async_prep_result"
             }
         },
         {
@@ -28,6 +38,10 @@
     "edges": [
         {
             "source": "async_prep",
+            "target": "async_prep_2"
+        },
+        {
+            "source": "async_prep_2",
             "target": "async_llm_call",
             "type": "normal"
         }

@@ -4,10 +4,29 @@
     "nodes": [
         {
             "id": "async_prep",
-            "type": "operator",
+            "type": "operator_official",
             "config": {
-                "code": "print(\"비동기 LLM 테스트 준비\")\nstate['async_ready'] = True\nresult = {'status': 'prepared_for_async', 'test_type': 'async_llm'}\nstate['async_prep_result'] = result\nprint(\"비동기 LLM 준비 완료\")",
-                "output_key": "async_prep_result"
+                "strategy": "echo",
+                "input": "prepared_for_async",
+                "output_key": "status"
+            }
+        },
+        {
+            "id": "async_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "async_llm",
+                "output_key": "test_type"
+            }
+        },
+        {
+            "id": "async_prep_3",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "async_ready"
             }
         },
         {
@@ -25,7 +44,15 @@
     "edges": [
         {
             "source": "async_prep",
-            "target": "async_llm_call", 
+            "target": "async_prep_2"
+        },
+        {
+            "source": "async_prep_2",
+            "target": "async_prep_3"
+        },
+        {
+            "source": "async_prep_3",
+            "target": "async_llm_call",
             "type": "normal"
         }
     ],

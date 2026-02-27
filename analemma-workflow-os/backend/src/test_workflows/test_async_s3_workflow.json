@@ -4,14 +4,24 @@
     "nodes": [
         {
             "id": "s3_heavy_prep",
-            "type": "operator",
-            "sets": {
-                "heavy_size": 262144,
-                "s3_heavy_result": {
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 262144,
+                "output_key": "heavy_size"
+            }
+        },
+        {
+            "id": "s3_heavy_prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
                     "size_kb": 256,
                     "triggers_s3_offload": true,
                     "requires_async": true
-                }
+                },
+                "output_key": "s3_heavy_result"
             }
         },
         {
@@ -29,6 +39,10 @@
     "edges": [
         {
             "source": "s3_heavy_prep",
+            "target": "s3_heavy_prep_2"
+        },
+        {
+            "source": "s3_heavy_prep_2",
             "target": "async_s3_process",
             "type": "normal"
         }

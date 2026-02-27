@@ -4,12 +4,29 @@
     "nodes": [
         {
             "id": "prep",
-            "type": "operator",
-            "label": "Test Preparation",
-            "sets": {
-                "test_started": true,
-                "counter": 0,
-                "loop_items": [
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "test_started"
+            },
+            "label": "Test Preparation"
+        },
+        {
+            "id": "prep_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": 0,
+                "output_key": "counter"
+            }
+        },
+        {
+            "id": "prep_3",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": [
                     0,
                     1,
                     2,
@@ -40,7 +57,8 @@
                     27,
                     28,
                     29
-                ]
+                ],
+                "output_key": "loop_items"
             }
         },
         {
@@ -55,23 +73,29 @@
                     "nodes": [
                         {
                             "id": "loop_node_1",
-                            "type": "operator",
-                            "sets": {
-                                "step_1_done": true
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": true,
+                                "output_key": "step_1_done"
                             }
                         },
                         {
                             "id": "loop_node_2",
-                            "type": "operator",
-                            "sets": {
-                                "step_2_done": true
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": true,
+                                "output_key": "step_2_done"
                             }
                         },
                         {
                             "id": "loop_node_3",
-                            "type": "operator",
-                            "sets": {
-                                "step_3_done": true
+                            "type": "operator_official",
+                            "config": {
+                                "strategy": "echo",
+                                "input": true,
+                                "output_key": "step_3_done"
                             }
                         }
                     ],
@@ -91,17 +115,39 @@
         },
         {
             "id": "validator",
-            "type": "operator",
-            "label": "Validate Dynamic Limit Calculation",
-            "sets": {
-                "TEST_RESULT": "PASS: Dynamic loop limit test completed",
-                "test_passed": true
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "PASS: Dynamic loop limit test completed",
+                "output_key": "TEST_RESULT"
+            },
+            "label": "Validate Dynamic Limit Calculation"
+        },
+        {
+            "id": "validator_2",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": true,
+                "output_key": "test_passed"
             }
         }
     ],
     "edges": [
         {
             "source": "prep",
+            "target": "prep_2"
+        },
+        {
+            "source": "prep_2",
+            "target": "prep_3"
+        },
+        {
+            "source": "validator",
+            "target": "validator_2"
+        },
+        {
+            "source": "prep_3",
             "target": "heavy_loop"
         },
         {
