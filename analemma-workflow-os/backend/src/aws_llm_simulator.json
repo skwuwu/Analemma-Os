@@ -166,6 +166,15 @@
                                 "BackoffRate": 2.0
                             }
                         ],
+                        "Next": "TrimOutput"
+                    },
+                    "TrimOutput": {
+                        "Type": "Pass",
+                        "Comment": "Strip test_result.output (SFN bag JSON, 50-120KB per scenario) before Map aggregation. Keep only scenario + verification summary to stay under 256KB SFN limit.",
+                        "Parameters": {
+                            "scenario.$": "$.scenario",
+                            "verification_result.$": "$.verification_result"
+                        },
                         "End": true
                     }
                 }
