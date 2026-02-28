@@ -30,7 +30,8 @@
                 "model": "claude-3-haiku-20240307",
                 "max_tokens": 100,
                 "prompt": "Reply with exactly one word: COMPLETE",
-                "temperature": 0.0
+                "temperature": 0.0,
+                "output_key": "complete_llm_output"
             }
         },
         {

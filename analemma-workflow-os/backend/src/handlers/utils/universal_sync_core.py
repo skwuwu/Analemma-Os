@@ -577,18 +577,24 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                             "Falling back to pointer merge."
                         )
             if isinstance(final_state, dict):
-                # Unwrap one level if the result is still wrapped in current_state
-                # (handles rare case where run_workflow itself returned a nested bag)
+                # [v3.24] Root keys WIN over current_state burial (v3.20-era compat).
+                # Step 1: seed delta with any buried current_state keys (lower priority)
                 inner = final_state.get('current_state')
-                source = inner if isinstance(inner, dict) else final_state
+                if isinstance(inner, dict):
+                    for k, v in inner.items():
+                        if k not in _BAG_STRUCTURAL_SKIP:
+                            delta[k] = v
+                # Step 2: overlay root keys — these are the CURRENT segment's outputs
+                # and must override any stale current_state data.
                 merged_keys = []
-                for k, v in source.items():
-                    if k not in _BAG_STRUCTURAL_SKIP:
+                for k, v in final_state.items():
+                    if k not in _BAG_STRUCTURAL_SKIP and k != 'current_state':
                         delta[k] = v
                         merged_keys.append(k)
                 _get_logger().info(
-                    f"[v3.22] flat-merged final_state keys to delta root "
-                    f"({len(merged_keys)} keys): {merged_keys[:10]}"
+                    f"[v3.24] flat-merged final_state keys to delta root "
+                    f"({len(merged_keys)} keys, root-wins over current_state burial): "
+                    f"{merged_keys[:10]}"
                 )
 
         elif action == 'sync_branch':
@@ -625,13 +631,17 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                             f"[v3.23 sync_branch] S3 hydration failed: {_hydrate_err}"
                         )
             if isinstance(final_state, dict):
+                # [v3.24] Root keys WIN — mirrors sync path burial fix
                 inner = final_state.get('current_state')
-                source = inner if isinstance(inner, dict) else final_state
-                for k, v in source.items():
-                    if k not in _BAG_STRUCTURAL_SKIP:
+                if isinstance(inner, dict):
+                    for k, v in inner.items():
+                        if k not in _BAG_STRUCTURAL_SKIP:
+                            delta[k] = v
+                for k, v in final_state.items():
+                    if k not in _BAG_STRUCTURAL_SKIP and k != 'current_state':
                         delta[k] = v
             _get_logger().info(
-                f"[flatten_result sync_branch] status={delta['_status']}, "
+                f"[flatten_result sync_branch v3.24] status={delta['_status']}, "
                 f"next_segment={payload.get('next_segment_to_run')}, "
                 f"state_s3_path={'set' if delta.get('state_s3_path') else 'unset'}"
             )

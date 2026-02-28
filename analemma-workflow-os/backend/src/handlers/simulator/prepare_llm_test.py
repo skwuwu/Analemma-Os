@@ -86,6 +86,7 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
         'verify_loop_branch_integration': True,
         'verify_s3_offload': True,
         'expected_outer_count': 5,
+        'AUTO_RESUME_DELAY_SECONDS': '10',
     },
     'STRESS': {
         'pipeline_test_enabled': True,
@@ -95,12 +96,13 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
     'VISION': {
         'pipeline_test_enabled': True,
         'verify_multimodal': True,
-        'vision_input': {'image_uri': 's3://analemma-test-assets/product_sample.jpg'},
-        'product_image': 's3://analemma-test-assets/product_sample.jpg',
+        'vision_input': {'image_uri': 's3://analemma-test-assets/sample_receipt.jpg'},
+        'product_image': 's3://analemma-test-assets/sample_receipt.jpg',
     },
     'HITP_RECOVERY': {
         'pipeline_test_enabled': True,
         'verify_hitp_recovery': True,
+        'AUTO_RESUME_DELAY_SECONDS': '10',
     },
     'ASYNC_LLM': {
         'pipeline_test_enabled': True,
