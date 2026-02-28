@@ -24,7 +24,9 @@ Return Schema (all verify_* functions):
   }
 """
 
+import json
 import logging
+from decimal import Decimal
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,36 @@ logger.setLevel(logging.INFO)
 
 # S3 offload size threshold (bytes)
 S3_OFFLOAD_SIZE_THRESHOLD = 200_000
+
+
+# ---------------------------------------------------------------------------
+# Type-safe scalar helpers
+# ---------------------------------------------------------------------------
+
+def _to_int(v: Any, default: int = 0) -> int:
+    """Return v as int only when it is a real numeric scalar (int/float, not bool/dict/…).
+    Handles Decimal (DynamoDB) transparently."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float, Decimal)):
+        return int(v)
+    return default
+
+
+def _safe_num(v: Any, default: float = 0.0) -> float:
+    """Coerce any numeric-like value (including Decimal) to float for JSON-safe metrics.
+    Returns default for non-numeric types (dict, list, None, …)."""
+    if isinstance(v, bool):
+        return default
+    if isinstance(v, (int, float, Decimal)):
+        return float(v)
+    return default
+
+
+def _test_result_str(final: Dict[str, Any]) -> str:
+    """Return TEST_RESULT as a plain string, coercing non-str values safely."""
+    val = final.get("TEST_RESULT", "")
+    return val if isinstance(val, str) else str(val)
 
 
 # Helper Functions
@@ -77,7 +109,6 @@ def _final_state(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """
     output = test_result.get("output", {})
     if isinstance(output, str):
-        import json
         try:
             output = json.loads(output)
         except Exception:
@@ -126,17 +157,17 @@ def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
             evidence.append(f"llm_raw_output present ({len(raw_output)} chars)")
     
     # 2. Token usage check
-    total_tokens = final_state.get("total_tokens", 0)
-    if total_tokens and total_tokens > 0:
-        evidence.append(f"total_tokens={total_tokens}")
-    
+    total_tokens = _safe_num(final_state.get("total_tokens", 0))
+    if total_tokens > 0:
+        evidence.append(f"total_tokens={total_tokens:.0f}")
+
     # 3. usage object check
     usage = final_state.get("usage")
     if isinstance(usage, dict):
-        input_tok = usage.get("input_tokens", 0)
-        output_tok = usage.get("output_tokens", 0)
+        input_tok = _safe_num(usage.get("input_tokens", 0))
+        output_tok = _safe_num(usage.get("output_tokens", 0))
         if input_tok > 0 or output_tok > 0:
-            evidence.append(f"usage={{input:{input_tok},output:{output_tok}}}")
+            evidence.append(f"usage={{input:{input_tok:.0f},output:{output_tok:.0f}}}")
     
     # 4. LLM output key patterns (node_id + "_output", "_result", "_analysis", etc.)
     _llm_suffixes = ("_output", "_llm", "_response", "_result", "_analysis")
@@ -281,11 +312,15 @@ def verify_loop_limit(test_result: Dict[str, Any]) -> Dict[str, Any]:
     # Primary: kernel-guaranteed iteration count written directly by for_each_runner
     # (never lost to S3-offload unlike loop_results list).
     # Secondary: loop_count written by count_loop_iterations operator node.
-    loop_count = (
-        final.get("loop_count")
-        or final.get("heavy_loop_iteration_count", 0)
+    loop_count: int = (
+        _to_int(final.get("loop_count"))
+        or _to_int(final.get("heavy_loop_iteration_count"))
     )
-    max_iterations = final.get("max_loop_iterations", final.get("loop_limit", 10))
+    max_iterations: int = (
+        _to_int(final.get("max_loop_iterations"))
+        or _to_int(final.get("loop_limit"))
+        or 10
+    )
 
     # 최소 1회 이상 루프 실행 여부 (0 loops → 허위 통과 방지)
     actually_ran = loop_count >= 1
@@ -335,12 +370,13 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     # 4. loop_counter: SFN reserved key — always 0 in simulator
     loop_results = final.get("loop_results", [])
     loop_results_count = len(loop_results) if isinstance(loop_results, list) else 0
-    loop_processor_count = final.get("loop_processor_iteration_count", 0)
-    loop_counter = (
-        final.get("workflow_loop_count")
+    loop_processor_count: int = _to_int(final.get("loop_processor_iteration_count"))
+
+    loop_counter: int = (
+        _to_int(final.get("workflow_loop_count"))
         or loop_processor_count
         or loop_results_count
-        or final.get("loop_counter", 0)
+        or _to_int(final.get("loop_counter"))
     )
     loop_ok = loop_counter >= 1  # At least 1 iteration ran; exact count verified by presence of kernel key
     checks.append(_check(
@@ -350,7 +386,7 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     ))
 
     # Validate branch executions — falls back to loop counter if no explicit key
-    branch_count = final.get("branch_execution_count", loop_counter)
+    branch_count: int = _to_int(final.get("branch_execution_count"), loop_counter)
     branch_ok = branch_count >= 1  # At least 1 branch ran
     checks.append(_check(
         "Branch executions (>= 1)",
@@ -360,24 +396,24 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     
     # Validate state size was measured by kernel (presence + non-negative value is sufficient;
     # absolute 100KB threshold is unreliable in test environments without padding payloads)
-    accumulated_size = final.get("accumulated_size_kb", 0)
-    size_ok = isinstance(accumulated_size, (int, float)) and accumulated_size >= 0
+    accumulated_size: float = _safe_num(final.get("accumulated_size_kb", 0))
+    size_ok = accumulated_size >= 0
     checks.append(_check(
         "State size measured (accumulated_size_kb present)",
         size_ok,
-        f"accumulated_size_kb={accumulated_size}"
+        f"accumulated_size_kb={accumulated_size:.2f}"
     ))
     
     # Validate S3 offload tracking (numeric presence is sufficient; actual trigger depends on
     # payload size which varies per environment)
-    offload_count = final.get("offload_triggered_count", 0)
-    offload_ok = isinstance(offload_count, (int, float)) and offload_count >= 0
+    offload_count: float = _safe_num(final.get("offload_triggered_count", 0))
+    offload_ok = offload_count >= 0
     checks.append(_check(
         "S3 offload tracking present",
         offload_ok,
-        f"offload_triggered_count={offload_count}"
+        f"offload_triggered_count={offload_count:.0f}"
     ))
-    
+
     # Validate HITP checkpoint passed
     hitp_passed = "hitp_checkpoint" in final
     checks.append(_check(
@@ -385,21 +421,23 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
         hitp_passed,
         f"hitp_checkpoint present: {hitp_passed}"
     ))
-    
+
     # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
+    tr_str = _test_result_str(final)
+    test_passed = "PASS" in tr_str or "SUCCESS" in tr_str
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
-        f"TEST_RESULT={final.get('TEST_RESULT', 'absent')[:100]}"
+        f"TEST_RESULT={tr_str[:100]}"
     ))
-    
+
+    acc_size_f: float = _safe_num(accumulated_size)
     metrics = {
         "loop_iterations": loop_counter,
         "branch_executions": branch_count,
-        "accumulated_size_kb": accumulated_size,
-        "offload_count": offload_count
+        "accumulated_size_kb": acc_size_f,
+        "offload_count": offload_count,
     }
     return _result("LOOP_BRANCH_STRESS", checks, metrics)
 
@@ -426,47 +464,52 @@ def verify_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     
     # Extract stress metrics
     stress_metrics = final.get("stress_metrics", {})
-    
+    if not isinstance(stress_metrics, dict):
+        stress_metrics = {}
+
     # Validate loop pointer recovery after HITL
-    loop_recoveries = stress_metrics.get("loop_pointer_recoveries", 0)
+    loop_recoveries: float = _safe_num(stress_metrics.get("loop_pointer_recoveries", 0))
     recovery_ok = loop_recoveries > 0
     checks.append(_check(
         "Loop pointer recovery after HITL",
         recovery_ok,
-        f"loop_pointer_recoveries={loop_recoveries}"
+        f"loop_pointer_recoveries={loop_recoveries:.0f}"
     ))
-    
+
     # Validate branch isolation (no memory violations)
     isolation_violations = stress_metrics.get("isolation_violations", [])
+    if not isinstance(isolation_violations, list):
+        isolation_violations = []
     isolation_ok = len(isolation_violations) == 0
     checks.append(_check(
         "Branch isolation maintained (no violations)",
         isolation_ok,
         f"isolation_violations={len(isolation_violations)}"
     ))
-    
+
     # Validate HITL triggered inside loop
-    hitl_count = stress_metrics.get("hitl_inside_loop_count", 0)
+    hitl_count: float = _safe_num(stress_metrics.get("hitl_inside_loop_count", 0))
     hitl_ok = hitl_count > 0
     checks.append(_check(
         "HITL triggered inside loop",
         hitl_ok,
-        f"hitl_inside_loop_count={hitl_count}"
+        f"hitl_inside_loop_count={hitl_count:.0f}"
     ))
-    
+
     # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
+    tr_str = _test_result_str(final)
+    test_passed = "PASS" in tr_str or "SUCCESS" in tr_str
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
-        f"TEST_RESULT={final.get('TEST_RESULT', 'absent')[:100]}"
+        f"TEST_RESULT={tr_str[:100]}"
     ))
-    
+
     metrics = {
         "loop_pointer_recoveries": loop_recoveries,
         "isolation_violations_count": len(isolation_violations),
-        "hitl_inside_loop_count": hitl_count
+        "hitl_inside_loop_count": hitl_count,
     }
     return _result("STRESS", checks, metrics)
 
@@ -585,16 +628,17 @@ def verify_hitp_recovery(test_result: Dict[str, Any]) -> Dict[str, Any]:
     
     # Validate TEST_RESULT indicates success
     test_result_key = "TEST_RESULT" in final
-    test_passed = final.get("TEST_RESULT", "").find("PASS") >= 0 or final.get("TEST_RESULT", "").find("SUCCESS") >= 0
+    tr_str = _test_result_str(final)
+    test_passed = "PASS" in tr_str or "SUCCESS" in tr_str
     checks.append(_check(
         "TEST_RESULT indicates success",
         test_result_key and test_passed,
-        f"TEST_RESULT={final.get('TEST_RESULT', 'absent')[:100]}"
+        f"TEST_RESULT={tr_str[:100]}"
     ))
-    
+
     metrics = {
-        "hitp_prepared": hitp_prepared,
-        "has_approval_result": has_approval
+        "hitp_prepared": bool(hitp_prepared),
+        "has_approval_result": bool(has_approval),
     }
     return _result("HITP_RECOVERY", checks, metrics)
 
