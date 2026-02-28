@@ -138,6 +138,17 @@ LIST_FIELD_STRATEGIES: Dict[str, str] = {
     '_failed_segments': 'replace',         # 매 aggregate마다 최신 값으로 교체 (누적 방지)
 }
 
+# [v3.22] Bag 구조 키 — flat-merge 시 루트에 올리지 않을 커널 전용 키
+# run_workflow() 결과를 delta 루트에 직접 플랫 머지할 때 이 키들은 제외함
+_BAG_STRUCTURAL_SKIP: frozenset = frozenset({
+    'workflow_config', 'partition_map', 'segment_manifest_s3_path',
+    'execution_id', 'idempotency_key', 'ownerId', 'workflowId',
+    'segment_to_run', 'loop_counter', 'segment_id', 'total_segments',
+    'state_s3_path', 'payload_size_kb', 'last_update_time',
+    'AUTO_RESUME_HITP', 'MOCK_MODE', 'manifest_id', 'branches_s3_path',
+    'pre_snapshot_s3_path', 'post_snapshot_s3_path',
+})
+
 # 크기 임계값 (KB)
 FIELD_OFFLOAD_THRESHOLD_KB = 30
 FULL_STATE_OFFLOAD_THRESHOLD_KB = 100
@@ -513,45 +524,26 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
             # �🔍 [v3.15 Debug] Log status extraction for troubleshooting
             _get_logger().info(f"[flatten_result sync] Extracted status={delta['_status']} from payload, next_segment={payload.get('next_segment_to_run')}")
             
-            # 🔑 [Critical Fix v3.20] Merge final_state into current_state
-            # run_workflow returns results directly (e.g., {'llm_raw_output': '...'})
-            # These should become part of current_state for verification to find them
+            # [v3.22] Flat-merge final_state directly into delta root
+            # Replaces v3.20 burial (delta['current_state'] = final_state) which hid
+            # all user keys one level deep and broke cross-segment state propagation.
+            # Kernel structural keys (workflowId, execution_id, …) are skipped via
+            # _BAG_STRUCTURAL_SKIP to prevent user data from overwriting kernel config.
             final_state = payload.get('final_state')
             if isinstance(final_state, dict):
-                current_state = final_state.get('current_state')
-                if isinstance(current_state, dict):
-                    # final_state.current_state가 있으면 그대로 사용
-                    delta['current_state'] = current_state
-                else:
-                    # [v3.20] final_state에 current_state가 없으면 
-                    # final_state 자체를 current_state로 사용 (run_workflow 결과)
-                    # 단, 메타데이터 키는 제외
-                    # [v3.21] 모든 Stage의 LLM output_key 포함
-                    execution_result_keys = {
-                        # Stage 1, 7, 8: Basic LLM
-                        'llm_raw_output', 'llm_output', 'llm_result', 'parsed_summary',
-                        # Stage 2: Flow Control
-                        'item_result', 'quality_check_result', 'processed_items',
-                        # Stage 3: Vision Basic
-                        'vision_raw_output', 'parsed_vision_data',
-                        # Stage 4: Vision Map
-                        'image_analysis', 'vision_results',
-                        # Stage 5: Hyper Stress
-                        'document_analysis_raw', 'final_report_raw', 'depth_1_results', 'depth_2_results',
-                        # Stage 6: Distributed Map Reduce
-                        'llm_analysis_raw', 'partition_results',
-                        # Stage 7: Parallel Multi LLM
-                        'branch_results', 'claude_branch', 'gemini_branch',
-                        # Stage 8: Slop Detection
-                        'test_results', 'slop_detection_results',
-                        # Common metadata
-                        'usage', 'step_history', 'execution_logs', '__new_history_logs'
-                    }
-                    has_execution_results = any(k in final_state for k in execution_result_keys)
-                    if has_execution_results or (final_state and '_' not in str(list(final_state.keys())[:1])):
-                        # final_state에 실행 결과가 있으면 current_state로 승격
-                        delta['current_state'] = final_state
-                        _get_logger().info(f"[v3.20] Promoted final_state to current_state, keys: {list(final_state.keys())[:10]}")
+                # Unwrap one level if the result is still wrapped in current_state
+                # (handles rare case where run_workflow itself returned a nested bag)
+                inner = final_state.get('current_state')
+                source = inner if isinstance(inner, dict) else final_state
+                merged_keys = []
+                for k, v in source.items():
+                    if k not in _BAG_STRUCTURAL_SKIP:
+                        delta[k] = v
+                        merged_keys.append(k)
+                _get_logger().info(
+                    f"[v3.22] flat-merged final_state keys to delta root "
+                    f"({len(merged_keys)} keys): {merged_keys[:10]}"
+                )
 
         elif action == 'sync_branch':
             # [C-1/C-2 Fix] sync_branch를 sync와 동일한 1급 시민으로 격상
@@ -564,14 +556,14 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
             if payload.get('new_history_logs'):
                 delta['new_history_logs'] = payload['new_history_logs']
             delta['_status'] = payload.get('status', 'CONTINUE')
-            # 브랜치 LLM 실행 결과 보존 (sync와 동일한 final_state 승격 로직)
+            # [v3.22] Flat-merge (sync_branch) — mirrors sync path above
             final_state = payload.get('final_state')
             if isinstance(final_state, dict):
-                current_state = final_state.get('current_state')
-                if isinstance(current_state, dict):
-                    delta['current_state'] = current_state
-                elif final_state:
-                    delta['current_state'] = final_state
+                inner = final_state.get('current_state')
+                source = inner if isinstance(inner, dict) else final_state
+                for k, v in source.items():
+                    if k not in _BAG_STRUCTURAL_SKIP:
+                        delta[k] = v
             _get_logger().info(
                 f"[flatten_result sync_branch] status={delta['_status']}, "
                 f"next_segment={payload.get('next_segment_to_run')}, "
