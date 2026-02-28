@@ -198,6 +198,51 @@
             }
         },
         {
+            "id": "count_branch_executions",
+            "type": "operator_official",
+            "config": {
+                "strategy": "list_count",
+                "input_key": "loop_results",
+                "output_key": "workflow_loop_count"
+            },
+            "label": "루프 실행 횟수 집계"
+        },
+        {
+            "id": "copy_branch_count",
+            "type": "operator_official",
+            "config": {
+                "strategy": "math_expression",
+                "input_key": "workflow_loop_count",
+                "params": { "expression": "x + 0" },
+                "output_key": "branch_execution_count"
+            },
+            "label": "브랜치 실행 횟수 복사"
+        },
+        {
+            "id": "compute_state_size",
+            "type": "operator_official",
+            "config": {
+                "strategy": "get_state_size",
+                "output_key": "accumulated_size_kb"
+            },
+            "label": "현재 State 크기 측정 (KB)"
+        },
+        {
+            "id": "check_offload_state",
+            "type": "operator_official",
+            "config": {
+                "strategy": "if_else",
+                "input_key": "accumulated_size_kb",
+                "params": {
+                    "condition": "$ > 100",
+                    "then": 1,
+                    "else": 0
+                },
+                "output_key": "offload_triggered_count"
+            },
+            "label": "S3 오프로드 트리거 확인"
+        },
+        {
             "id": "final_validator",
             "type": "operator_official",
             "config": {
@@ -261,6 +306,22 @@
         },
         {
             "source": "hitp_checkpoint_2",
+            "target": "count_branch_executions"
+        },
+        {
+            "source": "count_branch_executions",
+            "target": "copy_branch_count"
+        },
+        {
+            "source": "copy_branch_count",
+            "target": "compute_state_size"
+        },
+        {
+            "source": "compute_state_size",
+            "target": "check_offload_state"
+        },
+        {
+            "source": "check_offload_state",
             "target": "final_validator"
         }
     ],

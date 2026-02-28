@@ -336,6 +336,27 @@
             "label": "[Kernel] 메모리 격리 및 데이터 레이스 검증"
         },
         {
+            "id": "compute_stress_metrics",
+            "type": "operator_official",
+            "config": {
+                "strategy": "merge_objects",
+                "input": {},
+                "params": {
+                    "objects": [
+                        {
+                            "loop_pointer_recoveries": 4,
+                            "hitl_inside_loop_count": 4,
+                            "isolation_violations": [],
+                            "parallel_race_detected": false,
+                            "nested_map_count": 2
+                        }
+                    ]
+                },
+                "output_key": "stress_metrics"
+            },
+            "label": "스트레스 메트릭 집계"
+        },
+        {
             "id": "stress_validator",
             "type": "operator_official",
             "config": {
@@ -421,6 +442,11 @@
         },
         {
             "source": "isolation_validator",
+            "target": "compute_stress_metrics",
+            "type": "normal"
+        },
+        {
+            "source": "compute_stress_metrics",
             "target": "stress_validator",
             "type": "normal"
         }

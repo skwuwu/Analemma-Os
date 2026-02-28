@@ -95,7 +95,8 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
     'VISION': {
         'pipeline_test_enabled': True,
         'verify_multimodal': True,
-        'product_image': 's3://test-bucket/large_product_8mb.jpg',
+        'vision_input': {'image_uri': 's3://analemma-test-assets/product_sample.jpg'},
+        'product_image': 's3://analemma-test-assets/product_sample.jpg',
     },
     'HITP_RECOVERY': {
         'pipeline_test_enabled': True,

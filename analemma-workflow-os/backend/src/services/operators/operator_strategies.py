@@ -114,6 +114,7 @@ class OperatorStrategy(str, Enum):
     ECHO = "echo"  # Pass-through for testing
     LOG = "log"    # Debug logging
     TIMESTAMP = "timestamp"  # Current timestamp
+    GET_STATE_SIZE = "get_state_size"  # Measure JSON-serialized state size in KB
     
 
 # =============================================================================
@@ -1151,6 +1152,20 @@ def _timestamp(input_val: Any, params: Dict[str, Any]) -> Union[str, int, float]
             return now.isoformat()
 
 
+def _get_state_size(input_val: Any, params: Dict[str, Any]) -> float:
+    """Measure the JSON-serialized size of the input value in KB.
+    
+    When used without input_key / input_template in the workflow node,
+    operator_official_runner passes the entire state as input_val.
+    This allows measuring current StateBag size before S3 offload.
+    """
+    try:
+        size_bytes = len(json.dumps(input_val, default=str, ensure_ascii=False).encode('utf-8'))
+        return round(size_bytes / 1024, 1)
+    except Exception:
+        return 0.0
+
+
 # =============================================================================
 # Strategy Registry - Maps strategy names to handler functions
 # =============================================================================
@@ -1233,6 +1248,7 @@ STRATEGY_REGISTRY: Dict[str, Callable[[Any, Dict[str, Any]], Any]] = {
     OperatorStrategy.ECHO: _echo,
     OperatorStrategy.LOG: _log,
     OperatorStrategy.TIMESTAMP: _timestamp,
+    OperatorStrategy.GET_STATE_SIZE: _get_state_size,
 }
 
 # Also register by string values for easier lookup

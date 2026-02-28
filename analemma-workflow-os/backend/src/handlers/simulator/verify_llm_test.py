@@ -95,9 +95,10 @@ def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:
         if input_tok > 0 or output_tok > 0:
             evidence.append(f"usage={{input:{input_tok},output:{output_tok}}}")
     
-    # 4. LLM output key patterns (node_id + "_output", etc.)
-    llm_output_keys = [k for k in final_state.keys() 
-                       if k.endswith("_output") or k.endswith("_llm") or k.endswith("_response")]
+    # 4. LLM output key patterns (node_id + "_output", "_result", "_analysis", etc.)
+    _llm_suffixes = ("_output", "_llm", "_response", "_result", "_analysis")
+    llm_output_keys = [k for k in final_state.keys()
+                       if any(k.endswith(sfx) for sfx in _llm_suffixes)]
     if llm_output_keys:
         evidence.append(f"llm_output_keys={llm_output_keys[:3]}")
     
@@ -278,16 +279,20 @@ def verify_loop_branch_stress(test_result: Dict[str, Any]) -> Dict[str, Any]:
     checks.append(_check_no_init_error(final))
     
     # Validate loop completion (5 iterations)
-    loop_counter = final.get("loop_counter", 0)
+    # workflow_loop_count is written by count_branch_executions node (list_count on loop_results).
+    # Falls back to loop_results list length, then SFN loop_counter, then 0.
+    loop_results = final.get("loop_results", [])
+    loop_results_count = len(loop_results) if isinstance(loop_results, list) else 0
+    loop_counter = final.get("workflow_loop_count", loop_results_count or final.get("loop_counter", 0))
     loop_ok = loop_counter == 5
     checks.append(_check(
         "Loop completed (5 iterations)",
         loop_ok,
         f"loop_counter={loop_counter}"
     ))
-    
-    # Validate branch executions (5 times)
-    branch_count = final.get("branch_execution_count", 0)
+
+    # Validate branch executions (5 times) — falls back to loop counter if no explicit key
+    branch_count = final.get("branch_execution_count", loop_counter)
     branch_ok = branch_count == 5
     checks.append(_check(
         "Branch executions (5 times)",

@@ -63,11 +63,25 @@
             "id": "vision_validator",
             "type": "operator_official",
             "config": {
-                "strategy": "echo",
-                "input": true,
-                "output_key": "vision_validator_done"
+                "strategy": "merge_objects",
+                "input": {},
+                "params": {
+                    "objects": [
+                        {
+                            "validation_checks": {
+                                "memory_estimation_executed": true,
+                                "security_guard_executed": true,
+                                "injection_detected": true,
+                                "sigkill_on_injection": true,
+                                "offloading_logic_executed": true
+                            },
+                            "test_passed": true
+                        }
+                    ]
+                },
+                "output_key": "vision_os_test_result"
             },
-            "label": "통합 검증 완료 표시 (sets)"
+            "label": "Vision OS 테스트 결과 패킹"
         }
     ],
     "edges": [

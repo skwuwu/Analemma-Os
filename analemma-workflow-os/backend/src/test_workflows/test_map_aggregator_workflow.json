@@ -58,7 +58,10 @@
         },
         {
             "id": "aggregator_node",
-            "type": "aggregator"
+            "type": "aggregator",
+            "config": {
+                "merge_policy": "FLATTEN_ALL"
+            }
         },
         {
             "id": "validator_node",

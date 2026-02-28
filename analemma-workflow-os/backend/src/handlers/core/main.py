@@ -2700,6 +2700,8 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
     node_id = config.get("id", "aggregator")
     # [Fix] Support both flattened and nested config structures
     inner_config = config.get("config") or config
+    # [FLATTEN_ALL] Merge policy: expand branch sub-dicts into top-level state keys
+    merge_policy = inner_config.get("merge_policy", "DEFAULT")
     
     # [Token Aggregation] 여러 소스의 토큰 사용량 합산
     total_input_tokens = 0
@@ -2823,7 +2825,22 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
                 f"total tokens: {result['total_tokens']} "
                 f"({result['total_input_tokens']} input + {result['total_output_tokens']} output), "
                 f"cost: ${estimated_cost:.6f}")
-    
+
+    # [FLATTEN_ALL] When merge_policy == "FLATTEN_ALL", expand branch_* sub-dicts into root state.
+    # This ensures branch_A_result, branch_B_result etc. are accessible at top level after aggregation.
+    if merge_policy == "FLATTEN_ALL":
+        skip_keys = frozenset((
+            "total_tokens", "total_input_tokens", "total_output_tokens",
+            "branch_token_details", "estimated_cost_usd", "aggregated_at",
+            "aggregation_sources", "step_history",
+        ))
+        for state_key, state_val in state.items():
+            if state_key.startswith("branch_") and isinstance(state_val, dict):
+                for sub_key, sub_val in state_val.items():
+                    if sub_key not in skip_keys:
+                        result[sub_key] = sub_val
+        logger.info(f"Aggregator {node_id}: FLATTEN_ALL applied, branch sub-dicts merged to root")
+
     return result
 
 
@@ -3547,6 +3564,8 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     result_updates['total_output_tokens'] = total_output_tokens
     result_updates['total_tokens'] = total_input_tokens + total_output_tokens
     result_updates['iteration_token_details'] = iteration_token_details
+    # Auto-metadata: kernel records actual iteration count (accessible by downstream verifiers/nodes)
+    result_updates[f'{node_id}_iteration_count'] = len(results)
     
     # [Accumulation] 이전 상태의 토큰 값과 누적
     temp_result = {
