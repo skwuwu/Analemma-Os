@@ -3485,12 +3485,11 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # deepcopy 50MB → Proxy 11MB
     try:
         from src.common.state_view_context import create_state_view_context
-        state_view_context = create_state_view_context()
         ring_level = state.get('ring_level', 3)
+        state_view_context = create_state_view_context(state)
         
         # Ring별 Proxy View 생성 (Lazy Projection)
         state_view = state_view_context.create_view(
-            core_state=state,
             ring_level=ring_level
         )
         
@@ -3504,7 +3503,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             f"[FOR_EACH] StateViewContext Ring {ring_level}: "
             f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction)"
         )
-    except ImportError:
+    except Exception:
         # Fallback: deepcopy (하위 호환)
         import copy
         state_view = copy.deepcopy(state)
@@ -3693,12 +3692,11 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
     try:
         from src.common.state_view_context import create_state_view_context
-        state_view_context = create_state_view_context()
         ring_level = state.get('ring_level', 3)
+        state_view_context = create_state_view_context(state)
         
         # Ring별 Proxy View 생성
         current_state = state_view_context.create_view(
-            core_state=state,
             ring_level=ring_level
         )
         
@@ -3713,7 +3711,7 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
             f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
             f"max_iterations={max_iterations}"
         )
-    except ImportError:
+    except Exception:
         # Fallback: deepcopy (하위 호환)
         import copy
         current_state = copy.deepcopy(state)
@@ -4306,12 +4304,11 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
     try:
         from src.common.state_view_context import create_state_view_context
-        state_view_context = create_state_view_context()
         ring_level = state.get('ring_level', 3)
+        state_view_context = create_state_view_context(state)
         
         # Ring별 Proxy View 생성
         state_snapshot = state_view_context.create_view(
-            core_state=state,
             ring_level=ring_level
         )
         
@@ -4326,7 +4323,7 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
             f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
             f"{len(branches)} branches"
         )
-    except ImportError:
+    except Exception:
         # Fallback: deepcopy (하위 호환)
         import copy
         state_snapshot = copy.deepcopy(state)
