@@ -52,8 +52,29 @@ def _sfn_succeeded(test_result: Dict[str, Any]) -> bool:
     return test_result.get("status") == "SUCCEEDED"
 
 
+# Known user-result keys that should appear at the root of a healthy bag.
+# Used by _final_state() to decide whether to trust the root or descend one
+# level into "current_state" (backward-compat with USC v3.20 burial bug).
+_USER_RESULT_KEYS: frozenset = frozenset({
+    "TEST_RESULT", "loop_count", "heavy_loop_iteration_count",
+    "stress_metrics", "vision_os_test_result", "aggregated_results",
+    "map_results", "parallel_results", "llm_raw_output",
+    "total_tokens", "usage", "__llm_error",
+})
+
+
 def _final_state(test_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Extract final_state from SFN execution output"""
+    """Extract final_state from SFN execution output.
+
+    Resolution strategy (has_user_keys check):
+    1. Parse/unwrap the raw output dict to reach the bag candidate.
+    2. If the candidate root already contains any known user-result key
+       → return it directly (happy path).
+    3. If the root is structural-only (empty of user keys) but
+       candidate['current_state'] contains user keys
+       → promote current_state to root (USC v3.20 burial fallback).
+    4. Otherwise return the candidate as-is.
+    """
     output = test_result.get("output", {})
     if isinstance(output, str):
         import json
@@ -61,7 +82,29 @@ def _final_state(test_result: Dict[str, Any]) -> Dict[str, Any]:
             output = json.loads(output)
         except Exception:
             return {}
-    return output.get("final_state", output) if isinstance(output, dict) else {}
+    if not isinstance(output, dict):
+        return {}
+
+    candidate = output.get("final_state", output)
+    if not isinstance(candidate, dict):
+        return {}
+
+    # [has_user_keys] If root already carries result data, trust it.
+    if any(k in candidate for k in _USER_RESULT_KEYS):
+        return candidate
+
+    # Root is structural-only: check one level deeper for burial fallback.
+    nested = candidate.get("current_state")
+    if isinstance(nested, dict) and any(k in nested for k in _USER_RESULT_KEYS):
+        logger.debug(
+            "[_final_state] Promoting current_state to root "
+            "(USC v3.20 burial fallback)"
+        )
+        merged = {**candidate, **nested}
+        merged.pop("current_state", None)
+        return merged
+
+    return candidate
 
 
 def _has_llm_evidence(final_state: Dict[str, Any]) -> tuple[bool, str]:

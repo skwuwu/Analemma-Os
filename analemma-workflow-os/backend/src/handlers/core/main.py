@@ -2696,15 +2696,34 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     f"Human readable: {human_readable_error}"
                 )
                 
-                # 사용자 친화적인 메시지를 포함한 새로운 예외 발생
-                from src.common.exceptions import LLMServiceError
-                raise LLMServiceError(
-                    message=human_readable_error,
-                    original_error=last_error,
-                    provider=meta.get("provider", "unknown"),
-                    node_id=node_id,
-                    attempts=max_retries+1
-                ) from last_error
+                # [v3.22] Soft-fail: return error-annotated state instead of raising.
+                # Downstream merge_objects / aggregator nodes still execute,
+                # and TEST_RESULT carries a human-readable PARTIAL_LLM_FAILURE prefix
+                # for easy post-mortem analysis in CloudWatch / verifier outputs.
+                error_summary = (
+                    f"[PARTIAL_LLM_FAILURE] node={node_id} "
+                    f"provider={meta.get('provider', 'unknown')} "
+                    f"attempts={max_retries + 1}: {human_readable_error}"
+                )
+                logger.error(
+                    f"\U0001f6a8 [LLM Soft-Fail] Returning error-annotated state instead of raising. "
+                    f"Summary: {error_summary}"
+                )
+                error_state = dict(state)
+                error_state["__llm_error"] = {
+                    "node_id": node_id,
+                    "provider": meta.get("provider", "unknown"),
+                    "attempts": max_retries + 1,
+                    "error": human_readable_error,
+                    "raw_error": str(last_error),
+                }
+                # [v3.22] Also stamp TEST_RESULT so verifiers can detect partial failure
+                # without needing to inspect the __llm_error dict.
+                error_state["TEST_RESULT"] = error_summary
+                error_state["step_history"] = (
+                    list(state.get("step_history", [])) + [f"{node_id}:llm_error"]
+                )
+                return error_state
 
     # Should not reach here
     raise last_error if last_error else RuntimeError("LLM execution failed unexpectedly")
