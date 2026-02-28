@@ -141,12 +141,24 @@ LIST_FIELD_STRATEGIES: Dict[str, str] = {
 # [v3.22] Bag 구조 키 — flat-merge 시 루트에 올리지 않을 커널 전용 키
 # run_workflow() 결과를 delta 루트에 직접 플랫 머지할 때 이 키들은 제외함
 _BAG_STRUCTURAL_SKIP: frozenset = frozenset({
+    # Routing / identity keys — kernel owns these, never merge from workflow output
     'workflow_config', 'partition_map', 'segment_manifest_s3_path',
     'execution_id', 'idempotency_key', 'ownerId', 'workflowId',
     'segment_to_run', 'loop_counter', 'segment_id', 'total_segments',
     'state_s3_path', 'payload_size_kb', 'last_update_time',
     'AUTO_RESUME_HITP', 'MOCK_MODE', 'manifest_id', 'branches_s3_path',
     'pre_snapshot_s3_path', 'post_snapshot_s3_path',
+    # [v3.22 SFN-size fix] Volatile runtime-internal keys — flat-merging these to bag root
+    # causes unbounded payload growth and SFN 256 KB limit violations:
+    #   • step_history  — LangGraph per-node trace list; merge_logic uses 'append' strategy
+    #                     so it grows O(segments × nodes). Handled via new_history_logs instead.
+    #   • execution_logs — similar ephemeral log list; not consumed by verifiers
+    #   • _metadata      — per-LLM-call internal dict written by llm_chat_runner
+    #   • _kernel_execution_summary — accumulating kernel stats dict
+    'step_history',
+    'execution_logs',
+    '_metadata',
+    '_kernel_execution_summary',
 })
 
 # 크기 임계값 (KB)
@@ -1004,7 +1016,23 @@ def optimize_and_offload(
             idempotency_key
         )
         state['current_state'] = optimized_current
-    
+    else:
+        # [v3.22 SFN-size fix] Fix 1 flat-merge mode: all workflow output keys are at bag
+        # root (no current_state sub-dict).  optimize_current_state would be a no-op above,
+        # so apply the same field-level S3 offloading at root level — but only for
+        # non-critical user fields (skip CONTROL_FIELDS_NEVER_OFFLOAD and _BAG_STRUCTURAL_SKIP).
+        offload_candidates = {
+            k: v for k, v in state.items()
+            if k not in CONTROL_FIELDS_NEVER_OFFLOAD and k not in _BAG_STRUCTURAL_SKIP
+        }
+        if offload_candidates:
+            optimized_root, any_offloaded = optimize_current_state(
+                offload_candidates, idempotency_key
+            )
+            if any_offloaded:
+                state.update(optimized_root)
+                logger.info("[v3.22] Root-level field offload applied (Fix 1 flat-merge mode)")
+
     # 3. 포인터 비대화 방지
     state = prevent_pointer_bloat(state, idempotency_key)
     
