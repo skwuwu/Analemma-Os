@@ -542,6 +542,40 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
             # Kernel structural keys (workflowId, execution_id, …) are skipped via
             # _BAG_STRUCTURAL_SKIP to prevent user data from overwriting kernel config.
             final_state = payload.get('final_state')
+            # [v3.23 S3 Hydration] When segment_runner has offloaded final_state to S3
+            # (e.g., has_next_segment=True + size>20KB), USC receives a pointer dict:
+            #   {"__s3_offloaded": True, "__s3_path": "s3://bucket/key", ...}
+            # Flat-merging the pointer alone would write __s3_offloaded/__s3_path to
+            # the bag root and lose all user keys (TEST_RESULT etc).
+            # Solution: detect the pointer and hydrate the full state from S3 before merging.
+            if isinstance(final_state, dict) and final_state.get('__s3_offloaded'):
+                s3_path = (
+                    final_state.get('__s3_path')
+                    or final_state.get('s3_path')
+                    or payload.get('final_state_s3_path')
+                    or payload.get('state_s3_path')
+                )
+                if s3_path:
+                    _get_logger().info(
+                        f"[v3.23] final_state is S3 pointer, hydrating from {s3_path}"
+                    )
+                    try:
+                        hydrated = get_default_hydrator().load_from_s3(s3_path)
+                        if isinstance(hydrated, dict):
+                            final_state = hydrated
+                            _get_logger().info(
+                                f"[v3.23] Hydration OK — {len(final_state)} keys from S3"
+                            )
+                        else:
+                            _get_logger().warning(
+                                f"[v3.23] Hydrated value is not dict: {type(hydrated)}. "
+                                "Falling back to pointer merge."
+                            )
+                    except Exception as _hydrate_err:
+                        _get_logger().error(
+                            f"[v3.23] S3 hydration failed ({s3_path}): {_hydrate_err}. "
+                            "Falling back to pointer merge."
+                        )
             if isinstance(final_state, dict):
                 # Unwrap one level if the result is still wrapped in current_state
                 # (handles rare case where run_workflow itself returned a nested bag)
@@ -569,7 +603,27 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['new_history_logs'] = payload['new_history_logs']
             delta['_status'] = payload.get('status', 'CONTINUE')
             # [v3.22] Flat-merge (sync_branch) — mirrors sync path above
+            # [v3.23] S3 pointer hydration identical to action='sync'
             final_state = payload.get('final_state')
+            if isinstance(final_state, dict) and final_state.get('__s3_offloaded'):
+                s3_path = (
+                    final_state.get('__s3_path')
+                    or final_state.get('s3_path')
+                    or payload.get('final_state_s3_path')
+                    or payload.get('state_s3_path')
+                )
+                if s3_path:
+                    try:
+                        hydrated = get_default_hydrator().load_from_s3(s3_path)
+                        if isinstance(hydrated, dict):
+                            final_state = hydrated
+                            _get_logger().info(
+                                f"[v3.23 sync_branch] Hydrated from S3: {len(final_state)} keys"
+                            )
+                    except Exception as _hydrate_err:
+                        _get_logger().error(
+                            f"[v3.23 sync_branch] S3 hydration failed: {_hydrate_err}"
+                        )
             if isinstance(final_state, dict):
                 inner = final_state.get('current_state')
                 source = inner if isinstance(inner, dict) else final_state

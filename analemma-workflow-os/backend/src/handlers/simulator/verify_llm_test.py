@@ -225,12 +225,20 @@ def verify_complete(test_result: Dict[str, Any]) -> Dict[str, Any]:
         llm_details
     ))
     
-    # Validate TEST_RESULT key presence
+    # Validate TEST_RESULT key presence AND content
+    tr_str = _test_result_str(final)
     has_result = "TEST_RESULT" in final
+    is_partial_failure = "[PARTIAL_LLM_FAILURE]" in tr_str
     checks.append(_check(
         "TEST_RESULT key in final_state",
         has_result,
         f"keys={list(final.keys())[:10]}"
+    ))
+    # [Ghost-Success Guard] PARTIAL_LLM_FAILURE prefix = LLM hard-failed even after retries
+    checks.append(_check(
+        "TEST_RESULT is not a PARTIAL_LLM_FAILURE",
+        not is_partial_failure,
+        tr_str[:120] if is_partial_failure else "ok"
     ))
 
     return _result("COMPLETE", checks)
@@ -288,6 +296,15 @@ def verify_map_aggregator(test_result: Dict[str, Any]) -> Dict[str, Any]:
         found_key is not None,
         f"found={found_key}, keys={list(final.keys())[:10]}"
     ))
+    # [Ghost-Success Guard] If TEST_RESULT present, must not be a PARTIAL_LLM_FAILURE
+    tr_str = _test_result_str(final)
+    if "TEST_RESULT" in final:
+        is_partial_failure = "[PARTIAL_LLM_FAILURE]" in tr_str
+        checks.append(_check(
+            "TEST_RESULT is not a PARTIAL_LLM_FAILURE",
+            not is_partial_failure,
+            tr_str[:120] if is_partial_failure else "ok"
+        ))
 
     return _result("MAP_AGGREGATOR", checks)
 

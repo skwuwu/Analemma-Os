@@ -691,6 +691,9 @@ Resources:
         # 🧪 [LLM Simulator] Vision 테스트용 S3 이미지 접근 권한
         - S3ReadPolicy:
             BucketName: analemma-workflows-dev
+        # 🧪 [LLM Simulator] Vision/Stage3/Stage4 테스트 이미지 버킷 읽기 권한
+        - S3ReadPolicy:
+            BucketName: analemma-test-assets
         # 🚀 [NEW] EventBridge 발행 권한 추가
         - EventBridgePutEventsPolicy:
             EventBusName: !Ref WorkflowEventBus

@@ -2720,6 +2720,21 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 # [v3.22] Also stamp TEST_RESULT so verifiers can detect partial failure
                 # without needing to inspect the __llm_error dict.
                 error_state["TEST_RESULT"] = error_summary
+                # [v3.23 Fix 3+] Inject a minimal default schema for the output_key so that
+                # downstream merge_objects / aggregator nodes receive a predictable structure
+                # instead of a missing key.  The None sentinel lets callers distinguish
+                # "llm returned null" from "key was never written".
+                out_key_for_error = (
+                    config.get("output_key")
+                    or config.get("writes_state_key")
+                    or f"{node_id}_output"
+                )
+                if out_key_for_error not in error_state:
+                    error_state[out_key_for_error] = None  # safe null — key exists, value absent
+                    logger.warning(
+                        f"[Fix3+] Injected null sentinel for output_key '{out_key_for_error}' "
+                        f"so downstream nodes do not KeyError on missing LLM result."
+                    )
                 error_state["step_history"] = (
                     list(state.get("step_history", [])) + [f"{node_id}:llm_error"]
                 )
