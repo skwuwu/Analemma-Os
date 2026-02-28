@@ -583,6 +583,23 @@ class SegmentRunnerService:
                 return True
         return False
 
+    @staticmethod
+    def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Recursively merge two dicts.
+        - Scalar / list values from override take precedence.
+        - Nested dicts are merged recursively so sub-keys from BOTH sides are preserved.
+        This fixes the 'Top-level Deep Merge' regression in _handle_aggregator where
+        sibling branch states sharing nested-dict keys would lose their earlier values.
+        """
+        result = base.copy()
+        for k, v in override.items():
+            if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+                result[k] = SegmentRunnerService._deep_merge_dicts(result[k], v)
+            else:
+                result[k] = v
+        return result
+
     def _merge_states(
         self,
         base_state: Dict[str, Any],
@@ -645,8 +662,11 @@ class SegmentRunnerService:
                 if existing_value != new_value:
                     conflicts.append(key)
             else:
-                # APPEND_LIST default: overwrite if not list
-                result[key] = new_value
+                # APPEND_LIST default: deep-merge nested dicts, overwrite scalars/lists
+                if isinstance(existing_value, dict) and isinstance(new_value, dict):
+                    result[key] = self._deep_merge_dicts(existing_value, new_value)
+                else:
+                    result[key] = new_value
         
         if conflicts:
             logger.warning(f"[Merge] State conflicts detected on keys: {conflicts}")

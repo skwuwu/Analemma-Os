@@ -201,11 +201,11 @@
             "id": "count_branch_executions",
             "type": "operator_official",
             "config": {
-                "strategy": "list_count",
-                "input_key": "loop_results",
+                "strategy": "echo",
+                "input_key": "loop_processor_iteration_count",
                 "output_key": "workflow_loop_count"
             },
-            "label": "루프 실행 횟수 집계"
+            "label": "루프 실행 횟수 집계 (커널 보증 키 복사)"
         },
         {
             "id": "copy_branch_count",

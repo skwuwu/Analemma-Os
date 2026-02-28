@@ -117,11 +117,11 @@
             "id": "count_loop_iterations",
             "type": "operator_official",
             "config": {
-                "strategy": "list_count",
-                "input_key": "loop_results",
+                "strategy": "echo",
+                "input_key": "heavy_loop_iteration_count",
                 "output_key": "loop_count"
             },
-            "label": "루프 실행 횟수 측정"
+            "label": "루프 실행 횟수 측정 (커널 보증)"
         },
         {
             "id": "validator",

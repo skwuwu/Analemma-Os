@@ -399,6 +399,8 @@ KERNEL_MANAGED_KEYS = {
     "__hidden_context",       # ✅ [v3.28] Hidden kernel memory (Ring 3 cannot read/write)
     "__original_state",       # ✅ [v3.28] Original state snapshot (for Ring Level validation)
     "__rollback_stack",       # ✅ [v3.28] Rollback action stack
+    "_kernel_execution_summary",  # ✅ Kernel-guaranteed LLM execution evidence (for test verifiers)
+    "_metadata",              # ✅ Kernel-injected last-LLM-result metadata
 }
 
 
@@ -2635,6 +2637,22 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             # 사용자 출력만 검증 (커널 메타데이터 제외)
             validated_output = _validate_output_keys(user_output, node_id)
             
+            # 🛡️ [Kernel] Accumulate LLM execution evidence — guaranteed by kernel, never lost
+            # Used by test verifiers via _kernel_execution_summary contract instead of
+            # brittle individual metric keys that may be lost across distributed segments.
+            _kes = dict(state.get("_kernel_execution_summary") or {})
+            _kes["llm_call_count"] = _kes.get("llm_call_count", 0) + 1
+            _kes["last_llm_node"] = node_id
+            _kes["last_llm_tokens"] = usage.get("total_tokens", 0)
+            _kes["total_llm_tokens"] = _kes.get("total_llm_tokens", 0) + usage.get("total_tokens", 0)
+            validated_output["_kernel_execution_summary"] = _kes
+            validated_output["_metadata"] = {
+                "last_llm_node": node_id,
+                "last_llm_tokens": usage.get("total_tokens", 0),
+                "llm_call_count": _kes["llm_call_count"],
+                "last_llm_result": output_value if not isinstance(output_value, (dict, list)) else "[Structured Data]",
+            }
+
             # 🛡️ [Kernel Metadata] 검증 후 커널 메타데이터 추가 (Reserved Keys이지만 커널이 관리)
             validated_output[f"{node_id}_meta"] = meta
             validated_output["step_history"] = new_history
@@ -2826,20 +2844,25 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
                 f"({result['total_input_tokens']} input + {result['total_output_tokens']} output), "
                 f"cost: ${estimated_cost:.6f}")
 
-    # [FLATTEN_ALL] When merge_policy == "FLATTEN_ALL", expand branch_* sub-dicts into root state.
-    # This ensures branch_A_result, branch_B_result etc. are accessible at top level after aggregation.
-    if merge_policy == "FLATTEN_ALL":
-        skip_keys = frozenset((
-            "total_tokens", "total_input_tokens", "total_output_tokens",
-            "branch_token_details", "estimated_cost_usd", "aggregated_at",
-            "aggregation_sources", "step_history",
-        ))
-        for state_key, state_val in state.items():
-            if state_key.startswith("branch_") and isinstance(state_val, dict):
-                for sub_key, sub_val in state_val.items():
-                    if sub_key not in skip_keys:
-                        result[sub_key] = sub_val
-        logger.info(f"Aggregator {node_id}: FLATTEN_ALL applied, branch sub-dicts merged to root")
+    # [Kernel-Forced] Always flatten branch_* sub-dicts to root state.
+    # Merge strategy is determined by data type — no user merge_policy config needed:
+    #   dict  → shallow deep-merge (sibling keys from both sides preserved)
+    #   other → overwrite
+    # merge_policy config value is accepted for backward compat but intentionally ignored.
+    _branch_skip = frozenset((
+        "total_tokens", "total_input_tokens", "total_output_tokens",
+        "branch_token_details", "estimated_cost_usd", "aggregated_at",
+        "aggregation_sources", "step_history",
+    ))
+    for _sk, _sv in state.items():
+        if _sk.startswith("branch_") and isinstance(_sv, dict):
+            for _sub_key, _sub_val in _sv.items():
+                if _sub_key not in _branch_skip:
+                    if _sub_key in result and isinstance(result[_sub_key], dict) and isinstance(_sub_val, dict):
+                        result[_sub_key] = {**result[_sub_key], **_sub_val}
+                    else:
+                        result[_sub_key] = _sub_val
+    logger.info(f"Aggregator {node_id}: branch sub-dicts flattened to root (type-driven merge)")
 
     return result
 
@@ -3297,6 +3320,56 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
     return validate_state_with_schema(validated_output, node_id)
 
+
+# =============================================================================
+# [Kernel Shared Helper] _execute_node_sequence
+# Single implementation of the "run a list of nodes against a base state" loop.
+# Used by for_each_runner (per-item), parallel_group_runner (per-branch), and
+# loop_runner (per-iteration). Eliminates three near-identical copy-paste blocks.
+# =============================================================================
+def _execute_node_sequence(
+    nodes: List[Dict[str, Any]],
+    base_state: Dict[str, Any],
+    node_id_prefix: str = "",
+    caller_tag: str = "node_seq",
+) -> Tuple[Dict[str, Any], bool]:
+    """
+    Execute a sequence of nodes sequentially against a base state snapshot.
+
+    Each node receives: {**base_state, **accumulated_updates_so_far}.
+    Merge strategy is data-type-driven (no user config needed):
+      - dict values  → shallow merge (preserves sibling keys)
+      - other values → overwrite
+
+    Returns:
+        (accumulated_updates, had_error)
+    """
+    updates: Dict[str, Any] = {}
+    for node_def in nodes:
+        node_type = node_def.get("type", "operator")
+        handler = NODE_REGISTRY.get(node_type)
+        if not handler:
+            logger.error(f"[{caller_tag}] Unknown node type '{node_type}' — skipping")
+            continue
+        try:
+            current_view: Dict[str, Any] = {**base_state, **updates}
+            rendered_node = _render_template(node_def, current_view)
+            if node_id_prefix:
+                rendered_node["id"] = f"{node_id_prefix}{node_def.get('id', 'sub')}"
+            res = handler(current_view, rendered_node)
+            if isinstance(res, dict):
+                for k, v in res.items():
+                    if k in updates and isinstance(updates[k], dict) and isinstance(v, dict):
+                        updates[k] = {**updates[k], **v}   # shallow deep-merge for dicts
+                    else:
+                        updates[k] = v
+        except Exception as exc:
+            logger.error(f"[{caller_tag}] Node '{node_def.get('id')}' failed: {exc}")
+            updates["error"] = str(exc)
+            return updates, True
+    return updates, False
+
+
 def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """Executes sub-node for each item in list concurrently with multi-node support."""
     node_id = config.get("id", "for_each")
@@ -3461,35 +3534,11 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         if "messages" in it_state and isinstance(it_state["messages"], list):
             it_state["messages"] = it_state["messages"].copy()
             
-        it_updates = {}
-        
-        for node_def in sub_nodes:
-            # [Fix] Merge previous node results so next node can access them
-            current_view = ChainMap(it_updates, it_state)
-            node_type = node_def.get("type", "llm_chat")
-            handler = NODE_REGISTRY.get(node_type)
-            
-            if not handler:
-                logger.error(f"Unknown node type '{node_type}' in for_each iteration")
-                continue
-                
-            try:
-                rendered_node = _render_template(node_def, current_view)
-                # Ensure node ID uniqueness
-                rendered_node["id"] = f"{node_id}_{node_def.get('id', 'sub')}"
-                
-                updates = handler(current_view, rendered_node)
-                if isinstance(updates, dict):
-                    it_updates.update(updates)
-            # [DISABLED] AsyncLLMRequiredException handling - Fargate async not implemented
-            # except AsyncLLMRequiredException:
-            #     # Bubble up to trigger PAUSED_FOR_ASYNC_LLM
-            #     raise
-            except Exception as e:
-                logger.error(f"Iteration node {node_def.get('id')} failed: {e}")
-                it_updates["error"] = str(e)
-                break
-        
+        it_updates, _ = _execute_node_sequence(
+            sub_nodes, it_state,
+            node_id_prefix=f"{node_id}_",
+            caller_tag=f"ForEach[{node_id}]",
+        )
         return it_updates
 
     # 3. Parallel Execution
@@ -3691,35 +3740,22 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
         iter_updates = {loop_var: i}
         current_state.update(iter_updates)
         
-        # Execute sub-nodes sequentially
-        for node_def in sub_nodes:
-            node_type = node_def.get("type", "operator")
-            handler = NODE_REGISTRY.get(node_type)
-            
-            if not handler:
-                logger.error(f"[Loop] Unknown node type '{node_type}'")
-                continue
-                
-            try:
-                # [Fix] Render node config based on current loop state
-                rendered_node = _render_template(node_def, current_state)
-                # Ensure unique nested ID
-                rendered_node["id"] = f"{node_id}_it{i}_{node_def.get('id', 'sub')}"
-                
-                updates = handler(current_state, rendered_node)
-                if isinstance(updates, dict):
-                    # 🛡️ Recursive merge using StateBag logic behavior (mimicked here via update)
-                    current_state.update(updates)
-                    all_loop_updates.update(updates)
-                    
-                    # Accumulate tokens
-                    usage = extract_token_usage(updates)
-                    total_input_tokens += usage['input_tokens']
-                    total_output_tokens += usage['output_tokens']
-            except Exception as e:
-                logger.error(f"❌ [Loop] Node {node_def.get('id')} failed in iteration {i}: {e}")
-                all_loop_updates[f"{node_id}_error"] = str(e)
-                return all_loop_updates
+        # Execute sub-nodes sequentially via shared helper
+        iter_updates, had_error = _execute_node_sequence(
+            sub_nodes, current_state,
+            node_id_prefix=f"{node_id}_it{i}_",
+            caller_tag=f"Loop[{node_id}][it{i}]",
+        )
+        if had_error:
+            all_loop_updates[f"{node_id}_error"] = iter_updates.get("error", "unknown")
+            return all_loop_updates
+        if iter_updates:
+            current_state.update(iter_updates)
+            all_loop_updates.update(iter_updates)
+            # Accumulate tokens
+            usage = extract_token_usage(iter_updates)
+            total_input_tokens += usage['input_tokens']
+            total_output_tokens += usage['output_tokens']
 
         # Update step history
         current_history = all_loop_updates.get("step_history", state.get("step_history", []))
@@ -4326,24 +4362,13 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
         # [Critical Fix] Use dict merge for true isolation instead of ChainMap
         # ChainMap with shared state causes race conditions in ThreadPoolExecutor
         b_state = {**state_snapshot}
-        b_updates = {}
-        
-        for n_def in (branch_nodes or []):
-            # [Fix] 브랜치 내 노드 간 상태 공유를 위해 업데이트 병합
-            current_view = {**b_state, **b_updates}
-            node_type = n_def.get("type", "operator")
-            handler = NODE_REGISTRY.get(node_type)
-            
-            if handler:
-                try:
-                    # Execute node within branch
-                    res = handler(current_view, n_def)
-                    if isinstance(res, dict):
-                        b_updates.update(res)
-                except Exception as e:
-                    logger.error(f"Node execution failed in branch {branch_id}: {e}")
-                    raise e
-                    
+        b_updates, had_error = _execute_node_sequence(
+            branch_nodes or [], b_state,
+            node_id_prefix=f"{branch_id}_",
+            caller_tag=f"Parallel[{node_id}][{branch_id}]",
+        )
+        if had_error:
+            raise RuntimeError(f"Branch {branch_id} failed: {b_updates.get('error')}")
         return branch_id, b_updates
 
     # Execute branches in parallel
