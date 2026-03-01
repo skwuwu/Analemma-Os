@@ -1047,6 +1047,13 @@
         ]
       },
       "ResultPath": null,
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.notify_complete_error",
+          "Next": "PrepareSuccessOutput"
+        }
+      ],
       "Next": "PrepareSuccessOutput"
     },
     "PrepareSuccessOutput": {

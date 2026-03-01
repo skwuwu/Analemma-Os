@@ -249,22 +249,32 @@ def verify_fail(test_result: Dict[str, Any]) -> Dict[str, Any]:
     FAIL: Error handling pipeline validation
     - SFN status = FAILED (expected for error pipeline)
     - error_info propagated to output
+
+    [Fix] Handle both SFN Catch error format and normalized format:
+      - SFN startExecution.sync:2 Catch sets {"Error": "...", "Cause": "..."} (uppercase)
+      - Normalized format uses {"status": "FAILED", "error": "...", "cause": "..."} (lowercase)
     """
     checks = []
-    status = test_result.get("status", "")
-    failed_as_expected = status == "FAILED"
+
+    # [Fix] Support both normalized (status) and SFN Catch (Error/Status) formats
+    status = test_result.get("status") or test_result.get("Status", "")
+    sfn_error = test_result.get("Error") or test_result.get("error")
+
+    # FAILED if status == "FAILED" OR SFN Catch fired (Error key present, no status key)
+    failed_as_expected = (status == "FAILED") or (sfn_error is not None)
     checks.append(_check(
         "SFN status FAILED (expected)",
         failed_as_expected,
-        f"status={status}"
+        f"status={status}, Error={sfn_error}"
     ))
 
     # error_info propagated to SFN cause/error fields
-    has_error_info = bool(test_result.get("error") or test_result.get("cause"))
+    sfn_cause = test_result.get("Cause") or test_result.get("cause")
+    has_error_info = bool(sfn_error or sfn_cause)
     checks.append(_check(
         "error_info propagated",
         has_error_info,
-        f"error={test_result.get('error')}, cause={str(test_result.get('cause', ''))[:80]}"
+        f"error={sfn_error}, cause={str(sfn_cause or '')[:80]}"
     ))
 
     return _result("FAIL", checks)

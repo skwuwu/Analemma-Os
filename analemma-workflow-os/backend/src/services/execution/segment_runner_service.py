@@ -3452,9 +3452,28 @@ class SegmentRunnerService:
             if offloaded_s3_path:
                 logger.info(f"[S3 Offload Recovery] Detected offloaded state. Restoring from S3: {offloaded_s3_path}")
                 try:
-                    initial_state = self.state_manager.download_state_from_s3(offloaded_s3_path)
-                    logger.info(f"[S3 Offload Recovery] Successfully restored state from S3 "
-                               f"({len(json.dumps(initial_state, ensure_ascii=False).encode('utf-8'))/1024:.1f}KB)")
+                    # [Fix] flat-merge Strategy-2: S3 contains only offload_candidates (user keys).
+                    # Structural & control keys live in the bag alongside the wrapper pointer.
+                    # Preserve them before replacement, then overlay with S3 user keys
+                    # so the next segment receives a complete initial_state.
+                    _OFFLOAD_WRAPPER_KEYS = frozenset({
+                        '__s3_offloaded', '__s3_path', '__original_size_kb',
+                        'guardrail_verified', 'batch_count_actual', 'scheduling_metadata',
+                        '__scheduling_metadata', '__guardrail_verified', '__batch_count_actual',
+                    })
+                    structural_preserved = {
+                        k: v for k, v in initial_state.items()
+                        if k not in _OFFLOAD_WRAPPER_KEYS
+                    }
+                    s3_state = self.state_manager.download_state_from_s3(offloaded_s3_path)
+                    # S3 user keys win on conflict (they are the freshest output)
+                    initial_state = {**structural_preserved, **s3_state}
+                    logger.info(
+                        f"[S3 Offload Recovery] Successfully restored state from S3 "
+                        f"({len(json.dumps(initial_state, ensure_ascii=False).encode('utf-8'))/1024:.1f}KB). "
+                        f"Preserved {len(structural_preserved)} structural keys, "
+                        f"merged {len(s3_state)} S3 keys."
+                    )
                 except Exception as e:
                     logger.error(f"[S3 Offload Recovery] Failed to restore state from S3: {e}")
                     return _finalize_response({

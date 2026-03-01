@@ -1094,6 +1094,17 @@ def optimize_and_offload(
                 offload_candidates, idempotency_key
             )
             if any_offloaded:
+                if optimized_root.get('__s3_offloaded') is True:
+                    # [Fix] Strategy-2 full-offload: S3 contains only offload_candidates.
+                    # Evict original candidate keys from bag so the bag carries only the
+                    # wrapper pointer — otherwise the bag stays bloated (data + pointer)
+                    # and the next segment's S3 recovery would discard structural keys.
+                    for k in list(offload_candidates.keys()):
+                        state.pop(k, None)
+                    logger.info(
+                        "[v3.22] Strategy-2 full offload: evicted %d candidate keys from bag root",
+                        len(offload_candidates)
+                    )
                 state.update(optimized_root)
                 logger.info("[v3.22] Root-level field offload applied (Fix 1 flat-merge mode)")
 
