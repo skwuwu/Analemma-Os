@@ -3,7 +3,8 @@
     "allow": [
       "Bash(python:*)",
       "Bash(git add:*)",
-      "Bash(wc -l:*)"
+      "Bash(wc -l:*)",
+      "Bash(wsl.exe -d Ubuntu -- bash -c \"mkdir -p ~/obsidian/Analemma\":*)"
     ]
   }
 }

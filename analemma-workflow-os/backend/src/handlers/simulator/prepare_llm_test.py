@@ -72,6 +72,13 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
     'FAIL': {
         'pipeline_test_enabled': True,
         'expected_failure': True,
+        # Trigger pre-retry FAILED path in segment_runner (line ~3450):
+        # S3 offload recovery check fires before _execute_with_kernel_retry,
+        # so ENABLE_PARTIAL_SUCCESS does NOT apply.
+        # The segment runner detects __s3_offloaded=True, tries to download
+        # from __s3_path, fails (nonexistent bucket) → _finalize_response(FAILED).
+        '__s3_offloaded': True,
+        '__s3_path': 's3://nonexistent-fail-test-bucket/fake-key-for-fail-test',
     },
     'MAP_AGGREGATOR': {
         'pipeline_test_enabled': True,

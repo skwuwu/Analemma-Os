@@ -31,7 +31,8 @@
                 "model": "anthropic.claude-3-opus-20240229-v1:0",
                 "max_tokens": 3000,
                 "temperature": 0.5,
-                "force_async": true
+                "force_async": true,
+                "output_key": "async_result"
             }
         }
     ],

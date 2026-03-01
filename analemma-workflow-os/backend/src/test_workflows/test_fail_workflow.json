@@ -1,19 +1,30 @@
 {
     "workflow_name": "FAIL Test Workflow",
-    "description": "실패 테스트를 위한 워크플로우 - Step Functions 전체 흐름 테스트",
+    "description": "Error handling pipeline validation. Expects FAILED status. The failure is deliberately triggered by injecting __s3_offloaded=True with a nonexistent __s3_path into initial_state (via prepare_llm_test.py PIPELINE_SCENARIO_INPUT). The segment runner's S3 recovery check fires at line ~3450 before _execute_with_kernel_retry, so ENABLE_PARTIAL_SUCCESS does not apply.",
+    "version": "2.0.0",
+    "test_category": "error_handling",
     "nodes": [
         {
-            "id": "fail_node",
-            "type": "aiModel",
+            "id": "fail_entry",
+            "type": "operator_official",
             "config": {
-                "model": "claude-3-haiku-20240307",
-                "max_tokens": 50,
-                "prompt": "Reply FAIL_TEST",
-                "temperature": 0.0,
-                "output_key": "fail_result"
-            }
+                "strategy": "echo",
+                "input": "EXPECTED_FAILURE_NODE",
+                "output_key": "fail_entry_result"
+            },
+            "label": "실패 시나리오 진입점 (S3 복구 실패로 실제 실행 불가)"
         }
     ],
     "edges": [],
-    "start_node": "fail_node"
+    "start_node": "fail_entry",
+    "metadata": {
+        "test_features": [
+            "error_handling",
+            "s3_recovery_failure",
+            "failed_status_propagation",
+            "pre_retry_failed_path"
+        ],
+        "expected_behavior": "Segment runner detects __s3_offloaded=True with nonexistent __s3_path in initial_state. S3 recovery attempt fails (NoSuchBucket/NoSuchKey) → _finalize_response(status=FAILED) → next_action=FAILED → SFN Fail state → verify_fail passes.",
+        "failure_mechanism": "initial_state.__s3_offloaded=True + __s3_path=nonexistent injected via PIPELINE_SCENARIO_INPUT in prepare_llm_test.py"
+    }
 }
