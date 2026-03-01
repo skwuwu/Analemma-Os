@@ -1113,6 +1113,12 @@ def _execute_initialization(event, context):
     mock_mode = raw_input.get('MOCK_MODE') or event.get('MOCK_MODE')
     if mock_mode:
         bag['MOCK_MODE'] = mock_mode
+    # [v3.25 Fix] AUTO_RESUME_DELAY_SECONDS도 bag 최상위로 복사
+    # store_task_token.py: bag.get('AUTO_RESUME_DELAY_SECONDS') 조회하는데
+    # 이 값이 bag['input'] 아래에만 있어서 top-level에서 못 찾고 env 기본값(5초)으로 폴백함
+    auto_resume_delay = raw_input.get('AUTO_RESUME_DELAY_SECONDS') or event.get('AUTO_RESUME_DELAY_SECONDS')
+    if auto_resume_delay:
+        bag['AUTO_RESUME_DELAY_SECONDS'] = auto_resume_delay
     
     # 5. [Phase 1/2] Segment Manifest Strategy
     # Merkle DAG 모드: segment_manifest는 이미 S3에 저장됨 (StateVersioningService)

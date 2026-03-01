@@ -1307,6 +1307,38 @@ def _compute_next_action(
             
             if total_segments_raw is not None:
                 total_segments = int(total_segments_raw)
+
+                # [v3.25 Fix] _increment_segment=True 케이스:
+                # USC Step 3에서 segment_to_run이 이미 +1 증가된 상태로 이 함수에 진입.
+                # 따라서 state['segment_to_run']은 '마지막 실행 세그먼트'가 아닌
+                # '다음에 실행할 세그먼트(forward pointer)'를 가리킴.
+                #
+                # 의미 변화:
+                #   _increment_segment=False: segment_to_run = 마지막 실행 세그먼트
+                #     → COMPLETE 조건: current_segment >= total_segments - 1
+                #   _increment_segment=True:  segment_to_run = 다음 실행 세그먼트
+                #     → COMPLETE 조건: current_segment >= total_segments
+                #       (아직 실행 안 된 세그먼트가 마지막 세그먼트 위치에 있으면 CONTINUE)
+                #
+                # 예시 (total_segments=2):
+                #   HITP 후 _increment_segment=True, segment_to_run=1 (Seg1 아직 미실행)
+                #   old: 1 >= 2-1=1 → COMPLETE (버그! Seg1 건너뜀)
+                #   new: 1 >= 2=2 → False → CONTINUE (올바름)
+                if delta.get('_increment_segment', False):
+                    if current_segment >= total_segments:
+                        logger.info(
+                            f"[_compute_next_action] All segments done after HITP/async increment: "
+                            f"segment_to_run={current_segment} >= total={total_segments}, returning COMPLETE"
+                        )
+                        return 'COMPLETE'
+                    else:
+                        logger.info(
+                            f"[_compute_next_action] Next segment {current_segment} pending after increment "
+                            f"(total={total_segments}), returning CONTINUE"
+                        )
+                        return 'CONTINUE'
+
+                # 일반 케이스: segment_to_run = 마지막으로 실행된 세그먼트 인덱스
                 if current_segment >= total_segments - 1:
                     logger.info(f"[_compute_next_action] Last segment reached: {current_segment + 1}/{total_segments}, returning COMPLETE")
                     return 'COMPLETE'
