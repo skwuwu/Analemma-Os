@@ -36,7 +36,7 @@
                 "multimodal": true,
                 "vision_enabled": true,
                 "output_key": "vision_analysis_result",
-                "prompt": "제품 이미지를 분석하여 다음 항목을 한국어로 응답하세요:\n1. 제품 명칭\n2. 주요 특징 (최대 5가지)\n3. 색상\n4. 예상 가격대\n\n이미지: {vision_input.image_uri}"
+                "prompt": "제품 이미지를 분석하여 다음 항목을 한국어로 응답하세요:\n1. 제품 명칭\n2. 주요 특징 (최대 5가지)\n3. 색상\n4. 예상 가격대\n\n이미지: {{vision_input.image_uri}}"
             }
         },
         {

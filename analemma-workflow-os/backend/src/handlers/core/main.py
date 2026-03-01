@@ -2143,7 +2143,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             current_attempt_state["attempt_count"] = attempt + 1
             
             # Render prompts with current attempt count
-            prompt_template = actual_config.get("prompt_content") or actual_config.get("user_prompt_template") or actual_config.get("prompt_template", "")
+            prompt_template = actual_config.get("prompt_content") or actual_config.get("user_prompt_template") or actual_config.get("prompt_template") or actual_config.get("prompt", "")
             
             # 🔧 [Workflow Chain Support] 프롬프트 템플릿이 없을 때 자동 생성
             if not prompt_template.strip():
