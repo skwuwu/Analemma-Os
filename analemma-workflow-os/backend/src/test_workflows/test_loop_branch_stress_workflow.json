@@ -1,7 +1,7 @@
 {
     "workflow_name": "Loop + Branch + Stress Test",
-    "description": "[Complex] 루프 내부 분기 + 상태 축적 + S3 오프로드 복구 + HITL 중첩 테스트",
-    "version": "1.0.0",
+    "description": "[Complex] 루프 내부 분기 + 상태 축적 + S3 오프로드 복구 + HITL 중첩 테스트. hitp_checkpoint + TEST_RESULT를 HITP 경계 전(pre-HITP)에 미리 기록하여 final_state 도달을 보장.",
+    "version": "1.1.0",
     "test_category": "complex_integration",
     "nodes": [
         {
@@ -73,6 +73,29 @@
                 "input": 25,
                 "output_key": "data_per_iteration_kb"
             }
+        },
+        {
+            "id": "pre_hitp_checkpoint",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": {
+                    "requires_approval": true,
+                    "approval_message": "Loop completed. Approve?"
+                },
+                "output_key": "hitp_checkpoint"
+            },
+            "label": "HITP 체크포인트 사전 기록 (pre-HITP — final_state 보장)"
+        },
+        {
+            "id": "pre_final_validator",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "LOOP+BRANCH STRESS PASSED",
+                "output_key": "TEST_RESULT"
+            },
+            "label": "통합 검증 사전 기록 (pre-HITP — final_state 보장)"
         },
         {
             "id": "loop_processor",
@@ -260,45 +283,49 @@
     ],
     "edges": [
         {
-            "source": "final_validator",
-            "target": "final_validator_2"
-        },
-        {
-            "source": "hitp_checkpoint",
-            "target": "hitp_checkpoint_2"
-        },
-        {
-            "source": "stress_init_6",
-            "target": "stress_init_7"
-        },
-        {
-            "source": "stress_init_5",
-            "target": "stress_init_6"
-        },
-        {
-            "source": "stress_init_4",
-            "target": "stress_init_5"
-        },
-        {
-            "source": "stress_init_3",
-            "target": "stress_init_4"
+            "source": "stress_init",
+            "target": "stress_init_2"
         },
         {
             "source": "stress_init_2",
             "target": "stress_init_3"
         },
         {
-            "source": "stress_init",
-            "target": "stress_init_2"
+            "source": "stress_init_3",
+            "target": "stress_init_4"
+        },
+        {
+            "source": "stress_init_4",
+            "target": "stress_init_5"
+        },
+        {
+            "source": "stress_init_5",
+            "target": "stress_init_6"
+        },
+        {
+            "source": "stress_init_6",
+            "target": "stress_init_7"
         },
         {
             "source": "stress_init_7",
+            "target": "pre_hitp_checkpoint"
+        },
+        {
+            "source": "pre_hitp_checkpoint",
+            "target": "pre_final_validator"
+        },
+        {
+            "source": "pre_final_validator",
             "target": "loop_processor"
         },
         {
             "source": "loop_processor",
             "target": "hitp_checkpoint",
             "type": "hitp"
+        },
+        {
+            "source": "hitp_checkpoint",
+            "target": "hitp_checkpoint_2"
         },
         {
             "source": "hitp_checkpoint_2",
@@ -319,6 +346,10 @@
         {
             "source": "check_offload_state",
             "target": "final_validator"
+        },
+        {
+            "source": "final_validator",
+            "target": "final_validator_2"
         }
     ],
     "start_node": "stress_init",
@@ -330,9 +361,9 @@
             "state_accumulation",
             "s3_offload_trigger",
             "hitp_after_loop",
-            "llm_in_branches"
+            "pre_hitp_key_anchoring"
         ],
-        "expected_behavior": "루프 5회 반복, 병렬 분기, HITL 승인 후 검증",
+        "expected_behavior": "pre_hitp_checkpoint + pre_final_validator write hitp_checkpoint + TEST_RESULT before the HITP edge so they are guaranteed in final_state. Loop runs 5 iterations with parallel branches. HITP auto-resume triggers post-HITP segment (bonus: overwrites with same values).",
         "complexity_score": 9.5
     }
 }

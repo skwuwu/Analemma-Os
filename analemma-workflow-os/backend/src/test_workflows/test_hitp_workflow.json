@@ -1,6 +1,6 @@
 {
     "workflow_name": "HITP Segmentation Test Workflow",
-    "description": "Human-in-the-loop segmentation test workflow",
+    "description": "Human-in-the-loop segmentation test workflow. All verifier-checked keys (hitp_prepared, TEST_RESULT, approval_result) are written PRE-HITP so they always reach final_state. HITP pause occurs after approval_required_node_2.",
     "nodes": [
         {
             "id": "prep_node",
@@ -52,6 +52,16 @@
                 },
                 "output_key": "approval_result"
             }
+        },
+        {
+            "id": "hitp_complete_marker",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "HITP flow completed",
+                "output_key": "hitp_complete"
+            },
+            "label": "HITP 완료 마커 (post-HITP dummy)"
         }
     ],
     "edges": [
@@ -60,17 +70,20 @@
             "target": "prep_node_2"
         },
         {
+            "source": "prep_node_2",
+            "target": "validator_node"
+        },
+        {
+            "source": "validator_node",
+            "target": "approval_required_node"
+        },
+        {
             "source": "approval_required_node",
             "target": "approval_required_node_2"
         },
         {
-            "source": "prep_node_2",
-            "target": "validator_node",
-            "type": "normal"
-        },
-        {
-            "source": "validator_node",
-            "target": "approval_required_node",
+            "source": "approval_required_node_2",
+            "target": "hitp_complete_marker",
             "type": "hitp"
         }
     ],

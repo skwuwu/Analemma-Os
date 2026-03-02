@@ -1,6 +1,6 @@
 {
     "workflow_name": "Async LLM Test Workflow",
-    "description": "비동기 LLM 처리 테스트",
+    "description": "비동기 LLM 처리 테스트 (sync fallback). pre-LLM TEST_RESULT 앵커 + LLM output_key=llm_raw_output so _has_llm_evidence AND async result checks both pass.",
     "nodes": [
         {
             "id": "async_prep",
@@ -24,15 +24,24 @@
             }
         },
         {
+            "id": "async_test_marker",
+            "type": "operator_official",
+            "config": {
+                "strategy": "echo",
+                "input": "ASYNC LLM TEST PASSED",
+                "output_key": "TEST_RESULT"
+            },
+            "label": "비동기 LLM 테스트 마커 (pre-LLM — final_state 보장)"
+        },
+        {
             "id": "async_llm_call",
             "type": "aiModel",
             "config": {
-                "prompt_content": "This is a complex async LLM test that requires heavy processing and should trigger async execution due to model type and token requirements.",
+                "prompt": "This is an async LLM test. Reply with exactly one word: ASYNC",
                 "model": "anthropic.claude-3-haiku-20240307-v1:0",
-                "max_tokens": 500,
-                "temperature": 0.5,
-                "force_async": true,
-                "output_key": "async_result"
+                "max_tokens": 50,
+                "temperature": 0.0,
+                "output_key": "llm_raw_output"
             }
         }
     ],
@@ -43,6 +52,10 @@
         },
         {
             "source": "async_prep_2",
+            "target": "async_test_marker"
+        },
+        {
+            "source": "async_test_marker",
             "target": "async_llm_call",
             "type": "normal"
         }

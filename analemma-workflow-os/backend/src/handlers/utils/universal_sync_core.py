@@ -490,7 +490,11 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                 delta['state_s3_path'] = payload['new_state_s3_path']
             if payload.get('new_history_logs'):
                 delta['new_history_logs'] = payload['new_history_logs']
-            delta['_increment_segment'] = payload.get('segment_to_run') is None
+            # [v3.29 HITP Fix] The HITP pause already advanced segment_to_run to the NEXT
+            # segment (forward pointer). Do NOT increment again via _increment_segment —
+            # that would push segment_to_run past the next segment and cause premature COMPLETE.
+            # Instead, set _hitp_resume so _compute_next_action uses the forward pointer directly.
+            delta['_hitp_resume'] = True
                 
         elif action == 'merge_async':
             payload = result.get('async_result', result)
@@ -559,10 +563,12 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                     _get_logger().info(
                         f"[v3.23] final_state is S3 pointer, hydrating from {s3_path}"
                     )
+                    _hydration_succeeded = False
                     try:
                         hydrated = get_default_hydrator().load_from_s3(s3_path)
                         if isinstance(hydrated, dict):
                             final_state = hydrated
+                            _hydration_succeeded = True
                             _get_logger().info(
                                 f"[v3.23] Hydration OK — {len(final_state)} keys from S3"
                             )
@@ -576,6 +582,15 @@ def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[s
                             f"[v3.23] S3 hydration failed ({s3_path}): {_hydrate_err}. "
                             "Falling back to pointer merge."
                         )
+                    # [v3.28 DIAG] Log hydration result for diagnosing state loss
+                    _diag_keys_usc = ['TEST_RESULT', 'vision_os_test_result', 'llm_raw_output',
+                                      'approval_result', 'hitp_checkpoint']
+                    _in_hydrated = {k: (k in final_state) for k in _diag_keys_usc} if isinstance(final_state, dict) else {}
+                    _get_logger().error(
+                        f"[v3.28 DIAG hydrate] s3_path={s3_path} "
+                        f"hydrated={_hydration_succeeded} "
+                        f"in_hydrated={_in_hydrated}"
+                    )
             if isinstance(final_state, dict):
                 # [v3.24] Root keys WIN over current_state burial (v3.20-era compat).
                 # Step 1: seed delta with any buried current_state keys (lower priority)
@@ -1099,6 +1114,17 @@ def optimize_and_offload(
                     # Evict original candidate keys from bag so the bag carries only the
                     # wrapper pointer — otherwise the bag stays bloated (data + pointer)
                     # and the next segment's S3 recovery would discard structural keys.
+                    _diag_watch = ['TEST_RESULT', 'hitp_checkpoint', 'vision_os_test_result',
+                                   'llm_raw_output', 'approval_result']
+                    _watched_evicted = [k for k in _diag_watch if k in offload_candidates]
+                    logger.error(
+                        "[v3.28 Strategy-2] Full-offload triggered: evicting %d candidate keys. "
+                        "S3 path=%s. Watched keys evicted=%s. Total candidate keys=%s",
+                        len(offload_candidates),
+                        optimized_root.get('__s3_path', 'N/A'),
+                        _watched_evicted,
+                        list(offload_candidates.keys())[:20],
+                    )
                     for k in list(offload_candidates.keys()):
                         state.pop(k, None)
                     logger.info(
@@ -1221,6 +1247,7 @@ def universal_sync_core(
     _PIPELINE_INTERNAL_KEYS = frozenset({
         '_status', '_is_init', '_increment_segment', '_increment_loop',
         '_aggregation_complete', '_is_pointer_mode', '_soft_fail_branches',
+        '_hitp_resume',
     })
     for _k in _PIPELINE_INTERNAL_KEYS:
         optimized_state.pop(_k, None)
@@ -1300,7 +1327,32 @@ def _compute_next_action(
     # HITP 대기
     if status in ('PAUSED_FOR_HITP', 'PAUSE'):
         return 'PAUSED_FOR_HITP'
-    
+
+    # [v3.29 HITP Resume] merge_callback sets _hitp_resume=True to signal that
+    # segment_to_run in state is a FORWARD pointer (set by HITP pause to next segment).
+    # Use >= total_segments (not total_segments - 1) since the value is already incremented.
+    if delta.get('_hitp_resume', False):
+        try:
+            current_segment = int(state.get('segment_to_run', 0) or 0)
+            total_segments_raw = state.get('total_segments')
+            if total_segments_raw is not None:
+                total_segments = int(total_segments_raw)
+                if current_segment >= total_segments:
+                    logger.info(
+                        f"[_compute_next_action HITP resume] All segments done: "
+                        f"segment_to_run={current_segment} >= total={total_segments}, returning COMPLETE"
+                    )
+                    return 'COMPLETE'
+                else:
+                    logger.info(
+                        f"[_compute_next_action HITP resume] Next segment {current_segment} pending "
+                        f"(total={total_segments}), returning CONTINUE"
+                    )
+                    return 'CONTINUE'
+        except (ValueError, TypeError) as e:
+            logger.warning(f"[_compute_next_action HITP resume] Invalid segment numbers: {e}. Defaulting to CONTINUE.")
+        return 'CONTINUE'
+
     # Distributed 전체 실패
     if delta.get('_aggregation_complete'):
         failed = delta.get('_failed_segments', [])

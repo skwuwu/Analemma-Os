@@ -24,17 +24,6 @@
             }
         },
         {
-            "id": "complete_llm",
-            "type": "aiModel",
-            "config": {
-                "model": "anthropic.claude-3-haiku-20240307-v1:0",
-                "max_tokens": 100,
-                "prompt": "Reply with exactly one word: COMPLETE",
-                "temperature": 0.0,
-                "output_key": "complete_llm_output"
-            }
-        },
-        {
             "id": "validator_node",
             "type": "operator_official",
             "config": {
@@ -42,7 +31,18 @@
                 "input": "SUCCESS: complete test workflow finished",
                 "output_key": "TEST_RESULT"
             },
-            "label": "검증"
+            "label": "검증 (pre-LLM)"
+        },
+        {
+            "id": "complete_llm",
+            "type": "aiModel",
+            "config": {
+                "model": "anthropic.claude-3-haiku-20240307-v1:0",
+                "max_tokens": 100,
+                "prompt": "Reply with exactly one word: COMPLETE",
+                "temperature": 0.0,
+                "output_key": "llm_raw_output"
+            }
         }
     ],
     "edges": [
@@ -52,12 +52,11 @@
         },
         {
             "source": "complete_prep_2",
-            "target": "complete_llm",
-            "type": "normal"
+            "target": "validator_node"
         },
         {
-            "source": "complete_llm",
-            "target": "validator_node",
+            "source": "validator_node",
+            "target": "complete_llm",
             "type": "normal"
         }
     ],

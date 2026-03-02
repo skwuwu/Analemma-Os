@@ -3091,6 +3091,19 @@ class SegmentRunnerService:
                 logger.info(f"[v3.14 Debug] base_state.loop_counter={base_state.get('loop_counter')}, "
                            f"max_loop_iterations={base_state.get('max_loop_iterations')}, "
                            f"event_keys={list(event.keys())[:10] if isinstance(event, dict) else 'N/A'}")
+
+                # [v3.28 DIAG] Pinpoint exact state-loss location for failing test scenarios
+                _diag_keys = ['TEST_RESULT', 'vision_os_test_result', 'llm_raw_output',
+                              'approval_result', 'hitp_checkpoint', 'async_ready']
+                _in_base = {k: (k in base_state) for k in _diag_keys}
+                _in_final = ({k: (k in original_final_state) for k in _diag_keys}
+                             if isinstance(original_final_state, dict) else {})
+                logger.error(
+                    f"[v3.28 DIAG seal] seg={_segment_id} status={res.get('status')} "
+                    f"in_base={_in_base} in_final={_in_final} "
+                    f"base_s3={base_state.get('__s3_offloaded')} "
+                    f"final_s3={original_final_state.get('__s3_offloaded') if isinstance(original_final_state, dict) else None}"
+                )
                 
                 # Build execution_result for sealing
                 status = res.get('status', 'CONTINUE')
@@ -3204,7 +3217,16 @@ class SegmentRunnerService:
                            f"original_status={status}, "
                            f"segment_id={_segment_id}, "
                            f"state_size={len(json.dumps(sealed_result.get('state_data', {}), default=str))//1024}KB")
-                
+
+                # [v3.28 DIAG] Post-seal: verify user keys survived USC merge
+                _sealed_data = sealed_result.get('state_data', {})
+                _in_sealed = {k: (k in _sealed_data) for k in _diag_keys}
+                logger.error(
+                    f"[v3.28 DIAG result] seg={_segment_id} next_action={sealed_result.get('next_action')} "
+                    f"in_sealed={_in_sealed} "
+                    f"sealed_s3={_sealed_data.get('__s3_offloaded')}"
+                )
+
                 return sealed_result
             
             # 3b. USC Fallback (if kernel_protocol not available but USC is)
@@ -3447,7 +3469,14 @@ class SegmentRunnerService:
         # [Critical Fix] S3 Offload Recovery: check __s3_offloaded flag
         # If previous segment did S3 offload, only metadata is included
         # → Full state needs to be restored from S3
-        if isinstance(initial_state, dict) and initial_state.get('__s3_offloaded') is True:
+        # [v3.28 FAIL Guard] Log detection for FAIL scenario diagnosis
+        _s3_offloaded_raw = initial_state.get('__s3_offloaded') if isinstance(initial_state, dict) else None
+        logger.error(
+            f"[v3.28 FAIL Guard] seg={_segment_id} "
+            f"__s3_offloaded={_s3_offloaded_raw!r} type={type(_s3_offloaded_raw).__name__} "
+            f"__s3_path={initial_state.get('__s3_path') if isinstance(initial_state, dict) else None}"
+        )
+        if isinstance(initial_state, dict) and _s3_offloaded_raw is True:
             offloaded_s3_path = initial_state.get('__s3_path')
             if offloaded_s3_path:
                 logger.info(f"[S3 Offload Recovery] Detected offloaded state. Restoring from S3: {offloaded_s3_path}")
