@@ -115,14 +115,12 @@
                                     "nodes": [
                                         {
                                             "id": "branch_a_llm",
-                                            "type": "aiModel",
-                                            "label": "Branch A LLM",
+                                            "type": "operator_official",
+                                            "label": "Branch A (echo — no real LLM to avoid timeout)",
                                             "config": {
-                                                "model": "gemini-2.0-flash",
-                                                "system_prompt": "You are a test assistant for Branch A. Return JSON only.",
-                                                "user_prompt": "Return {\"branch\": \"A\", \"status\": \"processed\"}",
-                                                "output_key": "branch_a_result",
-                                                "max_tokens": 50
+                                                "strategy": "echo",
+                                                "input": {"branch": "A", "status": "processed"},
+                                                "output_key": "branch_a_result"
                                             }
                                         }
                                     ]
@@ -133,14 +131,12 @@
                                     "nodes": [
                                         {
                                             "id": "branch_b_llm",
-                                            "type": "aiModel",
-                                            "label": "Branch B LLM",
+                                            "type": "operator_official",
+                                            "label": "Branch B (echo — no real LLM to avoid timeout)",
                                             "config": {
-                                                "model": "gemini-2.0-flash",
-                                                "system_prompt": "You are a test assistant for Branch B. Return JSON only.",
-                                                "user_prompt": "Return {\"branch\": \"B\", \"status\": \"processed\"}",
-                                                "output_key": "branch_b_result",
-                                                "max_tokens": 50
+                                                "strategy": "echo",
+                                                "input": {"branch": "B", "status": "processed"},
+                                                "output_key": "branch_b_result"
                                             }
                                         }
                                     ]

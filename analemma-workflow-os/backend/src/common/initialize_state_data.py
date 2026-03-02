@@ -1119,7 +1119,18 @@ def _execute_initialization(event, context):
     auto_resume_delay = raw_input.get('AUTO_RESUME_DELAY_SECONDS') or event.get('AUTO_RESUME_DELAY_SECONDS')
     if auto_resume_delay:
         bag['AUTO_RESUME_DELAY_SECONDS'] = auto_resume_delay
-    
+    # [v3.26 Fix] Propagate __s3_offloaded + __s3_path to bag top-level.
+    # FAIL simulator test injects __s3_offloaded=True into initial_state, but
+    # initialize_state_data stores it inside bag['input'] (which gets S3-offloaded).
+    # segment_runner_service line ~3450 checks bag['__s3_offloaded'] (top-level).
+    # Without this copy the FAIL pre-retry path never fires.
+    s3_offloaded_flag = raw_input.get('__s3_offloaded') or event.get('__s3_offloaded')
+    if s3_offloaded_flag is True:
+        bag['__s3_offloaded'] = True
+        s3_path_val = raw_input.get('__s3_path') or event.get('__s3_path')
+        if s3_path_val:
+            bag['__s3_path'] = s3_path_val
+
     # 5. [Phase 1/2] Segment Manifest Strategy
     # Merkle DAG 모드: segment_manifest는 이미 S3에 저장됨 (StateVersioningService)
     # Legacy 모드: 기존 방식으로 S3에 업로드

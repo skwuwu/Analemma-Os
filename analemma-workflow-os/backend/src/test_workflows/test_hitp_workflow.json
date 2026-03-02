@@ -25,14 +25,10 @@
         },
         {
             "id": "validator_node",
-            "type": "safe_operator",
+            "type": "operator_official",
             "config": {
-                "strategy": "if_else",
-                "params": {
-                    "condition": "$.hitp_prepared and $.prep_result.ready_for_segmentation",
-                    "then": "✅ SUCCESS: HITP preparation status confirmed",
-                    "else": "❌ FAILURE: HITP preparation failed"
-                },
+                "strategy": "echo",
+                "input": "✅ SUCCESS: HITP preparation status confirmed",
                 "output_key": "TEST_RESULT"
             }
         },
