@@ -9,13 +9,15 @@ import {
   CheckCircle2,
   ChevronRight,
   ExternalLink,
-  PanelRightClose
+  PanelRightClose,
+  RefreshCw
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface AuditPanelProps {
-  issues?: any[]; // 로컬 validation warnings
+  issues?: any[]; // local validation warnings
   onNodeClick?: (nodeId: string) => void;
+  onRefresh?: () => void;
   onClose?: () => void;
   isLoading?: boolean;
   className?: string;
@@ -52,6 +54,7 @@ const levelConfig = {
 export function AuditPanel({
   issues: externalIssues,
   onNodeClick,
+  onRefresh,
   onClose,
   isLoading = false,
   className,

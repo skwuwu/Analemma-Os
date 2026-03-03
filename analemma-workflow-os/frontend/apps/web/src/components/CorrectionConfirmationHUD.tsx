@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { X, Check, Brain, Clock, Pause, Play } from 'lucide-react';
+import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 
 interface CorrectionHUDProps {
@@ -165,19 +166,6 @@ export function CorrectionConfirmationHUD({
         />
       </div>
     </div>
-  );
-}
-
-// Badge 컴포넌트 간이 구현 (UI 라이브러리 미참조 시 대비)
-function Badge({ children, variant, className }: any) {
-  return (
-    <span className={cn(
-      "inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium",
-      variant === "outline" ? "border" : "bg-gray-100",
-      className
-    )}>
-      {children}
-    </span>
   );
 }
 

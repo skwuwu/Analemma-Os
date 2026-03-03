@@ -47,6 +47,7 @@ from .python_bridge import AnalemmaBridge, SegmentResult, SecurityViolation
 from .local_l1_checker import LocalL1Checker, L1Result
 from .rehydration import StateRehydrationMixin
 from .shared_policy import BridgeRingLevel, CAPABILITY_MAP, get_allowed_tools
+from .react_executor import ReactExecutor, ReactResult
 
 # ── Server exports (테스트 / 진단용) ──────────────────────────────────────────
 # 주의: 프로덕션 에이전트 코드에서 vsm_app을 직접 import하지 말 것.
@@ -61,6 +62,8 @@ __all__ = [
     "LocalL1Checker",
     "L1Result",
     "StateRehydrationMixin",
+    "ReactExecutor",
+    "ReactResult",
     # Shared
     "BridgeRingLevel",
     "CAPABILITY_MAP",

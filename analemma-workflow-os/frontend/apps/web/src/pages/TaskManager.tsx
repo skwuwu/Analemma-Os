@@ -40,7 +40,9 @@ import {
   Play,
   Square,
   ChevronDown,
-  ChevronRight
+  ChevronRight,
+  Database,
+  ShieldAlert,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -59,6 +61,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Progress } from '@/components/ui/progress';
 import { WorkflowGraphViewer } from '@/components/WorkflowGraphViewer';
 import { NodeDetailPanel } from '@/components/NodeDetailPanel';
+import { SelfHealingPanel } from '@/components/SelfHealingPanel';
+import { AuditPanel } from '@/components/AuditPanel';
+import { ExecutionHistoryInline } from '@/components/ExecutionHistoryInline';
+import { CorrectionConfirmationHUD } from '@/components/CorrectionConfirmationHUD';
+import { MerkleDAGTreeView } from '@/components/MerkleDAGTreeView';
 
 // Hooks
 import { useTaskManager } from '@/hooks/useTaskManager';
@@ -67,6 +74,8 @@ import { useWorkflowApi } from '@/hooks/useWorkflowApi';
 import { useCheckpoints, useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { useNodeExecutionStatus } from '@/hooks/useNodeExecutionStatus';
 import { useExecutionTimeline } from '@/hooks/useExecutionTimeline';
+import { useSelfHealing } from '@/hooks/useSelfHealing';
+import { getOwnerId } from '@/lib/api';
 import type { TaskSummary, TaskStatus, TimelineItem, NotificationItem, HistoryEntry, ResumeWorkflowRequest, ExecutionSummary } from '@/lib/types';
 
 interface TaskManagerProps {
@@ -131,7 +140,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   
   // Detail View Tab State (Business vs Technical)
   const [detailViewTab, setDetailViewTab] = useState<'business' | 'technical'>('business');
-  const [technicalSubTab, setTechnicalSubTab] = useState<'graph' | 'timeline' | 'nodes' | 'summary'>('graph');
+  const [technicalSubTab, setTechnicalSubTab] = useState<'graph' | 'timeline' | 'dag' | 'history' | 'nodes' | 'audit' | 'summary'>('graph');
   const [responseText, setResponseText] = useState('');
   
   // Summary state
@@ -226,7 +235,18 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
     onRollbackSuccess: handleRollbackSuccess,
     onRollbackError: handleRollbackError,
   });
-  
+
+  // Self-healing hook (for failed/healing tasks)
+  const [ownerId, setOwnerId] = useState('');
+  useEffect(() => {
+    getOwnerId().then(id => setOwnerId(id)).catch(() => {});
+  }, []);
+
+  const selfHealing = useSelfHealing({
+    executionArn: taskManager.selectedTask?.task_id || '',
+    ownerId,
+  });
+
   // Workflow Graph Data (for technical tab)
   const workflowGraphData = useMemo(() => {
     if (!taskManager.selectedTask) return null;
@@ -736,8 +756,25 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             )}
                         </div>
                     </div>
-                    
-                    {/* 탭 시스템 */}
+
+                    {/* Self-Healing Panel (shown for failed/healing tasks) */}
+                    {selfHealing.healingState.status && (
+                      <SelfHealingPanel
+                        executionArn={taskManager.selectedTask.task_id}
+                        ownerId={ownerId}
+                        healingStatus={selfHealing.healingState.status}
+                        errorType={selfHealing.healingState.errorType}
+                        errorMessage={selfHealing.healingState.errorMessage}
+                        suggestedFix={selfHealing.healingState.suggestedFix}
+                        healingCount={selfHealing.healingState.healingCount}
+                        maxHealingAttempts={selfHealing.healingState.maxHealingAttempts}
+                        blockedReason={selfHealing.healingState.blockedReason}
+                        onApproveHealing={selfHealing.approveHealing}
+                        onRejectHealing={selfHealing.rejectHealing}
+                      />
+                    )}
+
+                    {/* Tab system */}
                     <Tabs value={detailViewTab} onValueChange={(v) => setDetailViewTab(v as 'business' | 'technical')} className="flex-1 flex flex-col">
                       <div className="px-6 pt-3 border-b border-slate-800">
                         <TabsList className="bg-slate-900">
@@ -761,7 +798,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                       
                       {/* Technical tab - Sub-tab system */}
                       <TabsContent value="technical" className="flex-1 overflow-hidden mt-0">
-                        <Tabs value={technicalSubTab} onValueChange={(v) => setTechnicalSubTab(v as 'graph' | 'timeline' | 'nodes' | 'summary')} className="h-full flex flex-col">
+                        <Tabs value={technicalSubTab} onValueChange={(v) => setTechnicalSubTab(v as typeof technicalSubTab)} className="h-full flex flex-col">
                           {/* Technical sub-tab header */}
                           <div className="px-4 pt-2 border-b border-slate-800">
                             <TabsList className="bg-slate-900">
@@ -773,9 +810,21 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 <History className="w-3 h-3 mr-1.5" />
                                 Timeline
                               </TabsTrigger>
+                              <TabsTrigger value="dag" className="data-[state=active]:bg-slate-800 text-xs">
+                                <Database className="w-3 h-3 mr-1.5" />
+                                State DAG
+                              </TabsTrigger>
+                              <TabsTrigger value="history" className="data-[state=active]:bg-slate-800 text-xs">
+                                <List className="w-3 h-3 mr-1.5" />
+                                History
+                              </TabsTrigger>
                               <TabsTrigger value="nodes" className="data-[state=active]:bg-slate-800 text-xs">
                                 <Box className="w-3 h-3 mr-1.5" />
                                 Nodes
+                              </TabsTrigger>
+                              <TabsTrigger value="audit" className="data-[state=active]:bg-slate-800 text-xs">
+                                <ShieldAlert className="w-3 h-3 mr-1.5" />
+                                Audit
                               </TabsTrigger>
                               <TabsTrigger value="summary" className="data-[state=active]:bg-slate-800 text-xs">
                                 <Bot className="w-3 h-3 mr-1.5" />
@@ -836,6 +885,30 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             </ScrollArea>
                           </TabsContent>
 
+                          {/* State DAG sub-tab (Merkle DAG Tree View) */}
+                          <TabsContent value="dag" className="flex-1 overflow-hidden mt-0">
+                            {taskManager.selectedTask ? (
+                              <MerkleDAGTreeView executionId={taskManager.selectedTask.task_id} className="h-full" />
+                            ) : (
+                              <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-20">
+                                <Database className="w-12 h-12 mb-4" />
+                                <p className="text-sm font-medium uppercase">No State DAG Data</p>
+                              </div>
+                            )}
+                          </TabsContent>
+
+                          {/* History sub-tab (Execution Step History) */}
+                          <TabsContent value="history" className="flex-1 overflow-hidden mt-0">
+                            {taskManager.selectedTask ? (
+                              <ExecutionHistoryInline executionArn={taskManager.selectedTask.task_id} />
+                            ) : (
+                              <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-20">
+                                <History className="w-12 h-12 mb-4" />
+                                <p className="text-sm font-medium uppercase">No History Data</p>
+                              </div>
+                            )}
+                          </TabsContent>
+
                           {/* Nodes sub-tab (NodeDetailPanel + HITP Input) */}
                           <TabsContent value="nodes" className="flex-1 overflow-hidden mt-0">
                             <div className="h-full flex flex-col">
@@ -893,6 +966,11 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             </div>
                           </TabsContent>
                           
+                          {/* Audit sub-tab */}
+                          <TabsContent value="audit" className="flex-1 overflow-hidden mt-0">
+                            <AuditPanel className="h-full" />
+                          </TabsContent>
+
                           {/* Summary sub-tab (Gemini summary) */}
                           <TabsContent value="summary" className="flex-1 overflow-hidden mt-0">
                             <ScrollArea className="h-full">
@@ -1055,11 +1133,26 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
       </ResizablePanelGroup>
 
       {taskManager.selectedTask && (
-        <OutcomeManagerModal 
-            isOpen={outcomeModalOpen} 
-            onClose={() => setOutcomeModalOpen(false)} 
+        <OutcomeManagerModal
+            isOpen={outcomeModalOpen}
+            onClose={() => setOutcomeModalOpen(false)}
             task={taskManager.selectedTask}
             initialArtifactId={selectedArtifactId}
+        />
+      )}
+
+      {/* Correction Confirmation HUD (instruction learning overlay) */}
+      {taskManager.selectedTask?.correction_delta && (
+        <CorrectionConfirmationHUD
+          originalText={taskManager.selectedTask.correction_delta.original_output_ref || ''}
+          correctedText={taskManager.selectedTask.correction_delta.corrected_output_ref || ''}
+          onConfirm={(shouldRemember) => {
+            if (shouldRemember === true) {
+              toast.success('Correction saved — agent will learn from this pattern');
+            } else if (shouldRemember === false) {
+              toast.info('One-time correction applied');
+            }
+          }}
         />
       )}
     </div>

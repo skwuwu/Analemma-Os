@@ -654,6 +654,304 @@ async def get_rollback_suggestions(thread_id: str):
 
 
 # ──────────────────────────────────────────────────────────────
+# Merkle DAG State Versioning API Endpoints
+# ──────────────────────────────────────────────────────────────
+
+
+class ManifestBlockResponse(BaseModel):
+    """Content block in a manifest"""
+    block_id: str
+    s3_path: str
+    size: int
+    fields: List[str]
+    checksum: str
+
+
+class ManifestSummaryResponse(BaseModel):
+    """Manifest summary (list item)"""
+    manifest_id: str
+    version: int
+    parent_hash: Optional[str] = None
+    manifest_hash: str
+    config_hash: str
+    created_at: str
+    total_segments: int
+
+
+class ManifestDetailResponse(ManifestSummaryResponse):
+    """Full manifest detail including blocks"""
+    blocks: List[ManifestBlockResponse] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IntegrityCheckResponse(BaseModel):
+    """Merkle root integrity check result"""
+    manifest_id: str
+    is_valid: bool
+    verified_at: str
+
+
+def _get_versioning_service():
+    """Lazy factory for StateVersioningService with env-based config."""
+    from src.services.state.state_versioning_service import StateVersioningService
+    table_name = os.environ.get('MANIFESTS_TABLE', 'WorkflowManifestsV3')
+    bucket = os.environ.get('STATE_BUCKET', os.environ.get('S3_BUCKET', 'analemma-state'))
+    return StateVersioningService(dynamodb_table=table_name, s3_bucket=bucket)
+
+
+def _manifest_to_summary(item: dict) -> dict:
+    """Convert DynamoDB manifest item to summary response dict."""
+    metadata = item.get('metadata', {})
+    return {
+        'manifest_id': item.get('manifest_id', ''),
+        'version': item.get('version', 0),
+        'parent_hash': item.get('parent_hash'),
+        'manifest_hash': item.get('manifest_hash', ''),
+        'config_hash': item.get('config_hash', ''),
+        'created_at': metadata.get('created_at', ''),
+        'total_segments': metadata.get('total_segments', 0),
+    }
+
+
+def _manifest_to_detail(pointer) -> dict:
+    """Convert ManifestPointer dataclass to detail response dict."""
+    blocks = []
+    for b in getattr(pointer, 'blocks', []):
+        blocks.append({
+            'block_id': b.block_id,
+            's3_path': b.s3_path,
+            'size': b.size,
+            'fields': b.fields,
+            'checksum': b.checksum,
+        })
+    metadata = getattr(pointer, 'metadata', {})
+    return {
+        'manifest_id': pointer.manifest_id,
+        'version': pointer.version,
+        'parent_hash': pointer.parent_hash,
+        'manifest_hash': pointer.manifest_hash,
+        'config_hash': pointer.config_hash,
+        'created_at': metadata.get('created_at', ''),
+        'total_segments': metadata.get('total_segments', 0),
+        'blocks': blocks,
+        'metadata': metadata,
+    }
+
+
+@app.get("/executions/{execution_id}/manifests")
+async def list_manifests(
+    execution_id: str,
+    request: Request
+):
+    """
+    List all manifest versions for an execution.
+
+    Response:
+    {
+        "execution_id": "...",
+        "manifests": [...],
+        "total": N
+    }
+    """
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
+    svc = _get_versioning_service()
+
+    # Query manifests table by execution metadata
+    try:
+        table = svc.table
+        # Scan for manifests belonging to this execution via metadata
+        response = table.scan(
+            FilterExpression='contains(metadata.execution_id, :eid) OR contains(metadata.workflow_id, :eid)',
+            ExpressionAttributeValues={':eid': execution_id},
+            Limit=100,
+        )
+    except Exception:
+        # Fallback: try querying by workflow_id directly
+        try:
+            from boto3.dynamodb.conditions import Attr
+            response = table.scan(
+                FilterExpression=Attr('workflow_id').eq(execution_id),
+                Limit=100,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to query manifests: {str(e)}")
+
+    items = response.get('Items', [])
+    summaries = [_manifest_to_summary(item) for item in items]
+    summaries.sort(key=lambda x: x['version'])
+
+    return {
+        "execution_id": execution_id,
+        "manifests": summaries,
+        "total": len(summaries),
+    }
+
+
+@app.get("/executions/{execution_id}/manifests/latest")
+async def get_latest_manifest(
+    execution_id: str,
+    request: Request
+):
+    """
+    Get the latest manifest pointer for an execution (tree entry point).
+
+    Response: ManifestDetailResponse
+    """
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
+    svc = _get_versioning_service()
+
+    try:
+        pointer = svc.load_latest_state.__func__  # Check if method exists
+    except AttributeError:
+        pass
+
+    # Get latest manifest via workflow table pointer
+    try:
+        from src.common.constants import DynamoDBConfig
+        from src.common.aws_clients import get_dynamodb_resource
+        workflows_table = get_dynamodb_resource().Table(
+            os.environ.get('WORKFLOWS_TABLE', DynamoDBConfig.WORKFLOWS_TABLE)
+        )
+        # execution_id may map to workflow_id
+        wf_item = workflows_table.get_item(
+            Key={'ownerId': owner_id, 'workflowId': execution_id}
+        ).get('Item')
+
+        if wf_item and wf_item.get('latest_manifest_id'):
+            manifest_id = wf_item['latest_manifest_id']
+            pointer = svc.get_manifest(manifest_id)
+            return _manifest_to_detail(pointer)
+    except Exception:
+        pass
+
+    # Fallback: get newest from manifest list
+    try:
+        from boto3.dynamodb.conditions import Attr
+        response = svc.table.scan(
+            FilterExpression=Attr('workflow_id').eq(execution_id),
+            Limit=100,
+        )
+        items = response.get('Items', [])
+        if not items:
+            raise HTTPException(status_code=404, detail="No manifests found for this execution")
+
+        latest = max(items, key=lambda x: x.get('version', 0))
+        pointer = svc.get_manifest(latest['manifest_id'])
+        return _manifest_to_detail(pointer)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get latest manifest: {str(e)}")
+
+
+@app.get("/executions/{execution_id}/manifests/{manifest_id}")
+async def get_manifest_detail(
+    execution_id: str,
+    manifest_id: str,
+    request: Request
+):
+    """
+    Get full manifest detail including content blocks.
+
+    Response: ManifestDetailResponse
+    """
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
+    svc = _get_versioning_service()
+
+    try:
+        pointer = svc.get_manifest(manifest_id)
+        return _manifest_to_detail(pointer)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get manifest: {str(e)}")
+
+
+@app.get("/executions/{execution_id}/manifests/{manifest_id}/segments")
+async def get_manifest_segments(
+    execution_id: str,
+    manifest_id: str,
+    request: Request,
+    indices: Optional[str] = Query(None, description="Comma-separated segment indices (e.g. 0,1,2)")
+):
+    """
+    Load segment content from a manifest (lazy, with optional index filter).
+    Capped at 10 segments per request to prevent payload overflow.
+
+    Response:
+    {
+        "manifest_id": "...",
+        "segments": [
+            {"segment_index": 0, "data": {...}},
+            ...
+        ]
+    }
+    """
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
+    svc = _get_versioning_service()
+
+    parsed_indices = None
+    if indices:
+        try:
+            parsed_indices = [int(i.strip()) for i in indices.split(',')]
+            # Cap at 10 segments
+            parsed_indices = parsed_indices[:10]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid indices format. Use comma-separated integers.")
+
+    try:
+        segments_raw = svc.load_manifest_segments(
+            manifest_id=manifest_id,
+            segment_indices=parsed_indices
+        )
+        segments = []
+        for idx, seg_data in enumerate(segments_raw):
+            seg_index = parsed_indices[idx] if parsed_indices and idx < len(parsed_indices) else idx
+            segments.append({
+                "segment_index": seg_index,
+                "data": seg_data if isinstance(seg_data, dict) else {"raw": seg_data},
+            })
+
+        return {
+            "manifest_id": manifest_id,
+            "segments": segments,
+        }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load segments: {str(e)}")
+
+
+@app.get("/executions/{execution_id}/manifests/{manifest_id}/integrity")
+async def verify_manifest_integrity(
+    execution_id: str,
+    manifest_id: str,
+    request: Request
+):
+    """
+    Verify Merkle root integrity for a manifest.
+
+    Response: IntegrityCheckResponse
+    """
+    owner_id = extract_owner_id_from_fastapi_request(request) or "default"
+    svc = _get_versioning_service()
+
+    from datetime import datetime, timezone
+
+    try:
+        is_valid = svc.verify_manifest_integrity(manifest_id)
+        return {
+            "manifest_id": manifest_id,
+            "is_valid": is_valid,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Manifest not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Integrity check failed: {str(e)}")
+
+
+# ──────────────────────────────────────────────────────────────
 # Task Manager API Endpoints
 # ──────────────────────────────────────────────────────────────
 

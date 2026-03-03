@@ -311,6 +311,48 @@ export interface ExecutionHistoryResponse {
   nextToken: string | null;
 }
 
+// ===== Merkle DAG Types =====
+
+export interface MerkleContentBlock {
+  block_id: string;
+  s3_path: string;
+  size: number;
+  fields: string[];
+  checksum: string;
+}
+
+export interface ManifestSummary {
+  manifest_id: string;
+  version: number;
+  parent_hash: string | null;
+  manifest_hash: string;
+  config_hash: string;
+  created_at: string;
+  total_segments: number;
+}
+
+export interface ManifestDetail extends ManifestSummary {
+  blocks: MerkleContentBlock[];
+  metadata: Record<string, unknown>;
+}
+
+export interface ManifestListResponse {
+  execution_id: string;
+  manifests: ManifestSummary[];
+  total: number;
+}
+
+export interface IntegrityCheckResult {
+  manifest_id: string;
+  is_valid: boolean;
+  verified_at: string;
+}
+
+export interface SegmentData {
+  segment_index: number;
+  data: Record<string, unknown>;
+}
+
 // ===== Task Manager Types =====
 
 export type TaskStatus = 'queued' | 'in_progress' | 'pending_approval' | 'completed' | 'failed' | 'cancelled';

@@ -26,6 +26,11 @@ def _canonical_bytes(data: Any) -> bytes:
     - sort_keys=True for deterministic key order
     - separators=(',', ':') for no whitespace
     - ensure_ascii=False for UTF-8 preservation
+
+    Safety:
+    - Decimal → str (preserves precision; float conversion causes hash drift)
+    - __dict__ → filtered (private keys excluded, to_dict() preferred)
+    - Circular references → caught and replaced with safe repr fallback
     """
     from datetime import datetime, date
     from decimal import Decimal
@@ -34,18 +39,51 @@ def _canonical_bytes(data: Any) -> bytes:
         if isinstance(obj, (datetime, date)):
             return obj.isoformat()
         if isinstance(obj, Decimal):
-            return float(obj)
+            # str preserves exact precision — float(Decimal("0.1") + Decimal("0.2"))
+            # yields 0.30000000000000004, causing false Merkle violations.
+            return str(obj)
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
+        if isinstance(obj, (set, frozenset)):
+            return sorted(str(item) for item in obj)
+        # Explicit serialization contract takes precedence
+        if hasattr(obj, 'to_dict') and callable(obj.to_dict):
+            return obj.to_dict()
+        # __dict__ fallback — filter private/dunder keys to prevent
+        # leaking internal state (API keys, credentials, etc.)
         if hasattr(obj, '__dict__'):
-            return obj.__dict__
+            return {
+                k: v for k, v in obj.__dict__.items()
+                if not k.startswith('_')
+            }
         return str(obj)
 
-    return json.dumps(
-        data,
-        sort_keys=True,
-        separators=(',', ':'),
-        ensure_ascii=False,
-        default=_default,
-    ).encode('utf-8')
+    try:
+        return json.dumps(
+            data,
+            sort_keys=True,
+            separators=(',', ':'),
+            ensure_ascii=False,
+            default=_default,
+        ).encode('utf-8')
+    except (ValueError, RecursionError):
+        # Circular reference or excessive nesting — fall back to repr.
+        # repr() is deterministic for the same object state, preserving
+        # hash stability without crashing the kernel.
+        return repr(data).encode('utf-8')
+
+
+def canonical_json(data: Any) -> str:
+    """Canonical JSON string for deterministic, type-safe serialization.
+
+    Same contract as ``_canonical_bytes`` but returns ``str`` instead of bytes.
+    Use for tool results, bridge payloads, and any cross-boundary serialization
+    where deterministic output is required.
+
+    Unlike ``json.dumps(default=str)`` which silently stringifies unknown types,
+    this function uses explicit type-aware conversion via ``_canonical_bytes``.
+    """
+    return _canonical_bytes(data).decode('utf-8')
 
 
 def content_hash(data: Any, *, truncate: int = 0) -> str:
