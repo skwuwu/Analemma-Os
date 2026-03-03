@@ -2422,21 +2422,24 @@ class SegmentRunnerService:
                                 f"These will be treated as OPTIONAL to prevent Wait-for-all deadlock."
                             )
         
-        # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
-        # Uses partition_map.outgoing_edges instead of scanning workflow_config.edges
+        # [v3.30 Fix] HITP Edge Detection using segment_config.outgoing_edges
         hitp_detected = False
-        
-        if next_segment < total_segments and partition_map and isinstance(partition_map, list):
-            current_seg = partition_map[segment_to_run] if segment_to_run < len(partition_map) else None
-            next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
-            
-            if current_seg and next_seg:
-                edge_info = check_inter_segment_edges(current_seg, next_seg)
-                if is_hitp_edge(edge_info):
-                    hitp_detected = True
-                    logger.info(f"[Aggregator] 🚨 HITP edge detected via outgoing_edges: "
-                              f"segment {segment_to_run} → {next_segment}, "
-                              f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+        agg_segment_config = event.get('segment_config')
+        if not agg_segment_config:
+            manifest_s3_path = event.get('segment_manifest_s3_path')
+            if manifest_s3_path:
+                try:
+                    agg_segment_config = self._load_segment_config_from_manifest(manifest_s3_path, segment_to_run)
+                except Exception:
+                    agg_segment_config = None
+
+        if next_segment < total_segments and agg_segment_config:
+            edge_info = check_inter_segment_edges(agg_segment_config)
+            if is_hitp_edge(edge_info):
+                hitp_detected = True
+                logger.info(f"[Aggregator] HITP edge detected via segment_config.outgoing_edges: "
+                          f"segment {segment_to_run} → {next_segment}, "
+                          f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
         
         # 완료 여부 판단
         is_complete = next_segment >= total_segments
@@ -4000,24 +4003,19 @@ class SegmentRunnerService:
             if not valid_branches:
                 logger.info(f"[Kernel] ⏭️ No valid branches to execute, skipping parallel group")
                 
-                # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+                # [v3.30 Fix] HITP Edge Detection using segment_config.outgoing_edges
                 next_segment = segment_id + 1
                 total_segments = _safe_get_total_segments(event)
                 has_more_segments = next_segment < total_segments
                 hitp_detected = False
-                
-                # Use partition_map.outgoing_edges instead of scanning workflow_config.edges
-                if has_more_segments and partition_map and isinstance(partition_map, list):
-                    current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
-                    next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
-                    
-                    if current_seg and next_seg:
-                        edge_info = check_inter_segment_edges(current_seg, next_seg)
-                        if is_hitp_edge(edge_info):
-                            hitp_detected = True
-                            logger.info(f"[Empty Parallel] 🚨 HITP edge detected via outgoing_edges: "
-                                      f"segment {segment_id} → {next_segment}, "
-                                      f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+
+                if has_more_segments and segment_config:
+                    edge_info = check_inter_segment_edges(segment_config)
+                    if is_hitp_edge(edge_info):
+                        hitp_detected = True
+                        logger.info(f"[Empty Parallel] HITP edge detected via segment_config.outgoing_edges: "
+                                  f"segment {segment_id} → {next_segment}, "
+                                  f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
                 
                 if hitp_detected:
                     logger.info(f"[Empty Parallel] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
@@ -4248,21 +4246,15 @@ class SegmentRunnerService:
             next_segment = segment_id + 1
             has_more_segments = next_segment < total_segments
             
-            # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+            # [v3.30 Fix] HITP Edge Detection using segment_config.outgoing_edges
             hitp_detected = False
-            if has_more_segments:
-                partition_map = event.get('partition_map')
-                if partition_map and isinstance(partition_map, list):
-                    current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
-                    next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
-                    
-                    if current_seg and next_seg:
-                        edge_info = check_inter_segment_edges(current_seg, next_seg)
-                        if is_hitp_edge(edge_info):
-                            hitp_detected = True
-                            logger.info(f"[Partial Success] 🚨 HITP edge detected via outgoing_edges: "
-                                      f"segment {segment_id} → {next_segment}, "
-                                      f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+            if has_more_segments and segment_config:
+                edge_info = check_inter_segment_edges(segment_config)
+                if is_hitp_edge(edge_info):
+                    hitp_detected = True
+                    logger.info(f"[Partial Success] HITP edge detected via segment_config.outgoing_edges: "
+                              f"segment {segment_id} → {next_segment}, "
+                              f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
             
             if hitp_detected:
                 logger.info(f"[Partial Success] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
@@ -4474,21 +4466,21 @@ class SegmentRunnerService:
         # Extract history logs from result_state if available
         new_history_logs = result_state.get('__new_history_logs', []) if isinstance(result_state, dict) else []
         
-        # [Critical Fix] 워크플로우 완료 여부 결정
-        # 1. partition_map이 없는 경우: 전체 워크플로우를 한 번에 실행했으므로 완료
-        # 2. partition_map이 있는 경우: 다음 세그먼트가 있는지 확인
-        # [Bug Fix] test_workflow_config 존재 여부(is_e2e_test)는 판단 기준에서 제거.
-        # test_workflow_config는 시뮬레이터 실행 시 state_bag 전체에 항상 포함되므로
-        # is_e2e_test=True가 모든 세그먼트에서 발생 → segment 0 이후 조기 COMPLETE 반환 버그.
-        # partition_map이 있으면 항상 세그먼트 루프를 통해 순차 실행해야 함.
-        has_partition_map = partition_map is not None and len(partition_map) > 0
-        
+        # [v3.30 Fix] Workflow completion decision using total_segments
+        # Previously used `has_partition_map` which always returned False because
+        # partition_map is force-offloaded to S3/manifest in initialize_state_data.py.
+        # total_segments (already computed at line ~4377) is always available in the
+        # event bag and correctly indicates single-segment vs multi-segment execution.
+        # - total_segments <= 1: single execution, return COMPLETE
+        # - total_segments > 1:  check current segment position
+
         # 커널 메타데이터 추출 (있는 경우)
         kernel_actions = result_state.get('__kernel_actions', []) if isinstance(result_state, dict) else []
-        
-        if not has_partition_map:
-            # 파티션 없는 단일 실행: 워크플로우 완료
-            # [Critical Fix] S3 offload 시 final_state 비우기 (256KB 제한 회피)
+
+        next_segment = segment_id + 1
+
+        if total_segments <= 1:
+            # Single-segment workflow: execution complete
             response_final_state = final_state
             if output_s3_path:
                 response_final_state = {
@@ -4497,12 +4489,12 @@ class SegmentRunnerService:
                     "__original_size_kb": len(json.dumps(final_state, ensure_ascii=False).encode('utf-8')) / 1024 if final_state else 0
                 }
                 logger.info(f"[S3 Offload] Replaced final_state with metadata reference (E2E). Original: {response_final_state['__original_size_kb']:.1f}KB → Response: ~0.2KB")
-            
+
             return _finalize_response({
-                "status": "COMPLETE",  # ASL이 기대하는 상태값
+                "status": "COMPLETE",
                 "final_state": response_final_state,
                 "final_state_s3_path": output_s3_path,
-                "next_segment_to_run": None,  # 다음 세그먼트 없음
+                "next_segment_to_run": None,
                 "new_history_logs": new_history_logs,
                 "error_info": None,
                 "branches": None,
@@ -4510,14 +4502,9 @@ class SegmentRunnerService:
                 "state_s3_path": output_s3_path,
                 "execution_time": execution_time,
                 "kernel_actions": kernel_actions if kernel_actions else None,
-                "total_segments": _total_segments
+                "total_segments": total_segments
             })
-        
-        # 파티션 맵이 있는 경우: 다음 세그먼트 존재 여부 확인
-        total_segments = _safe_get_total_segments(event)
-        
-        next_segment = segment_id + 1
-        
+
         if next_segment >= total_segments:
             # 마지막 세그먼트 완료
             # [Critical Fix] S3 offload 시 final_state 비우기 (256KB 제한 회피)
@@ -4553,19 +4540,17 @@ class SegmentRunnerService:
             logger.info(f"[S3 Offload] Replaced final_state with metadata reference. "
                        f"Original: {response_final_state.get('__original_size_kb', 0):.1f}KB → Response: ~0.2KB")
         
-        # [P0 Refactoring] HITP Edge Detection via outgoing_edges (O(1) lookup)
+        # [v3.30 Fix] HITP Edge Detection using segment_config.outgoing_edges
+        # Previously used partition_map (always empty due to force-offload).
+        # Now uses segment_config (loaded from manifest) which has outgoing_edges.
         hitp_detected = False
-        if next_segment < total_segments and partition_map and isinstance(partition_map, list):
-            current_seg = partition_map[segment_id] if segment_id < len(partition_map) else None
-            next_seg = partition_map[next_segment] if next_segment < len(partition_map) else None
-            
-            if current_seg and next_seg:
-                edge_info = check_inter_segment_edges(current_seg, next_seg)
-                if is_hitp_edge(edge_info):
-                    hitp_detected = True
-                    logger.info(f"[General Segment] 🚨 HITP edge detected via outgoing_edges: "
-                              f"segment {segment_id} → {next_segment}, "
-                              f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
+        if next_segment < total_segments and segment_config:
+            edge_info = check_inter_segment_edges(segment_config)
+            if is_hitp_edge(edge_info):
+                hitp_detected = True
+                logger.info(f"[General Segment] HITP edge detected via segment_config.outgoing_edges: "
+                          f"segment {segment_id} → {next_segment}, "
+                          f"type={edge_info.get('edge_type')}, target={edge_info.get('target_node')}")
         
         if hitp_detected:
             logger.info(f"[General Segment] 🚨 Pausing execution due to HITP edge. Next segment: {next_segment}")
