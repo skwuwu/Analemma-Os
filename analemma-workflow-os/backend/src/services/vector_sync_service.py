@@ -1256,22 +1256,6 @@ class VectorSyncService:
         
         return text
 
-    # ═══════════════════════════════════════════════════════════════════════════
-    # [DEPRECATED] 아래 메서드들은 더 이상 사용되지 않습니다.
-    # 위쪽의 _generate_embedding 메서드(Vertex AI 전용)를 사용하세요.
-    # ═══════════════════════════════════════════════════════════════════════════
-    
-    # async def _generate_embedding_legacy(self, text: str) -> Optional[List[float]]:
-    #     """
-    #     [DEPRECATED] OpenAI 임베딩 - 더 이상 사용하지 않음
-    #     
-    #     이유: OpenAI (1536차원)와 Vertex AI (768차원) 혼합 사용 불가
-    #     동일한 벡터 DB 인덱스에는 단일 차원의 벡터만 허용됩니다.
-    #     
-    #     대신 위쪽의 _generate_embedding 메서드(Vertex AI 전용)를 사용하세요.
-    #     """
-    #     pass
-
     async def _store_vector_document(self, vector_document: Dict[str, Any]) -> bool:
         """벡터 문서를 DB에 저장"""
         try:

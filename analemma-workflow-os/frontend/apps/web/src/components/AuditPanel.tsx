@@ -288,41 +288,4 @@ function IssueItem({ issue, onNodeClick }: IssueItemProps) {
   );
 }
 
-// 이슈 요약 컴포넌트 (외부에서 사용 가능)
-export function AuditSummary({ className }: { className?: string }) {
-  const issueSummary = useCodesignStore(selectIssueSummary);
-
-  if (issueSummary.total === 0) {
-    return (
-      <div className={cn("flex items-center gap-1.5 text-green-600", className)}>
-        <CheckCircle2 className="w-4 h-4" />
-        <span className="text-xs">이슈 없음</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className={cn("flex items-center gap-1", className)}>
-      {issueSummary.errors > 0 && (
-        <div className="flex items-center gap-0.5 text-destructive">
-          <XCircle className="w-3.5 h-3.5" />
-          <span className="text-xs font-medium">{issueSummary.errors}</span>
-        </div>
-      )}
-      {issueSummary.warnings > 0 && (
-        <div className="flex items-center gap-0.5 text-yellow-600">
-          <AlertTriangle className="w-3.5 h-3.5" />
-          <span className="text-xs font-medium">{issueSummary.warnings}</span>
-        </div>
-      )}
-      {issueSummary.info > 0 && (
-        <div className="flex items-center gap-0.5 text-blue-600">
-          <Info className="w-3.5 h-3.5" />
-          <span className="text-xs font-medium">{issueSummary.info}</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default AuditPanel;

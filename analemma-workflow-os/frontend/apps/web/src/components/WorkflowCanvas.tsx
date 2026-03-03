@@ -32,7 +32,6 @@ import { NodeEditorDialog } from './NodeEditorDialog';
 import { GroupNameDialog } from './GroupNameDialog';
 import { RollbackDialog } from './RollbackDialog';
 import { SuggestionOverlay } from './SuggestionOverlay';
-import { EmptyCanvasGuide } from './EmptyCanvasGuide';
 import { AuditPanel } from './AuditPanel';
 
 import { Button } from './ui/button';
@@ -49,7 +48,7 @@ import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
 import { TooltipProvider } from './ui/tooltip';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
-import { useCodesignStore } from '@/lib/codesignStore';
+import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
 import { useCanvasMode } from '@/hooks/useCanvasMode';
 import { useAutoValidation } from '@/hooks/useAutoValidation';
 import { WorkflowStatusIndicator } from './WorkflowStatusIndicator';
@@ -76,9 +75,6 @@ const WorkflowCanvasInner = () => {
   const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
   const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
   
-  // Empty Canvas Guide visibility
-  const [emptyGuideVisible, setEmptyGuideVisible] = useState(true);
-
   // Audit Panel state (Local validation only)
   const [auditPanelOpen, setAuditPanelOpen] = useState(false);
 
@@ -184,11 +180,9 @@ const WorkflowCanvasInner = () => {
     setActiveSuggestion,
     acceptSuggestion,
     rejectSuggestion,
-    auditIssues,
     requestSuggestions,
     requestAudit,
     recentChanges,
-    addMessage,
   } = useCodesignStore(
     useShallow((state) => ({
       recordChange: state.recordChange,
@@ -197,21 +191,14 @@ const WorkflowCanvasInner = () => {
       setActiveSuggestion: state.setActiveSuggestion,
       acceptSuggestion: state.acceptSuggestion,
       rejectSuggestion: state.rejectSuggestion,
-      auditIssues: state.auditIssues,
       requestSuggestions: state.requestSuggestions,
       requestAudit: state.requestAudit,
       recentChanges: state.recentChanges,
-      addMessage: state.addMessage,
     }))
   );
 
-  // Calculate issue summary for ContextualSideRail
-  const issueSummary = useMemo(() => ({
-    errors: auditIssues.filter(i => i.level === 'error').length,
-    warnings: auditIssues.filter(i => i.level === 'warning').length,
-    info: auditIssues.filter(i => i.level === 'info').length,
-    total: auditIssues.length
-  }), [auditIssues]);
+  // Issue summary from centralized store selector
+  const issueSummary = useCodesignStore(selectIssueSummary);
 
   // Canvas mode detection
   const canvasMode = useCanvasMode();
@@ -528,28 +515,11 @@ const WorkflowCanvasInner = () => {
     return await timeMachine.executeRollback(request);
   }, [timeMachine]);
 
-  const handleQuickStart = useCallback(async (prompt: string, persona?: string, systemPrompt?: string) => {
-    addMessage('user', prompt);
-    if (persona && systemPrompt) {
-      addMessage('system', `도메인 전문가 모드 활성화: ${persona.replace('_', ' ')}`);
-    }
-    toast.success('AI Designer Activated');
-  }, [addMessage]);
-
   return (
     <>
       <div className="h-full w-full relative flex overflow-hidden bg-[#121212]">
         {/* Main Canvas Area */}
         <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
-          {/* EmptyCanvasGuide 비활성화됨 */}
-          {/* {canvasMode.isEmpty && emptyGuideVisible && (
-            <EmptyCanvasGuide
-              onQuickStart={handleQuickStart}
-              onClose={() => setEmptyGuideVisible(false)}
-              className="absolute inset-0 z-10 bg-background/95 backdrop-blur-sm"
-            />
-          )} */}
-
           {/* Contextual Toolbar */}
           <div className="absolute top-4 right-4 z-10 flex gap-2">
             {/* Clear Canvas Button */}
@@ -690,26 +660,6 @@ const WorkflowCanvasInner = () => {
         <SuggestionOverlay />
       </div>
 
-      {/* Audit Panel Sidebar - Triggered by Status Indicator */}
-      <AnimatePresence>
-        {auditPanelOpen && (
-          <motion.div
-            initial={{ x: 400 }}
-            animate={{ x: 0 }}
-            exit={{ x: 400 }}
-            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
-            className="absolute right-0 top-0 bottom-0 w-96 border-l border-slate-800 bg-slate-950/50 backdrop-blur-xl z-30 flex flex-col"
-          >
-            <AuditPanel 
-              standalone 
-              className="flex-1 overflow-hidden"
-              onClose={() => setAuditPanelOpen(false)}
-              key="audit-panel"
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       <NodeEditorDialog
         node={selectedNode as any}
         open={editorOpen}
@@ -744,7 +694,7 @@ const WorkflowCanvasInner = () => {
         }}
       />
 
-      {/* Local Validation Panel */}
+      {/* Audit Panel Sidebar */}
       <AnimatePresence>
         {auditPanelOpen && (
           <motion.div

@@ -22,13 +22,10 @@ from src.handlers.core.main import run_workflow, run_workflow_from_dynamodb, par
 # into the top-level keys so existing test callers keep working.
 try:
     from src.common.statebag import normalize_event  # type: ignore
-except Exception:
-    try:
-        from src.common.statebag import normalize_event  # type: ignore
-    except Exception:
-        def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
-            # no-op fallback when the helper isn't available
-            return e
+except ImportError:
+    def normalize_event(e: Dict[str, Any]) -> Dict[str, Any]:
+        # no-op fallback when the helper isn't available
+        return e
 
 
 def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
@@ -64,11 +61,8 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             # a clear 'cache not ready' message.
             try:
                 from src.handlers.core.main import CacheMissError
-            except Exception:
-                try:
-                    from src.handlers.core.main import CacheMissError
-                except Exception:
-                    CacheMissError = None
+            except ImportError:
+                CacheMissError = None
             if CacheMissError is not None and isinstance(e, CacheMissError):
                 return {"statusCode": 503, "body": json.dumps({"error": str(e)})}
             return {"statusCode": 500, "body": json.dumps({"error": str(e)})}

@@ -524,64 +524,9 @@ def lambda_handler(event, context):
             payload['test_workflow_config'] = test_config_to_inject
             logger.info("🧪 MOCK_MODE: test_workflow_config injected, will bypass DynamoDB")
         
-        # NOTE: workflow_config는 orchestrator selection 섹션에서 로드되어 payload에 추가됩니다
-        # 여기서는 payload 기본 구조만 설정하고, 실제 config 로딩은 아래 orchestrator selection에서 수행
-        
-        # [LEGACY FALLBACK - 사용하지 않음] 워크플로우 설정을 찾을 수 없는 경우 캐시를 사용한 DB 재시도
-        # 이 로직은 orchestrator selection 섹션으로 이동되었습니다
-        if False:  # Disabled - handled by orchestrator selection
-            try:
-                from src.services.workflow.cache_manager import cached_get_workflow_config
-                
-                # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
-                WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-                if WORKFLOWS_TABLE:
-                    wf_table = dynamodb.Table(WORKFLOWS_TABLE)
-                    
-                    # 🚀 캐시를 사용한 fallback 조회
-                    workflow_config = cached_get_workflow_config(wf_table, owner_id, workflow_id)
-                    
-                    if workflow_config:
-                        # Ensure config is serializable (Decimal conversion)
-                        config = _convert_floats_to_decimals(workflow_config)
-                        payload['workflow_config'] = config
-                        
-                        # 워크플로우 이름도 가져오기 (별도 조회 필요)
-                        try:
-                            wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})
-                            if 'Item' in wf_resp:
-                                payload['workflow_name'] = wf_resp['Item'].get('name')
-                        except Exception:
-                            pass  # 이름은 선택사항
-                        
-                        logger.info(f"📦 Fallback: workflow_config loaded (cached) for {workflow_id}")
-                    else:
-                        logger.warning(f"⚠️ Fallback: Workflow not found in DB: {workflow_id}")
-                        
-            except ImportError:
-                # 캐시 모듈이 없으면 기본 DB 조회
-                try:
-                    # 🚨 [Critical Fix] 기본값을 template.yaml과 일치시킴
-                    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-                    if WORKFLOWS_TABLE:
-                        wf_table = dynamodb.Table(WORKFLOWS_TABLE)
-                        wf_resp = wf_table.get_item(Key={'ownerId': owner_id, 'workflowId': workflow_id})
-                        if 'Item' in wf_resp:
-                            wf_item = wf_resp['Item']
-                            config = wf_item.get('config')
-                            # Ensure config is serializable (Decimal conversion)
-                            config = _convert_floats_to_decimals(config)
-                            payload['workflow_config'] = config
-                            payload['workflow_name'] = wf_item.get('name')
-                            logger.info(f"📦 Fallback: workflow_config loaded (direct DB) for {workflow_id}")
-                        else:
-                            logger.warning(f"⚠️ Fallback: Workflow not found in DB: {workflow_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Fallback direct DB query failed: {e}")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Fallback cached workflow config fetch failed: {e}")
-        
+        # NOTE: workflow_config is loaded in the orchestrator selection section below.
+        # Only the base payload structure is set here.
+
         # NOTE: API key injection removed from src.this Lambda for security reasons.
         # SegmentRunner Lambda handles API key retrieval (user keys + Secrets Manager
         # fallback) using the secure proxy pattern. This avoids exposing secrets

@@ -149,14 +149,6 @@ export interface WorkflowDetailResponse {
   [key: string]: unknown;
 }
 
-export interface ExecutionHistoryResponse {
-  step_function_state?: {
-    state_history?: HistoryEntry[];
-    [key: string]: unknown;
-  };
-  [key: string]: unknown;
-}
-
 // ===== Plan Briefing Types =====
 
 export type RiskLevel = 'low' | 'medium' | 'high';
