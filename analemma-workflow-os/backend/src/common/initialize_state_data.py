@@ -1292,6 +1292,16 @@ def _execute_initialization(event, context):
             }
         )
         
+        # [v3.31 Fix] Re-inject __s3_offloaded after seal_state_bag.
+        # SmartStateBag.dehydrate() batches user fields into S3 batch pointers.
+        # __s3_offloaded is NOT in CONTROL_PLANE_FIELDS, so it's absent from
+        # the top-level state_data. segment_runner checks top-level __s3_offloaded
+        # to trigger S3 recovery failure (FAIL test scenario).
+        if s3_offloaded_flag is True and isinstance(response_data.get('state_data'), dict):
+            response_data['state_data']['__s3_offloaded'] = True
+            if s3_path_val:
+                response_data['state_data']['__s3_path'] = s3_path_val
+
         logger.info(f"✅ [Kernel Protocol] Init complete: next_action={response_data.get('next_action')}")
     elif _HAS_USC and universal_sync_core:
         # Fallback to direct USC (if kernel_protocol not available)
