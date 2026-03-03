@@ -7,18 +7,12 @@ import boto3
 from botocore.exceptions import ClientError
 import time
 
+from src.common.exceptions import ExecutionNotFound, ExecutionForbidden
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 stepfunctions = boto3.client('stepfunctions')
-
-
-class ExecutionNotFound(Exception):
-    pass
-
-
-class ExecutionForbidden(Exception):
-    pass
 
 
 def _safe_json_load(raw: Any) -> Any:
@@ -72,7 +66,7 @@ def describe_execution(execution_arn: str) -> Dict[str, Any]:
     except ClientError as exc:
         code = exc.response.get('Error', {}).get('Code')
         if code in ('ExecutionDoesNotExist', 'StateMachineDoesNotExist'):
-            raise ExecutionNotFound() from src.exc
+            raise ExecutionNotFound() from exc
         logger.exception('DescribeExecution error for %s: %s', execution_arn, exc)
         raise
 

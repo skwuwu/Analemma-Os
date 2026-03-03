@@ -195,7 +195,10 @@ def handle_bedrock_error(
     elif error_code == 'ServiceQuotaExceededException':
         return QuotaExceededError("bedrock", f"Service quota exceeded for {model}")
     else:
-        return LLMServiceError("bedrock", f"{error_code}: {error_message}")
+        return LLMServiceError(
+            message=f"{error_code}: {error_message}",
+            provider="bedrock"
+        )
 
 
 def handle_llm_api_error(
@@ -246,7 +249,11 @@ def handle_llm_api_error(
             return ValidationError(f"Anthropic validation error: {error}")
     
     # General LLM service error
-    return LLMServiceError(provider, str(error))
+    return LLMServiceError(
+        message=str(error),
+        original_error=error,
+        provider=provider
+    )
 
 
 def handle_network_error(error: Exception, service: str, operation: str) -> Exception:

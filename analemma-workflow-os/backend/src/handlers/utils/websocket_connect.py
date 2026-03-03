@@ -46,28 +46,9 @@ except ImportError:
 
 dynamodb = boto3.resource('dynamodb')
 
-# Import exec_status_helper with fallback pattern used by other Lambda functions
-try:
-    from src.common.exec_status_helper import (
-        build_status_payload,
-        ExecutionForbidden,
-        ExecutionNotFound,
-    )
-except ImportError:
-    try:
-        from src.common.exec_status_helper import (
-            build_status_payload,
-            ExecutionForbidden,
-            ExecutionNotFound,
-        )
-    except ImportError:
-        # Last resort: define minimal fallbacks
-        def build_status_payload(*args, **kwargs):
-            return {"error": "exec_status_helper not available"}
-        class ExecutionForbidden(Exception):
-            pass
-        class ExecutionNotFound(Exception):
-            pass
+# Import exec_status_helper and common exception classes
+from src.common.exec_status_helper import build_status_payload
+from src.common.exceptions import ExecutionForbidden, ExecutionNotFound
 
 
 def lambda_handler(event, context):

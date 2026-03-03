@@ -359,15 +359,6 @@ def calculate_checksum(data: Any) -> str:
     return hashlib.md5(json_str.encode('utf-8')).hexdigest()
 
 
-def calculate_payload_size(data: Dict[str, Any]) -> int:
-    """페이로드 크기 계산 (KB)"""
-    try:
-        json_str = json.dumps(data, separators=(',', ':'))
-        return len(json_str.encode('utf-8')) // 1024
-    except Exception:
-        return 0
-
-
 def flatten_result(result: Any, context: Optional[SyncContext] = None) -> Dict[str, Any]:
     """
     📥 입력 정규화 (Normalize) - v3.2 스마트 추출

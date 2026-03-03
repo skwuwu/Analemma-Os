@@ -130,6 +130,29 @@ class LLMModels:
     DEFAULT_REALTIME = GEMINI_1_5_FLASH  # 실시간 협업용
 
 
+class PayloadLimits:
+    """AWS Step Functions / Lambda payload size limits.
+
+    All threshold constants related to 256KB SFN payload limit should
+    reference this class instead of using scattered magic numbers.
+    """
+
+    # Hard limit imposed by AWS Step Functions
+    SFN_MAX_BYTES = 256 * 1024  # 256 KB
+
+    # Safe thresholds (leave margin for AWS wrapper overhead ~15-76 KB)
+    SAFE_THRESHOLD_BYTES = 180 * 1024   # 180 KB — general segment runner
+    SAFE_THRESHOLD_KB = 180
+
+    AGGREGATOR_SAFE_BYTES = 120 * 1024  # 120 KB — aggregator path (extra margin)
+
+    # S3 offload trigger (state_data_manager default)
+    OFFLOAD_THRESHOLD_KB = int(os.environ.get('MAX_PAYLOAD_SIZE_KB', '200'))
+
+    # EventBridge payload limit (same as SFN)
+    EVENTBRIDGE_MAX_BYTES = 256 * 1024
+
+
 class HTTPStatusCodes:
     """HTTP 상태 코드 상수"""
     

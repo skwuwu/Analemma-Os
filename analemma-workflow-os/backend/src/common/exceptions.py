@@ -161,14 +161,6 @@ class ExternalServiceError(BaseAnalemmaError):
         self.service_name = service_name
 
 
-class LLMServiceError(ExternalServiceError):
-    """LLM 서비스 호출에 실패했습니다"""
-    
-    def __init__(self, provider: str = "unknown", message: str = None):
-        super().__init__(f"LLM/{provider}", message)
-        self.provider = provider
-
-
 class S3OperationError(ExternalServiceError):
     """S3 작업에 실패했습니다"""
     

@@ -547,20 +547,8 @@ Resources:
   #
   # ❌ FAILURE SYMPTOMS: "Exec format error" when Lambda tries to run x86_64 image on arm64 runtime
   # ✅ VERIFICATION: docker inspect <image> | grep Architecture → should show "arm64"
-  PartitionWorkflowFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      PackageType: Image
-      ImageUri: !Ref BackendLambdaImageUri
-      ImageConfig:
-        Command: ["src.services.partition_workflow_lambda.lambda_handler"]
-      Timeout: 60
-      Environment:
-        Variables:
-          WORKFLOWS_TABLE: !Ref WorkflowsTableV3
-      Policies:
-        - DynamoDBReadPolicy:
-            TableName: !Ref UsersTableV3
+  # [REMOVED] PartitionWorkflowFunction — handler file src.services.partition_workflow_lambda
+  # does not exist. Partitioning is now handled by InitializeStateDataFunction.
 
   InitializeStateDataFunction:
     Type: AWS::Serverless::Function
@@ -2565,8 +2553,7 @@ Resources:
         IdempotencyTable: !Ref IdempotencyTableV3
         # Express Workflow removed - using alternative Event History mitigation strategies
       Policies:
-        - LambdaInvokePolicy:
-            FunctionName: !Ref PartitionWorkflowFunction
+        # [REMOVED] PartitionWorkflowFunction — handler does not exist
         - LambdaInvokePolicy:
             FunctionName: !Ref SegmentRunnerFunction
         # [2순위 최적화] CheckIdempotencyFunction 제거 - Direct SDK로 대체
@@ -2622,8 +2609,7 @@ Resources:
         WorkflowStateBucket: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Policies:
         # 기존 함수들에 대한 권한
-        - LambdaInvokePolicy:
-            FunctionName: !Ref PartitionWorkflowFunction
+        # [REMOVED] PartitionWorkflowFunction — handler does not exist
         - LambdaInvokePolicy:
             FunctionName: !Ref SegmentRunnerFunction
         - DynamoDBReadPolicy:
@@ -4256,40 +4242,9 @@ Resources:
               ArnEquals:
                 aws:SourceArn: !Ref GovernanceViolationTopic
 
-  # Lambda function for async rationale generation (Tier 2 violations)
-  RationaleGeneratorFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: !Sub "rationale-generator-${StageName}"
-      PackageType: Image
-      ImageUri: !Ref BackendLambdaImageUri
-      ImageConfig:
-        Command: ["src.handlers.governance.rationale_generator_lambda.lambda_handler"]
-      Timeout: 900  # 15 minutes
-      MemorySize: 512
-      Environment:
-        Variables:
-          MANIFEST_TABLE: !Ref WorkflowsTableV3
-          AUDIT_LOG_TABLE: !Ref GovernanceAuditLogV3
-          BEDROCK_REGION: !Ref AWS::Region
-      Policies:
-        - DynamoDBCrudPolicy:
-            TableName: !Ref WorkflowsTableV3
-        - DynamoDBCrudPolicy:
-            TableName: !Ref GovernanceAuditLogV3
-        - Statement:
-          - Effect: Allow
-            Action:
-              - bedrock:InvokeModel
-            Resource: 
-              - !Sub "arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
-      Events:
-        SQSTrigger:
-          Type: SQS
-          Properties:
-            Queue: !GetAtt GovernanceRationaleQueue.Arn
-            BatchSize: 10
-            MaximumBatchingWindowInSeconds: 5
+  # [REMOVED] RationaleGeneratorFunction — handler file
+  # src.handlers.governance.rationale_generator_lambda does not exist.
+  # Re-add when governance rationale generation is implemented.
 
   # --- Optional S3 bucket for workflow state (created when WorkflowStateBucket param is empty) ---
   # 🔧 수명 주기 정책 최적화: Outcome Manager 접근성 고려

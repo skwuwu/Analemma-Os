@@ -1936,12 +1936,6 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
     
     return prompt, multimodal_parts
 
-# Async processing threshold (configurable via environment variable)
-# [DISABLED] Fargate async is NOT IMPLEMENTED yet. Set very high threshold to disable.
-# Original: ASYNC_TOKEN_THRESHOLD = 2000 (caused false positives with max_tokens > 2000)
-ASYNC_TOKEN_THRESHOLD = int(os.getenv('ASYNC_TOKEN_THRESHOLD', '999999'))  # Effectively disabled
-ASYNC_HEAVY_MODELS = os.getenv('ASYNC_HEAVY_MODELS', 'claude-3-opus,gpt-4').split(',')
-
 # HTTP request timeout configuration
 DEFAULT_HTTP_TIMEOUT = float(os.environ.get('DEFAULT_HTTP_TIMEOUT', '10.0'))  # seconds
 MAX_HTTP_TIMEOUT = float(os.environ.get('MAX_HTTP_TIMEOUT', '30.0'))  # seconds
@@ -1949,27 +1943,6 @@ MAX_HTTP_TIMEOUT = float(os.environ.get('MAX_HTTP_TIMEOUT', '30.0'))  # seconds
 # Token cost estimation (USD per million tokens)
 CACHE_COST_REDUCTION = float(os.environ.get('CACHE_COST_REDUCTION', '0.75'))  # 75% savings
 APPROXIMATE_TOKEN_COST_USD = float(os.environ.get('APPROXIMATE_TOKEN_COST_USD', '0.000001'))  # $1 per 1M tokens
-
-def should_use_async_llm(config: Dict[str, Any]) -> bool:
-    """
-    Heuristic to check if async processing is needed.
-    
-    [DISABLED] Fargate async worker is NOT IMPLEMENTED.
-    Always return False until ECS/Fargate infrastructure is deployed.
-    """
-    # [TODO] Re-enable when Fargate async worker is implemented
-    # max_tokens = config.get("max_tokens", 0)
-    # model = config.get("model", "")
-    # force_async = config.get("force_async", False)
-    # 
-    # high_token_count = max_tokens > ASYNC_TOKEN_THRESHOLD
-    # heavy_model = any(heavy in model for heavy in ASYNC_HEAVY_MODELS)
-    # 
-    # if high_token_count or heavy_model or force_async:
-    #     logger.info(f"Async required: tokens={max_tokens}, model={model}, force={force_async}")
-    #     return True
-    return False  # Always sync until Fargate is implemented
-
 
 # -----------------------------------------------------------------------------
 # 4. Node Runners Implementation
@@ -2230,10 +2203,6 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     logger.warning(f"Unknown provider '{configured_provider}' for model '{model}', defaulting to Gemini")
                     actual_config["provider"] = "gemini"
             
-            if should_use_async_llm(actual_config):
-                logger.warning(f"🚨 Async required by heuristic for node {node_id}")
-                raise AsyncLLMRequiredException("Resource-intensive processing required")
-
             # 3. Invoke - Provider Selection (Gemini or Bedrock)
             meta = {
                 "model": model, 
