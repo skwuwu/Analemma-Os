@@ -490,8 +490,8 @@
       "Comment": "🎯 [v3.32] Route to E2E proxy (waitForTaskToken) or direct Lambda invoke",
       "Choices": [
         {
-          "Variable": "$.state_data.bag.__e2e_proxy",
-          "IsPresent": true,
+          "Variable": "$.__e2e_proxy",
+          "BooleanEquals": true,
           "Next": "ExecuteSegmentProxy"
         }
       ],
