@@ -155,13 +155,14 @@ class TestPayloadBloatS3Fallback:
 
 
 class TestNetworkPartitionTimeout:
-    """Kill tunnel mid-execution -> SFN heartbeat timeout -> Catch -> NotifyAndFail"""
+    """Disconnect MQTT mid-execution -> SFN heartbeat timeout -> Catch -> NotifyAndFail"""
 
     def test_network_partition_timeout(
         self,
         sfn_orchestrator_arn,
         sfn_client,
         start_sfn_execution,
+        mqtt_worker,
     ):
         # Start an execution
         input_data = _build_chaos_input(
@@ -185,9 +186,8 @@ class TestNetworkPartitionTimeout:
         if status["status"] != "RUNNING":
             pytest.skip("Execution not running, cannot test partition")
 
-        # NOTE: Actually killing the tunnel would affect other tests.
-        # In a real chaos test, this would be done in an isolated environment.
-        # Here we verify the SFN has proper timeout configuration.
+        # Simulate network partition by disconnecting MQTT client
+        mqtt_worker.disconnect()
 
         # Verify the execution eventually terminates (HeartbeatSeconds timeout)
         deadline = time.time() + 600  # 10 min max
@@ -201,6 +201,10 @@ class TestNetworkPartitionTimeout:
         assert final_status["status"] in ("SUCCEEDED", "FAILED", "TIMED_OUT"), (
             f"Partition test should terminate, got {final_status['status']}"
         )
+
+        # Reconnect MQTT for subsequent tests
+        mqtt_worker.connect()
+        mqtt_worker.subscribe_and_run()
 
 
 # ── Test 4: Worker Crash Recovery ────────────────────────────────────────────

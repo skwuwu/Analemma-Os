@@ -287,7 +287,8 @@ async def _startup():
     except Exception as exc:
         logger.warning(
             "[VirtualSegmentManager] Governance components unavailable (%s). "
-            "Running in degraded mode (Fail-Open).", exc,
+            "Running in degraded mode — CapabilityMap enforced via shared_policy fallback, "
+            "SemanticShield/GovernanceEngine skipped.", exc,
         )
 
 
@@ -344,6 +345,10 @@ async def propose_segment(req: SegmentProposalRequest):
             logger.warning("[VirtualSegmentManager] SemanticShield error (skip): %s", exc)
 
     # ── [2] Capability validation ─────────────────────────────────────────────
+    # Primary: use _security_guard if available.
+    # Fallback: direct whitelist lookup via _ALLOWED_TOOLS_BY_RING (shared_policy).
+    # This ensures capability enforcement even when governance components fail to load.
+    _cap_checked = False
     if _security_guard is not None:
         try:
             from src.services.governance.governance_engine import RingLevel
@@ -358,6 +363,7 @@ async def propose_segment(req: SegmentProposalRequest):
                         "capability", action, ring_level, allowed_tools=allowed,
                     ),
                 )
+            _cap_checked = True
         except ValueError:
             return _commit(
                 "REJECTED", "local_only",
@@ -365,7 +371,21 @@ async def propose_segment(req: SegmentProposalRequest):
                 recovery_instruction="ring_level must be 0–3. Check SegmentContext.ring_level.",
             )
         except Exception as exc:
-            logger.warning("[VirtualSegmentManager] Capability check error (fail-open): %s", exc)
+            logger.warning("[VirtualSegmentManager] Capability check error (fallback to whitelist): %s", exc)
+
+    if not _cap_checked:
+        # Fallback: direct whitelist check (Default-Deny)
+        allowed_tools = _ALLOWED_TOOLS_BY_RING.get(ring_level, frozenset())
+        if "*" not in allowed_tools and action not in allowed_tools:
+            allowed = sorted(allowed_tools)
+            status = "SOFT_ROLLBACK" if is_optimistic else "REJECTED"
+            return _commit(
+                status, "local_only",
+                warnings=[f"Capability denied: {action} at Ring {ring_level} (fallback check)"],
+                recovery_instruction=_build_recovery_instruction(
+                    "capability", action, ring_level, allowed_tools=allowed,
+                ),
+            )
 
     # ── [3] Budget Watchdog ───────────────────────────────────────────────────
     token_usage = req.state_snapshot.get("token_usage_total", 0)

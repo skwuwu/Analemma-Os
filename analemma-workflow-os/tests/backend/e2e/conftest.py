@@ -1,10 +1,10 @@
 """
-E2E Test Fixtures — AWS credentials, local servers, tunnel management.
+E2E Test Fixtures — AWS credentials, local servers, IoT Core MQTT.
 
 Features:
     - Real AWS session (NOT moto) for E2E tests
-    - VSM server on :8765 and Worker server on :9876 as background processes
-    - Tunnel auto-rebuild with TunnelHealthMonitor (30s check interval)
+    - VSM server on :8765 as background process
+    - IoT Core MQTT worker (replaces ngrok tunnel — outbound 443 only)
     - MerkleVerifier fixture for state consistency checks
     - Hard timeout (120s) per test
     - Idempotency table creation/verification
@@ -27,10 +27,7 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ────────────────────────────────────────────────────────────
 
-E2E_WORKER_PORT = int(os.environ.get("E2E_WORKER_PORT", "9876"))
 VSM_PORT = int(os.environ.get("VSM_PORT", "8765"))
-TUNNEL_CHECK_INTERVAL = int(os.environ.get("TUNNEL_CHECK_INTERVAL", "30"))
-TUNNEL_MAX_RETRIES = int(os.environ.get("TUNNEL_MAX_RETRIES", "3"))
 E2E_TEST_TIMEOUT = int(os.environ.get("E2E_TEST_TIMEOUT", "120"))
 
 # ── Pytest Markers ───────────────────────────────────────────────────────────
@@ -172,187 +169,55 @@ def vsm_server():
     proc.wait(timeout=10)
 
 
-@pytest.fixture(scope="session")
-def worker_server(vsm_server):
-    """Start E2E Worker Server on :9876 in background process."""
-    health_url = f"http://localhost:{E2E_WORKER_PORT}/health"
+# ── IoT Core MQTT Worker ────────────────────────────────────────────────────
 
-    # Check if already running
+
+@pytest.fixture(scope="session")
+def iot_endpoint(aws_session):
+    """Discover IoT Core Data-ATS endpoint for the account."""
+    iot_client = aws_session.client("iot")
+    response = iot_client.describe_endpoint(endpointType="iot:Data-ATS")
+    endpoint = response["endpointAddress"]
+    logger.info("[E2E] IoT Core endpoint: %s", endpoint)
+    return endpoint
+
+
+@pytest.fixture(scope="session")
+def mqtt_worker(vsm_server, iot_endpoint, aws_session, idempotency_table):
+    """
+    Start local MQTT worker that subscribes to E2E task topics.
+
+    [Feedback ⑤] Depends on vsm_server fixture — pytest guarantees VSM
+    is healthy before this fixture runs. Additionally, explicit health
+    check before MQTT connect ensures governance pipeline is ready.
+    """
+    from tests.backend.e2e.mqtt_client import E2EMqttClient
+
+    # [Feedback ⑤] Verify VSM is healthy before starting MQTT worker
+    vsm_url = f"http://localhost:{VSM_PORT}/v1/health"
     try:
-        resp = requests.get(health_url, timeout=2)
-        if resp.status_code == 200:
-            logger.info("[E2E] Worker already running on port %d", E2E_WORKER_PORT)
-            yield None
-            return
+        resp = requests.get(vsm_url, timeout=5)
+        assert resp.status_code == 200, f"VSM not healthy: {resp.text}"
     except requests.exceptions.ConnectionError:
-        pass
+        pytest.fail(f"VSM not running on port {VSM_PORT}. Cannot start MQTT worker.")
 
-    logger.info("[E2E] Starting worker server on port %d", E2E_WORKER_PORT)
-    proc = subprocess.Popen(
-        [
-            sys.executable, "-m", "uvicorn",
-            "tests.backend.e2e.worker_server:app",
-            "--host", "0.0.0.0",
-            "--port", str(E2E_WORKER_PORT),
-        ],
-        cwd=os.path.join(os.path.dirname(__file__), "..", "..", ".."),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    state_bucket = os.environ.get(
+        "WORKFLOW_STATE_BUCKET",
+        os.environ.get("SKELETON_S3_BUCKET", "analemma-workflow-state-dev"),
     )
 
-    if not _wait_for_server(health_url, timeout=30):
-        proc.terminate()
-        pytest.fail(f"Worker server failed to start on port {E2E_WORKER_PORT}")
-
-    logger.info("[E2E] Worker server started (pid=%d)", proc.pid)
-    yield proc
-    proc.terminate()
-    proc.wait(timeout=10)
-
-
-# ── Tunnel Management ────────────────────────────────────────────────────────
-
-
-class TunnelHealthMonitor:
-    """
-    Background thread that monitors tunnel health and auto-reconnects.
-
-    Pings the tunnel every check_interval seconds via the worker /health endpoint.
-    On failure: tears down old tunnel, reconnects with exponential backoff.
-    Max 3 reconnection attempts before raising TunnelError.
-    """
-
-    def __init__(self, port: int, check_interval: int = 30, max_retries: int = 3):
-        self._port = port
-        self._check_interval = check_interval
-        self._max_retries = max_retries
-        self._current_url: Optional[str] = None
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._lock = threading.Lock()
-
-    @property
-    def current_url(self) -> Optional[str]:
-        with self._lock:
-            return self._current_url
-
-    def start(self, initial_url: str) -> None:
-        self._current_url = initial_url
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._monitor_loop, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread:
-            self._thread.join(timeout=10)
-
-    def _monitor_loop(self) -> None:
-        while not self._stop_event.is_set():
-            self._stop_event.wait(timeout=self._check_interval)
-            if self._stop_event.is_set():
-                break
-
-            url = self.current_url
-            if not url:
-                continue
-
-            try:
-                resp = requests.get(f"{url}/health", timeout=5)
-                if resp.status_code == 200:
-                    continue
-            except Exception:
-                pass
-
-            # Tunnel is down -- attempt reconnection
-            logger.warning("[TunnelMonitor] Tunnel health check failed, attempting reconnect...")
-            new_url = self._reconnect()
-            if new_url:
-                with self._lock:
-                    self._current_url = new_url
-                logger.info("[TunnelMonitor] Reconnected: %s", new_url)
-            else:
-                logger.error("[TunnelMonitor] Reconnection failed after %d attempts", self._max_retries)
-
-    def _reconnect(self) -> Optional[str]:
-        """Attempt tunnel reconnection with exponential backoff."""
-        try:
-            from pyngrok import ngrok
-        except ImportError:
-            logger.error("[TunnelMonitor] pyngrok not installed, cannot reconnect")
-            return None
-
-        # Kill existing tunnels
-        try:
-            for t in ngrok.get_tunnels():
-                ngrok.disconnect(t.public_url)
-        except Exception:
-            pass
-
-        for attempt in range(self._max_retries):
-            delay = 2 ** attempt  # 1s, 2s, 4s
-            time.sleep(delay)
-            try:
-                tunnel = ngrok.connect(self._port, bind_tls=True)
-                # Verify the new tunnel works
-                resp = requests.get(f"{tunnel.public_url}/health", timeout=5)
-                if resp.status_code == 200:
-                    return tunnel.public_url
-            except Exception as e:
-                logger.warning(
-                    "[TunnelMonitor] Reconnect attempt %d/%d failed: %s",
-                    attempt + 1, self._max_retries, e,
-                )
-
-        return None
-
-
-def _create_tunnel_with_retry(port: int, max_retries: int = 3) -> str:
-    """Create an ngrok tunnel with retry logic."""
-    try:
-        from pyngrok import ngrok
-    except ImportError:
-        pytest.skip("pyngrok not installed. Install with: pip install pyngrok")
-
-    for attempt in range(max_retries):
-        try:
-            tunnel = ngrok.connect(port, bind_tls=True)
-            logger.info("[E2E] Tunnel created: %s -> localhost:%d", tunnel.public_url, port)
-            return tunnel.public_url
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-                logger.warning("[E2E] Tunnel creation attempt %d failed: %s", attempt + 1, e)
-            else:
-                pytest.fail(f"Failed to create tunnel after {max_retries} attempts: {e}")
-
-    return ""  # unreachable
-
-
-@pytest.fixture(scope="session")
-def tunnel_url(worker_server):
-    """
-    Open ngrok tunnel to local worker. Returns public URL.
-
-    Includes TunnelHealthMonitor for auto-rebuild on disconnect.
-    """
-    url = _create_tunnel_with_retry(port=E2E_WORKER_PORT, max_retries=TUNNEL_MAX_RETRIES)
-
-    monitor = TunnelHealthMonitor(
-        port=E2E_WORKER_PORT,
-        check_interval=TUNNEL_CHECK_INTERVAL,
-        max_retries=TUNNEL_MAX_RETRIES,
+    client = E2EMqttClient(
+        iot_endpoint=iot_endpoint,
+        region=aws_session.region_name,
+        state_bucket=state_bucket,
     )
-    monitor.start(initial_url=url)
+    client.connect()
+    client.subscribe_and_run()
 
-    yield url
+    logger.info("[E2E] MQTT worker connected and subscribed (client_id=%s)", client._client_id)
+    yield client
 
-    monitor.stop()
-    try:
-        from pyngrok import ngrok
-        ngrok.disconnect(url)
-    except Exception:
-        pass
+    client.disconnect()
 
 
 # ── MerkleVerifier ───────────────────────────────────────────────────────────

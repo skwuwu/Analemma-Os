@@ -1,10 +1,11 @@
 """
-E2E Worker Server — Local FastAPI worker for Hybrid Tunnel Testing
+E2E Worker Server — Local FastAPI worker for Hybrid Testing
 
-Receives forwarded SFN tasks via tunnel, runs ReactExecutor with real VSM
+Receives forwarded SFN tasks via MQTT or HTTP, runs ReactExecutor with real VSM
 governance, and returns results to SFN via SendTaskSuccess.
 
-Runs at: localhost:9876
+The core execution logic is in execute_segment_task() — shared between
+the FastAPI HTTP endpoint and the MQTT subscriber (mqtt_client.py).
 
 Features:
     - DynamoDB-based idempotency (prevents duplicate task execution)
@@ -18,8 +19,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
@@ -43,7 +43,7 @@ AWS_REGION = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "
 IDEMPOTENCY_TABLE = os.environ.get("E2E_IDEMPOTENCY_TABLE", "E2EWorkerIdempotency")
 MAX_ITERATIONS_HARD_CAP = 50
 
-app = FastAPI(title="Analemma E2E Worker", version="1.0.0")
+app = FastAPI(title="Analemma E2E Worker", version="2.0.0")
 
 # ── Pydantic Models ──────────────────────────────────────────────────────────
 
@@ -127,6 +127,35 @@ def _check_idempotency(idem_key: str) -> Optional[Dict[str, Any]]:
         raise
 
 
+def check_idempotency_simple(idem_key: str) -> Optional[Dict[str, Any]]:
+    """
+    Check DynamoDB for prior execution (MQTT-safe version, no HTTPException).
+
+    Returns:
+        None if new/retryable, cached result dict if already completed,
+        "PENDING" string if in-progress.
+    """
+    try:
+        table = _get_dynamodb().Table(IDEMPOTENCY_TABLE)
+        resp = table.get_item(Key={"idempotency_key": idem_key})
+        item = resp.get("Item")
+
+        if item is None:
+            return None
+
+        status = item.get("status", "UNKNOWN")
+        if status == "COMPLETED":
+            return item.get("cached_result", {})
+        elif status == "PENDING":
+            return "PENDING"
+        return None
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code")
+        if code == "ResourceNotFoundException":
+            return None
+        raise
+
+
 def _write_idempotency(idem_key: str, status: str, cached_result: Optional[Dict] = None) -> None:
     """Write idempotency record to DynamoDB."""
     try:
@@ -193,7 +222,7 @@ def _send_task_failure(task_token: str, error: str, cause: str) -> None:
     logger.info("[Worker] SendTaskFailure: error=%s", error[:100])
 
 
-# ── Default Tool for E2E ─────────────────────────────────────────────────────
+# ── Default Tools for E2E ────────────────────────────────────────────────────
 
 def _echo_handler(params: Dict[str, Any]) -> str:
     """Default E2E tool: echoes input text."""
@@ -209,7 +238,135 @@ def _compute_handler(params: Dict[str, Any]) -> Dict[str, Any]:
     return {"result": ops.get(op, a + b), "operation": op}
 
 
-# ── Main Endpoint ────────────────────────────────────────────────────────────
+# ── Core Execution Logic (shared between HTTP and MQTT) ──────────────────────
+
+def execute_segment_task(
+    task_token: str,
+    execution_id: str,
+    owner_id: str,
+    bag: Dict[str, Any],
+    max_iterations: int,
+    workflow_config: Optional[Dict[str, Any]] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Core segment execution logic — shared between FastAPI and MQTT paths.
+
+    Args:
+        task_token: SFN task token for SendTaskSuccess
+        execution_id: Unique execution identifier
+        owner_id: Owner ID for governance context
+        bag: State bag from SFN
+        max_iterations: Max ReactExecutor iterations (hard-capped at 50)
+        workflow_config: Optional workflow configuration
+
+    Returns:
+        Tuple of (sealed_state_bag, response_summary)
+
+    Raises:
+        Exception on execution failure
+    """
+    max_iter = min(max_iterations, MAX_ITERATIONS_HARD_CAP)
+    task_prompt = bag.get("task_prompt", bag.get("prompt", "Execute the workflow segment."))
+
+    # Initialize AnalemmaBridge with real VSM
+    bridge = AnalemmaBridge(
+        workflow_id=f"e2e_{execution_id}",
+        ring_level=2,  # SERVICE level for E2E
+        kernel_endpoint=VSM_ENDPOINT,
+        mode="strict",
+    )
+
+    # Initialize ReactExecutor
+    executor = ReactExecutor(
+        bridge=bridge,
+        max_iterations=max_iter,
+        token_budget=500_000,
+    )
+
+    # Register default E2E tools
+    executor.add_tool(
+        name="read_only",
+        description="Echo text back (read-only test tool)",
+        input_schema={
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Text to echo"}},
+            "required": ["text"],
+        },
+        handler=_echo_handler,
+        bridge_action="read_only",
+    )
+    executor.add_tool(
+        name="basic_query",
+        description="Perform simple arithmetic (a op b)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "a": {"type": "number"},
+                "b": {"type": "number"},
+                "operation": {"type": "string", "enum": ["add", "subtract", "multiply"]},
+            },
+            "required": ["a", "b"],
+        },
+        handler=_compute_handler,
+        bridge_action="basic_query",
+    )
+
+    # Register additional tools from workflow_config if provided
+    if workflow_config and "tools" in workflow_config:
+        for tool_def in workflow_config["tools"]:
+            executor.add_tool(
+                name=tool_def["name"],
+                description=tool_def.get("description", ""),
+                input_schema=tool_def.get("input_schema", {"type": "object", "properties": {}}),
+                handler=lambda p, desc=tool_def.get("description", ""): f"[E2E stub] {desc}: {p}",
+                bridge_action=tool_def.get("bridge_action", tool_def["name"]),
+            )
+
+    # Execute ReAct loop
+    logger.info(
+        "[Worker] Starting ReactExecutor: execution_id=%s, max_iter=%d, task=%s",
+        execution_id, max_iter, task_prompt[:100],
+    )
+    result = executor.run(task_prompt)
+
+    # Seal state bag
+    result_delta = {
+        "status": "COMPLETE" if result.stop_reason == "end_turn" else result.stop_reason.upper(),
+        "_status": "COMPLETE" if result.stop_reason == "end_turn" else result.stop_reason.upper(),
+        "react_result": {
+            "final_answer": result.final_answer,
+            "iterations": result.iterations,
+            "stop_reason": result.stop_reason,
+            "segments": result.segments,
+            "total_input_tokens": result.total_input_tokens,
+            "total_output_tokens": result.total_output_tokens,
+        },
+        "llm_raw_output": result.final_answer,
+        "total_tokens": result.total_input_tokens + result.total_output_tokens,
+    }
+
+    sealed = seal_state_bag(
+        base_state=bag,
+        result_delta=result_delta,
+        action="sync",
+        context={"segment_type": "E2E_REACT"},
+    )
+
+    response_summary = {
+        "status": "SUCCESS",
+        "execution_id": execution_id,
+        "iterations": result.iterations,
+        "stop_reason": result.stop_reason,
+        "final_answer": result.final_answer[:10000],
+        "segments": result.segments,
+        "total_input_tokens": result.total_input_tokens,
+        "total_output_tokens": result.total_output_tokens,
+    }
+
+    return sealed, response_summary
+
+
+# ── Main FastAPI Endpoint ────────────────────────────────────────────────────
 
 @app.post("/task/execute", response_model=TaskExecuteResponse)
 async def execute_task(request: TaskExecuteRequest):
@@ -234,119 +391,33 @@ async def execute_task(request: TaskExecuteRequest):
     # Mark as PENDING
     _write_idempotency(idem_key, "PENDING")
 
-    # Enforce hard cap on iterations
-    max_iter = min(request.max_iterations, MAX_ITERATIONS_HARD_CAP)
-
     try:
-        # Step 1: Extract state from bag
         bag = request.bag or open_state_bag(request.payload)
-        task_prompt = bag.get("task_prompt", bag.get("prompt", "Execute the workflow segment."))
 
-        # Step 2: Initialize AnalemmaBridge with real VSM
-        bridge = AnalemmaBridge(
-            workflow_id=f"e2e_{request.execution_id}",
-            ring_level=2,  # SERVICE level for E2E
-            kernel_endpoint=VSM_ENDPOINT,
-            mode="strict",
+        sealed, response_summary = execute_segment_task(
+            task_token=request.task_token,
+            execution_id=request.execution_id,
+            owner_id=request.owner_id,
+            bag=bag,
+            max_iterations=request.max_iterations,
+            workflow_config=request.workflow_config,
         )
 
-        # Step 3: Initialize ReactExecutor
-        executor = ReactExecutor(
-            bridge=bridge,
-            max_iterations=max_iter,
-            token_budget=500_000,
-        )
-
-        # Step 4: Register default E2E tools
-        executor.add_tool(
-            name="read_only",
-            description="Echo text back (read-only test tool)",
-            input_schema={
-                "type": "object",
-                "properties": {"text": {"type": "string", "description": "Text to echo"}},
-                "required": ["text"],
-            },
-            handler=_echo_handler,
-            bridge_action="read_only",
-        )
-        executor.add_tool(
-            name="basic_query",
-            description="Perform simple arithmetic (a op b)",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "a": {"type": "number"},
-                    "b": {"type": "number"},
-                    "operation": {"type": "string", "enum": ["add", "subtract", "multiply"]},
-                },
-                "required": ["a", "b"],
-            },
-            handler=_compute_handler,
-            bridge_action="basic_query",
-        )
-
-        # Register additional tools from workflow_config if provided
-        if request.workflow_config and "tools" in request.workflow_config:
-            for tool_def in request.workflow_config["tools"]:
-                executor.add_tool(
-                    name=tool_def["name"],
-                    description=tool_def.get("description", ""),
-                    input_schema=tool_def.get("input_schema", {"type": "object", "properties": {}}),
-                    handler=lambda p, desc=tool_def.get("description", ""): f"[E2E stub] {desc}: {p}",
-                    bridge_action=tool_def.get("bridge_action", tool_def["name"]),
-                )
-
-        # Step 5: Execute ReAct loop
-        logger.info(
-            "[Worker] Starting ReactExecutor: execution_id=%s, max_iter=%d, task=%s",
-            request.execution_id, max_iter, task_prompt[:100],
-        )
-        result = executor.run(task_prompt)
-
-        # Step 6: Seal state bag
-        result_delta = {
-            "status": "COMPLETE" if result.stop_reason == "end_turn" else result.stop_reason.upper(),
-            "_status": "COMPLETE" if result.stop_reason == "end_turn" else result.stop_reason.upper(),
-            "react_result": {
-                "final_answer": result.final_answer,
-                "iterations": result.iterations,
-                "stop_reason": result.stop_reason,
-                "segments": result.segments,
-                "total_input_tokens": result.total_input_tokens,
-                "total_output_tokens": result.total_output_tokens,
-            },
-            "llm_raw_output": result.final_answer,
-            "total_tokens": result.total_input_tokens + result.total_output_tokens,
-        }
-
-        sealed = seal_state_bag(
-            base_state=bag,
-            result_delta=result_delta,
-            action="sync",
-            context={"segment_type": "E2E_REACT"},
-        )
-
-        # Step 7: SendTaskSuccess to SFN
+        # SendTaskSuccess to SFN
         _send_task_success(request.task_token, sealed)
 
-        # Step 8: Mark completed in idempotency table
-        response_data = {
-            "status": "SUCCESS",
-            "execution_id": request.execution_id,
-            "iterations": result.iterations,
-            "stop_reason": result.stop_reason,
-        }
-        _write_idempotency(idem_key, "COMPLETED", cached_result=response_data)
+        # Mark completed in idempotency table
+        _write_idempotency(idem_key, "COMPLETED", cached_result=response_summary)
 
         return TaskExecuteResponse(
             status="SUCCESS",
             execution_id=request.execution_id,
-            iterations=result.iterations,
-            stop_reason=result.stop_reason,
-            final_answer=result.final_answer[:10000],  # Truncate for response
-            segments=result.segments,
-            total_input_tokens=result.total_input_tokens,
-            total_output_tokens=result.total_output_tokens,
+            iterations=response_summary["iterations"],
+            stop_reason=response_summary["stop_reason"],
+            final_answer=response_summary["final_answer"],
+            segments=response_summary["segments"],
+            total_input_tokens=response_summary["total_input_tokens"],
+            total_output_tokens=response_summary["total_output_tokens"],
             idempotency_status="NEW",
         )
 

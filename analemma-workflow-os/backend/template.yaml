@@ -98,11 +98,18 @@ Parameters:
     Default: ""
     Description: ARN of a pre-existing Kinesis stream. If provided, creation is skipped.
 
-  # [E2E Hybrid Tunnel Testing] Tunnel URL for local worker proxy
-  E2ETunnelUrl:
+  # [E2E IoT Core MQTT] Enable IoT Core pub/sub for hybrid testing
+  E2EIoTEnabled:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Enable IoT Core MQTT for E2E hybrid testing
+
+  # [E2E IoT Core MQTT] IoT Core Data-ATS endpoint
+  E2EIoTEndpoint:
     Type: String
     Default: ""
-    Description: Tunnel URL for E2E hybrid testing (empty = E2E proxy disabled)
+    Description: IoT Core Data-ATS endpoint (from aws iot describe-endpoint --endpoint-type iot:Data-ATS)
 
   # [Addition] Inject image URI built externally
   BackendLambdaImageUri:
@@ -182,8 +189,8 @@ Conditions:
   # [Addition] Create GCP secret only when GCP credentials are provided
   HasGcpCredentials: !Not [ !Equals [ !Ref GcpProjectId, "" ] ]
   # Note: GcpServiceAccountKey secret is created by GitHub Actions directly in Secrets Manager
-  # [E2E] Enable SegmentProxyFunction when tunnel URL is provided
-  E2EEnabled: !Not [ !Equals [ !Ref E2ETunnelUrl, "" ] ]
+  # [E2E] Enable IoT Core MQTT resources for hybrid testing
+  E2EEnabled: !Equals [ !Ref E2EIoTEnabled, "true" ]
 
 Resources:
   # [Secondary optimization] CheckIdempotencyFunction removed
@@ -728,9 +735,9 @@ Resources:
         - SQSSendMessagePolicy:
             QueueName: !GetAtt GCDeadLetterQueue.QueueName
 
-  # ── E2E Hybrid Tunnel Proxy (waitForTaskToken bridge) ──────────────────────
-  # Routes SFN segment execution to a local worker via ngrok/cloudflare tunnel.
-  # Only active when E2E_MODE=true and E2ETunnelUrl is set.
+  # ── E2E IoT Core MQTT Proxy (waitForTaskToken bridge) ────────────────────
+  # Routes SFN segment execution to a local MQTT subscriber via IoT Core.
+  # Only active when E2E_MODE=true and E2EIoTEnabled is set.
   SegmentProxyFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -738,16 +745,98 @@ Resources:
       ImageUri: !Ref BackendLambdaImageUri
       ImageConfig:
         Command: ["src.handlers.core.segment_proxy_handler.lambda_handler"]
-      Timeout: 30  # Only stores token + HTTP POST; SFN waits via callback
+      Timeout: 30  # Only stores token + IoT publish; SFN waits via callback
       MemorySize: 256
       Environment:
         Variables:
           E2E_MODE: !If [E2EEnabled, 'true', 'false']
-          E2E_WORKER_TUNNEL_URL: !Ref E2ETunnelUrl
+          E2E_IOT_ENDPOINT: !Ref E2EIoTEndpoint
           TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref TaskTokensTableV3
+        - Statement:
+            - Effect: Allow
+              Action:
+                - iot:Publish
+              Resource:
+                - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/analemma/e2e/*"
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+
+  # ── E2E IoT Callback Lambda (result -> SendTaskSuccess) ────────────────────
+  IoTCallbackFunction:
+    Type: AWS::Serverless::Function
+    Condition: E2EEnabled
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.iot_callback_handler.lambda_handler"]
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - states:SendTaskSuccess
+                - states:SendTaskFailure
+              Resource: "*"
+        - S3ReadPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+
+  # ── E2E IoT Core Resources ────────────────────────────────────────────────
+  E2EIoTPolicy:
+    Type: AWS::IoT::Policy
+    Condition: E2EEnabled
+    Properties:
+      PolicyName: !Sub "analemma-e2e-iot-${StageName}"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - iot:Connect
+            Resource:
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:client/analemma-e2e-*"
+          - Effect: Allow
+            Action:
+              - iot:Subscribe
+            Resource:
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/analemma/e2e/+/task"
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/analemma/e2e/+/result"
+          - Effect: Allow
+            Action:
+              - iot:Publish
+              - iot:Receive
+            Resource:
+              - !Sub "arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/analemma/e2e/*"
+
+  E2EIoTResultRule:
+    Type: AWS::IoT::TopicRule
+    Condition: E2EEnabled
+    Properties:
+      RuleName: !Sub "analemma_e2e_result_${StageName}"
+      TopicRulePayload:
+        Sql: "SELECT * FROM 'analemma/e2e/+/result'"
+        Actions:
+          - Lambda:
+              FunctionArn: !GetAtt IoTCallbackFunction.Arn
+        RuleDisabled: false
+        AwsIotSqlVersion: "2016-03-23"
+
+  E2EIoTRuleLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Condition: E2EEnabled
+    Properties:
+      FunctionName: !Ref IoTCallbackFunction
+      Action: lambda:InvokeFunction
+      Principal: iot.amazonaws.com
+      SourceArn: !GetAtt E2EIoTResultRule.Arn
 
   # 🛡️ [Reserved Concurrency] 디자인 어시스턴트 동시성 제한
   # - 계정 한도 1000 중 50개 예약
@@ -4311,6 +4400,11 @@ Resources:
             Status: Enabled
             Prefix: temp/
             ExpirationInDays: 7
+          # [E2E] MQTT payload cleanup (1 day TTL) [Feedback ④]
+          - Id: MqttPayloadCleanup
+            Status: Enabled
+            Prefix: mqtt-payloads/
+            ExpirationInDays: 1
       Tags:
         - Key: Stage
           Value: !Ref StageName
