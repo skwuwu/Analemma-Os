@@ -1119,6 +1119,12 @@ def _execute_initialization(event, context):
     auto_resume_delay = raw_input.get('AUTO_RESUME_DELAY_SECONDS') or event.get('AUTO_RESUME_DELAY_SECONDS')
     if auto_resume_delay:
         bag['AUTO_RESUME_DELAY_SECONDS'] = auto_resume_delay
+    # [v3.32] Propagate E2E test flags to bag top-level.
+    # _force_continue: MQTT worker overrides next_action to CONTINUE (loop limit test)
+    force_continue = raw_input.get('_force_continue') or event.get('_force_continue')
+    if force_continue:
+        bag['_force_continue'] = True
+
     # [v3.26 Fix] Propagate __s3_offloaded + __s3_path to bag top-level.
     # FAIL simulator test injects __s3_offloaded=True into initial_state, but
     # initialize_state_data stores it inside bag['input'] (which gets S3-offloaded).

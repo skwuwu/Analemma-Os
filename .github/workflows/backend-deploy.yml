@@ -294,6 +294,13 @@ jobs:
           # [Added] Image URI passing
           PARAM_OVERRIDES="${PARAM_OVERRIDES} BackendLambdaImageUri=${LAMBDA_IMAGE_URI}"
 
+          # [E2E] Enable IoT Core MQTT for hybrid testing
+          IOT_ENDPOINT=$(aws iot describe-endpoint --endpoint-type iot:Data-ATS --region "${AWS_REGION}" --query 'endpointAddress' --output text 2>/dev/null || echo "")
+          if [ -n "${IOT_ENDPOINT}" ] && [ "${IOT_ENDPOINT}" != "None" ]; then
+            PARAM_OVERRIDES="${PARAM_OVERRIDES} E2EIoTEnabled=true E2EIoTEndpoint=${IOT_ENDPOINT}"
+            echo "✅ E2E IoT Core enabled: ${IOT_ENDPOINT}"
+          fi
+
           echo "🚀 Deploying with Parameters: ${PARAM_OVERRIDES}"
 
           sam deploy \
