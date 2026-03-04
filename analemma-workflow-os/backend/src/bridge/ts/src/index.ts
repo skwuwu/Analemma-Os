@@ -37,3 +37,20 @@ export type {
   L1CheckResult,
   PolicySyncResponse,
 } from "./types";
+
+export { ReactExecutor } from "./react_executor";
+export type {
+  ReactResult,
+  ReactExecutorConfig,
+  LLMClient,
+  LLMResponse,
+  LLMUsage,
+  LLMContentBlock,
+  LLMCallOptions,
+  ConversationMessage,
+  ToolResultBlock,
+  ToolDefinition,
+  ToolHandler,
+  RegisteredTool,
+  StopReason,
+} from "./react_executor";
