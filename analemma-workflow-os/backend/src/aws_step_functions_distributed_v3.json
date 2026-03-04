@@ -559,6 +559,18 @@
       "Next": "ExecuteSegment"
     },
     "ExecuteSegment": {
+      "Type": "Choice",
+      "Comment": "🎯 [v3.32] Route to E2E proxy (waitForTaskToken) or direct Lambda invoke",
+      "Choices": [
+        {
+          "Variable": "$.state_data.bag.__e2e_proxy",
+          "IsPresent": true,
+          "Next": "ExecuteSegmentProxy"
+        }
+      ],
+      "Default": "ExecuteSegmentDirect"
+    },
+    "ExecuteSegmentDirect": {
       "Type": "Task",
       "Resource": "arn:aws:states:::lambda:invoke",
       "Comment": "🎯 [v3.12] Lambda hydrates state_data (may contain S3 pointers)",
@@ -584,6 +596,43 @@
         }
       ],
       "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "ResultPath": "$.last_error",
+          "Next": "NotifyAndFail"
+        }
+      ],
+      "Next": "EvaluateNextAction"
+    },
+    "ExecuteSegmentProxy": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Comment": "🔌 [E2E] Proxy to local MQTT worker via IoT Core — waitForTaskToken callback",
+      "Parameters": {
+        "FunctionName": "${SegmentProxyArn}",
+        "Payload": {
+          "TaskToken.$": "$$.Task.Token",
+          "state_data.$": "$.state_data.bag",
+          "execution_id.$": "$$.Execution.Name",
+          "ownerId.$": "$.ownerId"
+        }
+      },
+      "ResultSelector": {
+        "bag.$": "$.state_data",
+        "next_action.$": "$.next_action"
+      },
+      "ResultPath": "$.state_data",
+      "HeartbeatSeconds": 300,
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.HeartbeatTimeout"
+          ],
+          "ResultPath": "$.last_error",
+          "Next": "NotifyAndFail"
+        },
         {
           "ErrorEquals": [
             "States.ALL"

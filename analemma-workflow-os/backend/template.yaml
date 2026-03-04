@@ -2730,11 +2730,16 @@ Resources:
         AggregateDistributedResultsArn: !GetAtt AggregateDistributedResultsFunction.Arn
         ExecuteBranchArn: !GetAtt SegmentRunnerFunction.Arn
         WorkflowStateBucket: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        # [E2E] Proxy Lambda ARN for hybrid tunnel testing
+        SegmentProxyArn: !GetAtt SegmentProxyFunction.Arn
       Policies:
         # 기존 함수들에 대한 권한
         # [REMOVED] PartitionWorkflowFunction — handler does not exist
         - LambdaInvokePolicy:
             FunctionName: !Ref SegmentRunnerFunction
+        # [E2E] Invoke permission for SegmentProxyFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SegmentProxyFunction
         - DynamoDBReadPolicy:
             TableName: !Ref IdempotencyTableV3
         - LambdaInvokePolicy:
