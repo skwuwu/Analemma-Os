@@ -560,11 +560,19 @@
     },
     "ExecuteSegment": {
       "Type": "Choice",
-      "Comment": "🎯 [v3.32] Route to E2E proxy (waitForTaskToken) or direct Lambda invoke",
+      "Comment": "🎯 [v3.33] Route to E2E proxy (waitForTaskToken) or direct Lambda invoke. IsPresent guard prevents States.Runtime when __e2e_proxy is absent.",
       "Choices": [
         {
-          "Variable": "$.__e2e_proxy",
-          "BooleanEquals": true,
+          "And": [
+            {
+              "Variable": "$.__e2e_proxy",
+              "IsPresent": true
+            },
+            {
+              "Variable": "$.__e2e_proxy",
+              "BooleanEquals": true
+            }
+          ],
           "Next": "ExecuteSegmentProxy"
         }
       ],
