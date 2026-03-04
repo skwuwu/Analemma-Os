@@ -17,7 +17,13 @@ import sys
 import threading
 import time
 import logging
+from pathlib import Path
 from typing import Optional
+
+# Ensure this directory is on sys.path so sibling modules (mqtt_client, etc.) can be imported
+_E2E_DIR = str(Path(__file__).parent)
+if _E2E_DIR not in sys.path:
+    sys.path.insert(0, _E2E_DIR)
 
 import boto3
 import pytest
@@ -191,7 +197,7 @@ def mqtt_worker(vsm_server, iot_endpoint, aws_session, idempotency_table):
     is healthy before this fixture runs. Additionally, explicit health
     check before MQTT connect ensures governance pipeline is ready.
     """
-    from tests.backend.e2e.mqtt_client import E2EMqttClient
+    from mqtt_client import E2EMqttClient
 
     # [Feedback ⑤] Verify VSM is healthy before starting MQTT worker
     vsm_url = f"http://localhost:{VSM_PORT}/v1/health"
@@ -226,14 +232,15 @@ def mqtt_worker(vsm_server, iot_endpoint, aws_session, idempotency_table):
 @pytest.fixture(scope="session")
 def merkle_verifier(s3_client, dynamodb_resource):
     """MerkleVerifier instance for cross-boundary state consistency checks."""
-    from tests.backend.e2e.merkle_verifier import MerkleVerifier
+    from merkle_verifier import MerkleVerifier
     from src.services.state.state_versioning_service import StateVersioningService
 
     bucket = os.environ.get(
         "WORKFLOW_STATE_BUCKET",
         os.environ.get("SKELETON_S3_BUCKET", "analemma-workflow-state-dev"),
     )
-    versioning = StateVersioningService(bucket_name=bucket)
+    table = os.environ.get("MANIFESTS_TABLE", "WorkflowManifests-v3-dev")
+    versioning = StateVersioningService(dynamodb_table=table, s3_bucket=bucket)
     return MerkleVerifier(
         s3_client=s3_client,
         dynamodb_resource=dynamodb_resource,

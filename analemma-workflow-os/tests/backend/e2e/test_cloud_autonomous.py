@@ -12,6 +12,7 @@ Requirements:
 
 import json
 import os
+import uuid
 
 import pytest
 
@@ -24,8 +25,12 @@ def _build_cloud_input(
     extra: dict = None,
 ) -> dict:
     """Build SFN input for cloud-only ReactExecutor tests."""
+    run_id = uuid.uuid4().hex[:12]
     payload = {
         "ownerId": "e2e_cloud_owner",
+        "workflowId": f"e2e_cloud_{run_id}",
+        "idempotency_key": f"e2e_cloud_{run_id}",
+        "__e2e_proxy": True,
         "workflow_config": {
             "name": "e2e_cloud_autonomous",
             "segments": [{"id": "seg_0", "type": "REACT"}],

@@ -14,6 +14,7 @@ Requirements:
 import json
 import os
 import time
+import uuid
 
 import pytest
 
@@ -30,8 +31,12 @@ def _build_input(
     extra: dict = None,
 ) -> dict:
     """Build standard SFN input payload."""
+    run_id = uuid.uuid4().hex[:12]
     payload = {
         "ownerId": owner_id,
+        "workflowId": f"e2e_hybrid_{run_id}",
+        "idempotency_key": f"e2e_hybrid_{run_id}",
+        "__e2e_proxy": True,
         "workflow_config": {
             "name": "e2e_hybrid_test",
             "segments": [{"id": "seg_0", "type": "REACT"}],

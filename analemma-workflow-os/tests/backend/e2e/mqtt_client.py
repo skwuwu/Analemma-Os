@@ -120,6 +120,7 @@ class E2EMqttClient:
         """Establish MQTT connection using SigV4 WebSocket auth."""
         try:
             from awscrt import mqtt
+            from awscrt.auth import AwsCredentialsProvider
             from awsiot import mqtt_connection_builder
         except ImportError:
             raise ImportError(
@@ -131,9 +132,13 @@ class E2EMqttClient:
             self._iot_endpoint, self._client_id, self._region,
         )
 
+        # awsiotsdk >= 1.28.1 requires credentials_provider to be explicit
+        credentials_provider = AwsCredentialsProvider.new_default_chain()
+
         self._connection = mqtt_connection_builder.websockets_with_default_aws_signing(
             endpoint=self._iot_endpoint,
             region=self._region,
+            credentials_provider=credentials_provider,
             client_id=self._client_id,
             clean_session=True,
             keep_alive_secs=30,
@@ -226,7 +231,7 @@ class E2EMqttClient:
             return
 
         # [Feedback ①] Idempotency check — prevent duplicate execution from QoS 1
-        from tests.backend.e2e.worker_server import (
+        from worker_server import (
             _idempotency_key,
             check_idempotency_simple,
             _write_idempotency,
@@ -246,7 +251,7 @@ class E2EMqttClient:
 
         # Execute segment task
         try:
-            from tests.backend.e2e.worker_server import execute_segment_task
+            from worker_server import execute_segment_task
             from src.common.kernel_protocol import open_state_bag
 
             bag = message.get("bag") or open_state_bag(message.get("payload", {}))

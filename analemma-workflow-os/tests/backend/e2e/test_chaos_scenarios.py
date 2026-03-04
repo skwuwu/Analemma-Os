@@ -40,8 +40,12 @@ def _build_chaos_input(
     max_iterations: int = 5,
     extra: dict = None,
 ) -> dict:
+    run_id = uuid.uuid4().hex[:12]
     payload = {
         "ownerId": "e2e_chaos_owner",
+        "workflowId": f"e2e_chaos_{run_id}",
+        "idempotency_key": f"e2e_chaos_{run_id}",
+        "__e2e_proxy": True,
         "workflow_config": {
             "name": "e2e_chaos_test",
             "segments": [{"id": "seg_0", "type": "REACT"}],
@@ -50,6 +54,7 @@ def _build_chaos_input(
         "max_iterations": max_iterations,
         "total_segments": 1,
         "segment_to_run": 0,
+        "MOCK_MODE": "false",
     }
     if extra:
         payload.update(extra)
