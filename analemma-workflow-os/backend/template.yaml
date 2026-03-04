@@ -98,6 +98,12 @@ Parameters:
     Default: ""
     Description: ARN of a pre-existing Kinesis stream. If provided, creation is skipped.
 
+  # [E2E Hybrid Tunnel Testing] Tunnel URL for local worker proxy
+  E2ETunnelUrl:
+    Type: String
+    Default: ""
+    Description: Tunnel URL for E2E hybrid testing (empty = E2E proxy disabled)
+
   # [Addition] Inject image URI built externally
   BackendLambdaImageUri:
     Type: String
@@ -176,6 +182,8 @@ Conditions:
   # [Addition] Create GCP secret only when GCP credentials are provided
   HasGcpCredentials: !Not [ !Equals [ !Ref GcpProjectId, "" ] ]
   # Note: GcpServiceAccountKey secret is created by GitHub Actions directly in Secrets Manager
+  # [E2E] Enable SegmentProxyFunction when tunnel URL is provided
+  E2EEnabled: !Not [ !Equals [ !Ref E2ETunnelUrl, "" ] ]
 
 Resources:
   # [Secondary optimization] CheckIdempotencyFunction removed
@@ -719,6 +727,27 @@ Resources:
         # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
         - SQSSendMessagePolicy:
             QueueName: !GetAtt GCDeadLetterQueue.QueueName
+
+  # ── E2E Hybrid Tunnel Proxy (waitForTaskToken bridge) ──────────────────────
+  # Routes SFN segment execution to a local worker via ngrok/cloudflare tunnel.
+  # Only active when E2E_MODE=true and E2ETunnelUrl is set.
+  SegmentProxyFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.segment_proxy_handler.lambda_handler"]
+      Timeout: 30  # Only stores token + HTTP POST; SFN waits via callback
+      MemorySize: 256
+      Environment:
+        Variables:
+          E2E_MODE: !If [E2EEnabled, 'true', 'false']
+          E2E_WORKER_TUNNEL_URL: !Ref E2ETunnelUrl
+          TASK_TOKENS_TABLE_NAME: !Ref TaskTokensTableV3
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref TaskTokensTableV3
 
   # 🛡️ [Reserved Concurrency] 디자인 어시스턴트 동시성 제한
   # - 계정 한도 1000 중 50개 예약
@@ -2551,11 +2580,16 @@ Resources:
         AsyncLLMHandlerArn: !GetAtt AsyncLLMHandlerFunction.Arn
         AggregateResultsArn: !GetAtt AggregateDistributedResultsFunction.Arn
         IdempotencyTable: !Ref IdempotencyTableV3
+        # [E2E] Proxy Lambda ARN for hybrid tunnel testing
+        SegmentProxyArn: !GetAtt SegmentProxyFunction.Arn
         # Express Workflow removed - using alternative Event History mitigation strategies
       Policies:
         # [REMOVED] PartitionWorkflowFunction — handler does not exist
         - LambdaInvokePolicy:
             FunctionName: !Ref SegmentRunnerFunction
+        # [E2E] Invoke permission for SegmentProxyFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref SegmentProxyFunction
         # [2순위 최적화] CheckIdempotencyFunction 제거 - Direct SDK로 대체
         - DynamoDBReadPolicy:
             TableName: !Ref IdempotencyTableV3
