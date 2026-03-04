@@ -130,36 +130,40 @@ const Index = ({ signOut }: IndexProps) => {
   return (
     <>
       <div className="flex flex-col h-screen w-full bg-background overflow-hidden">
-        <div className="flex justify-between p-4 border-b items-center gap-2 bg-background z-20">
-          <div className="font-bold text-xl tracking-tight text-foreground">Analemma</div>
-          
-          {/* 알림 및 로그아웃 버튼 */}
+        {/* Header — Windows 11 style: elevated surface with soft shadow */}
+        <header className="flex justify-between px-5 py-3 items-center gap-3 bg-card border-b border-border shadow-sm z-20">
+          <div className="flex items-center gap-3">
+            <div className="font-semibold text-lg tracking-tight text-foreground">Analemma</div>
+            <Badge variant="outline" className="text-xs text-muted-foreground font-normal">
+              Workflow OS
+            </Badge>
+          </div>
+
           <div className="flex items-center gap-2">
             <ActiveWorkflowIndicator />
             <SavedNotificationsIndicator />
-            
+
             <Button
-              variant="outline"
+              variant="ghost"
               size="sm"
               onClick={() => navigate('/tasks')}
-              className="flex items-center gap-2"
+              className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
             >
               <Activity className="w-4 h-4" />
-              Task Manager
+              Tasks
             </Button>
-            {/* Notifications dialog removed; monitor shows notifications */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
-                  className="flex items-center gap-2"
+                  className="flex items-center gap-2 text-muted-foreground hover:text-foreground"
                 >
                   <User className="w-4 h-4" />
                   Account
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
+              <DropdownMenuContent align="end" className="shadow-md">
                 <DropdownMenuItem onClick={handleSignOut} className="flex items-center gap-2">
                   <LogOut className="w-4 h-4" />
                   Sign Out
@@ -233,27 +237,26 @@ const Index = ({ signOut }: IndexProps) => {
 
 
           </div>
-        </div>
+        </header>
 
         {/* 4-Pane Layout */}
         <div className="flex flex-1 overflow-hidden">
-          {/* Left: Node Inventory (260px) */}
-          <div className="w-[260px] flex-shrink-0 border-r border-border bg-background flex flex-col z-10">
+          {/* Left: Block Library */}
+          <div className="w-[260px] flex-shrink-0 border-r border-border bg-card flex flex-col z-10">
             <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>}>
               <BlockLibrary />
             </Suspense>
           </div>
 
-          {/* Center: Main Canvas */}
-          <div className="flex-1 relative bg-background bg-[radial-gradient(#1e293b_1px,transparent_1px)] [background-size:20px_20px]">
+          {/* Center: Canvas — dot-grid uses muted border color for theme-awareness */}
+          <div className="flex-1 relative bg-background bg-[radial-gradient(hsl(var(--border))_1px,transparent_1px)] [background-size:20px_20px]">
             <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary" /></div>}>
               <WorkflowCanvas />
             </Suspense>
           </div>
 
-          {/* Right: CRUD Operations (60%) + AI Chat (40%) */}
-          <div className="w-[350px] flex-shrink-0 border-l border-border flex flex-col bg-background z-10">
-            {/* Top: Saved Workflows CRUD */}
+          {/* Right: Workflows (60%) + AI Chat (40%) */}
+          <div className="w-[350px] flex-shrink-0 border-l border-border flex flex-col bg-card z-10">
             <div className="h-[60%] border-b border-border overflow-hidden">
               <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" /></div>}>
                 <SavedWorkflows
@@ -262,8 +265,6 @@ const Index = ({ signOut }: IndexProps) => {
                 />
               </Suspense>
             </div>
-            
-            {/* Bottom: AI Codesigner Chat */}
             <div className="h-[40%] overflow-hidden">
               <Suspense fallback={<div className="flex items-center justify-center h-full"><div className="animate-spin rounded-full h-6 w-6 border-b-2 border-primary" /></div>}>
                 <WorkflowChat />

@@ -87,7 +87,7 @@ const StatusIcon: React.FC<{ status: TaskStatus }> = ({ status }) => {
   
   switch (status) {
     case 'queued':
-      return <Clock {...iconProps} className="w-4 h-4 text-slate-500" />;
+      return <Clock {...iconProps} className="w-4 h-4 text-muted-foreground" />;
     case 'in_progress':
       return <Loader2 {...iconProps} className="w-4 h-4 text-blue-500 animate-spin" />;
     case 'pending_approval':
@@ -468,41 +468,40 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
   }, [taskManager.tasks, searchQuery, statusFilter, completedExecutions]);
 
   return (
-    <div className="flex flex-col h-screen bg-slate-950 text-slate-100 overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-slate-800 bg-slate-900/50 backdrop-blur-sm shrink-0 h-14">
+    <div className="flex flex-col h-screen bg-background text-foreground overflow-hidden">
+      {/* Header — Windows 11 style: elevated card surface */}
+      <header className="flex items-center justify-between px-6 py-3 border-b border-border bg-card shadow-sm shrink-0 h-14">
         <div className="flex items-center gap-4">
-          <Button variant="ghost" size="icon" onClick={() => navigate('/')} className="text-slate-400 hover:text-slate-100 hover:bg-slate-800">
+          <Button variant="ghost" size="icon" onClick={() => navigate('/')} className="text-muted-foreground hover:text-foreground">
             <Home className="w-5 h-5" />
           </Button>
           <div className="flex items-center gap-2">
-            <h1 className="text-lg font-semibold text-slate-100">Task Manager</h1>
-            <Badge variant="outline" className="text-slate-400 border-slate-700">Beta</Badge>
+            <h1 className="text-lg font-semibold">Task Manager</h1>
+            <Badge variant="outline" className="text-muted-foreground">Beta</Badge>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-3">
-          {/* Notification badge */}
           {stats.pendingApproval > 0 && (
-            <Badge variant="destructive" className="animate-pulse bg-red-600 text-white border-red-500">
+            <Badge variant="destructive" className="animate-pulse">
               <Bell className="w-3 h-3 mr-1" />
               {stats.pendingApproval} Pending Approval
             </Badge>
           )}
-          
+
           <Button
             variant="outline"
             size="sm"
             onClick={() => taskManager.refreshList()}
             disabled={taskManager.isLoading}
-            className="border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-slate-100 h-8"
+            className="h-8"
           >
             <RefreshCw className={`w-3 h-3 mr-2 ${taskManager.isLoading ? 'animate-spin' : ''}`} />
             Refresh
           </Button>
-          
+
           {signOut && (
-            <Button variant="ghost" size="sm" onClick={signOut} className="text-slate-400 hover:text-slate-100 hover:bg-slate-800 h-8">
+            <Button variant="ghost" size="sm" onClick={signOut} className="text-muted-foreground hover:text-foreground h-8">
               Sign Out
             </Button>
           )}
@@ -511,24 +510,24 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
       
       <ResizablePanelGroup direction="horizontal" className="flex-1">
         {/* Left panel: Task list */}
-        <ResizablePanel defaultSize={25} minSize={20} maxSize={40} className="bg-slate-900/30 border-r border-slate-800 flex flex-col">
-            <div className="p-4 border-b border-slate-800 space-y-3">
+        <ResizablePanel defaultSize={25} minSize={20} maxSize={40} className="bg-card/50 border-r border-border flex flex-col">
+            <div className="p-4 border-b border-border space-y-3">
                 <div className="relative">
-                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500" />
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                     <Input
                         placeholder="Search tasks..."
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        className="pl-9 bg-slate-800 border-slate-700 text-slate-100 placeholder:text-slate-500 focus:border-slate-600 h-9 text-sm"
+                        className="pl-9 h-9 text-sm"
                     />
                 </div>
                 <div className="flex gap-2">
                     <Select value={statusFilter} onValueChange={setStatusFilter}>
-                        <SelectTrigger className="w-full bg-slate-800 border-slate-700 text-slate-100 h-8 text-xs">
+                        <SelectTrigger className="w-full h-8 text-xs">
                             <Filter className="w-3 h-3 mr-2" />
                             <SelectValue placeholder="Status" />
                         </SelectTrigger>
-                        <SelectContent className="bg-slate-800 border-slate-700">
+                        <SelectContent>
                             <SelectItem value="all">All Status</SelectItem>
                             <SelectItem value="in_progress">In Progress</SelectItem>
                             <SelectItem value="pending_approval">Pending Approval</SelectItem>
@@ -544,19 +543,19 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                     {taskManager.isLoading ? (
                         <div className="space-y-2">
                             {[1, 2, 3].map((i) => (
-                                <Skeleton key={i} className="h-24 w-full bg-slate-800 rounded-lg" />
+                                <Skeleton key={i} className="h-24 w-full rounded-lg" />
                             ))}
                         </div>
                     ) : (
-                        <Accordion 
-                            type="multiple" 
-                            value={expandedGroups} 
+                        <Accordion
+                            type="multiple"
+                            value={expandedGroups}
                             onValueChange={setExpandedGroups}
                             className="space-y-2"
                         >
                             {/* In-progress tasks group */}
-                            <AccordionItem value="in-progress" className="border-slate-700">
-                                <AccordionTrigger className="px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800/50 rounded-md">
+                            <AccordionItem value="in-progress" className="border-border">
+                                <AccordionTrigger className="px-3 py-2 text-sm font-medium hover:bg-muted/50 rounded-md">
                                     <div className="flex items-center gap-2">
                                         <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />
                                         <span>In Progress</span>
@@ -568,7 +567,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 <AccordionContent className="pb-2">
                                     <div className="space-y-2">
                                         {taskGroups.inProgress.length === 0 ? (
-                                            <div className="text-center py-4 text-slate-500 text-xs">
+                                            <div className="text-center py-4 text-muted-foreground text-xs">
                                                 No tasks in progress.
                                             </div>
                                         ) : (
@@ -578,30 +577,30 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                                     onClick={() => handleTaskClick(task)}
                                                     className={`
                                                         p-3 rounded-lg border cursor-pointer transition-all duration-200
-                                                        ${taskManager.selectedTaskId === task.task_id 
-                                                            ? 'bg-slate-800 border-sky-500/50 shadow-md' 
-                                                            : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600'}
+                                                        ${taskManager.selectedTaskId === task.task_id
+                                                            ? 'bg-secondary border-primary/50 shadow-md'
+                                                            : 'bg-secondary/40 border-border/50 hover:bg-secondary hover:border-border'}
                                                     `}
                                                 >
                                                     <div className="flex justify-between items-start mb-2">
                                                         <div className="flex items-center gap-2">
-                                                            <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0">
-                                                                <Bot className="w-3 h-3 text-slate-300" />
+                                                            <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center shrink-0">
+                                                                <Bot className="w-3 h-3 text-muted-foreground" />
                                                             </div>
-                                                            <span className="text-xs font-medium text-slate-200 truncate max-w-[120px]">
+                                                            <span className="text-xs font-medium truncate max-w-[120px]">
                                                                 {task.agent_name}
                                                             </span>
                                                         </div>
                                                         <StatusIcon status={task.status} />
                                                     </div>
-                                                    <h4 className="text-sm font-medium text-slate-100 mb-1 line-clamp-1">
+                                                    <h4 className="text-sm font-medium mb-1 line-clamp-1">
                                                         {task.task_summary || 'Task in progress'}
                                                     </h4>
-                                                    <div className="flex items-center justify-between text-[10px] text-slate-400 mt-2">
+                                                    <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-2">
                                                         <span>{task.current_step_name || 'Waiting'}</span>
                                                         <span>{task.progress_percentage}%</span>
                                                     </div>
-                                                    <Progress value={task.progress_percentage} className="h-1 mt-1 bg-slate-700" />
+                                                    <Progress value={task.progress_percentage} className="h-1 mt-1" />
                                                 </div>
                                             ))
                                         )}
@@ -610,8 +609,8 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             </AccordionItem>
 
                             {/* Completed tasks group */}
-                            <AccordionItem value="completed" className="border-slate-700">
-                                <AccordionTrigger className="px-3 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800/50 rounded-md">
+                            <AccordionItem value="completed" className="border-border">
+                                <AccordionTrigger className="px-3 py-2 text-sm font-medium hover:bg-muted/50 rounded-md">
                                     <div className="flex items-center gap-2">
                                         <CheckCircle2 className="w-4 h-4 text-green-500" />
                                         <span>Completed</span>
@@ -623,7 +622,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 <AccordionContent className="pb-2">
                                     <div className="space-y-2">
                                         {taskGroups.completed.length === 0 ? (
-                                            <div className="text-center py-4 text-slate-500 text-xs">
+                                            <div className="text-center py-4 text-muted-foreground text-xs">
                                                 No completed tasks.
                                             </div>
                                         ) : (
@@ -631,35 +630,34 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                                 <div
                                                     key={task.task_id}
                                                     onClick={() => {
-                                                      // Load completed execution details with history
                                                       taskManager.selectTask(task.task_id);
                                                     }}
                                                     className={`
                                                         p-3 rounded-lg border cursor-pointer transition-all duration-200
-                                                        ${taskManager.selectedTask?.task_id === task.task_id 
-                                                            ? 'bg-slate-800 border-purple-500/50' 
-                                                            : 'bg-slate-800/40 border-slate-700/50 hover:bg-slate-800 hover:border-slate-600'}
+                                                        ${taskManager.selectedTask?.task_id === task.task_id
+                                                            ? 'bg-secondary border-purple-500/50'
+                                                            : 'bg-secondary/40 border-border/50 hover:bg-secondary hover:border-border'}
                                                     `}
                                                 >
                                                     <div className="flex justify-between items-start mb-2">
                                                         <div className="flex items-center gap-2">
-                                                            <div className="w-6 h-6 rounded-full bg-slate-700 flex items-center justify-center shrink-0">
+                                                            <div className="w-6 h-6 rounded-full bg-muted flex items-center justify-center shrink-0">
                                                                 <CheckCircle2 className="w-3 h-3 text-green-500" />
                                                             </div>
-                                                            <span className="text-xs font-medium text-slate-200 truncate max-w-[120px]">
+                                                            <span className="text-xs font-medium truncate max-w-[120px]">
                                                                 {task.agent_name}
                                                             </span>
                                                         </div>
                                                         <StatusBadge status={task.status} />
                                                     </div>
-                                                    <h4 className="text-sm font-medium text-slate-100 mb-1 line-clamp-1">
+                                                    <h4 className="text-sm font-medium mb-1 line-clamp-1">
                                                         {task.task_summary}
                                                     </h4>
-                                                    <div className="flex items-center justify-between text-[10px] text-slate-400 mt-2">
+                                                    <div className="flex items-center justify-between text-[10px] text-muted-foreground mt-2">
                                                         <span>{task.current_step_name}</span>
                                                         <span>{task.progress_percentage}%</span>
                                                     </div>
-                                                    <Progress value={task.progress_percentage} className="h-1 mt-1 bg-slate-700" />
+                                                    <Progress value={task.progress_percentage} className="h-1 mt-1" />
                                                 </div>
                                             ))
                                         )}
@@ -672,10 +670,10 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
             </ScrollArea>
         </ResizablePanel>
         
-        <ResizableHandle className="bg-slate-800" />
-        
+        <ResizableHandle className="bg-border" />
+
         {/* Right panel: Details (tab system) */}
-        <ResizablePanel defaultSize={75} className="bg-slate-950">
+        <ResizablePanel defaultSize={75} className="bg-background">
             {(() => {
               console.log('[TaskManager] Rendering detail panel - selectedTask:', taskManager.selectedTask ? taskManager.selectedTask.task_id : 'null');
               console.log('[TaskManager] selectedTaskId:', taskManager.selectedTaskId);
@@ -683,10 +681,10 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
               return taskManager.selectedTask;
             })() ? (
                 <div className="h-full flex flex-col">
-                    {/* 헤더 with Action Buttons */}
-                    <div className="px-6 py-4 border-b border-slate-800 flex justify-between items-center bg-slate-900/30">
+                    {/* Detail header with action buttons */}
+                    <div className="px-6 py-4 border-b border-border flex justify-between items-center bg-card/50">
                         <div>
-                            <h2 className="text-xl font-bold text-slate-100 flex items-center gap-2">
+                            <h2 className="text-xl font-bold flex items-center gap-2">
                                 {taskManager.selectedTask.task_summary}
                                 <StatusBadge status={taskManager.selectedTask.status} />
                                 {taskManager.selectedTask.is_interruption && (
@@ -696,7 +694,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                   </Badge>
                                 )}
                             </h2>
-                            <p className="text-sm text-slate-400 mt-1">
+                            <p className="text-sm text-muted-foreground mt-1">
                                 ID: {taskManager.selectedTask.task_id.substring(0, 16)}... • Workflow: {taskManager.selectedTask.workflow_name}
                             </p>
                         </div>
@@ -776,13 +774,13 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
 
                     {/* Tab system */}
                     <Tabs value={detailViewTab} onValueChange={(v) => setDetailViewTab(v as 'business' | 'technical')} className="flex-1 flex flex-col">
-                      <div className="px-6 pt-3 border-b border-slate-800">
-                        <TabsList className="bg-slate-900">
-                          <TabsTrigger value="business" className="data-[state=active]:bg-slate-800">
+                      <div className="px-6 pt-3 border-b border-border">
+                        <TabsList className="bg-muted">
+                          <TabsTrigger value="business" className="data-[state=active]:bg-secondary">
                             <Box className="w-4 h-4 mr-2" />
                             Business View
                           </TabsTrigger>
-                          <TabsTrigger value="technical" className="data-[state=active]:bg-slate-800">
+                          <TabsTrigger value="technical" className="data-[state=active]:bg-secondary">
                             <GitBranch className="w-4 h-4 mr-2" />
                             Technical View
                           </TabsTrigger>
@@ -800,33 +798,33 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                       <TabsContent value="technical" className="flex-1 overflow-hidden mt-0">
                         <Tabs value={technicalSubTab} onValueChange={(v) => setTechnicalSubTab(v as typeof technicalSubTab)} className="h-full flex flex-col">
                           {/* Technical sub-tab header */}
-                          <div className="px-4 pt-2 border-b border-slate-800">
-                            <TabsList className="bg-slate-900">
-                              <TabsTrigger value="graph" className="data-[state=active]:bg-slate-800 text-xs">
+                          <div className="px-4 pt-2 border-b border-border">
+                            <TabsList className="bg-muted">
+                              <TabsTrigger value="graph" className="data-[state=active]:bg-secondary text-xs">
                                 <GitBranch className="w-3 h-3 mr-1.5" />
                                 Graph
                               </TabsTrigger>
-                              <TabsTrigger value="timeline" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="timeline" className="data-[state=active]:bg-secondary text-xs">
                                 <History className="w-3 h-3 mr-1.5" />
                                 Timeline
                               </TabsTrigger>
-                              <TabsTrigger value="dag" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="dag" className="data-[state=active]:bg-secondary text-xs">
                                 <Database className="w-3 h-3 mr-1.5" />
                                 State DAG
                               </TabsTrigger>
-                              <TabsTrigger value="history" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="history" className="data-[state=active]:bg-secondary text-xs">
                                 <List className="w-3 h-3 mr-1.5" />
                                 History
                               </TabsTrigger>
-                              <TabsTrigger value="nodes" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="nodes" className="data-[state=active]:bg-secondary text-xs">
                                 <Box className="w-3 h-3 mr-1.5" />
                                 Nodes
                               </TabsTrigger>
-                              <TabsTrigger value="audit" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="audit" className="data-[state=active]:bg-secondary text-xs">
                                 <ShieldAlert className="w-3 h-3 mr-1.5" />
                                 Audit
                               </TabsTrigger>
-                              <TabsTrigger value="summary" className="data-[state=active]:bg-slate-800 text-xs">
+                              <TabsTrigger value="summary" className="data-[state=active]:bg-secondary text-xs">
                                 <Bot className="w-3 h-3 mr-1.5" />
                                 Summary
                               </TabsTrigger>
@@ -846,7 +844,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                   onNodeClick={setSelectedNodeId}
                                 />
                               ) : (
-                                <div className="flex items-center justify-center h-full text-slate-500">
+                                <div className="flex items-center justify-center h-full text-muted-foreground">
                                   <div className="text-center">
                                     <p className="text-lg mb-2">Cannot load workflow graph</p>
                                     <p className="text-sm">workflow_config data is not available.</p>
@@ -890,7 +888,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             {taskManager.selectedTask ? (
                               <MerkleDAGTreeView executionId={taskManager.selectedTask.task_id} className="h-full" />
                             ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-20">
+                              <div className="flex flex-col items-center justify-center h-full text-muted-foreground opacity-20">
                                 <Database className="w-12 h-12 mb-4" />
                                 <p className="text-sm font-medium uppercase">No State DAG Data</p>
                               </div>
@@ -902,7 +900,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             {taskManager.selectedTask ? (
                               <ExecutionHistoryInline executionArn={taskManager.selectedTask.task_id} />
                             ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-slate-500 opacity-20">
+                              <div className="flex flex-col items-center justify-center h-full text-muted-foreground opacity-20">
                                 <History className="w-12 h-12 mb-4" />
                                 <p className="text-sm font-medium uppercase">No History Data</p>
                               </div>
@@ -914,17 +912,17 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                             <div className="h-full flex flex-col">
                               {/* HITP Response Input (응답 대기 중일 때만 표시) */}
                               {taskManager.selectedTask?.is_interruption && (
-                                <div className="border-b border-slate-800 p-4 bg-amber-900/10">
+                                <div className="border-b border-border p-4 bg-amber-900/10">
                                   <div className="flex items-center gap-2 mb-3">
                                     <AlertCircle className="w-5 h-5 text-amber-500" />
-                                    <h3 className="font-semibold text-slate-100">Awaiting User Input</h3>
+                                    <h3 className="font-semibold text-foreground">Awaiting User Input</h3>
                                   </div>
                                   <div className="space-y-3">
                                     <Input
                                       placeholder="Enter your response..."
                                       value={responseText}
                                       onChange={(e) => setResponseText(e.target.value)}
-                                      className="bg-slate-800 border-slate-700 text-slate-100"
+                                      className="bg-secondary border-border text-foreground"
                                       onKeyDown={(e) => {
                                         if (e.key === 'Enter' && !e.shiftKey) {
                                           e.preventDefault();
@@ -956,7 +954,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                               )}
                               
                               {/* Node Detail Panel */}
-                              <div className="flex-1 overflow-y-auto bg-slate-900/50">
+                              <div className="flex-1 overflow-y-auto bg-muted/50">
                                 <NodeDetailPanel
                                   nodeId={selectedNodeId}
                                   nodeDetails={nodeStatus.nodeDetails}
@@ -1020,7 +1018,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 
                                 {/* 로딩 */}
                                 {summaryLoading && (
-                                  <div className="flex items-center gap-2 text-slate-400 bg-slate-800/30 p-4 rounded-lg border border-slate-700">
+                                  <div className="flex items-center gap-2 text-muted-foreground bg-secondary/30 p-4 rounded-lg border border-border">
                                     <Loader2 className="w-5 h-5 animate-spin" />
                                     <span>Gemini 2.0 Flash is analyzing execution logs...</span>
                                   </div>
@@ -1038,12 +1036,12 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                     )}
                                     
                                     {/* 요약 텍스트 */}
-                                    <div className="bg-slate-800/50 p-4 rounded-lg border border-slate-700">
-                                      <h3 className="font-semibold mb-3 text-slate-100 flex items-center gap-2">
+                                    <div className="bg-secondary/50 p-4 rounded-lg border border-border">
+                                      <h3 className="font-semibold mb-3 text-foreground flex items-center gap-2">
                                         <Bot className="w-4 h-4" />
                                         Summary
                                       </h3>
-                                      <p className="text-slate-300 text-sm whitespace-pre-wrap leading-relaxed">
+                                      <p className="text-foreground/80 text-sm whitespace-pre-wrap leading-relaxed">
                                         {summary.summary}
                                       </p>
                                     </div>
@@ -1057,7 +1055,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                         </h3>
                                         <ul className="space-y-2">
                                           {summary.key_insights.map((insight: string, i: number) => (
-                                            <li key={i} className="text-slate-300 text-sm flex gap-2">
+                                            <li key={i} className="text-foreground/80 text-sm flex gap-2">
                                               <span className="text-blue-400 shrink-0">•</span>
                                               <span>{insight}</span>
                                             </li>
@@ -1075,7 +1073,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                         </h3>
                                         <ul className="space-y-2">
                                           {summary.recommendations.map((rec: string, i: number) => (
-                                            <li key={i} className="text-slate-300 text-sm flex gap-2">
+                                            <li key={i} className="text-foreground/80 text-sm flex gap-2">
                                               <span className="text-amber-400 shrink-0">•</span>
                                               <span>{rec}</span>
                                             </li>
@@ -1085,7 +1083,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                     )}
                                     
                                     {/* Metadata */}
-                                    <div className="text-xs text-slate-500 flex flex-wrap gap-4 bg-slate-900/50 p-3 rounded border border-slate-800">
+                                    <div className="text-xs text-muted-foreground flex flex-wrap gap-4 bg-muted/50 p-3 rounded border border-border">
                                       <span className="flex items-center gap-1">
                                         <Bot className="w-3 h-3" />
                                         Model: {summary.model_used}
@@ -1109,7 +1107,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                                 
                                 {/* Initial state */}
                                 {!summary && !summaryLoading && (
-                                  <div className="text-center py-12 text-slate-500">
+                                  <div className="text-center py-12 text-muted-foreground">
                                     <Bot className="w-16 h-16 mx-auto mb-4 opacity-20" />
                                     <p className="text-lg mb-2">Summarize Execution Logs with Gemini 2.0 Flash</p>
                                     <p className="text-sm">Click the buttons above to view AI-analyzed summary</p>
@@ -1123,7 +1121,7 @@ export const TaskManager: React.FC<TaskManagerProps> = ({ signOut }) => {
                     </Tabs>
                 </div>
             ) : (
-                <div className="h-full flex flex-col items-center justify-center text-slate-500">
+                <div className="h-full flex flex-col items-center justify-center text-muted-foreground">
                     <LayoutGrid className="w-16 h-16 mb-4 opacity-20" />
                     <p className="text-lg font-medium">Select a task to view details</p>
                     <p className="text-sm opacity-60">Click a task from the left panel to display the dashboard.</p>
