@@ -46,15 +46,18 @@ def _build_governance_input(
         "max_iterations": 5,
         "token_budget": 100_000,
     }
+    react_segment = {"id": "seg_0", "type": "REACT", "nodes": []}
     payload = {
         "ownerId": "e2e_governance_owner",
         "workflowId": f"e2e_gov_{run_id}",
         "idempotency_key": f"e2e_gov_{run_id}",
         "workflow_config": {
             "name": "e2e_vsm_governance",
-            "segments": [{"id": "seg_0", "type": "REACT"}],
+            "segments": [react_segment],
             "react_executor": react_config,
         },
+        # partition_map populates the S3 segment manifest used by SegmentRunnerService
+        "partition_map": [react_segment],
         "task_prompt": task_prompt,
         "max_iterations": react_config.get("max_iterations", 5),
         "total_segments": 1,

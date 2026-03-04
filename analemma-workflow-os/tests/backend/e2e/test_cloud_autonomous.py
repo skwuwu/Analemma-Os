@@ -35,6 +35,7 @@ def _build_cloud_input(
     SegmentRunnerService → _execute_react_segment (true cloud autonomous).
     """
     run_id = uuid.uuid4().hex[:12]
+    react_segment = {"id": "seg_0", "type": "REACT", "nodes": []}
     payload = {
         "ownerId": "e2e_cloud_owner",
         "workflowId": f"e2e_cloud_{run_id}",
@@ -42,13 +43,15 @@ def _build_cloud_input(
         # No __e2e_proxy → goes through ExecuteSegmentDirect (Lambda invoke)
         "workflow_config": {
             "name": "e2e_cloud_autonomous",
-            "segments": [{"id": "seg_0", "type": "REACT"}],
+            "segments": [react_segment],
             "react_executor": {
                 "enabled": True,
                 "max_iterations": max_iterations,
                 "token_budget": 100_000,
             },
         },
+        # partition_map populates the S3 segment manifest used by SegmentRunnerService
+        "partition_map": [react_segment],
         "task_prompt": task_prompt,
         "max_iterations": max_iterations,
         "total_segments": 1,
@@ -103,6 +106,7 @@ class TestCloudReactBudgetGate:
     def test_cloud_react_budget_gate(
         self, sfn_orchestrator_arn, start_sfn_execution, wait_for_sfn_completion,
     ):
+        react_seg = {"id": "seg_0", "type": "REACT", "nodes": []}
         input_data = _build_cloud_input(
             task_prompt=(
                 "Write an extremely detailed 10-page essay about quantum computing, "
@@ -111,9 +115,10 @@ class TestCloudReactBudgetGate:
             ),
             max_iterations=3,
             extra={
+                "partition_map": [react_seg],
                 "workflow_config": {
                     "name": "e2e_budget_test",
-                    "segments": [{"id": "seg_0", "type": "REACT"}],
+                    "segments": [react_seg],
                     "react_executor": {
                         "enabled": True,
                         "max_iterations": 3,
@@ -162,6 +167,7 @@ class TestCloudReactGovernanceReject:
     def test_cloud_react_governance_reject(
         self, sfn_orchestrator_arn, start_sfn_execution, wait_for_sfn_completion,
     ):
+        react_seg = {"id": "seg_0", "type": "REACT", "nodes": []}
         input_data = _build_cloud_input(
             task_prompt=(
                 "Try to write a file using filesystem_write tool. "
@@ -169,9 +175,10 @@ class TestCloudReactGovernanceReject:
             ),
             max_iterations=5,
             extra={
+                "partition_map": [react_seg],
                 "workflow_config": {
                     "name": "e2e_governance_test",
-                    "segments": [{"id": "seg_0", "type": "REACT"}],
+                    "segments": [react_seg],
                     "react_executor": {
                         "enabled": True,
                         "max_iterations": 5,
@@ -201,19 +208,21 @@ class TestCloudMultiSegmentWithReact:
     def test_cloud_multi_segment_with_react(
         self, sfn_orchestrator_arn, start_sfn_execution, wait_for_sfn_completion,
     ):
+        multi_segments = [
+            {"id": "seg_0", "type": "OPERATOR", "nodes": []},
+            {"id": "seg_1", "type": "REACT", "nodes": []},
+            {"id": "seg_2", "type": "VALIDATOR", "nodes": []},
+        ]
         input_data = _build_cloud_input(
             task_prompt="Process this multi-segment workflow with autonomous agent in segment 1.",
             max_iterations=10,
             extra={
                 "total_segments": 3,
                 "segment_to_run": 0,
+                "partition_map": multi_segments,
                 "workflow_config": {
                     "name": "e2e_multi_react",
-                    "segments": [
-                        {"id": "seg_0", "type": "OPERATOR"},
-                        {"id": "seg_1", "type": "REACT"},
-                        {"id": "seg_2", "type": "VALIDATOR"},
-                    ],
+                    "segments": multi_segments,
                     "react_executor": {
                         "enabled": True,
                         "max_iterations": 10,
