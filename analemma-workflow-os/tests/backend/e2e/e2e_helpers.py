@@ -58,6 +58,30 @@ def _assert_react_evidence(bag: dict, context: str = ""):
     )
 
 
+def _assert_lambda_internal_execution(bag: dict, context: str = ""):
+    """
+    Assert that ReactExecutor ran INSIDE Lambda, not via MQTT proxy.
+
+    The evidence marker __react_execution_context == "lambda_internal" is set by
+    SegmentRunnerService._execute_react_segment(). Its absence means the segment
+    was routed through ExecuteSegmentProxy (MQTT worker) instead.
+    """
+    exec_ctx = bag.get("__react_execution_context")
+    prefix = f"[{context}] " if context else ""
+
+    # If data was dehydrated (batch pointers), the marker may be offloaded too.
+    # In that case, verify that at least batch pointers exist (confirming the
+    # segment ran and sealed state).
+    if exec_ctx is None and _has_batch_pointers(bag):
+        return  # Dehydrated: can't verify execution context, but bag was sealed
+
+    assert exec_ctx == "lambda_internal", (
+        f"{prefix}Expected lambda_internal execution context but got: "
+        f"{exec_ctx!r}. This segment may have routed through MQTT proxy "
+        f"instead of Lambda ReactExecutor. Keys: {list(bag.keys())[:20]}"
+    )
+
+
 def _get_react_result(bag: dict) -> dict:
     """
     Safely extract react_result from bag. Returns empty dict if dehydrated.

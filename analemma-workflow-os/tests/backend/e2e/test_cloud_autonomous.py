@@ -16,7 +16,10 @@ import uuid
 
 import pytest
 
-from e2e_helpers import _extract_bag, _assert_react_evidence, _get_react_result, _has_batch_pointers
+from e2e_helpers import (
+    _extract_bag, _assert_react_evidence, _get_react_result,
+    _has_batch_pointers, _assert_lambda_internal_execution,
+)
 
 pytestmark = [pytest.mark.e2e, pytest.mark.cloud]
 
@@ -26,13 +29,17 @@ def _build_cloud_input(
     max_iterations: int = 5,
     extra: dict = None,
 ) -> dict:
-    """Build SFN input for cloud-only ReactExecutor tests."""
+    """Build SFN input for cloud-only ReactExecutor tests.
+
+    NO __e2e_proxy — routes through ExecuteSegmentDirect → Lambda invoke →
+    SegmentRunnerService → _execute_react_segment (true cloud autonomous).
+    """
     run_id = uuid.uuid4().hex[:12]
     payload = {
         "ownerId": "e2e_cloud_owner",
         "workflowId": f"e2e_cloud_{run_id}",
         "idempotency_key": f"e2e_cloud_{run_id}",
-        "__e2e_proxy": True,
+        # No __e2e_proxy → goes through ExecuteSegmentDirect (Lambda invoke)
         "workflow_config": {
             "name": "e2e_cloud_autonomous",
             "segments": [{"id": "seg_0", "type": "REACT"}],
@@ -82,6 +89,9 @@ class TestCloudReactSingleTool:
 
         # Verify LLM evidence exists (or was dehydrated by seal_state_bag)
         _assert_react_evidence(bag, context="CloudReactSingleTool")
+
+        # Verify Lambda-internal execution (not MQTT proxy)
+        _assert_lambda_internal_execution(bag, context="CloudReactSingleTool")
 
 
 # ── Test 2: Cloud React Budget Gate ──────────────────────────────────────────

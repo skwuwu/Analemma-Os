@@ -29,6 +29,7 @@ Usage:
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -114,7 +115,7 @@ class ReactResult:
     total_input_tokens: int
     total_output_tokens: int
     segments: List[str]
-    stop_reason: str  # "end_turn" | "max_iterations" | "budget_exceeded" | "sigkill"
+    stop_reason: str  # "end_turn" | "max_iterations" | "budget_exceeded" | "sigkill" | "wall_clock_timeout" | "max_rejections"
 
 
 # ─── Tool Registration ──────────────────────────────────────────────────────
@@ -163,6 +164,11 @@ class ReactExecutor:
         token_counter:       Optional callable(str) -> int for accurate token estimation.
                              Defaults to len(text) // 4. Plug in tiktoken or Anthropic's
                              token counter for production-grade budget precision.
+        wall_clock_timeout:  Hard wall-clock limit in seconds. None = no limit.
+                             For Lambda (300s timeout), use 240s to reserve 60s for
+                             seal_state_bag + S3 offload + response serialization.
+        tool_timeout:        Per-tool execution timeout in seconds. Prevents a single
+                             slow tool handler from consuming the entire budget.
     """
 
     def __init__(
@@ -176,6 +182,8 @@ class ReactExecutor:
         token_budget: int = 500_000,
         system_prompt: Optional[str] = None,
         token_counter: Optional[Callable[[str], int]] = None,
+        wall_clock_timeout: Optional[float] = None,
+        tool_timeout: float = 30.0,
     ):
         self._bridge = bridge
         self._model_id = model_id
@@ -187,11 +195,33 @@ class ReactExecutor:
         self._tools: Dict[str, _RegisteredTool] = {}
         self._client = None  # Lazy-initialized
         self._token_counter = token_counter or self._default_token_estimate
+        self._wall_clock_timeout = wall_clock_timeout
+        self._tool_timeout = tool_timeout
+        self._start_time: Optional[float] = None
 
     @staticmethod
     def _default_token_estimate(text: str) -> int:
         """Rough token estimate: ~4 chars per token. Override via token_counter."""
         return len(text) // _TOKEN_ESTIMATE_CHARS_PER_TOKEN
+
+    def _check_wall_clock(self) -> bool:
+        """Return True if wall-clock budget is exceeded."""
+        if self._wall_clock_timeout is None or self._start_time is None:
+            return False
+        elapsed = time.time() - self._start_time
+        if elapsed >= self._wall_clock_timeout:
+            logger.warning(
+                "[ReactExecutor] Wall-clock timeout: %.1fs >= %.1fs",
+                elapsed, self._wall_clock_timeout,
+            )
+            return True
+        return False
+
+    def _remaining_wall_clock(self) -> Optional[float]:
+        """Return remaining wall-clock seconds, or None if no limit."""
+        if self._wall_clock_timeout is None or self._start_time is None:
+            return None
+        return max(0.0, self._wall_clock_timeout - (time.time() - self._start_time))
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -258,6 +288,7 @@ class ReactExecutor:
         total_input_tokens = 0
         total_output_tokens = 0
         rejection_counter: Dict[str, int] = {}
+        self._start_time = time.time()
 
         for iteration in range(self._max_iterations):
             # ── Budget gate 1/3: pre-loop ──
@@ -270,6 +301,18 @@ class ReactExecutor:
                 return self._budget_exceeded_result(
                     messages, iteration,
                     total_input_tokens, total_output_tokens, segments,
+                )
+
+            # ── Wall-clock gate: pre-LLM ──
+            if self._check_wall_clock():
+                return ReactResult(
+                    final_answer="",
+                    messages=messages,
+                    iterations=iteration,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                    segments=segments,
+                    stop_reason="wall_clock_timeout",
                 )
 
             # ── LLM call ──
@@ -364,6 +407,18 @@ class ReactExecutor:
                     stop_reason="sigkill",
                 )
 
+            # ── Wall-clock gate: post-tool ──
+            if self._check_wall_clock():
+                return ReactResult(
+                    final_answer="",
+                    messages=messages,
+                    iterations=iteration + 1,
+                    total_input_tokens=total_input_tokens,
+                    total_output_tokens=total_output_tokens,
+                    segments=segments,
+                    stop_reason="wall_clock_timeout",
+                )
+
             # ── Budget gate 3/3: post-tool estimate ──
             tool_result_text = "".join(
                 str(r.get("content", "")) for r in tool_results
@@ -426,10 +481,20 @@ class ReactExecutor:
         """
         Call Claude via AnthropicBedrock with retry logic.
 
+        Timeout is capped by remaining wall-clock budget to prevent a single
+        slow Bedrock response from consuming the entire Lambda timeout.
+
         Returns the raw anthropic Message response object.
         """
         client = self._get_client()
         last_error = None
+
+        # Cap LLM timeout to remaining wall-clock (min 10s, max 120s)
+        remaining = self._remaining_wall_clock()
+        if remaining is not None:
+            llm_timeout = min(max(remaining - 5.0, 10.0), 120.0)
+        else:
+            llm_timeout = 120.0
 
         for attempt in range(_LLM_MAX_RETRIES):
             try:
@@ -438,6 +503,7 @@ class ReactExecutor:
                     "max_tokens": self._max_tokens_per_turn,
                     "system": self._system_prompt,
                     "messages": messages,
+                    "timeout": llm_timeout,
                 }
                 if self._temperature > 0:
                     kwargs["temperature"] = self._temperature
@@ -737,7 +803,9 @@ class ReactExecutor:
             }
 
         try:
-            result = tool.handler(tool_input)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(tool.handler, tool_input)
+                result = future.result(timeout=self._tool_timeout)
 
             # Canonical serialization — typed, deterministic, no silent str() fallback
             if isinstance(result, str):
@@ -749,6 +817,18 @@ class ReactExecutor:
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
                 "content": result_str,
+            }
+
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "[ReactExecutor] Tool timeout: tool=%s after %.1fs",
+                tool_name, self._tool_timeout,
+            )
+            return {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "is_error": True,
+                "content": f"Tool '{tool_name}' timed out after {self._tool_timeout}s",
             }
 
         except Exception as exec_err:

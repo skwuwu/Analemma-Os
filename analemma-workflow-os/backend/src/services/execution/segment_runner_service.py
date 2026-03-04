@@ -41,6 +41,16 @@ except ImportError:
     get_concurrency_controller = None
     ConcurrencyControllerV2 = None
 
+# [REACT] ReactExecutor integration for autonomous agent segments
+try:
+    from src.bridge.python_bridge import AnalemmaBridge as _ReactBridge
+    from src.bridge.react_executor import ReactExecutor as _ReactExecutor
+    REACT_EXECUTOR_AVAILABLE = True
+except ImportError:
+    REACT_EXECUTOR_AVAILABLE = False
+    _ReactBridge = None
+    _ReactExecutor = None
+
 # Services
 from src.services.state.state_manager import StateManager
 from src.common.security_utils import mask_pii_in_state
@@ -2954,6 +2964,167 @@ class SegmentRunnerService:
         
         return initial_state, error_info
 
+    # ── REACT Segment Execution ───────────────────────────────────────────────
+
+    def _execute_react_segment(
+        self,
+        segment_config: Dict[str, Any],
+        initial_state: Dict[str, Any],
+        event: Dict[str, Any],
+        execution_id: str,
+        owner_id: str,
+    ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+        """
+        Execute a REACT-type segment using ReactExecutor with full VSM governance.
+
+        Mirrors the pattern from worker_server.py:execute_segment_task() but runs
+        inside Lambda. Wall-clock timeout (240s default) reserves 60s for
+        seal_state_bag + S3 offload + response serialization.
+
+        Returns:
+            (result_state, error_info_or_None) — compatible with _execute_with_kernel_retry
+        """
+        if not REACT_EXECUTOR_AVAILABLE:
+            return initial_state, {
+                'error': 'ReactExecutor not available in Lambda environment',
+                'error_type': 'ImportError',
+                'retry_attempts': 0,
+            }
+
+        # Extract config from segment_config or workflow_config
+        react_config = {}
+        if isinstance(segment_config, dict):
+            react_config = segment_config.get('react_executor', {})
+        if not react_config:
+            workflow_config = initial_state.get('workflow_config', {})
+            if isinstance(workflow_config, dict):
+                react_config = workflow_config.get('react_executor', {})
+
+        max_iterations = min(react_config.get('max_iterations', 10), 50)
+        token_budget = react_config.get('token_budget', 500_000)
+        ring_level = react_config.get('ring_level', 2)
+        wall_clock_timeout = react_config.get('wall_clock_timeout', 240.0)
+        tool_timeout = react_config.get('tool_timeout', 30.0)
+        task_prompt = initial_state.get(
+            'task_prompt',
+            initial_state.get('prompt', 'Execute the workflow segment.'),
+        )
+
+        vsm_endpoint = os.environ.get("ANALEMMA_KERNEL_ENDPOINT", "http://localhost:8765")
+
+        try:
+            bridge = _ReactBridge(
+                workflow_id=f"lambda_{execution_id}",
+                ring_level=ring_level,
+                kernel_endpoint=vsm_endpoint,
+                mode="strict",
+            )
+
+            executor = _ReactExecutor(
+                bridge=bridge,
+                max_iterations=max_iterations,
+                token_budget=token_budget,
+                wall_clock_timeout=wall_clock_timeout,
+                tool_timeout=tool_timeout,
+            )
+
+            # Register default tools (same as worker_server.py)
+            executor.add_tool(
+                name="read_only",
+                description="Echo text back (read-only tool)",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string", "description": "Text to echo"}},
+                    "required": ["text"],
+                },
+                handler=lambda p: p.get("text", "echo: no text provided"),
+                bridge_action="read_only",
+            )
+            executor.add_tool(
+                name="basic_query",
+                description="Perform simple arithmetic (a op b)",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number"},
+                        "b": {"type": "number"},
+                        "operation": {"type": "string", "enum": ["add", "subtract", "multiply"]},
+                    },
+                    "required": ["a", "b"],
+                },
+                handler=lambda p: {
+                    "result": {"add": p.get("a", 0) + p.get("b", 0),
+                               "subtract": p.get("a", 0) - p.get("b", 0),
+                               "multiply": p.get("a", 0) * p.get("b", 0),
+                               }.get(p.get("operation", "add"), p.get("a", 0) + p.get("b", 0)),
+                    "operation": p.get("operation", "add"),
+                },
+                bridge_action="basic_query",
+            )
+
+            # Register custom tools from config
+            custom_tools = react_config.get('tools', [])
+            for tool_def in custom_tools:
+                if isinstance(tool_def, dict) and 'name' in tool_def:
+                    executor.add_tool(
+                        name=tool_def["name"],
+                        description=tool_def.get("description", ""),
+                        input_schema=tool_def.get("input_schema", {"type": "object", "properties": {}}),
+                        handler=lambda p, desc=tool_def.get("description", ""): f"[stub] {desc}: {p}",
+                        bridge_action=tool_def.get("bridge_action", tool_def["name"]),
+                    )
+
+            logger.info(
+                "[ReactExecutor] Starting: execution_id=%s, max_iter=%d, "
+                "wall_clock=%.0fs, ring=%d, task=%s",
+                execution_id, max_iterations, wall_clock_timeout, ring_level,
+                task_prompt[:100],
+            )
+
+            result = executor.run(task_prompt)
+
+            # Build result_state compatible with _execute_with_kernel_retry output
+            status = "COMPLETE" if result.stop_reason == "end_turn" else result.stop_reason.upper()
+
+            result_state = dict(initial_state)
+            result_state.update({
+                "status": status,
+                "_status": status,
+                "react_result": {
+                    "final_answer": result.final_answer,
+                    "iterations": result.iterations,
+                    "stop_reason": result.stop_reason,
+                    "segments": result.segments,
+                    "total_input_tokens": result.total_input_tokens,
+                    "total_output_tokens": result.total_output_tokens,
+                },
+                "llm_raw_output": result.final_answer,
+                "total_tokens": result.total_input_tokens + result.total_output_tokens,
+                "usage": {
+                    "input_tokens": result.total_input_tokens,
+                    "output_tokens": result.total_output_tokens,
+                    "total_tokens": result.total_input_tokens + result.total_output_tokens,
+                },
+                # Lambda-internal execution evidence marker
+                "__react_execution_context": "lambda_internal",
+            })
+
+            logger.info(
+                "[ReactExecutor] Completed: stop_reason=%s, iterations=%d, tokens=%d",
+                result.stop_reason, result.iterations,
+                result.total_input_tokens + result.total_output_tokens,
+            )
+
+            return result_state, None
+
+        except Exception as e:
+            logger.error("[ReactExecutor] Execution failed: %s", e, exc_info=True)
+            return initial_state, {
+                'error': str(e),
+                'error_type': type(e).__name__,
+                'retry_attempts': 0,
+            }
+
     def execute_segment(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """
         Main execution logic for a workflow segment with StateHydrator integration.
@@ -4186,16 +4357,27 @@ class SegmentRunnerService:
             except Exception as e:
                 logger.warning("User check failed, but proceeding if possible: %s", e)
 
-        # 7. Execute Workflow Segment with Kernel Defense
-        # [Guard] [Kernel Defense] Aggressive Retry + Partial Success
+        # 7. Execute Workflow Segment
         start_time = time.time()
-        
-        result_state, execution_error = self._execute_with_kernel_retry(
-            segment_config=segment_config,
-            initial_state=initial_state,
-            auth_user_id=auth_user_id,
-            event=event
-        )
+
+        # [REACT] Autonomous agent segment — use ReactExecutor instead of run_workflow
+        if segment_type == 'REACT' and REACT_EXECUTOR_AVAILABLE:
+            logger.info(f"[REACT] Segment {segment_id} is REACT type — using ReactExecutor")
+            result_state, execution_error = self._execute_react_segment(
+                segment_config=segment_config,
+                initial_state=initial_state,
+                event=event,
+                execution_id=execution_id,
+                owner_id=owner_id,
+            )
+        else:
+            # [Guard] [Kernel Defense] Aggressive Retry + Partial Success (legacy node-by-node)
+            result_state, execution_error = self._execute_with_kernel_retry(
+                segment_config=segment_config,
+                initial_state=initial_state,
+                auth_user_id=auth_user_id,
+                event=event
+            )
         
         execution_time = time.time() - start_time
         

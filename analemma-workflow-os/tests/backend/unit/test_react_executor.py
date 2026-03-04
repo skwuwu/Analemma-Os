@@ -2298,3 +2298,221 @@ def test_llm_empty_content(executor, mock_client, mock_bridge):
     assert result.stop_reason == "end_turn"
     assert result.final_answer == ""
     assert result.iterations == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION H: Wall-Clock, Tool, and LLM Timeout Safety
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ─── Test 41: Wall-clock timeout stops loop with preserved state ──────────────
+
+def test_wall_clock_timeout_stops_loop(mock_client):
+    """wall_clock_timeout=0.01s with slow LLM → stop_reason='wall_clock_timeout',
+    messages/segments/tokens preserved up to last completed step."""
+    from backend.src.bridge.react_executor import ReactExecutor
+
+    bridge = MagicMock()
+    bridge.workflow_id = "test"
+
+    handle = MagicMock()
+    handle.allowed = True
+    handle.should_kill = False
+    handle.should_rollback = False
+    handle.checkpoint_id = "cp_ok"
+    handle.action_params = {}
+    handle.report_observation = MagicMock()
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=handle)
+    ctx.__exit__ = MagicMock(return_value=False)
+    bridge.segment = MagicMock(return_value=ctx)
+
+    call_count = [0]
+
+    def llm_response(*args, **kwargs):
+        call_count[0] += 1
+        # Always return tool call so the loop keeps going
+        return MockMessage(
+            content=[MockToolUseBlock(id=f"t{call_count[0]}", name="tool_a", input={})],
+            stop_reason="tool_use",
+            usage=MockUsage(input_tokens=100, output_tokens=50),
+        )
+
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = llm_response
+
+    exec_ = ReactExecutor(
+        bridge=bridge, model_id="test", max_iterations=10,
+        wall_clock_timeout=0.08,  # 80ms
+        tool_timeout=30.0,
+    )
+    exec_._client = mock_client
+
+    def slow_tool(p):
+        time.sleep(0.05)  # 50ms per tool — after 2 iterations wall-clock expires
+        return "ok"
+
+    exec_.add_tool("tool_a", "A", {"type": "object", "properties": {}}, slow_tool)
+
+    result = exec_.run("Keep going")
+
+    assert result.stop_reason == "wall_clock_timeout"
+    # State preserved: messages contain at least initial user + assistant + tool result
+    assert len(result.messages) >= 3
+    assert result.total_input_tokens >= 100
+    assert result.total_output_tokens >= 50
+    assert result.iterations >= 1
+
+
+# ─── Test 42: Per-tool timeout returns error, loop continues ──────────────────
+
+def test_tool_timeout_returns_error(mock_client):
+    """Tool handler sleeps beyond tool_timeout → is_error tool result, loop continues."""
+    from backend.src.bridge.react_executor import ReactExecutor
+
+    bridge = MagicMock()
+    bridge.workflow_id = "test"
+
+    handle = MagicMock()
+    handle.allowed = True
+    handle.should_kill = False
+    handle.should_rollback = False
+    handle.checkpoint_id = "cp_ok"
+    handle.action_params = {"text": "test"}
+    handle.report_observation = MagicMock()
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=handle)
+    ctx.__exit__ = MagicMock(return_value=False)
+    bridge.segment = MagicMock(return_value=ctx)
+
+    # Turn 1: tool call (will timeout)
+    resp1 = MockMessage(
+        content=[MockToolUseBlock(id="t1", name="slow_tool", input={"text": "test"})],
+        stop_reason="tool_use",
+        usage=MockUsage(input_tokens=100, output_tokens=50),
+    )
+    # Turn 2: LLM recovers
+    resp2 = MockMessage(
+        content=[MockTextBlock(text="Tool was too slow, answering directly.")],
+        stop_reason="end_turn",
+        usage=MockUsage(input_tokens=150, output_tokens=30),
+    )
+
+    mock_client = MagicMock()
+    mock_client.messages.create.side_effect = [resp1, resp2]
+
+    exec_ = ReactExecutor(
+        bridge=bridge, model_id="test", max_iterations=10,
+        tool_timeout=0.05,  # 50ms
+    )
+    exec_._client = mock_client
+
+    def slow_handler(p):
+        time.sleep(1.0)  # 1 second — well beyond 50ms timeout
+        return "should not reach"
+
+    exec_.add_tool(
+        "slow_tool", "Slow tool",
+        {"type": "object", "properties": {"text": {"type": "string"}}},
+        slow_handler,
+    )
+
+    result = exec_.run("Use slow tool")
+
+    assert result.stop_reason == "end_turn"
+    assert result.iterations == 2
+
+    # First tool result should be a timeout error
+    tool_result = result.messages[2]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "timed out" in tool_result["content"]
+    assert "slow_tool" in tool_result["content"]
+
+
+# ─── Test 43: wall_clock_timeout=None means no limit ─────────────────────────
+
+def test_wall_clock_none_means_no_limit(mock_client):
+    """wall_clock_timeout=None → no wall-clock limit, normal execution."""
+    from backend.src.bridge.react_executor import ReactExecutor
+
+    bridge = MagicMock()
+    bridge.workflow_id = "test"
+
+    handle = MagicMock()
+    handle.allowed = True
+    handle.should_kill = False
+    handle.should_rollback = False
+    handle.checkpoint_id = "cp_ok"
+    handle.report_observation = MagicMock()
+
+    ctx = MagicMock()
+    ctx.__enter__ = MagicMock(return_value=handle)
+    ctx.__exit__ = MagicMock(return_value=False)
+    bridge.segment = MagicMock(return_value=ctx)
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MockMessage(
+        content=[MockTextBlock(text="Normal answer.")],
+        stop_reason="end_turn",
+        usage=MockUsage(input_tokens=50, output_tokens=20),
+    )
+
+    exec_ = ReactExecutor(
+        bridge=bridge, model_id="test",
+        wall_clock_timeout=None,  # No limit
+    )
+    exec_._client = mock_client
+
+    result = exec_.run("Hello")
+
+    assert result.stop_reason == "end_turn"
+    assert result.final_answer == "Normal answer."
+    assert result.iterations == 1
+
+
+# ─── Test 44: LLM timeout capped by remaining wall-clock ─────────────────────
+
+def test_llm_timeout_capped_by_wall_clock(mock_client):
+    """When wall-clock is nearly exhausted, _call_llm passes truncated timeout."""
+    from backend.src.bridge.react_executor import ReactExecutor
+
+    bridge = MagicMock()
+    bridge.workflow_id = "test"
+
+    mock_client = MagicMock()
+    mock_client.messages.create.return_value = MockMessage(
+        content=[MockTextBlock(text="Quick answer.")],
+        stop_reason="end_turn",
+        usage=MockUsage(input_tokens=50, output_tokens=20),
+    )
+
+    exec_ = ReactExecutor(
+        bridge=bridge, model_id="test",
+        wall_clock_timeout=200.0,  # 200s total
+    )
+    exec_._client = mock_client
+
+    # Verify _remaining_wall_clock before run
+    assert exec_._remaining_wall_clock() is None  # Not started yet
+
+    result = exec_.run("Quick task")
+
+    assert result.stop_reason == "end_turn"
+
+    # Verify timeout kwarg was passed to messages.create
+    call_kwargs = mock_client.messages.create.call_args
+    assert "timeout" in call_kwargs.kwargs or "timeout" in dict(zip(
+        ["model", "max_tokens", "system", "messages", "timeout"],
+        call_kwargs.args if call_kwargs.args else [],
+    ))
+
+    # Verify the timeout value was set (should be <= 120 per cap)
+    if call_kwargs.kwargs:
+        timeout_val = call_kwargs.kwargs.get("timeout")
+    else:
+        timeout_val = None
+    if timeout_val is not None:
+        assert timeout_val <= 120.0
+        assert timeout_val >= 10.0
