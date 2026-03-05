@@ -42,14 +42,15 @@ This document provides step-by-step instructions for deploying Analemma OS to AW
   - Step Functions state transitions: 25000/day
   - DynamoDB RCU/WCU: 500+ each
 
-### 1.3 API Keys
+### 1.3 API Keys & LLM Access
 
 | Service | Required | Purpose |
 |---------|----------|---------|
-| **Google AI (Gemini)** | ✅ Yes | Primary LLM provider |
-| **AWS Bedrock** | Optional | Fallback LLM (Claude) |
-| **OpenAI** | Optional | Alternative LLM |
-| **Anthropic** | Optional | Direct Claude access |
+| **AWS Bedrock** | ✅ Yes | Claude Sonnet 4 for REACT agents (via inference profiles) |
+| **Google AI (Gemini)** | ✅ Yes | Gemini Flash/Pro for distillation, self-healing, context caching |
+| **OpenAI** | Optional | Alternative LLM routing |
+
+> **Note**: Bedrock model access must be enabled in the AWS console for the deployment region. For Claude Sonnet 4+, cross-region inference profiles are required (e.g., `apac.anthropic.claude-sonnet-4-*` for ap-northeast-2).
 
 ---
 
@@ -70,7 +71,7 @@ pip install -r requirements.txt
 
 # 4. Configure AWS credentials
 aws configure
-# Enter: Access Key, Secret Key, Region (e.g., us-east-1)
+# Enter: Access Key, Secret Key, Region (e.g., ap-northeast-2)
 
 # 5. Deploy to AWS
 sam build
@@ -102,8 +103,8 @@ Create a `.env` file in the `backend/` directory:
 ```bash
 # .env file for local development
 
-# AWS Configuration
-AWS_REGION=us-east-1
+# AWS Configuration (adjust to your deployment region)
+AWS_REGION=ap-northeast-2
 AWS_PROFILE=default
 
 # DynamoDB Tables (local or remote)
@@ -116,8 +117,8 @@ CHECKPOINT_TABLE=CheckpointsTableV3-dev
 # S3 Bucket
 SKELETON_S3_BUCKET=analemma-state-dev
 
-# Cognito
-COGNITO_ISSUER_URL=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXX
+# Cognito (adjust region to match deployment)
+COGNITO_ISSUER_URL=https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_XXXXXX
 APP_CLIENT_ID=your-app-client-id
 
 # LLM API Keys
@@ -174,7 +175,7 @@ version = 0.1
 stack_name = "analemma-workflow-backend"
 resolve_s3 = true
 s3_prefix = "analemma-workflow-backend"
-region = "us-east-1"
+region = "ap-northeast-2"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM CAPABILITY_AUTO_EXPAND"
 disable_rollback = false
@@ -214,40 +215,38 @@ During `sam deploy --guided`, provide these parameters:
 
 ### 4.4 CI/CD Deployment (GitHub Actions)
 
-```yaml
-# .github/workflows/deploy.yml
+The actual CI/CD pipeline (`.github/workflows/backend-deploy.yml`) uses OIDC for AWS authentication:
 
-name: Deploy to AWS
+```yaml
+# .github/workflows/backend-deploy.yml (simplified)
+
+name: Backend Deploy
 
 on:
   push:
     branches: [main]
+    paths: ['analemma-workflow-os/backend/**']
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - uses: aws-actions/setup-sam@v2
-      
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-      
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ap-northeast-2
+
       - run: sam build
-      
-      - run: |
-          sam deploy \
-            --no-confirm-changeset \
-            --no-fail-on-empty-changeset \
-            --parameter-overrides \
-              "GoogleApiKey=${{ secrets.GOOGLE_API_KEY }}" \
-              "CognitoIssuerUrl=${{ secrets.COGNITO_ISSUER_URL }}" \
-              "CognitoAudience=${{ secrets.COGNITO_AUDIENCE }}"
+      - run: sam deploy --no-confirm-changeset --no-fail-on-empty-changeset
 ```
+
+> **Note**: The pipeline builds 64+ Lambda Docker images, which takes approximately 10-15 minutes.
 
 ---
 

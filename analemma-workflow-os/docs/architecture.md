@@ -17,7 +17,7 @@ This document provides a comprehensive technical reference for the Analemma OS k
 7. [2-Phase Commit Protocol](#7-2-phase-commit-protocol)
 8. [Distributed Execution Strategies](#8-distributed-execution-strategies)
 9. [Governance Layer](#9-governance-layer)
-10. [Gemini Integration Architecture](#10-gemini-integration-architecture)
+10. [LLM Integration Architecture](#10-llm-integration-architecture)
 11. [Glass-Box Observability](#11-glass-box-observability)
 
 ---
@@ -29,7 +29,7 @@ Analemma OS is a serverless kernel that enforces deterministic state management 
 ```
 +-----------------------------------------------------------------------+
 |  Ring 3 - USER AGENTS (Untrusted)                                     |
-|  Gemini-powered agents, external tools                                 |
+|  Claude/Gemini-powered agents, ReactExecutor, external tools            |
 |  All output treated as unverified data                                 |
 |                                                                        |
 |  +-------------------------------------------------------------------+ |
@@ -65,7 +65,7 @@ Analemma OS is a serverless kernel that enforces deterministic state management 
 | 0 | KERNEL | `kernel_protocol.py`, `universal_sync_core.py`, `state_versioning_service.py` | Immutable system core |
 | 1 | GOVERNOR | `governor_runner.py`, `governance_engine.py`, `constitution.py`, `prompt_security_guard.py` | Deterministic gatekeeper |
 | 2 | TRUSTED TOOLS | Verified internal services, validated API integrations | Controlled access |
-| 3 | USER AGENTS | Gemini agents, external tools, user-defined logic | Untrusted input |
+| 3 | USER AGENTS | Claude/Gemini agents, ReactExecutor, external tools | Untrusted input |
 
 ### Ring Enforcement Invariants
 
@@ -482,28 +482,60 @@ Custom clauses can be added per-workflow via `governance_policies.constitution[]
 
 ---
 
-## 10. Gemini Integration Architecture
+## 10. LLM Integration Architecture
 
-The kernel infrastructure (Step Functions orchestration, Merkle DAG, 2PC, Ring protection) is model-agnostic. The intelligence layer is not.
+The kernel infrastructure (Step Functions orchestration, Merkle DAG, 2PC, Ring protection) is **model-agnostic**. The intelligence layer supports multiple LLM providers, each selected for specific strengths:
 
-| Capability | Analemma Requirement | Why Gemini 3 |
+| Provider | Models | Primary Use Cases | Integration |
+|---|---|---|---|
+| **Claude (Bedrock)** | Sonnet 4, Haiku 4.5, Opus 4.5 | REACT autonomous agents, complex reasoning, tool_use protocol | `AnthropicBedrock` via inference profiles |
+| **Gemini (Vertex AI)** | 2.0 Flash, 1.5 Pro | Background distillation, self-healing diagnosis, context caching (2M tokens) | `google-cloud-aiplatform` SDK |
+| **OpenAI** | GPT-4o | Fallback routing, specific task delegation | `openai` SDK |
+
+### ReactExecutor — Bridge-Governed Autonomous Agent
+
+REACT-type segments use `ReactExecutor` with Claude via Bedrock for autonomous tool-use agent execution:
+
+```
+[1] Build messages (system + user task)
+[2] Call Claude via AnthropicBedrock with tool definitions
+[3] Post-LLM budget gate
+[4] Atomic governance: bridge.segment() for ALL tools in batch
+[5] Kill check: ANY SIGKILL → abort entire batch
+[6] Execute approved handlers, error for rejected
+[7] Post-tool budget estimate
+[8] Loop until end_turn / max_iterations / budget_exceeded / sigkill
+```
+
+Key safety constraints:
+- Every tool call passes through `AnalemmaBridge.segment()` before handler execution
+- Parallel tool batches use atomic governance — if ANY tool receives SIGKILL, ALL tools abort
+- Token budget checked at 3 gates (pre-loop, post-LLM, post-tool estimate)
+- Wall-clock timeout reserves 60s for seal_state_bag + S3 offload + response serialization
+
+### Bedrock Inference Profiles
+
+Newer Claude models (Sonnet 4+) require cross-region inference profiles rather than direct model invocation:
+
+| Region | Profile Prefix | Example |
 |---|---|---|
-| 2M token context window | Load full execution history for self-healing diagnosis | GPT-4: 128K, Claude 3.5: 200K — insufficient for full-history analysis |
-| Sub-500ms TTFT | Real-time kernel scheduling decisions between segments | Higher latency degrades execution loop to batch |
-| Native structured output | Zero-parsing overhead for Merkle manifest serialization | Prompt-engineered JSON is brittle at scale |
-| Vertex AI context caching | Cache 500K+ token system prompts across executions | Gemini-specific API |
-| Thinking Mode | Expose reasoning chain to Glass-Box callbacks | Native capability |
-| Multimodal input | Analyze logs + architecture diagrams + metrics simultaneously | Required for self-healing across heterogeneous signals |
+| US | `us.` | `us.anthropic.claude-sonnet-4-20250514-v1:0` |
+| Europe | `eu.` | `eu.anthropic.claude-sonnet-4-20250514-v1:0` |
+| Asia-Pacific | `apac.` | `apac.anthropic.claude-sonnet-4-20250514-v1:0` |
+| Global | `global.` | `global.anthropic.claude-sonnet-4-5-20250929-v1:0` |
+
+Discover available profiles: `aws bedrock list-inference-profiles --region <REGION>`
 
 ### Model Router
 
-The `model_router.py` service dynamically selects the Gemini variant based on context length, task complexity, and latency requirements. Selection criteria:
+The `model_router.py` service dynamically selects the optimal model based on context length, task complexity, and latency requirements:
 
 1. Semantic intent detection (structure vs. query vs. edit)
 2. Token count estimation (triggers Pro vs. Flash selection)
 3. Latency requirements (interactive vs. batch)
+4. Provider-specific capability matching (e.g., tool_use → Claude, context caching → Gemini)
 
-Context caching activates automatically for contexts above 32K tokens. Cached tokens are billed at the provider's reduced rate.
+Context caching activates automatically for contexts above 32K tokens via Vertex AI's `CachedContent` API.
 
 ---
 
@@ -522,7 +554,7 @@ Because the state bag uses S3 pointers, raw payloads are not directly renderable
 
 ### Thinking Mode Integration
 
-When Gemini Thinking Mode is active, intermediate reasoning steps are streamed as `ai_thought` events before the final response. These events carry the same `trace_id` as the parent execution, enabling correlation of reasoning steps to their producing segment.
+When the LLM's extended thinking mode is active (Gemini Thinking Mode or Claude extended thinking), intermediate reasoning steps are streamed as `ai_thought` events before the final response. These events carry the same `trace_id` as the parent execution, enabling correlation of reasoning steps to their producing segment.
 
 ### Log Structure
 
@@ -533,7 +565,7 @@ When Gemini Thinking Mode is active, intermediate reasoning steps are streamed a
   "trace_id": "exec_xyz789",
   "segment_id": 0,
   "data": {
-    "model": "gemini-3-pro",
+    "model": "claude-sonnet-4",
     "tokens": { "input": 850, "output": 400, "total": 1250 },
     "duration_ms": 850
   }

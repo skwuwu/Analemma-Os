@@ -21,6 +21,8 @@ This document covers Analemma OS features: the Co-design Assistant, workflow exe
 11. [Instruction Distiller](#11-instruction-distiller)
 12. [Task Manager](#12-task-manager)
 13. [Scheduled Workflows](#13-scheduled-workflows)
+14. [REACT Autonomous Agent](#14-react-autonomous-agent)
+15. [Speculative Execution](#15-speculative-execution)
 
 ---
 
@@ -310,7 +312,7 @@ Sensitive fields are filtered according to the Ring protection policy before app
 
 ## 6. Self-Healing and Recovery
 
-Analemma OS includes automatic error recovery through Gemini-powered diagnostics. When a segment fails, the Governor checks the circuit breaker count and, if within the retry budget, passes the error context to Gemini for diagnosis.
+Analemma OS includes automatic error recovery through LLM-powered diagnostics. When a segment fails, the Governor checks the circuit breaker count and, if within the retry budget, passes the error context to the configured LLM for diagnosis.
 
 ### 6.1 Self-Healing Process
 
@@ -328,9 +330,9 @@ Execution Fails
       | Within retry budget
       v
 +------------------------------------------+
-|     Gemini: Diagnosis                     |
+|     LLM: Diagnosis                        |
 |   - Full execution context injected      |
-|   - 2M token window for history analysis |
+|   - Large context window for analysis    |
 |   - Returns targeted recovery action     |
 +------------------------------------------+
       |
@@ -542,12 +544,12 @@ Namespace: Analemma/Workflow
 
 ## 10. Model Router
 
-The Model Router selects the optimal Gemini variant for each request based on context length, task complexity, and latency requirements.
+The Model Router selects the optimal LLM provider and model for each request based on context length, task complexity, latency requirements, and capability matching.
 
 ### 10.1 Selection Criteria
 
 ```
-Input: User request, canvas mode, workflow state
+Input: User request, canvas mode, workflow state, segment type
                  |
                  v
 +------------------------------------------+
@@ -559,10 +561,11 @@ Input: User request, canvas mode, workflow state
                  |
                  v
 +------------------------------------------+
-|     Context Analysis                      |
-|   - Workflow size                        |
-|   - History length                       |
+|     Context & Capability Analysis         |
 |   - Token estimation                     |
+|   - Tool_use requirement (→ Claude)      |
+|   - Context caching eligibility (→ Gemini)|
+|   - REACT segment type (→ Claude)        |
 +------------------------------------------+
                  |
                  v
@@ -571,24 +574,27 @@ Input: User request, canvas mode, workflow state
 |   - Latency requirements                 |
 |   - Context window needs                 |
 |   - Cost constraints                     |
+|   - Provider-specific capabilities       |
 +------------------------------------------+
                  |
                  v
-Output: Selected model (e.g., gemini-3-pro)
+Output: Selected model + provider
 ```
 
 ### 10.2 Available Models
 
-| Model | Use Case | Context Window | Approx. TTFT |
+| Model | Provider | Use Case | Context Window |
 |---|---|---|---|
-| `gemini-3-pro` | Full generation, complex reasoning, self-healing | 2M tokens | ~500ms |
-| `gemini-3-flash` | Real-time collaboration, streaming, Distributed Map workers | 1M tokens | ~100ms |
-| `gemini-3-flash-lite` | Pre-routing, classification | 1M tokens | ~80ms |
-| `claude-3-sonnet` | Fallback, Bedrock integration | 200K tokens | ~1.5s |
+| Claude Sonnet 4 | AWS Bedrock | REACT agents, tool_use, complex reasoning | 200K tokens |
+| Claude Haiku 4.5 | AWS Bedrock | Fast classification, lightweight tasks | 200K tokens |
+| Claude Opus 4.5 | AWS Bedrock | Deep analysis, self-healing diagnosis | 200K tokens |
+| Gemini 2.0 Flash | Vertex AI | Background distillation, streaming, Distributed Map | 1M tokens |
+| Gemini 1.5 Pro | Vertex AI | Full-history analysis with context caching | 2M tokens |
+| GPT-4o | OpenAI | Fallback routing | 128K tokens |
 
 ### 10.3 Context Caching
 
-Context caching activates automatically for contexts above 32K tokens. System prompts and large reference documents cached via `CachedContent` API are billed at the provider's reduced token rate.
+Context caching activates automatically for Gemini contexts above 32K tokens. System prompts and large reference documents cached via Vertex AI's `CachedContent` API are billed at the reduced token rate.
 
 ---
 
@@ -730,7 +736,119 @@ Runs on a fixed interval (default: every minute):
 
 ---
 
+## 14. REACT Autonomous Agent
+
+REACT segments enable fully autonomous agent execution with bridge-governed tool use via Claude (Bedrock).
+
+### 14.1 Architecture
+
+```
+ReactExecutor
+  |
+  +-- Claude Sonnet 4 (via AnthropicBedrock)
+  |     - tool_use protocol for structured tool calls
+  |     - APAC inference profile for ap-northeast-2
+  |
+  +-- AnalemmaBridge (Ring 1 Governor)
+  |     - Every tool call passes through bridge.segment()
+  |     - Ring-fenced Capability Map enforcement
+  |     - SIGKILL / SOFT_ROLLBACK governance decisions
+  |
+  +-- Budget & Safety Gates
+        - 3-point token budget enforcement
+        - Wall-clock timeout (240s default, reserves 60s for seal)
+        - Per-tool execution timeout (30s default)
+        - Max consecutive rejection limit (3)
+```
+
+### 14.2 Governance Model
+
+| Phase | Action | On Failure |
+|---|---|---|
+| Phase 1 — Governance | Probe `bridge.segment()` for ALL tools in batch | Record decision |
+| Phase 2 — Kill Check | If ANY tool received SIGKILL → abort entire batch | Return `stop_reason: sigkill` |
+| Phase 3 — Execution | Run approved handlers, error for rejected | Continue loop |
+
+### 14.3 Tool Registration
+
+```python
+executor.add_tool(
+    name="read_only",
+    description="Echo text back (read-only tool)",
+    input_schema={
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"]
+    },
+    handler=lambda p: p.get("text", ""),
+    bridge_action="read_only",
+)
+```
+
+### 14.4 Stop Reasons
+
+| Reason | Description |
+|---|---|
+| `end_turn` | Claude completed naturally |
+| `max_iterations` | Loop iteration limit reached |
+| `budget_exceeded` | Token budget exhausted |
+| `sigkill` | Governance terminated execution |
+| `wall_clock_timeout` | Lambda time limit approaching |
+| `max_rejections` | Tool rejected 3+ times consecutively |
+
+---
+
+## 15. Speculative Execution
+
+CPU branch-prediction analogy for governance verification overhead reduction.
+
+### 15.1 How It Works
+
+```
+SEGMENT N OUTPUT
+  Stage 1 (<5ms) → PASS? (score >= 0.75) → Start Segment N+1 immediately
+                                           + Background verify (async thread)
+                 → FAIL/UNCERTAIN → Blocking Stage 2 (500ms)
+
+BACKGROUND THREAD:
+  - Merkle hash computation (dirty-key only)
+  - Stage 2 LLM verification (if needed)
+  - If FAIL → set abort flag → Segment N+1 rolls back
+```
+
+### 15.2 Safety Guards
+
+Speculation is FORBIDDEN when:
+- Segment contains side-effectful nodes (webhook, email, database_write, etc.)
+- HITP edge boundary
+- REACT segment type
+- Parallel branch execution
+- Max 1 speculative segment in-flight
+
+---
+
 ## Feature Matrix
+
+| Feature | Description | Status |
+|---|---|---|
+| Co-design Assistant | Natural language workflow editing | Available |
+| Agentic Designer | Full workflow generation from description | Available |
+| HITP | Human-in-the-Loop pause points with task token | Available |
+| Time Machine | Merkle-chain checkpoint debugging | Available |
+| Glass-Box | Real-time AI reasoning transparency | Available |
+| Self-Healing | Governor-directed automatic error recovery | Available |
+| Mission Simulator | Chaos engineering stress-testing suite | Available |
+| Skill Repository | Reusable versioned workflow components | Available |
+| Real-time Monitoring | WebSocket + CloudWatch | Available |
+| Model Router | Multi-LLM provider selection | Available |
+| Instruction Distiller | Learning from HITP corrections | Available |
+| Task Manager | Business-friendly task abstraction | Available |
+| Cron Scheduler | Time-based workflow execution | Available |
+| **REACT Agent** | **Bridge-governed autonomous agent (Claude)** | **Available** |
+| **Speculative Execution** | **Async verification with rollback** | **Available** |
+| **Optimistic Verifier** | **Parallel trust chain + LLM execution** | **Available** |
+| **Incremental Hashing** | **Temperature-based dirty-key hashing** | **Available** |
+| **MerkleDAG TreeView** | **Frontend state version visualization** | **Available** |
 
 | Feature | Description | Status |
 |---|---|---|
