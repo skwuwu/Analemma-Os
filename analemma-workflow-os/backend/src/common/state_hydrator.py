@@ -315,6 +315,7 @@ class SmartStateBag(dict):
         self._original_values: Dict[str, Any] = {}
         self._changed_fields: Set[str] = set()
         self._deleted_fields: Set[str] = set()
+        self._dirty_blocks: Set[str] = set()  # Phase 3c: O(1) block-level dirty tracking
         self._lazy_fields: Dict[str, S3Pointer] = {}  # 아직 로드 안 된 필드
         
         if initial_data:
@@ -343,11 +344,18 @@ class SmartStateBag(dict):
         # 변경 추적
         if self._track_changes and key not in self._changed_fields:
             self._changed_fields.add(key)
-        
+            # Phase 3c: Block-level dirty tracking for O(1) incremental hashing
+            try:
+                from src.common.hash_utils import classify_field_block
+                block = classify_field_block(key)
+                self._dirty_blocks.add("warm" if block == "unclassified" else block)
+            except ImportError:
+                pass
+
         # lazy 필드에서 제거 (실제 값으로 대체됨)
         if key in self._lazy_fields:
             del self._lazy_fields[key]
-        
+
         super().__setitem__(key, self._wrap(value))
     
     def __getitem__(self, key: str) -> Any:

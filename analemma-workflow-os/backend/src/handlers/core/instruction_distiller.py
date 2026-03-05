@@ -792,7 +792,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             
             # ① Context Cache 무효화 (새 지침 반영을 위해)
             invalidate_instruction_cache(owner_id, workflow_id, node_id)
-            
+
+            # ② Atomic version coherence: update instruction_config_hash
+            # in the manifest so Merkle DAG stays consistent with the new
+            # instructions.  Uses TransactWriteItems to prevent race
+            # conditions between background distiller updating instructions
+            # and a new segment reading stale cache.
+            _atomic_update_instruction_version(
+                owner_id, workflow_id, node_id, distilled_instructions
+            )
+
             logger.info(f"Distilled {len(distilled_instructions)} instructions for {node_id} (diff_score={semantic_diff_score:.2f})")
             
             # 비즈니스 이벤트: 증류 성공
@@ -1384,6 +1393,69 @@ def _consolidate_instructions(
     
     # 실패 시 기존 지침 유지
     return existing_instructions
+
+
+def _atomic_update_instruction_version(
+    owner_id: str,
+    workflow_id: str,
+    node_id: str,
+    instructions: List[str],
+) -> None:
+    """Atomically update instruction_config_hash in the manifest table.
+
+    Uses DynamoDB TransactWriteItems to ensure that the instruction body
+    and its version hash are updated in a single transaction, preventing
+    the race condition where a background worker updates instructions
+    while a new segment reads stale cached instructions.
+
+    Best-effort: failures are logged but do not block the distillation
+    pipeline.
+    """
+    try:
+        from src.common.hash_utils import content_hash
+
+        version_hash = content_hash(
+            {"owner_id": owner_id, "workflow_id": workflow_id,
+             "node_id": node_id, "instructions": instructions},
+            truncate=16,
+        )
+
+        dynamodb_client = boto3.client("dynamodb")
+        manifest_table = os.environ.get("MANIFEST_TABLE", "ManifestTable")
+
+        dynamodb_client.transact_write_items(
+            TransactItems=[
+                {
+                    "Update": {
+                        "TableName": manifest_table,
+                        "Key": {
+                            "pk": {"S": f"{owner_id}#{workflow_id}"},
+                            "sk": {"S": "INSTRUCTION_VERSION"},
+                        },
+                        "UpdateExpression": (
+                            "SET instruction_config_hash = :h, "
+                            "node_id = :n, updated_at = :t"
+                        ),
+                        "ExpressionAttributeValues": {
+                            ":h": {"S": version_hash},
+                            ":n": {"S": node_id},
+                            ":t": {"S": datetime.now(timezone.utc).isoformat()},
+                        },
+                    }
+                }
+            ]
+        )
+
+        logger.info(
+            "Atomic instruction version updated: "
+            "owner=%s workflow=%s node=%s hash=%s",
+            owner_id, workflow_id, node_id, version_hash,
+        )
+    except Exception as exc:
+        # Best-effort — never block the distillation pipeline
+        logger.warning(
+            "Failed to update instruction version atomically: %s", exc
+        )
 
 
 @log_external_service_call("dynamodb", "save_instructions")

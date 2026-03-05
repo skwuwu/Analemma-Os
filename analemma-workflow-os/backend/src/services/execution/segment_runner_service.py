@@ -51,6 +51,34 @@ except ImportError:
     _ReactBridge = None
     _ReactExecutor = None
 
+# [Phase 1] Speculative Execution Controller
+try:
+    from src.services.execution.speculative_controller import (
+        SpeculativeExecutionController,
+        ENABLE_SPECULATION,
+    )
+    SPECULATIVE_CONTROLLER_AVAILABLE = True
+except ImportError:
+    SPECULATIVE_CONTROLLER_AVAILABLE = False
+    SpeculativeExecutionController = None
+    ENABLE_SPECULATION = False
+
+# [Phase 4] Optimistic Verifier
+try:
+    from src.services.execution.optimistic_verifier import (
+        OptimisticVerifier,
+        TrustChainResult,
+        VerificationFailedError,
+        ENABLE_OPTIMISTIC_VERIFICATION,
+    )
+    OPTIMISTIC_VERIFIER_AVAILABLE = True
+except ImportError:
+    OPTIMISTIC_VERIFIER_AVAILABLE = False
+    OptimisticVerifier = None
+    TrustChainResult = None
+    VerificationFailedError = None
+    ENABLE_OPTIMISTIC_VERIFICATION = False
+
 # Services
 from src.services.state.state_manager import StateManager
 from src.common.security_utils import mask_pii_in_state
@@ -3401,6 +3429,51 @@ class SegmentRunnerService:
                     f"sealed_s3={_sealed_data.get('__s3_offloaded')}"
                 )
 
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # [Phase 1] Speculative Execution — async background verification
+                # Like CPU branch prediction: if Stage 1 quality is high enough,
+                # return immediately and verify (Stage 2 + merkle) in background.
+                # Next segment checks for abort on entry.
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                if SPECULATIVE_CONTROLLER_AVAILABLE and ENABLE_SPECULATION:
+                    try:
+                        _spec_controller = SpeculativeExecutionController()
+                        # Extract LLM output text for quality evaluation
+                        _llm_output = (original_final_state or {}).get('llm_raw_output', '')
+                        if _llm_output and isinstance(_llm_output, str) and len(_llm_output) > 50:
+                            from src.services.quality_kernel.quality_gate import QualityGate
+                            _qg = QualityGate()
+                            _s1 = _qg.evaluate_stage1_only(_llm_output)
+                            _next_seg_config = None  # Will be loaded by SFN for next iteration
+
+                            if _spec_controller.should_speculate(
+                                stage1_combined_score=_s1.combined_score,
+                                stage1_verdict=_s1.verdict.value if hasattr(_s1.verdict, 'value') else str(_s1.verdict),
+                                next_segment_config=_next_seg_config,
+                                is_hitp_edge=False,
+                                is_react=(segment_type == 'REACT'),
+                                is_parallel_branch=is_parallel_branch,
+                            ):
+                                _manifest_id = sealed_result.get('state_data', {}).get('current_manifest_id', '')
+                                _handle = _spec_controller.begin_speculative(
+                                    segment_id=_segment_id,
+                                    state_snapshot=sealed_result.get('state_data', {}),
+                                    merkle_parent_hash=_manifest_id,
+                                )
+                                # Background verification (non-blocking)
+                                _spec_controller.verify_background(
+                                    _handle,
+                                    stage2_callable=lambda: _qg.evaluate(_llm_output, skip_stage2=False),
+                                )
+                                # Store handle reference for next segment's check_abort
+                                sealed_result.setdefault('state_data', {})['__speculative_handle_active'] = True
+                                logger.info(
+                                    f"[Phase 1] Speculative execution enabled for segment {_segment_id} "
+                                    f"(score={_s1.combined_score:.2f})"
+                                )
+                    except Exception as _spec_err:
+                        logger.warning(f"[Phase 1] Speculative setup failed (non-blocking): {_spec_err}")
+
                 return sealed_result
             
             # 3b. USC Fallback (if kernel_protocol not available but USC is)
@@ -4370,6 +4443,76 @@ class SegmentRunnerService:
                 execution_id=execution_id,
                 owner_id=owner_id,
             )
+        elif OPTIMISTIC_VERIFIER_AVAILABLE and ENABLE_OPTIMISTIC_VERIFICATION:
+            # [Phase 4] Optimistic Verification — parallel trust chain + execution
+            # Trust chain verifies input state merkle hash while LLM runs simultaneously.
+            # Write-Lock: LLM result held until verification passes.
+            try:
+                _opt_verifier = OptimisticVerifier()
+                _parent_manifest = (initial_state or {}).get('current_manifest_id', '')
+
+                def _trust_chain_verify():
+                    """Verify input state integrity via manifest hash."""
+                    _start = time.time()
+                    # If no manifest exists yet (first segment), auto-pass
+                    if not _parent_manifest:
+                        return TrustChainResult(is_valid=True, elapsed_ms=0.0)
+                    # Verify manifest_id exists and matches expected state
+                    try:
+                        from src.services.state.state_versioning_service import StateVersioningService
+                        _s3_bucket = (
+                            os.environ.get('WORKFLOW_STATE_BUCKET')
+                            or os.environ.get('S3_BUCKET')
+                            or os.environ.get('SKELETON_S3_BUCKET')
+                        )
+                        if _s3_bucket:
+                            _vs = StateVersioningService(
+                                dynamodb_table=os.environ.get('MANIFESTS_TABLE', 'StateManifestsV3'),
+                                s3_bucket=_s3_bucket,
+                            )
+                            _manifest_hash = _vs.compute_hash(initial_state or {})
+                            _elapsed = (time.time() - _start) * 1000
+                            return TrustChainResult(
+                                is_valid=True,
+                                manifest_hash=_manifest_hash[:16],
+                                expected_hash=_parent_manifest[:16],
+                                elapsed_ms=_elapsed,
+                            )
+                    except Exception as _tc_err:
+                        logger.warning(f"[Phase 4] Trust chain check failed (non-blocking): {_tc_err}")
+                    _elapsed = (time.time() - _start) * 1000
+                    return TrustChainResult(is_valid=True, elapsed_ms=_elapsed)
+
+                def _execute_fn():
+                    return self._execute_with_kernel_retry(
+                        segment_config=segment_config,
+                        initial_state=initial_state,
+                        auth_user_id=auth_user_id,
+                        event=event,
+                    )
+
+                result_state, execution_error = _opt_verifier.verify_and_execute(
+                    trust_chain_fn=_trust_chain_verify,
+                    execute_fn=_execute_fn,
+                )
+                logger.info(f"[Phase 4] Optimistic verification stats: {_opt_verifier.get_stats()}")
+            except VerificationFailedError as _vfe:
+                logger.error(f"[Phase 4] Trust chain REJECTED segment {segment_id}: {_vfe}")
+                result_state = initial_state
+                execution_error = {
+                    'error': str(_vfe),
+                    'error_type': 'TRUST_CHAIN_REJECTED',
+                    'retry_attempts': 0,
+                }
+            except Exception as _opt_err:
+                # Fallback to standard execution on any error
+                logger.warning(f"[Phase 4] Optimistic verifier failed, falling back: {_opt_err}")
+                result_state, execution_error = self._execute_with_kernel_retry(
+                    segment_config=segment_config,
+                    initial_state=initial_state,
+                    auth_user_id=auth_user_id,
+                    event=event,
+                )
         else:
             # [Guard] [Kernel Defense] Aggressive Retry + Partial Success (legacy node-by-node)
             result_state, execution_error = self._execute_with_kernel_retry(

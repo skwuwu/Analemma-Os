@@ -12,11 +12,20 @@ Usage:
     h = content_hash(data, truncate=16)           # SHA-256, first 16 chars
     h = content_hash_md5(data, truncate=16)       # MD5, first 16 chars
     h = quick_id(data)                            # SHA-256, first 12 chars (short ID)
+
+Incremental Hashing (Phase 3):
+    from src.common.hash_utils import SubBlockHashRegistry
+
+    registry = SubBlockHashRegistry()
+    root, block_hashes = registry.compute_incremental_root(state, dirty_keys)
 """
 
 import hashlib
 import json
-from typing import Any
+import logging
+from typing import Any, Dict, FrozenSet, Optional, Set, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def _canonical_bytes(data: Any) -> bytes:
@@ -133,3 +142,245 @@ def raw_sha256(data: bytes) -> str:
 def raw_md5(data: bytes) -> str:
     """MD5 of raw bytes (no JSON serialization)."""
     return hashlib.md5(data).hexdigest()
+
+
+# ── Streaming Serialization (Phase 3b) ──────────────────────────────────────
+
+def streaming_content_hash(data: Dict[str, Any]) -> str:
+    """Streaming SHA-256 — feeds sorted keys directly into hashlib.update().
+
+    Avoids allocating the full canonical JSON string in memory.
+    hashlib releases the GIL during update(), enabling effective
+    multi-threaded sub-block hashing on Lambda's multi-core resources.
+
+    Memory: O(1) per key-value pair (vs O(N) for json.dumps of entire dict)
+    CPU: Same total work, but no intermediate string concatenation overhead
+
+    Note:
+        This is NOT a drop-in replacement for ``content_hash()``.
+        The wire format differs (key:value, delimiters vs canonical JSON),
+        so digests are intentionally incompatible. Used exclusively by
+        ``SubBlockHashRegistry`` for incremental merkle roots.
+    """
+    hasher = hashlib.sha256()
+    for key in sorted(data.keys()):
+        hasher.update(key.encode('utf-8'))
+        hasher.update(b':')
+        value_bytes = _canonical_bytes(data[key])
+        hasher.update(value_bytes)
+        hasher.update(b',')
+    return hasher.hexdigest()
+
+
+# ── Temperature-Aligned Sub-Block Definitions (Phase 3a) ────────────────────
+
+# Aligned with BatchedDehydrator (batched_dehydrator.py) FieldTemperature.
+# Changes here MUST be mirrored in SmartStateBag._dirty_blocks tracking.
+
+HOT_FIELDS: FrozenSet[str] = frozenset({
+    'llm_response', 'llm_raw_output', 'current_state', 'token_usage',
+    'thought_signature', 'callback_result', 'react_result',
+    'total_tokens', 'total_input_tokens', 'total_output_tokens',
+    'usage',
+})
+
+WARM_FIELDS: FrozenSet[str] = frozenset({
+    'step_history', 'messages', 'query_results',
+    'parallel_results', 'branch_results', 'state_history',
+})
+
+COLD_FIELDS: FrozenSet[str] = frozenset({
+    'workflow_config', 'partition_map', 'segment_manifest',
+    'final_state',
+})
+
+# CONTROL_PLANE_FIELDS imported from state_hydrator at runtime to avoid
+# circular import. Kept as a string constant for block classification.
+_BLOCK_NAMES = ("hot", "warm", "cold", "control", "unclassified")
+
+# Mapping for O(1) field → block lookup (built lazily)
+_FIELD_TO_BLOCK: Optional[Dict[str, str]] = None
+
+
+def _get_field_to_block_map() -> Dict[str, str]:
+    """Lazy-build the field → block classification map."""
+    global _FIELD_TO_BLOCK
+    if _FIELD_TO_BLOCK is not None:
+        return _FIELD_TO_BLOCK
+
+    mapping: Dict[str, str] = {}
+    for f in HOT_FIELDS:
+        mapping[f] = "hot"
+    for f in WARM_FIELDS:
+        mapping[f] = "warm"
+    for f in COLD_FIELDS:
+        mapping[f] = "cold"
+
+    # Import CONTROL_PLANE_FIELDS here to avoid circular import
+    try:
+        from src.common.state_hydrator import CONTROL_PLANE_FIELDS
+        for f in CONTROL_PLANE_FIELDS:
+            if f not in mapping:  # Temperature classification takes precedence
+                mapping[f] = "control"
+    except ImportError:
+        pass
+
+    _FIELD_TO_BLOCK = mapping
+    return mapping
+
+
+def classify_field_block(field_name: str) -> str:
+    """Classify a field name into its temperature block.
+
+    Returns one of: "hot", "warm", "cold", "control", "unclassified".
+    Unclassified fields are treated as WARM (default temperature).
+    """
+    return _get_field_to_block_map().get(field_name, "unclassified")
+
+
+# ── Sub-Block Hash Registry (Phase 3a) ──────────────────────────────────────
+
+class SubBlockHashRegistry:
+    """Incremental merkle hashing via dirty-key tracking.
+
+    Divides state into sub-blocks aligned with BatchedDehydrator temperature:
+    - HOT block: llm_response, current_state, token_usage, etc.
+    - WARM block: step_history, messages, query_results, etc.
+    - COLD block: workflow_config, partition_map, segment_manifest, etc.
+    - CONTROL block: CONTROL_PLANE_FIELDS (ownerId, workflowId, etc.)
+    - UNCLASSIFIED: treated as WARM (default)
+
+    Only re-hashes blocks containing dirty keys. Unchanged blocks
+    reuse their previous block_hash for merkle root computation.
+
+    Complexity: O(changed_data) instead of O(total_state).
+
+    CPU pipelining analogy:
+        Like a CPU instruction cache — unchanged pipeline stages
+        (COLD block hash) are reused from the previous cycle,
+        while only modified stages (HOT block) are recomputed.
+    """
+
+    def __init__(self) -> None:
+        self._block_hashes: Dict[str, str] = {}
+
+    def compute_incremental_root(
+        self,
+        full_state: Dict[str, Any],
+        dirty_keys: Set[str],
+    ) -> Tuple[str, Dict[str, str]]:
+        """Compute merkle root using incremental sub-block hashing.
+
+        Args:
+            full_state: The complete state dictionary.
+            dirty_keys: Set of field names that changed since last hash.
+
+        Returns:
+            Tuple of (merkle_root_hash, {block_name: block_hash}).
+        """
+        dirty_blocks = self._classify_dirty_blocks(dirty_keys)
+
+        for block_name in dirty_blocks:
+            # Cold block skip: immutable after workflow init
+            if block_name == "cold" and "cold" in self._block_hashes:
+                continue
+            block_fields = self._extract_block_fields(full_state, block_name)
+            if block_fields:
+                self._block_hashes[block_name] = streaming_content_hash(block_fields)
+
+        # Initialize any blocks not yet hashed (first run)
+        for block_name in _BLOCK_NAMES:
+            if block_name not in self._block_hashes:
+                block_fields = self._extract_block_fields(full_state, block_name)
+                if block_fields:
+                    self._block_hashes[block_name] = streaming_content_hash(block_fields)
+
+        # Merkle root from sorted block hashes
+        combined = "|".join(
+            f"{name}:{h}"
+            for name, h in sorted(self._block_hashes.items())
+        )
+        root = raw_sha256(combined.encode('utf-8'))
+        return root, dict(self._block_hashes)
+
+    def compute_incremental_root_parallel(
+        self,
+        full_state: Dict[str, Any],
+        dirty_keys: Set[str],
+        max_workers: int = 4,
+    ) -> Tuple[str, Dict[str, str]]:
+        """Multi-threaded sub-block hashing.
+
+        hashlib.sha256.update() releases the GIL, so threading is effective
+        for CPU-bound hashing of independent sub-blocks.
+
+        Lambda 2048MB ~ 1 vCPU; 2-4 threads optimal for I/O overlap.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        dirty_blocks = self._classify_dirty_blocks(dirty_keys)
+
+        # Determine which blocks need (re-)hashing
+        blocks_to_hash: list = []
+        for block_name in dirty_blocks:
+            if block_name == "cold" and "cold" in self._block_hashes:
+                continue
+            blocks_to_hash.append(block_name)
+
+        # First run: hash all blocks that have no previous hash
+        for block_name in _BLOCK_NAMES:
+            if block_name not in self._block_hashes and block_name not in blocks_to_hash:
+                blocks_to_hash.append(block_name)
+
+        def _hash_block(block_name: str) -> Tuple[str, Optional[str]]:
+            block_fields = self._extract_block_fields(full_state, block_name)
+            if block_fields:
+                return block_name, streaming_content_hash(block_fields)
+            return block_name, None
+
+        if blocks_to_hash:
+            n_workers = min(max_workers, len(blocks_to_hash))
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                for name, h in pool.map(_hash_block, blocks_to_hash):
+                    if h is not None:
+                        self._block_hashes[name] = h
+
+        combined = "|".join(
+            f"{name}:{h}"
+            for name, h in sorted(self._block_hashes.items())
+        )
+        root = raw_sha256(combined.encode('utf-8'))
+        return root, dict(self._block_hashes)
+
+    # ── Internal helpers ────────────────────────────────────────────────
+
+    @staticmethod
+    def _classify_dirty_blocks(dirty_keys: Set[str]) -> Set[str]:
+        """Map dirty field names to the set of blocks that need re-hashing."""
+        blocks: Set[str] = set()
+        for key in dirty_keys:
+            block = classify_field_block(key)
+            # "unclassified" fields are hashed with the WARM block
+            blocks.add("warm" if block == "unclassified" else block)
+        return blocks
+
+    @staticmethod
+    def _extract_block_fields(
+        full_state: Dict[str, Any],
+        block_name: str,
+    ) -> Dict[str, Any]:
+        """Extract fields belonging to a specific block from the full state."""
+        field_map = _get_field_to_block_map()
+
+        if block_name == "unclassified":
+            # Gather all fields not mapped to any known block
+            return {
+                k: v for k, v in full_state.items()
+                if k not in field_map
+            }
+
+        return {
+            k: v for k, v in full_state.items()
+            if field_map.get(k) == block_name
+            or (block_name == "warm" and k not in field_map)
+        }

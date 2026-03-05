@@ -1711,7 +1711,9 @@ class StateVersioningService:
         execution_id: str,
         owner_id: str,
         segment_id: int,
-        previous_manifest_id: Optional[str] = None
+        previous_manifest_id: Optional[str] = None,
+        dirty_keys: Optional[set] = None,
+        full_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         🧬 v3.3 KernelStateManager의 핵심 저장 로직
@@ -1840,7 +1842,41 @@ class StateVersioningService:
             manifest_hash = hashlib.sha256(
                 json.dumps([asdict(b) for b in blocks], sort_keys=True).encode('utf-8')
             ).hexdigest()
-            
+
+            # ── Phase 3d+5a: Incremental hashing + temperature-aware manifest ──
+            # When dirty_keys and full_state are provided, compute an incremental
+            # merkle root using SubBlockHashRegistry instead of full-state hash.
+            # Store per-temperature-tier hashes in manifest metadata.
+            incremental_metadata: Dict[str, str] = {}
+            if dirty_keys is not None and full_state is not None:
+                try:
+                    from src.common.hash_utils import SubBlockHashRegistry
+
+                    if not hasattr(self, '_sub_block_registry'):
+                        self._sub_block_registry = SubBlockHashRegistry()
+
+                    inc_root, block_hashes = (
+                        self._sub_block_registry.compute_incremental_root(
+                            full_state, dirty_keys,
+                        )
+                    )
+                    incremental_metadata = {
+                        'incremental_root': inc_root,
+                        **{f'{k}_hash': v for k, v in block_hashes.items()},
+                    }
+                    logger.info(
+                        "[KernelStateManager] Incremental hash: "
+                        "dirty_keys=%d blocks_rehashed=%s root=%s",
+                        len(dirty_keys),
+                        list(block_hashes.keys()),
+                        inc_root[:16],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[KernelStateManager] Incremental hashing fallback: %s",
+                        exc,
+                    )
+
             transact_items = []
             
             # 🥨 [치명적 결함 #1] 매니페스트를 마지막 배치로 이동 (원자성 보장)
@@ -1898,20 +1934,35 @@ class StateVersioningService:
             })
             
             # 2-1. 매니페스트 등록 (🥨 마지막에 배치 - 원자성 보장)
+            manifest_dynamo_item = {
+                'manifest_id': {'S': manifest_id},
+                'workflow_id': {'S': workflow_id},
+                'execution_id': {'S': execution_id},
+                'segment_id': {'N': str(segment_id)},
+                'manifest_hash': {'S': manifest_hash},
+                'parent_manifest_id': {'S': previous_manifest_id} if previous_manifest_id else {'NULL': True},
+                'blocks': {'S': json.dumps([asdict(b) for b in blocks])},
+                'created_at': {'S': datetime.utcnow().isoformat()},
+                'status': {'S': 'ACTIVE'},
+            }
+
+            # Phase 5a: Store temperature-tier hashes in manifest
+            if incremental_metadata:
+                manifest_dynamo_item['incremental_metadata'] = {
+                    'S': json.dumps(incremental_metadata)
+                }
+                # Top-level fields for fast DynamoDB queries
+                for meta_key in ('hot_hash', 'warm_hash', 'cold_hash',
+                                 'control_hash', 'incremental_root'):
+                    if meta_key in incremental_metadata:
+                        manifest_dynamo_item[meta_key] = {
+                            'S': incremental_metadata[meta_key]
+                        }
+
             manifest_item = {
                 'Put': {
                     'TableName': self.table.name,
-                    'Item': {
-                        'manifest_id': {'S': manifest_id},
-                        'workflow_id': {'S': workflow_id},
-                        'execution_id': {'S': execution_id},
-                        'segment_id': {'N': str(segment_id)},
-                        'manifest_hash': {'S': manifest_hash},
-                        'parent_manifest_id': {'S': previous_manifest_id} if previous_manifest_id else {'NULL': True},
-                        'blocks': {'S': json.dumps([asdict(b) for b in blocks])},
-                        'created_at': {'S': datetime.utcnow().isoformat()},
-                        'status': {'S': 'ACTIVE'}
-                    }
+                    'Item': manifest_dynamo_item,
                 }
             }
             
@@ -1983,15 +2034,18 @@ class StateVersioningService:
             )
             
             # 🎯 [P0 수정] manifest_id 반환 추가 (Merkle Chain 연속성 확보)
-            return {
+            result = {
                 'success': True,
                 'manifest_id': manifest_id,  # 다음 세그먼트가 부모로 참조할 ID
                 'blocks_uploaded': len(blocks),
                 'manifest_hash': manifest_hash,
                 'segment_id': segment_id,
                 'block_ids': uploaded_block_ids,
-                's3_paths': [b.s3_path for b in blocks]
+                's3_paths': [b.s3_path for b in blocks],
             }
+            if incremental_metadata:
+                result['incremental_metadata'] = incremental_metadata
+            return result
             
         except Exception as e:
             logger.error(f"[KernelStateManager] ❌ Failed to save delta: {e}")

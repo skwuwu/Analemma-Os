@@ -37,6 +37,7 @@ Kernel Level: RING_1_QUALITY
 """
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Callable, Union
@@ -421,9 +422,11 @@ class KernelMiddlewareInterceptor:
         
         # 웹소켓 콜백
         self.websocket_callback = websocket_callback
-        
-        # 백그라운드 태스크 큐 (간단한 인메모리 큐)
-        self.background_queue: List[BackgroundDistillationTask] = []
+
+        # EventBridge bus name for background distillation dispatch
+        self._event_bus_name = os.environ.get(
+            'WORKFLOW_EVENT_BUS_NAME', 'default'
+        )
         
         # 분석기 초기화
         self.entropy_analyzer = EntropyAnalyzer(domain=domain)
@@ -846,87 +849,81 @@ Reply: APPROVE: [score] or REJECT: [score]"""
         workflow_id: str,
         timestamp: str
     ) -> BackgroundDistillationTask:
-        """백그라운드 증류 태스크 생성"""
+        """Create a background distillation task and publish to EventBridge.
+
+        Instead of an in-memory queue (never consumed in Lambda),
+        dispatches a ``BackgroundDistillationRequested`` event to EventBridge.
+        The ``BackgroundDistillerFunction`` Lambda handles actual distillation.
+        """
         import uuid
-        
+
         task = BackgroundDistillationTask(
             task_id=f"distill-{uuid.uuid4().hex[:8]}",
             workflow_id=workflow_id,
             node_id=node_id,
             original_text=original_text,
             distillation_targets=targets,
-            priority=len(targets),  # 타겟이 많을수록 우선순위 높음
+            priority=len(targets),  # higher priority for more targets
             created_at=timestamp,
             status="pending",
             websocket_channel=f"ws://{workflow_id}/{node_id}/distillation"
         )
-        
-        # 태스크 큐에 추가
-        self.background_queue.append(task)
-        
+
+        # Publish to EventBridge for async processing
+        self._publish_distillation_event(task)
+
         return task
-    
-    async def process_background_queue(self):
+
+    def _publish_distillation_event(
+        self, task: BackgroundDistillationTask
+    ) -> None:
+        """Publish BackgroundDistillationRequested event to EventBridge.
+
+        Best-effort: swallows exceptions so the main PASS path is never
+        blocked by EventBridge failures.
         """
-        백그라운드 증류 큐 처리 (비동기 워커)
-        
-        Usage:
-            import asyncio
-            asyncio.create_task(interceptor.process_background_queue())
-        """
-        while True:
-            if not self.background_queue:
-                await asyncio.sleep(0.5)
-                continue
-            
-            # 우선순위 정렬 (높은 것 먼저)
-            self.background_queue.sort(key=lambda t: -t.priority)
-            task = self.background_queue.pop(0)
-            
-            try:
-                task.status = "processing"
-                logger.info(f"[BackgroundDistill] Processing task {task.task_id}")
-                
-                # 증류 실행
-                distilled_text = self.execute_distillation(
-                    task.original_text,
-                    task.distillation_targets
-                )
-                
-                task.distilled_text = distilled_text
-                task.status = "completed"
-                
-                # 웹소켓으로 결과 전송
-                if self.websocket_callback:
-                    await self._send_distillation_result(task)
-                
-                logger.info(f"[BackgroundDistill] Task {task.task_id} completed")
-                
-            except Exception as e:
-                task.status = "failed"
-                logger.error(f"[BackgroundDistill] Task {task.task_id} failed: {e}")
-    
-    async def _send_distillation_result(self, task: BackgroundDistillationTask):
-        """웹소켓으로 증류 결과 전송"""
-        if not self.websocket_callback:
-            return
-        
         try:
-            message = {
-                'type': 'distillation_complete',
+            import boto3
+
+            detail = {
                 'task_id': task.task_id,
-                'node_id': task.node_id,
                 'workflow_id': task.workflow_id,
-                'original_length': len(task.original_text),
-                'distilled_length': len(task.distilled_text) if task.distilled_text else 0,
-                'distilled_text': task.distilled_text,
-                'segments_improved': len(task.distillation_targets)
+                'node_id': task.node_id,
+                'original_text': task.original_text,
+                'distillation_targets': [
+                    {
+                        'segment_text': t.segment_text,
+                        'segment_index': t.segment_index,
+                        'entropy_score': t.entropy_score,
+                        'suggested_action': t.suggested_action,
+                        'distillation_prompt': t.distillation_prompt,
+                    }
+                    for t in task.distillation_targets
+                ],
+                'priority': task.priority,
+                'created_at': task.created_at,
+                'websocket_channel': task.websocket_channel,
             }
-            
-            await self.websocket_callback(task.websocket_channel, message)
-            
-        except Exception as e:
-            logger.error(f"Failed to send distillation result via websocket: {e}")
+
+            client = boto3.client('events')
+            client.put_events(Entries=[{
+                'Source': 'backend-workflow.kernel',
+                'DetailType': 'BackgroundDistillationRequested',
+                'Detail': json.dumps(detail, default=str),
+                'EventBusName': self._event_bus_name,
+            }])
+
+            logger.info(
+                "[Kernel] Published BackgroundDistillationRequested event "
+                "task=%s bus=%s",
+                task.task_id, self._event_bus_name,
+            )
+        except Exception as exc:
+            # Best-effort — never block the main path
+            logger.warning(
+                "[Kernel] Failed to publish distillation event task=%s: %s",
+                task.task_id, exc,
+            )
     
     def get_pending_tasks(self) -> List[BackgroundDistillationTask]:
         """대기 중인 백그라운드 태스크 조회"""

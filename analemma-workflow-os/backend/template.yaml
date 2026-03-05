@@ -3922,6 +3922,61 @@ Resources:
       Principal: events.amazonaws.com
       SourceArn: !GetAtt HITLApprovalDistillRule.Arn
 
+  # --- Background Distiller Lambda (Phase 2b) ---
+  # EventBridge-triggered content distillation for low-entropy segments.
+  # Decoupled from KernelMiddlewareInterceptor inline processing.
+  BackgroundDistillerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "background-distiller-${StageName}"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.core.background_distiller.lambda_handler"]
+      Timeout: 120
+      MemorySize: 512
+      Environment:
+        Variables:
+          WORKFLOW_EVENT_BUS_NAME: !Ref WorkflowEventBus
+          DISTILLED_INSTRUCTIONS_TABLE: !Ref DistilledInstructionsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DistilledInstructionsTable
+        - Statement:
+          - Effect: Allow
+            Action:
+              - events:PutEvents
+            Resource: !GetAtt WorkflowEventBus.Arn
+
+  # EventBridge Rule: BackgroundDistillationRequested → BackgroundDistillerFunction
+  BackgroundDistillationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "backend-workflow-${StageName}-bg-distill"
+      EventBusName: !Ref WorkflowEventBus
+      EventPattern:
+        source:
+          - backend-workflow.kernel
+        detail-type:
+          - BackgroundDistillationRequested
+      State: ENABLED
+      Targets:
+        - Id: BackgroundDistillerTarget
+          Arn: !GetAtt BackgroundDistillerFunction.Arn
+          RetryPolicy:
+            MaximumRetryAttempts: 2
+          DeadLetterConfig:
+            Arn: !GetAtt EventBridgeDLQ.Arn
+
+  # Permission for BackgroundDistillation Rule to invoke BackgroundDistiller
+  BackgroundDistillationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BackgroundDistillerFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt BackgroundDistillationRule.Arn
+
   # --- Outcome Manager API Lambda ---
   # Outcome-First UI 전용 API (결과물 목록, 추론 과정 조회)
   OutcomeManagerApiFunction:

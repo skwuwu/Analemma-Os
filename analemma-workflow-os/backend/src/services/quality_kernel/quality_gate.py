@@ -815,25 +815,55 @@ Your verdict (REJECT or APPROVE):"""
             kernel_action=kernel_action
         )
     
+    def evaluate_stage1_only(self, text: str) -> Stage1Result:
+        """Run Stage 1 heuristics only — no Stage 2 LLM call.
+
+        Used by SpeculativeExecutionController to make a fast, cheap
+        decision about whether to speculate (branch-predict) on the
+        next segment.
+
+        Cost: $0
+        Latency: < 5ms
+
+        Returns:
+            Stage1Result with verdict, combined_score, and requires_stage2 flag.
+        """
+        import time as _time
+        start = _time.time()
+        s1 = self._run_stage1(text)
+        latency = (_time.time() - start) * 1000
+
+        return Stage1Result(
+            verdict=s1['verdict'],
+            entropy_result=s1['entropy'],
+            slop_result=s1['slop'],
+            combined_score=s1['combined_score'],
+            latency_ms=latency,
+            requires_stage2=s1['requires_stage2'],
+            raw_entropy_score=s1['raw_entropy_score'],
+            normalized_entropy_score=s1['normalized_entropy_score'],
+            length_adjustment_applied=s1['length_adjustment'],
+        )
+
     @staticmethod
     def quick_check(text: str) -> bool:
         """
         빠른 품질 체크 (Stage 1만)
-        
+
         Cost: $0
         Latency: < 5ms
-        
+
         Returns:
             bool: True if likely quality content
         """
         # 빠른 엔트로피 체크
         if not EntropyAnalyzer.quick_entropy_check(text, min_threshold=3.8):
             return False
-        
+
         # 빠른 슬롭 체크
         if SlopDetector.quick_slop_check(text):
             return False
-        
+
         return True
 
 
