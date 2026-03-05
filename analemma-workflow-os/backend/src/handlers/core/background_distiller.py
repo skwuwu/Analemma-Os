@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Background Distiller Lambda — EventBridge-triggered content distillation.
+Background Distiller Lambda — EventBridge-triggered async content distillation.
 
 Triggered by ``BackgroundDistillationRequested`` events published by
 KernelMiddlewareInterceptor when quality is acceptable but low-entropy
