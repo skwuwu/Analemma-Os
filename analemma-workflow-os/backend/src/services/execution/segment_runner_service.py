@@ -3048,7 +3048,7 @@ class SegmentRunnerService:
                 mode="strict",
             )
 
-            model_id = react_config.get('model_id', 'anthropic.claude-sonnet-4-20250514-v1:0')
+            model_id = react_config.get('model_id', 'apac.anthropic.claude-sonnet-4-20250514-v1:0')
 
             executor = _ReactExecutor(
                 bridge=bridge,

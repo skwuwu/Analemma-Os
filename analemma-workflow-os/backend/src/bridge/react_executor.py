@@ -175,7 +175,7 @@ class ReactExecutor:
         self,
         bridge: AnalemmaBridge,
         *,
-        model_id: str = "anthropic.claude-sonnet-4-20250514-v1:0",
+        model_id: str = "apac.anthropic.claude-sonnet-4-20250514-v1:0",
         max_iterations: int = 25,
         max_tokens_per_turn: int = 4096,
         temperature: float = 0.0,
