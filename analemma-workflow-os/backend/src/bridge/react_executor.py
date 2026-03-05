@@ -175,7 +175,7 @@ class ReactExecutor:
         self,
         bridge: AnalemmaBridge,
         *,
-        model_id: str = "us.anthropic.claude-sonnet-4-20250514-v1:0",
+        model_id: str = "anthropic.claude-sonnet-4-20250514-v1:0",
         max_iterations: int = 25,
         max_tokens_per_turn: int = 4096,
         temperature: float = 0.0,
@@ -473,7 +473,7 @@ class ReactExecutor:
         if self._client is None:
             from anthropic import AnthropicBedrock
             self._client = AnthropicBedrock(
-                aws_region=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"),
+                aws_region=os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1")),
             )
         return self._client
 

@@ -3048,8 +3048,11 @@ class SegmentRunnerService:
                 mode="strict",
             )
 
+            model_id = react_config.get('model_id', 'anthropic.claude-sonnet-4-20250514-v1:0')
+
             executor = _ReactExecutor(
                 bridge=bridge,
+                model_id=model_id,
                 max_iterations=max_iterations,
                 token_budget=token_budget,
                 wall_clock_timeout=wall_clock_timeout,
