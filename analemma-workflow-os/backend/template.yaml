@@ -672,6 +672,9 @@ Resources:
           WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
           # 🔍 [v3.5] None Reference Tracing - 디버깅용 (NoneType 에러 추적)
           NONE_TRACE_ENABLED: "1"
+          # [REACT] VSM governance endpoint for ReactExecutor
+          ANALEMMA_KERNEL_ENDPOINT: !GetAtt VSMFunctionUrl.FunctionUrl
+          ANALEMMA_VSM_API_KEY: !Sub "analemma-vsm-${StageName}-${AWS::AccountId}"
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref WorkflowsTableV3
@@ -734,6 +737,39 @@ Resources:
         # 🔄 [Phase 10: 2PC GC] SQS send permission for GC DLQ (Phase 2 failure cleanup)
         - SQSSendMessagePolicy:
             QueueName: !GetAtt GCDeadLetterQueue.QueueName
+
+  # ── Lambda-Native VSM (VirtualSegmentManager) ─────────────────────────────
+  # Governance pipeline for REACT segments — same codebase as local VSM.
+  # SegmentRunnerFunction calls this via Function URL for tool governance.
+  # Security: X-Analemma-Key header validation (shared key via env var).
+  VSMFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.vsm.handler.handler"]
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          ANALEMMA_VSM_API_KEY: !Sub "analemma-vsm-${StageName}-${AWS::AccountId}"
+
+  # VSM Function URL — AuthType NONE at transport level; X-Analemma-Key
+  # middleware in handler.py provides application-level auth.
+  VSMFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt VSMFunction.Arn
+
+  VSMFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VSMFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
 
   # ── E2E IoT Core MQTT Proxy (waitForTaskToken bridge) ────────────────────
   # Routes SFN segment execution to a local MQTT subscriber via IoT Core.

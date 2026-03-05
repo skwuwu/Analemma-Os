@@ -1,0 +1,15 @@
+{
+    "workflow_name": "REACT Autonomous Agent Test",
+    "description": "ReactExecutor integration test — single REACT segment with tool governance. Nodes/edges are empty because REACT segments bypass node-by-node execution entirely; the partition_map with type=REACT is injected via PIPELINE_SCENARIO_INPUT.",
+    "react_executor": {
+        "enabled": true,
+        "max_iterations": 5,
+        "token_budget": 100000,
+        "ring_level": 2,
+        "wall_clock_timeout": 120.0,
+        "tool_timeout": 30.0
+    },
+    "nodes": [],
+    "edges": [],
+    "start_node": null
+}

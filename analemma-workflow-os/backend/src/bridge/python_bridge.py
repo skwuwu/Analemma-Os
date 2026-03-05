@@ -62,6 +62,9 @@ _DEFAULT_KERNEL_ENDPOINT: str = os.environ.get(
 # 환경 변수: 초기화 시 Policy Sync 자동 수행 여부
 _AUTO_SYNC_POLICY: bool = os.environ.get("ANALEMMA_SYNC_POLICY", "").strip() == "1"
 
+# 환경 변수: VSM API Key (Lambda-Native VSM 보안)
+_VSM_API_KEY: str = os.environ.get("ANALEMMA_VSM_API_KEY", "")
+
 
 # ─── Hybrid Interceptor: 파괴적 행동 분류 ─────────────────────────────────────
 # DESTRUCTIVE_ACTIONS / DESTRUCTIVE_PATTERNS 는 shared_policy.py 단일 출처 사용.
@@ -204,6 +207,9 @@ class AnalemmaBridge:
         self._parent_segment_id: Optional[str] = None
         self._lock = threading.Lock()
         self._l1_checker = LocalL1Checker()
+        self._kernel_headers: Dict[str, str] = (
+            {"X-Analemma-Key": _VSM_API_KEY} if _VSM_API_KEY else {}
+        )
 
         # Policy Sync: 커널 최신 패턴 다운로드 (선택적)
         should_sync = sync_policy if sync_policy is not None else _AUTO_SYNC_POLICY
@@ -353,6 +359,7 @@ class AnalemmaBridge:
                 requests.post(
                     f"{self.kernel_endpoint}/v1/segment/propose",
                     json=proposal,
+                    headers=self._kernel_headers,
                     timeout=10,
                 )
             except Exception as exc:
@@ -454,6 +461,7 @@ class AnalemmaBridge:
             resp = requests.post(
                 f"{self.kernel_endpoint}/v1/segment/propose",
                 json=proposal,
+                headers=self._kernel_headers,
                 timeout=10,
             )
             resp.raise_for_status()
@@ -487,6 +495,7 @@ class AnalemmaBridge:
                     "observation": str(observation),
                     "status": "SUCCESS",
                 },
+                headers=self._kernel_headers,
                 timeout=5,
             )
         except Exception:
@@ -499,6 +508,7 @@ class AnalemmaBridge:
             requests.post(
                 f"{self.kernel_endpoint}/v1/segment/fail",
                 json={"checkpoint_id": checkpoint_id, "error": error},
+                headers=self._kernel_headers,
                 timeout=5,
             )
         except Exception:

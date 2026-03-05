@@ -103,6 +103,13 @@ jobs:
         run: |
           pip install -r src/requirements.txt
 
+      # [CI Gate] Run unit tests before build — blocks deployment on test failure
+      - name: Run unit tests
+        run: |
+          python -m pytest ../tests/backend/unit/ -v --tb=short -x --timeout=60
+        env:
+          PYTHONPATH: src
+
       - name: Setup AWS SAM CLI
         uses: aws-actions/setup-sam@v2
 

@@ -15,6 +15,7 @@ MOCK_MODE=false로 분산 오케스트레이터에 실행을 위임합니다.
   VISION              — 멀티모달 비전 (메모리 추정, 인젝션 방어, 상태 오프로드)
   HITP_RECOVERY       — HITP 후 정상 복구 로직 테스트
   ASYNC_LLM           — 비동기 LLM 실행 파이프라인
+  REACT               — ReactExecutor 자율 에이전트 (단일 REACT 세그먼트, 도구 거버넌스)
 LLM Stage 시리즈 (점진적 토합 스테이지 테스트):
   LLM_STAGE1          — LLM 기초: Response Schema 준수 + json_parse 성능
   LLM_STAGE2          — ForEach 병렬 LLM + COST_GUARDRAIL + HITP 승인
@@ -53,6 +54,8 @@ PIPELINE_TEST_MAPPINGS: Dict[str, str] = {
     'VISION':              'test_vision_workflow',
     'HITP_RECOVERY':       'test_hitp_workflow',
     'ASYNC_LLM':           'test_async_llm_workflow',
+    # REACT autonomous agent
+    'REACT':               'test_react_workflow',
     # LLM Stage 시리즈 (점진적 토합 스테이지 테스트)
     'LLM_STAGE1':          'test_llm_stage1_basic',
     'LLM_STAGE2':          'test_llm_stage2_flow_control',
@@ -114,6 +117,13 @@ PIPELINE_SCENARIO_INPUT: Dict[str, Dict[str, Any]] = {
     'ASYNC_LLM': {
         'pipeline_test_enabled': True,
         'verify_async_result': True,
+    },
+    # REACT autonomous agent — partition_map with type=REACT bypasses
+    # node-by-node execution, triggering _execute_react_segment directly.
+    'REACT': {
+        'pipeline_test_enabled': True,
+        'partition_map': [{"id": "seg_0", "type": "REACT", "nodes": []}],
+        'task_prompt': "Use read_only to echo 'pipeline test' and give a final answer.",
     },
     # LLM Stage 시리즈
     'LLM_STAGE1': {

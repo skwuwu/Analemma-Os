@@ -33,6 +33,7 @@ PIPELINE_SCENARIOS = [
     "LOOP_LIMIT",
     "S3_LARGE",
     "ASYNC_LLM",
+    "REACT",
 ]
 
 

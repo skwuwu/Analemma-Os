@@ -14,6 +14,7 @@ Test Scenarios:
   VISION              - Multimodal vision (memory estimation, injection defense, state offload)
   HITP_RECOVERY       - HITP recovery logic after human approval
   ASYNC_LLM           - Async LLM execution pipeline
+  REACT               - ReactExecutor autonomous agent (single REACT segment, tool governance)
 
 Return Schema (all verify_* functions):
   {
@@ -728,6 +729,76 @@ def verify_async_llm(test_result: Dict[str, Any]) -> Dict[str, Any]:
     return _result("ASYNC_LLM", checks)
 
 
+def verify_react(test_result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    REACT: Autonomous agent pipeline with ReactExecutor
+    - SFN status = SUCCEEDED
+    - No initialization error (ghost-success guard)
+    - LLM invocation evidence (llm_raw_output, total_tokens, usage)
+    - react_result present OR dehydrated to S3 batch pointers (pointer existence only)
+    - stop_reason is valid (when react_result is inline)
+    """
+    checks = []
+    succeeded = _sfn_succeeded(test_result)
+    checks.append(_check(
+        "SFN status SUCCEEDED",
+        succeeded,
+        f"status={test_result.get('status')}"
+    ))
+
+    final = _final_state(test_result)
+    checks.append(_check_no_init_error(final))
+
+    # LLM evidence (llm_raw_output, total_tokens, usage)
+    has_llm, llm_details = _has_llm_evidence(final)
+    checks.append(_check(
+        "LLM invocation evidence detected",
+        has_llm,
+        llm_details
+    ))
+
+    # react_result presence — may be dehydrated to S3 by seal_state_bag.
+    # Dehydration check: pointer existence only (no rehydration/download).
+    react_result = final.get("react_result", {})
+    has_react_direct = isinstance(react_result, dict) and react_result.get("final_answer")
+    hot = final.get("__hot_batch__", {})
+    cold = final.get("__cold_batch__", {})
+    has_batch = (
+        (isinstance(hot, dict) and hot.get("__batch_pointer__"))
+        or (isinstance(cold, dict) and cold.get("__batch_pointer__"))
+    )
+    checks.append(_check(
+        "react_result present or dehydrated",
+        has_react_direct or has_batch,
+        f"direct={bool(has_react_direct)}, batch_pointers={bool(has_batch)}, "
+        f"keys={list(final.keys())[:15]}"
+    ))
+
+    # stop_reason validation (only when react_result is directly accessible)
+    if has_react_direct:
+        stop_reason = react_result.get("stop_reason", "")
+        valid_stops = {
+            "end_turn", "max_iterations", "budget_exceeded",
+            "sigkill", "wall_clock_timeout",
+        }
+        checks.append(_check(
+            "stop_reason is valid",
+            stop_reason in valid_stops,
+            f"stop_reason={stop_reason}"
+        ))
+
+    metrics = {}
+    if has_react_direct:
+        metrics = {
+            "iterations": _to_int(react_result.get("iterations")),
+            "stop_reason": react_result.get("stop_reason", ""),
+            "total_input_tokens": _to_int(react_result.get("total_input_tokens")),
+            "total_output_tokens": _to_int(react_result.get("total_output_tokens")),
+        }
+
+    return _result("REACT", checks, metrics)
+
+
 def verify_llm_stage_generic(test_result: Dict[str, Any]) -> Dict[str, Any]:
     """Generic verifier for LLM_STAGE1~8: SFN succeeded + no init error in final_state."""
     checks = []
@@ -755,6 +826,7 @@ _VERIFIERS = {
     "HITP_RECOVERY":       verify_hitp_recovery,
     "S3_LARGE":            verify_s3_large,  # Deprecated
     "ASYNC_LLM":           verify_async_llm,
+    "REACT":               verify_react,
 }
 
 # Register generic LLM stage verifier for LLM_STAGE1 ~ LLM_STAGE8
