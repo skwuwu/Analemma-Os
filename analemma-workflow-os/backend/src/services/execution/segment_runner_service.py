@@ -2389,6 +2389,67 @@ class SegmentRunnerService:
         logger.info(f"[Aggregator] [Token Aggregation] {len(branch_token_details)} branches, "
                    f"total tokens: {total_tokens} ({total_input_tokens} input + {total_output_tokens} output)")
         
+        # 2b. [v3.32] Merkle DAG manifest reconciliation for parallel branches.
+        # Each branch wrote its own manifest chain independently.  The aggregator
+        # creates a single "merge manifest" whose parent_manifest_ids list references
+        # every branch's final manifest, forming a proper DAG join node.
+        use_v3_state_saving = os.environ.get('USE_V3_STATE_SAVING', 'true').lower() == 'true'
+        if use_v3_state_saving:
+            try:
+                from src.services.state.state_versioning_service import StateVersioningService
+                s3_bucket_for_merkle = (
+                    os.environ.get('WORKFLOW_STATE_BUCKET')
+                    or os.environ.get('S3_BUCKET')
+                    or os.environ.get('SKELETON_S3_BUCKET')
+                )
+                if s3_bucket_for_merkle:
+                    versioning_svc = StateVersioningService(
+                        dynamodb_table=os.environ.get('MANIFESTS_TABLE', 'StateManifestsV3'),
+                        s3_bucket=s3_bucket_for_merkle,
+                        use_2pc=True,
+                        gc_dlq_url=os.environ.get('GC_DLQ_URL'),
+                    )
+                    # Collect branch manifest IDs for the DAG join
+                    branch_manifest_ids: list[str] = []
+                    for br in parallel_results:
+                        if isinstance(br, dict):
+                            mid = (
+                                br.get('current_manifest_id')
+                                or (br.get('final_state') or {}).get('current_manifest_id')
+                            )
+                            if mid:
+                                branch_manifest_ids.append(mid)
+
+                    # [H-1 FIX] Store parents as JSON array, not comma-joined string.
+                    # A comma-joined string is unresolvable by parent-chain walkers.
+                    merge_parent = (
+                        json.dumps(branch_manifest_ids)
+                        if branch_manifest_ids else None
+                    )
+                    merge_result = versioning_svc.save_state_delta(
+                        delta=aggregated_state,
+                        workflow_id=workflow_id,
+                        execution_id=event.get('execution_id', 'unknown'),
+                        owner_id=auth_user_id or event.get('ownerId', 'unknown'),
+                        segment_id=segment_to_run,
+                        previous_manifest_id=merge_parent,
+                    )
+                    merge_manifest_id = merge_result.get('manifest_id')
+                    if merge_manifest_id:
+                        aggregated_state['current_manifest_id'] = merge_manifest_id
+                        logger.info(
+                            f"[Aggregator] [v3.32] Merge manifest created: {merge_manifest_id[:16]}... "
+                            f"parents={len(branch_manifest_ids)}"
+                        )
+            except Exception as e:
+                # [BUG-5 FIX] On failure, preserve the best available manifest ID
+                # from any branch so the next segment has a non-None parent.
+                logger.warning(f"[Aggregator] [v3.32] Merkle reconciliation failed: {e}")
+                if 'branch_manifest_ids' in dir() and branch_manifest_ids:
+                    aggregated_state.setdefault(
+                        'current_manifest_id', branch_manifest_ids[-1]
+                    )
+
         # 3. 상태 저장 (S3 오프로딩 포함)
         s3_bucket_raw = os.environ.get("S3_BUCKET") or os.environ.get("SKELETON_S3_BUCKET") or ""
         s3_bucket = s3_bucket_raw.strip() if s3_bucket_raw else None
@@ -2468,7 +2529,12 @@ class SegmentRunnerService:
             if manifest_s3_path:
                 try:
                     agg_segment_config = self._load_segment_config_from_manifest(manifest_s3_path, segment_to_run)
-                except Exception:
+                except Exception as e:
+                    # [v3.34] Was silent — HITP edge detection skipped when this fails
+                    logger.warning(
+                        "[Aggregator] Failed to load segment config from manifest "
+                        "(HITP edge detection may be skipped): %s", e
+                    )
                     agg_segment_config = None
 
         if next_segment < total_segments and agg_segment_config:
@@ -3382,6 +3448,15 @@ class SegmentRunnerService:
                                 gc_dlq_url=os.environ.get('GC_DLQ_URL')
                             )
                             
+                            # [v3.34] Detect if previous segment's merkle save failed
+                            if base_state.get('__merkle_save_failed'):
+                                logger.error(
+                                    "[v3.34] ⚠️ MERKLE CHAIN BREAK DETECTED — previous segment's "
+                                    "state delta save failed. current_manifest_id may be stale. "
+                                    "Segment %s will attempt save with potentially broken chain.",
+                                    _segment_id,
+                                )
+
                             # 이전 manifest_id 추출 (Merkle Chain)
                             previous_manifest_id = base_state.get('current_manifest_id')
                             
@@ -3411,9 +3486,15 @@ class SegmentRunnerService:
                     
                     except ImportError as ie:
                         logger.error(f"[v3.3] ❌ StateVersioningService import failed: {ie}")
+                        # [v3.34] Flag merkle save failure so downstream can detect chain break
+                        sealed_result.setdefault('state_data', {})['__merkle_save_failed'] = True
                     except Exception as e:
                         # Non-blocking: v3.3 실패해도 워크플로우는 계속 진행
                         logger.error(f"[v3.3] ❌ Failed to save state delta: {e}", exc_info=True)
+                        # [v3.34] Flag merkle save failure — without this, the next segment
+                        # uses a stale current_manifest_id, silently breaking Merkle chain
+                        # continuity.  The flag enables downstream detection + potential retry.
+                        sealed_result.setdefault('state_data', {})['__merkle_save_failed'] = True
                 else:
                     logger.info("[v3.3] ℹ️ USE_V3_STATE_SAVING=false, skipping state delta save")
                 
@@ -3881,7 +3962,9 @@ class SegmentRunnerService:
             from src.common.statebag import SmartStateBag
             bag = SmartStateBag(initial_state, hydrator=self.hydrator)
             workflow_config = bag.get('workflow_config')
-        except:
+        except Exception as e:
+            # [v3.34] Was bare except — trust chain verification may be skipped
+            logger.warning("[Phase 8.4] Failed to load workflow_config for trust chain: %s", e)
             workflow_config = None
 
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -4145,8 +4228,9 @@ class SegmentRunnerService:
                 try:
                     payload_json = json.dumps(response_payload, ensure_ascii=False)
                     payload_size = len(payload_json.encode('utf-8'))
-                except:
-                    pass
+                except Exception as e:
+                    # [v3.34] Was bare except — payload_size stays stale, pruning may not trigger
+                    logger.warning("[Parallel] Payload size re-calculation failed: %s", e)
                     
                 if payload_size > 200 * 1024: # Still > 200KB
                     logger.warning(f"[Parallel] [Alert] Payload still huge ({payload_size} bytes) after offload. Pruning metadata.")

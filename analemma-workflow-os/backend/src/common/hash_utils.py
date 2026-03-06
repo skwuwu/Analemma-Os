@@ -23,7 +23,7 @@ Incremental Hashing (Phase 3):
 import hashlib
 import json
 import logging
-from typing import Any, Dict, FrozenSet, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, Literal, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,16 @@ def _canonical_bytes(data: Any) -> bytes:
                 k: v for k, v in obj.__dict__.items()
                 if not k.startswith('_')
             }
-        return str(obj)
+        # [v3.34] Fail-fast instead of silent hash divergence.
+        # str(obj) can produce non-deterministic output (e.g., memory addresses
+        # in default __repr__) causing identical state to hash differently
+        # across Lambda invocations.  Raising TypeError forces callers to add
+        # explicit serialization (to_dict() or type registration) rather than
+        # silently producing wrong Merkle hashes.
+        raise TypeError(
+            f"Object of type {type(obj).__qualname__} is not canonical-serializable. "
+            f"Add a to_dict() method or convert to a supported type before hashing."
+        )
 
     try:
         return json.dumps(
@@ -75,10 +84,16 @@ def _canonical_bytes(data: Any) -> bytes:
             ensure_ascii=False,
             default=_default,
         ).encode('utf-8')
-    except (ValueError, RecursionError):
-        # Circular reference or excessive nesting — fall back to repr.
-        # repr() is deterministic for the same object state, preserving
+    except (ValueError, TypeError, RecursionError) as exc:
+        # [v3.34] TypeError added: unsupported type in _default handler.
+        # Circular reference, excessive nesting, or unsupported type — fall back
+        # to repr().  repr() is deterministic for the same object state, preserving
         # hash stability without crashing the kernel.
+        logger.warning(
+            "[hash_utils] Canonical serialization failed (%s: %s) — "
+            "using repr() fallback. Hash may be less stable.",
+            type(exc).__name__, exc,
+        )
         return repr(data).encode('utf-8')
 
 
@@ -229,7 +244,7 @@ def _get_field_to_block_map() -> Dict[str, str]:
     return mapping
 
 
-def classify_field_block(field_name: str) -> str:
+def classify_field_block(field_name: str) -> Literal["hot", "warm", "cold", "control", "unclassified"]:
     """Classify a field name into its temperature block.
 
     Returns one of: "hot", "warm", "cold", "control", "unclassified".

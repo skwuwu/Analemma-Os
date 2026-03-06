@@ -119,84 +119,95 @@ class MerkleGarbageCollector:
     
     def _cleanup_manifest_blocks(self, manifest_item: Dict[str, Any]) -> Tuple[int, int]:
         """
-        매니페스트의 S3 블록 정리 (고도화: Atomic RefCount + Bulk Delete)
-        
-        OS 아키텍처 개선:
-        1. Atomic Reference Counting으로 Dangling Block 완전 차단
-        2. S3 Bulk Delete로 성능 최적화 (1000개/batch)
-        3. Safe Chain Protection (is_frozen 체크)
-        
+        Clean up S3 blocks for an expired manifest.
+
+        [v3.33] Three-layer safety:
+        1. Atomic Reference Counting (decrement + zero check)
+        2. Delete-time Reachability Verification (TOCTOU defense)
+        3. Safe Chain Protection (frozen block immunity)
+
         Args:
             manifest_item: DynamoDB OldImage
-        
+
         Returns:
-            (삭제된 블록 수, 스킵된 블록 수)
+            (deleted block count, skipped block count)
         """
         deleted = 0
         skipped = 0
-        
-        # S3 포인터 추출
+
+        # Extract S3 pointers
         s3_pointers = manifest_item.get('s3_pointers', {}).get('M', {})
         state_blocks = s3_pointers.get('state_blocks', {}).get('L', [])
-        
+
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # [고도화 1] Bulk Delete 준비 (성능 최적화)
+        # Phase 1: Decrement ref counts and collect candidates
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        pending_deletes = []  # S3 Bulk Delete 대상
-        frozen_blocks = []    # Safe Chain Protection에 의해 보호된 블록
-        
+        delete_candidates = []  # (block_id, s3_key) pairs
+        frozen_blocks = []
+
         for block_item in state_blocks:
             block_path = block_item.get('S', '')
             if not block_path:
                 continue
-            
+
             block_id = block_path.split('/')[-1].replace('.json', '')
-            
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # [고도화 2] Atomic Reference Counting (Dangling Block 방지)
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             is_deletable = self._decrement_and_check_zero(block_id)
-            
+
             if is_deletable:
                 key = block_path.replace(f"s3://{self.bucket}/", "")
-                pending_deletes.append({'Key': key})
+                delete_candidates.append((block_id, key))
             else:
                 skipped += 1
-                # Frozen block 여부 로깅
                 if self._is_block_frozen(block_id):
                     frozen_blocks.append(block_id[:8])
-        
+
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        # [고도화 3] S3 Bulk Delete 실행 (1000개/batch)
+        # Phase 2: Delete-time reachability re-check (TOCTOU defense)
+        #
+        # Between Phase 1 (_decrement_and_check_zero returned True) and
+        # Phase 2 (actual S3 delete), a concurrent segment write could
+        # have incremented the ref_count.  Re-read ref_count with a
+        # ConditionExpression to atomically verify it's still 0.
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        if pending_deletes:
-            # S3 delete_objects는 최대 1000개까지 처리 가능
+        verified_deletes = []
+
+        for block_id, s3_key in delete_candidates:
+            if self._verify_still_unreachable(block_id):
+                verified_deletes.append({'Key': s3_key})
+            else:
+                skipped += 1
+                logger.info(
+                    f"[GC] [TOCTOU Defense] Block {block_id[:8]}... was re-referenced "
+                    f"after decrement — skipping delete"
+                )
+
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Phase 3: S3 Bulk Delete (only verified blocks)
+        # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        if verified_deletes:
             batch_size = 1000
-            for i in range(0, len(pending_deletes), batch_size):
-                batch = pending_deletes[i:i + batch_size]
+            for i in range(0, len(verified_deletes), batch_size):
+                batch = verified_deletes[i:i + batch_size]
                 try:
                     response = self.s3.delete_objects(
                         Bucket=self.bucket,
                         Delete={'Objects': batch, 'Quiet': True}
                     )
-                    
-                    # 삭제 성공 카운트
+
                     deleted += len(batch)
-                    
-                    # 에러 발생 시 로깅
+
                     if 'Errors' in response:
                         for error in response['Errors']:
                             logger.error(
                                 f"[GC] Failed to delete {error['Key']}: "
                                 f"{error['Code']} - {error['Message']}"
                             )
-                    
+
                     logger.info(f"[GC] Bulk deleted {len(batch)} blocks (batch {i//batch_size + 1})")
-                    
+
                 except ClientError as e:
                     logger.error(f"[GC] Bulk delete failed for batch {i//batch_size + 1}: {e}")
-        
-        # Safe Chain Protection 로깅
+
         if frozen_blocks:
             logger.warning(
                 f"[GC] [Safe Chain] {len(frozen_blocks)} blocks protected by freeze policy: "
@@ -266,8 +277,12 @@ class MerkleGarbageCollector:
                 ReturnValues="ALL_NEW"
             )
             
-            new_count = response.get('Attributes', {}).get('ref_count', 0)
-            is_frozen = response.get('Attributes', {}).get('is_frozen', False)
+            # [v3.34] Explicit type conversion — DynamoDB resource returns Decimal
+            # for Number type.  Decimal(0) == 0 is True in Python, but implicit
+            # reliance on this is fragile: e.g. json.dumps(Decimal(0)) raises
+            # TypeError, and Decimal objects behave differently in boolean context.
+            new_count = int(response.get('Attributes', {}).get('ref_count', 0))
+            is_frozen = bool(response.get('Attributes', {}).get('is_frozen', False))
             zero_reached_at = response.get('Attributes', {}).get('zero_reached_at')
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -392,6 +407,45 @@ class MerkleGarbageCollector:
         except Exception:
             return False  # 에러 시 안전하게 삭제 가능으로 간주
     
+    def _verify_still_unreachable(self, block_id: str) -> bool:
+        """[v3.33] Delete-time reachability re-check (TOCTOU defense).
+
+        After _decrement_and_check_zero returns True, a concurrent segment
+        write may have incremented ref_count back above 0.  This method
+        performs a conditional delete of the ref_count entry that atomically
+        verifies ref_count is still 0 and the block is not frozen.
+
+        If the condition fails (ref_count > 0 or is_frozen), the block is
+        NOT deleted and we return False.
+
+        Returns:
+            True:  Block is confirmed unreachable — safe to delete from S3.
+            False: Block was re-referenced or frozen — must NOT delete.
+        """
+        try:
+            self.ref_table.delete_item(
+                Key={'block_id': block_id},
+                ConditionExpression=(
+                    'ref_count <= :zero AND '
+                    '(attribute_not_exists(is_frozen) OR is_frozen = :false)'
+                ),
+                ExpressionAttributeValues={
+                    ':zero': 0,
+                    ':false': False,
+                },
+            )
+            return True
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+                return False
+            logger.error(
+                f"[GC] [TOCTOU] Unexpected error verifying block {block_id[:8]}...: {e}"
+            )
+            return False  # Conservative: do not delete on error
+        except Exception as e:
+            logger.error(f"[GC] [TOCTOU] Unexpected error: {e}")
+            return False
+
     def _get_config_reference_count(self, config_hash: str) -> int:
         """
         workflow_config를 참조하는 매니페스트 수
@@ -424,36 +478,71 @@ class MerkleGarbageCollector:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def increment_block_references(block_ids: List[str], ref_table_name: str = None):
-    """
-    블록 생성 시 참조 카운트 증가 (StateVersioningService.create_manifest 호출 시)
-    
+    """Increment ref_count for each block when a new manifest references it.
+
+    [v3.33 FIX] Failures are now collected and raised as a single exception
+    after all blocks are attempted.  Previously, a failed increment was
+    silently logged, causing ref_count drift — the block's count would be
+    lower than the actual number of referencing manifests, leading to
+    premature GC deletion (data corruption).
+
+    The caller (Phase 2a in state_versioning_service) should catch this
+    and decide whether to abort or compensate.
+
     Args:
-        block_ids: 블록 ID 리스트
-        ref_table_name: Reference Table 이름 (환경변수 우선)
+        block_ids: Block ID list (SHA256 hashes).
+        ref_table_name: Reference Table name (env var takes priority).
+
+    Raises:
+        RefCountIncrementError: If any block increment failed.
     """
     dynamodb = boto3.resource('dynamodb')
     ref_table_name = ref_table_name or os.environ.get(
         'BLOCK_REF_COUNT_TABLE', 'BlockReferenceCounts-dev'
     )
     ref_table = dynamodb.Table(ref_table_name)
-    
+
+    failed_blocks: List[Dict[str, str]] = []
+
     for block_id in block_ids:
         try:
             ref_table.update_item(
                 Key={'block_id': block_id},
                 UpdateExpression="""
-                    ADD ref_count :inc 
+                    ADD ref_count :inc
                     SET created_at = if_not_exists(created_at, :now),
-                        last_accessed = :now
+                        last_accessed = :now,
+                        zero_reached_at = :null
                 """,
                 ExpressionAttributeValues={
                     ':inc': 1,
-                    ':now': datetime.utcnow().isoformat()
+                    ':now': datetime.utcnow().isoformat(),
+                    ':null': None,
                 }
             )
             logger.debug(f"[RefCount] Incremented {block_id[:8]}... (+1)")
         except Exception as e:
             logger.error(f"[RefCount] Failed to increment {block_id[:8]}...: {e}")
+            failed_blocks.append({'block_id': block_id, 'error': str(e)})
+
+    if failed_blocks:
+        raise RefCountIncrementError(
+            f"{len(failed_blocks)}/{len(block_ids)} block ref_count increments failed. "
+            f"Ref count drift detected — GC may prematurely delete these blocks.",
+            failed_blocks=failed_blocks,
+        )
+
+
+class RefCountIncrementError(Exception):
+    """Raised when one or more block ref_count increments fail.
+
+    Attributes:
+        failed_blocks: List of dicts with 'block_id' and 'error' keys.
+    """
+
+    def __init__(self, message: str, failed_blocks: List[Dict[str, str]] = None):
+        super().__init__(message)
+        self.failed_blocks = failed_blocks or []
 
 
 def freeze_manifest_blocks(manifest_id: str, reason: str = "Security Violation"):

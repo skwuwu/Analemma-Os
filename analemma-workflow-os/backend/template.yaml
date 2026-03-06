@@ -536,6 +536,27 @@ Resources:
         - DynamoDBCrudPolicy:
             TableName: !Ref UsersTableV3
 
+  # --- Benchmark Function (manual invoke only) ---
+  BenchmarkFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-BenchmarkFunction"
+      PackageType: Image
+      ImageUri: !Ref BackendLambdaImageUri
+      ImageConfig:
+        Command: ["src.handlers.utils.benchmark_handler.lambda_handler"]
+      Timeout: 300
+      MemorySize: 2048  # Match SegmentRunner for realistic vCPU allocation
+      Environment:
+        Variables:
+          SKELETON_S3_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+          MANIFESTS_TABLE: !Ref WorkflowManifestsV3
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkflowManifestsV3
+
   # --- Create User Function (Cognito PostConfirmation Trigger) ---
   CreateUserFunction:
     Type: AWS::Serverless::Function

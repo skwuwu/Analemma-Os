@@ -22,10 +22,20 @@ import json
 import time
 import logging
 import hashlib
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, TypedDict
 from dataclasses import dataclass
 from datetime import datetime
 import uuid
+
+
+class BlockDict(TypedDict, total=False):
+    """Type contract for block dicts passed to create_manifest_with_consistency.
+
+    Ensures callers provide the minimum required fields for 2PC S3 upload.
+    """
+    block_id: str       # SHA-256 content hash
+    s3_key: str         # S3 object key for this block
+    data: Dict[str, Any]  # Block payload (segment data or chunk)
 
 import boto3
 from botocore.exceptions import ClientError
@@ -82,30 +92,32 @@ class EventualConsistencyGuard:
         version: int,
         config_hash: str,
         manifest_hash: str,
-        blocks: List[Dict[str, Any]],
+        blocks: List[BlockDict],
         segment_hashes: Dict[str, str],
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        parent_hash: Optional[str] = None,
     ) -> str:
         """
-        정합성 보장 매니페스트 생성
-        
+        Create a manifest with 2-Phase Commit consistency.
+
         3-Phase Process:
-        1. Prepare: S3 업로드 (pending 태그)
-        2. Commit: DynamoDB 트랜잭션
-        3. Confirm: S3 태그 확정 or GC 스케줄
-        
+        1. Prepare: S3 upload (pending tag)
+        2. Commit: DynamoDB atomic transaction
+        3. Confirm: S3 tag confirmation or GC schedule
+
         Args:
-            workflow_id: 워크플로우 ID
-            manifest_id: 매니페스트 ID
-            version: 버전 번호
-            config_hash: 설정 해시
-            manifest_hash: 매니페스트 해시
-            blocks: 블록 목록
-            segment_hashes: 세그먼트 해시 맵
-            metadata: 메타데이터
-        
+            workflow_id: Workflow ID
+            manifest_id: Manifest ID
+            version: Version number
+            config_hash: Config hash
+            manifest_hash: Manifest hash (includes parent_hash)
+            blocks: Block list
+            segment_hashes: Segment hash map
+            metadata: Metadata dict
+            parent_hash: Parent manifest's hash for Merkle chain continuity
+
         Returns:
-            str: 생성된 매니페스트 ID
+            str: Created manifest ID
         """
         transaction_id = str(uuid.uuid4())
         transaction = TransactionContext(
@@ -179,6 +191,9 @@ class EventualConsistencyGuard:
                 self._batch_update_block_references(workflow_id, block_uploads, transaction_id)
             
             # Step 2: 매니페스트 등록 (최종 원자적 트랜잭션)
+            # [v3.33 FIX-B] parent_hash must be persisted for Merkle chain
+            # continuity.  Without it, get_manifest() returns parent_hash=None
+            # and the next child manifest computes a different merkle root.
             manifest_item = {
                 'Put': {
                     'TableName': self.dynamodb_table,
@@ -186,6 +201,7 @@ class EventualConsistencyGuard:
                         'manifest_id': {'S': manifest_id},
                         'version': {'N': str(version)},
                         'workflow_id': {'S': workflow_id},
+                        'parent_hash': {'S': parent_hash} if parent_hash else {'NULL': True},
                         'manifest_hash': {'S': manifest_hash},
                         'config_hash': {'S': config_hash},
                         'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
@@ -240,10 +256,13 @@ class EventualConsistencyGuard:
                 ],
                 key=lambda s: s.get('segment_id', s.get('execution_order', 0))
             )
+            # [v3.33 FIX-D] Include parent_hash so DAG can be reconstructed
+            # from S3 alone if DynamoDB fails after Phase 2.5.
             manifest_marker = json.dumps({
                 'manifest_id': manifest_id,
                 'version': version,
                 'workflow_id': workflow_id,
+                'parent_hash': parent_hash,
                 'manifest_hash': manifest_hash,
                 'config_hash': config_hash,
                 'segment_hashes': segment_hashes,

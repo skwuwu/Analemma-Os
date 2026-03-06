@@ -42,9 +42,33 @@ ENABLE_SPECULATION: bool = (
     os.environ.get("ENABLE_SPECULATION", "true").lower() == "true"
 )
 
-# Node types that produce irreversible external state changes.
-# Segments containing ANY of these types are NEVER speculated.
-SIDE_EFFECTFUL_NODE_TYPES: FrozenSet[str] = frozenset({
+# ── [v3.33] Default-Deny Speculation Model ──────────────────────────────
+# Previous model (v3.32): Default-Allow — any node NOT in a blocklist was
+# assumed pure.  This is unsafe because a new node type (e.g. custom_transform
+# that internally calls an external API) would silently be speculated.
+#
+# New model (v3.33): Default-Deny — ONLY node types in SPECULATABLE_NODE_TYPES
+# are eligible for speculation.  All unknown/unclassified types are treated as
+# side-effectful.  Workflow authors can opt-in individual nodes via the
+# `speculatable: true` marker.
+#
+# Node types proven to be pure (no external I/O, deterministic output):
+SPECULATABLE_NODE_TYPES: FrozenSet[str] = frozenset({
+    "transform",        # Pure data transformation
+    "conditional",      # Branch logic (if/else)
+    "validator",        # Schema / rule validation
+    "mapper",           # Data field mapping
+    "aggregator",       # Data aggregation (sum, count, merge)
+    "filter",           # Data filtering
+    "formatter",        # String / data formatting
+    "calculator",       # Arithmetic / expression evaluation
+    "router",           # Routing decision (no I/O)
+    "passthrough",      # Identity / no-op node
+})
+
+# Node types that are NEVER speculatable regardless of markers.
+# This is a safety net — even if someone sets `speculatable: true`, these are blocked.
+NEVER_SPECULATE_NODE_TYPES: FrozenSet[str] = frozenset({
     "webhook",
     "email",
     "slack",
@@ -54,10 +78,15 @@ SIDE_EFFECTFUL_NODE_TYPES: FrozenSet[str] = frozenset({
     "sqs_send",
     "s3_write",
     "dynamodb_write",
+    "aiModel",          # Bedrock / external LLM API call
+    "http_get",         # External HTTP read (non-deterministic)
+    "lambda_invoke",    # Arbitrary Lambda execution
 })
 
-# Per-node marker keys that indicate side effects
+# Per-node marker keys — used for opt-in (`speculatable: true`)
+# and forced opt-out (`side_effect: true`, `external_api: true`)
 SIDE_EFFECT_MARKERS = ("side_effect", "external_api", "has_side_effects")
+SPECULATE_OPT_IN_MARKER = "speculatable"
 
 
 # ── Data Structures ─────────────────────────────────────────────────────────
@@ -175,7 +204,8 @@ class SpeculativeExecutionController:
         1. Feature enabled
         2. Stage 1 quality score >= SPECULATIVE_THRESHOLD (0.75)
         3. Stage 1 verdict is not FAIL
-        4. No side-effectful nodes in next segment
+        4. ALL nodes in next segment are in SPECULATABLE_NODE_TYPES or
+           have explicit `speculatable: true` marker (Default-Deny)
         5. Not HITP edge / REACT / parallel branch
         6. No other speculative handle in-flight
         """
@@ -193,10 +223,10 @@ class SpeculativeExecutionController:
         if is_hitp_edge or is_react or is_parallel_branch:
             return False
 
-        if next_segment_config and self._has_side_effects(next_segment_config):
+        if next_segment_config and not self._is_speculatable(next_segment_config):
             self._stats["skipped_side_effects"] += 1
             logger.info(
-                "[Speculative] Skipped — next segment has side-effectful nodes"
+                "[Speculative] Skipped — next segment contains non-speculatable nodes"
             )
             return False
 
@@ -234,13 +264,20 @@ class SpeculativeExecutionController:
     def verify_background(
         self,
         handle: SpeculativeHandle,
-        stage2_callable: Optional[Callable] = None,
-        merkle_hash_callable: Optional[Callable] = None,
+        stage2_callable: Optional[Callable[[], Any]] = None,
+        merkle_hash_callable: Optional[Callable[[], None]] = None,
     ) -> None:
         """Launch background verification thread.
 
         Runs Stage 2 LLM verification and/or merkle hash computation
         asynchronously.  On failure, sets handle to ABORTED.
+
+        Args:
+            handle: The speculative handle to verify.
+            stage2_callable: Zero-arg callable returning a QualityGateResult
+                (or similar object with .final_verdict attribute).
+            merkle_hash_callable: Zero-arg callable that performs merkle hash
+                computation as a side-effect (return value ignored).
         """
         def _verify() -> None:
             try:
@@ -357,16 +394,27 @@ class SpeculativeExecutionController:
         """Return speculation statistics for monitoring."""
         return dict(self._stats)
 
-    # ── Side-Effect Detection ───────────────────────────────────────────
+    # ── Speculatability Check (Default-Deny) ────────────────────────────
 
     @staticmethod
-    def _has_side_effects(segment_config: Dict[str, Any]) -> bool:
-        """Check if a segment config contains side-effectful nodes.
+    def _is_speculatable(segment_config: Dict[str, Any]) -> bool:
+        """Check if ALL nodes in a segment are safe for speculative execution.
 
-        A segment is side-effectful if ANY node in it:
-        - Has type in SIDE_EFFECTFUL_NODE_TYPES
-        - Has side_effect/external_api/has_side_effects marker set to True
+        [v3.33] Default-Deny model: returns True only when EVERY node is
+        proven safe.  A single unverified node blocks the entire segment.
+
+        A node is speculatable when:
+        - Its type is in SPECULATABLE_NODE_TYPES, OR
+        - It has `speculatable: true` marker (explicit opt-in)
+        AND it does NOT:
+        - Have type in NEVER_SPECULATE_NODE_TYPES (hard block)
+        - Have any SIDE_EFFECT_MARKERS set to True (forced opt-out)
+        - Have segment-level `has_side_effects: true`
         """
+        # Segment-level forced opt-out
+        if segment_config.get("has_side_effects") is True:
+            return False
+
         nodes = segment_config.get("nodes", [])
         # Support both list-of-dicts and dict-of-dicts node formats
         if isinstance(nodes, dict):
@@ -376,20 +424,38 @@ class SpeculativeExecutionController:
         else:
             return False
 
+        if not node_list:
+            return False  # Empty segment — conservative deny
+
         for node in node_list:
             if not isinstance(node, dict):
-                continue
+                return False  # Unparseable node — deny
 
             node_type = node.get("type", "").lower()
-            if node_type in SIDE_EFFECTFUL_NODE_TYPES:
-                return True
 
+            # Hard block: never-speculate types override everything
+            if node_type in NEVER_SPECULATE_NODE_TYPES:
+                return False
+
+            # Forced opt-out: side-effect markers
             for marker in SIDE_EFFECT_MARKERS:
                 if node.get(marker) is True:
-                    return True
+                    return False
 
-        # Also check the segment-level marker
-        if segment_config.get("has_side_effects") is True:
-            return True
+            # Check if node is in the proven-pure allowlist
+            if node_type in SPECULATABLE_NODE_TYPES:
+                continue
 
-        return False
+            # Not in allowlist — check explicit opt-in marker
+            if node.get(SPECULATE_OPT_IN_MARKER) is True:
+                continue
+
+            # Unknown node type without opt-in — DEFAULT DENY
+            logger.debug(
+                "[Speculative] Node type '%s' is not in SPECULATABLE_NODE_TYPES "
+                "and lacks 'speculatable: true' marker — blocking speculation",
+                node_type,
+            )
+            return False
+
+        return True

@@ -1,0 +1,31 @@
+{
+  "incremental_hashing": {
+    "full_median_ms": 0.2622498432174325,
+    "incr_median_ms": 0.03885000478476286,
+    "reduction_pct": 85.1858806441489,
+    "state_size_kb": 49.244140625,
+    "claim_validated": true
+  },
+  "parallel_io": {
+    "seq_median_ms": 418.4906999580562,
+    "par_median_ms": 97.13139990344644,
+    "reduction_pct": 76.79006966864938,
+    "theoretical_reduction_pct": 86.74698795180723,
+    "n_workers": 8,
+    "claim_validated": false
+  },
+  "control_plane_size": {
+    "full_size_kb": 201.3798828125,
+    "cp_size_kb": 1.2333984375,
+    "target_kb": 10.0,
+    "under_limit": true,
+    "claim_validated": true
+  },
+  "speculative_atomicity": {
+    "total_tests": 100,
+    "atomicity_violations": 0,
+    "committed": 0,
+    "aborted": 0,
+    "claim_validated": true
+  }
+}

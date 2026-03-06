@@ -67,6 +67,15 @@ class ManifestPointer:
     blocks: List[ContentBlock]
     metadata: Dict
 
+    def __post_init__(self) -> None:
+        # [v3.34] Normalize legacy 'null' string from DynamoDB to Python None.
+        # Old records stored parent_hash as {'S': 'null'} instead of {'NULL': True}.
+        # The 'null' string silently poisons _compute_merkle_root(): the expression
+        # (parent_hash or '') treats 'null' as truthy → hash('config' + 'null' + blocks)
+        # instead of hash('config' + '' + blocks), producing a wrong Merkle root.
+        if self.parent_hash == 'null':
+            self.parent_hash = None
+
 
 class StateVersioningService:
     """
@@ -129,7 +138,7 @@ class StateVersioningService:
             if isinstance(obj, (datetime, date)):
                 return obj.isoformat()  # ISO 8601 표준화
             if isinstance(obj, Decimal):
-                return float(obj)       # DynamoDB Decimal 호환
+                return str(obj)         # [v3.32] str() — unified with hash_utils._canonical_bytes
             if hasattr(obj, '__dict__'):
                 return obj.__dict__
             return str(obj)
@@ -306,22 +315,39 @@ class StateVersioningService:
                     })
                     chunk_index += 1
         segment_hashes = self._compute_segment_hashes(segment_manifest)
+
+        # [v3.33 FIX-C] Resolve parent_hash from parent manifest.
+        # Previous code excluded parent_hash from manifest_hash computation,
+        # violating the Merkle structural invariant: a child manifest's hash
+        # MUST cryptographically bind to its parent.  Without this, two
+        # manifests with different parents can produce identical hashes,
+        # making DAG fork detection impossible.
+        parent_hash = None
+        if parent_manifest_id:
+            try:
+                parent = self.get_manifest(parent_manifest_id)
+                parent_hash = parent.manifest_hash
+            except Exception as e:
+                logger.warning(f"[v3.33] Failed to resolve parent manifest hash: {e}")
+
         manifest_hash = self._compute_hash({
             'workflow_id': workflow_id,
             'version': version,
             'config_hash': config_hash,
-            'segment_hashes': segment_hashes
+            'segment_hashes': segment_hashes,
+            'parent_hash': parent_hash or '',
         })
-        
+
         # 메타데이터
         metadata = {
             'workflow_id': workflow_id,
             'version': version,
             'created_at': datetime.utcnow().isoformat(),
             'parent_manifest_id': parent_manifest_id,
+            'parent_hash': parent_hash or '',
             'total_segments': len(segment_manifest)
         }
-        
+
         # EventualConsistencyGuard로 2PC 실행 (반환값은 stored manifest_id str)
         stored_manifest_id = self._consistency_guard.create_manifest_with_consistency(
             workflow_id=workflow_id,
@@ -331,13 +357,14 @@ class StateVersioningService:
             manifest_hash=manifest_hash,
             blocks=blocks,
             segment_hashes=segment_hashes,
-            metadata=metadata
+            metadata=metadata,
+            parent_hash=parent_hash,
         )
         # Wrap result in ManifestPointer so callers can access .manifest_id/.manifest_hash etc.
         return ManifestPointer(
             manifest_id=stored_manifest_id,
             version=version,
-            parent_hash=parent_manifest_id,
+            parent_hash=parent_hash,
             manifest_hash=manifest_hash,
             config_hash=config_hash,
             blocks=[],  # blocks persisted to S3/DynamoDB; not needed in the pointer
@@ -504,7 +531,7 @@ class StateVersioningService:
                             'manifest_id': {'S': manifest_id},
                             'version': {'N': str(version)},
                             'workflow_id': {'S': workflow_id},
-                            'parent_hash': {'S': parent_hash or 'null'},
+                            'parent_hash': {'S': parent_hash} if parent_hash else {'NULL': True},
                             'manifest_hash': {'S': manifest_hash},
                             'config_hash': {'S': config_hash},
                             'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
@@ -701,10 +728,13 @@ class StateVersioningService:
             
             # 저장된 블록들로 Merkle Root 재계산
             blocks = self._load_blocks(item['s3_pointers']['state_blocks'])
+            # [v3.34] Normalize legacy 'null' string — same logic as ManifestPointer.__post_init__
+            raw_parent = item.get('parent_hash')
+            parent_hash = None if raw_parent in (None, 'null') else raw_parent
             computed_hash = self._compute_merkle_root(
                 blocks,
                 item['config_hash'],
-                item.get('parent_hash') if item.get('parent_hash') != 'null' else None
+                parent_hash
             )
             
             is_valid = computed_hash == item['manifest_hash']
@@ -905,7 +935,7 @@ class StateVersioningService:
             ))
         return blocks
     
-    def _compute_segment_hashes(self, manifest: List[dict]) -> Dict[int, str]:
+    def _compute_segment_hashes(self, manifest: List[dict]) -> Dict[str, str]:
         """
         각 세그먼트의 개별 해시 미리 계산 (Phase 7 최적화용)
         
@@ -1274,7 +1304,7 @@ class StateVersioningService:
         logger.info(f"[Reconstruction] Loaded {len(result)} segments successfully")
         return result
     
-    def _load_block(self, block_path: str, segment_index: Optional[int]) -> str:
+    def _load_block(self, block_path: str, segment_index: Optional[int]) -> Optional[str]:
         """
         ✅ [피드백 ①] JSON Lines 형식 + S3 Select 최적화
         
@@ -1476,24 +1506,19 @@ class StateVersioningService:
                 f"but already in DynamoDB (safe state): {failed_commits}"
             )
     
-    def _json_default(self, obj):
-        """
-        ✅ [피드백 ①] JSON 직렬화 헬퍼 (datetime, Decimal 지원)
-        
-        S3에 JSON Lines 형식으로 저장할 때 타입 변환 처리
-        
-        Args:
-            obj: 직렬화할 객체
-        
-        Returns:
-            직렬화 가능한 형태로 변환된 값
+    def _json_default(self, obj: Any) -> Any:
+        """JSON serialization handler for datetime and Decimal.
+
+        [v3.32 FIX] Decimal uses str() — matches hash_utils._canonical_bytes.
+        Previous: float()/int() diverged from get_canonical_json (float) and
+        _canonical_bytes (str), producing incompatible hashes for the same value.
         """
         from decimal import Decimal
-        
+
         if isinstance(obj, datetime):
             return obj.isoformat()
         elif isinstance(obj, Decimal):
-            return float(obj) if obj % 1 else int(obj)
+            return str(obj)
         raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
     
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1501,38 +1526,52 @@ class StateVersioningService:
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     def increment_block_references(self, block_ids: List[str], workflow_id: str) -> int:
-        """
-        블록 참조 카운트 증가 (매니페스트 생성 시)
-        
+        """Increment ref_count for blocks when a manifest references them.
+
+        [v3.33 FIX] Partial failures are now tracked and raised so the caller
+        can decide whether to abort or compensate.  Silent swallowing of
+        increment errors causes ref_count drift → premature GC deletion.
+
         Args:
-            block_ids: 참조 카운트를 증가시킬 블록 ID 리스트
-            workflow_id: 복합키의 HASH key (WorkflowBlockReferencesV3 스키마 필수)
-        
+            block_ids: Block IDs to increment.
+            workflow_id: HASH key for WorkflowBlockReferencesV3.
+
         Returns:
-            업데이트된 블록 수
+            Number of successfully updated blocks.
+
+        Raises:
+            RuntimeError: If any block increment failed (contains details).
         """
         updated_count = 0
-        
+        failed_blocks: List[str] = []
+
         for block_id in block_ids:
             try:
-                # [FIX] WorkflowBlockReferencesV3 복합키: HASH=workflow_id, RANGE=block_id
                 self.block_refs_table.update_item(
                     Key={
-                        'workflow_id': workflow_id,  # HASH key (필수)
-                        'block_id': block_id          # RANGE key
+                        'workflow_id': workflow_id,
+                        'block_id': block_id,
                     },
                     UpdateExpression='ADD reference_count :inc SET last_referenced = :now',
                     ExpressionAttributeValues={
                         ':inc': 1,
-                        ':now': datetime.utcnow().isoformat()
+                        ':now': datetime.utcnow().isoformat(),
                     }
                 )
                 updated_count += 1
-                
             except Exception as e:
                 logger.error(f"Failed to increment reference for block {block_id}: {e}")
-        
+                failed_blocks.append(block_id)
+
         logger.info(f"[Reference Counting] Incremented {updated_count}/{len(block_ids)} blocks")
+
+        if failed_blocks:
+            raise RuntimeError(
+                f"[v3.33] {len(failed_blocks)}/{len(block_ids)} block ref_count increments "
+                f"failed for workflow {workflow_id}. Failed blocks: "
+                f"{[b[:8] for b in failed_blocks]}. Ref count drift risk."
+            )
+
         return updated_count
     
     def decrement_block_references(self, block_ids: List[str], workflow_id: str) -> int:
@@ -1768,77 +1807,99 @@ class StateVersioningService:
             )
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # Phase 1: Content Block 생성 및 S3 업로드 (status=temp)
+            # Phase 1: Content Block 생성 및 S3 병렬 업로드 (status=temp)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # [v3.32] S3 PUT 병렬화 — 순차 for 루프에서 ThreadPoolExecutor로 전환.
+            # 500 세그먼트 × 10 필드 = 5,000 PUT. 순차 시 ~50-150s → 병렬 시 ~5-15s.
+            # S3 PUT은 I/O-bound이므로 GIL 영향 없이 스레드 병렬 효과 확보.
+            import gzip
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
             blocks = []
             uploaded_block_ids = []
-            
+
+            # Step 1: CPU-bound 직렬화 + 압축 (GIL-bound이므로 순차 처리)
+            # [v3.32 FIX] block_hash는 raw data에서 계산 (BUG-4).
+            # gzip.compress()는 mtime을 header에 embed → non-deterministic.
+            # 같은 content가 다른 시각에 압축되면 다른 hash가 생성되어
+            # content-addressable dedup이 무효화됨.
+            prepared_uploads = []
             for field_name, field_value in delta.items():
-                # 필드별 해시 생성
                 field_json = json.dumps({field_name: field_value}, ensure_ascii=False, default=self._json_default)
-                
-                # 📝 [일관성 개선 #3] NDJSON 포맷 통일 (S3 Select 호환성)
-                ndjson_data = field_json + "\n"  # JSON Lines 형식
-                
-                # 📦 [FinOps 최적화 #2] Gzip 압축 (S3 Select 호환)
-                # 🔄 변경: Zstd → Gzip (S3 Select가 GZIP, BZIP2만 지원)
-                import gzip
-                
+                ndjson_data = field_json + "\n"
                 raw_data = ndjson_data.encode('utf-8')
-                compressed_data = gzip.compress(raw_data, compresslevel=6)  # 레벨 6: 속도/압축률 균형
-                
-                # 압축된 데이터로 해시 재계산 (무결성 보장)
-                block_hash = hashlib.sha256(compressed_data).hexdigest()
-                content_encoding = 'gzip'
-                body_data = compressed_data
-                
-                original_size = len(raw_data)
-                compressed_size = len(compressed_data)
-                compression_ratio = (1 - compressed_size / original_size) * 100
-                
-                logger.debug(
-                    f"[Gzip] Compressed {field_name}: {original_size} → {compressed_size} bytes "
-                    f"({compression_ratio:.1f}% reduction)"
-                )
-                
-                # S3 키 생성 (Content-Addressable)
+                block_hash = hashlib.sha256(raw_data).hexdigest()
+                compressed_data = gzip.compress(raw_data, compresslevel=6, mtime=0)
                 s3_key = f"merkle-blocks/{workflow_id}/{block_hash[:2]}/{block_hash}.json"
-                
-                # S3 업로드 (🛡️ status=temp 태그 필수)
+
+                prepared_uploads.append({
+                    'field_name': field_name,
+                    's3_key': s3_key,
+                    'body': compressed_data,
+                    'block_hash': block_hash,
+                    'raw_size': len(raw_data),
+                    'compressed_size': len(compressed_data),
+                    'field_json_size': len(field_json),
+                })
+
+            # Step 2: I/O-bound S3 PUT — 병렬 실행
+            def _upload_block(upload_info):
+                """Single block S3 upload (thread-safe: each call uses its own params)."""
                 self.s3.put_object(
                     Bucket=self.bucket,
-                    Key=s3_key,
-                    Body=body_data,  # 📦 압축된 데이터 (or 평문)
+                    Key=upload_info['s3_key'],
+                    Body=upload_info['body'],
                     ContentType='application/x-ndjson',
-                    ContentEncoding=content_encoding,  # 📦 'zstd' or 'identity'
-                    Tagging='status=temp',  # 🛡️ Phase 10 GC가 인식할 태그
+                    ContentEncoding='gzip',
+                    Tagging='status=temp',
                     Metadata={
-                        'block_hash': block_hash,
+                        'block_hash': upload_info['block_hash'],
                         'workflow_id': workflow_id,
                         'execution_id': execution_id,
                         'uploaded_at': datetime.utcnow().isoformat(),
                         'format': 'ndjson',
-                        'field_name': field_name,  # 📝 [최적화 #3] 필드명 저장
+                        'field_name': upload_info['field_name'],
                         'contains_segments': 'delta',
-                        'compression': content_encoding  # 📦 압축 방식 명시
+                        'compression': 'gzip',
                     }
                 )
-                
+                return upload_info
+
+            optimal_workers = _calculate_optimal_workers()
+
+            if len(prepared_uploads) <= 1:
+                # Single field: skip thread pool overhead
+                for info in prepared_uploads:
+                    _upload_block(info)
+            else:
+                with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
+                    futures = {executor.submit(_upload_block, info): info for info in prepared_uploads}
+                    for future in as_completed(futures):
+                        future.result()  # propagate any S3 error immediately
+
+            for info in prepared_uploads:
                 blocks.append(ContentBlock(
-                    block_id=block_hash,
-                    s3_path=f"s3://{self.bucket}/{s3_key}",
-                    size=len(field_json),
-                    fields=[field_name],
-                    checksum=block_hash
+                    block_id=info['block_hash'],
+                    s3_path=f"s3://{self.bucket}/{info['s3_key']}",
+                    size=info['field_json_size'],
+                    fields=[info['field_name']],
+                    checksum=info['block_hash'],
                 ))
-                uploaded_block_ids.append(block_hash)
-            
-            logger.info(f"[KernelStateManager] ✅ Phase 1: Uploaded {len(blocks)} blocks (status=temp)")
+                uploaded_block_ids.append(info['block_hash'])
+
+            logger.info(
+                f"[KernelStateManager] Phase 1: Uploaded {len(blocks)} blocks "
+                f"(status=temp, workers={optimal_workers})"
+            )
             
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             # Phase 2: DynamoDB TransactWriteItems (Atomic Commit)
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            manifest_id = f"manifest-{execution_id}-{segment_id}-{int(time.time())}"
+            # [v3.32 FIX] UUID suffix prevents 1-second collision window (BUG-2).
+            # int(time.time()) alone has 1s granularity — concurrent calls for the
+            # same execution_id + segment_id within 1s produce identical manifest_ids.
+            import uuid
+            manifest_id = f"manifest-{execution_id}-{segment_id}-{int(time.time())}-{uuid.uuid4().hex[:8]}"
             manifest_hash = hashlib.sha256(
                 json.dumps([asdict(b) for b in blocks], sort_keys=True).encode('utf-8')
             ).hexdigest()
@@ -1877,63 +1938,27 @@ class StateVersioningService:
                         exc,
                     )
 
+            # ── Phase 2a: Block ref counts + Manifest (unconditional, atomic) ──
+            # Block persistence must NEVER fail due to a stale pointer condition,
+            # so the conditional pointer update is separated into Phase 2b.
             transact_items = []
-            
-            # 🥨 [치명적 결함 #1] 매니페스트를 마지막 배치로 이동 (원자성 보장)
-            # 전략: 모든 블록 참조 카운트 증가 후 매니페스트 등록
-            # 효과: 부분 실패 시 매니페스트 미생성 → 데이터 무결성 보장
-            
-            # 2-2. 블록 참조 카운트 증가 (100개씩 배치 처리)
-            # [FIX] WorkflowBlockReferencesV3 테이블은 복합키 구조:
-            #   HASH: workflow_id  /  RANGE: block_id
-            # Key에 HASH key(workflow_id)가 누락되면 DynamoDB가 ValidationException을 발생시키고
-            # TransactWriteItems 전체가 TransactionCanceledException으로 취소됨.
-            for i in range(0, len(uploaded_block_ids), 100):
-                batch = uploaded_block_ids[i:i+100]
-                for block_id in batch:
-                    transact_items.append({
-                        'Update': {
-                            'TableName': self.block_refs_table.name,
-                            'Key': {
-                                'workflow_id': {'S': workflow_id},  # HASH key (복합키 필수)
-                                'block_id': {'S': block_id}         # RANGE key
-                            },
-                            'UpdateExpression': 'ADD ref_count :inc SET last_referenced = :now',
-                            'ExpressionAttributeValues': {
-                                ':inc': {'N': '1'},
-                                ':now': {'S': datetime.utcnow().isoformat()}
-                            }
+
+            for block_id in uploaded_block_ids:
+                transact_items.append({
+                    'Update': {
+                        'TableName': self.block_refs_table.name,
+                        'Key': {
+                            'workflow_id': {'S': workflow_id},
+                            'block_id': {'S': block_id},
+                        },
+                        'UpdateExpression': 'ADD ref_count :inc SET last_referenced = :now',
+                        'ExpressionAttributeValues': {
+                            ':inc': {'N': '1'},
+                            ':now': {'S': datetime.utcnow().isoformat()},
                         }
-                    })
-            
-            # 2-3. WorkflowsTableV3 포인터 갱신 (🗑️ latest_state.json 대체)
-            # [FIX] string replace 방식은 'WorkflowManifests-v3-dev' →
-            # 'WorkflowWorkflowsTableV3-v3-dev' 로 잘못 변환됨.
-            # 환경변수에서 직접 읽어야 함.
-            workflows_table_name = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-            transact_items.append({
-                'Update': {
-                    'TableName': workflows_table_name,
-                    'Key': {
-                        'ownerId': {'S': owner_id},
-                        'workflowId': {'S': workflow_id}
-                    },
-                    'UpdateExpression': (
-                        'SET latest_manifest_id = :manifest_id, '
-                        'latest_segment_id = :segment_id, '
-                        'latest_execution_id = :execution_id, '
-                        'updated_at = :now'
-                    ),
-                    'ExpressionAttributeValues': {
-                        ':manifest_id': {'S': manifest_id},
-                        ':segment_id': {'N': str(segment_id)},
-                        ':execution_id': {'S': execution_id},
-                        ':now': {'S': datetime.utcnow().isoformat()}
                     }
-                }
-            })
-            
-            # 2-1. 매니페스트 등록 (🥨 마지막에 배치 - 원자성 보장)
+                })
+
             manifest_dynamo_item = {
                 'manifest_id': {'S': manifest_id},
                 'workflow_id': {'S': workflow_id},
@@ -1941,7 +1966,10 @@ class StateVersioningService:
                 'segment_id': {'N': str(segment_id)},
                 'manifest_hash': {'S': manifest_hash},
                 'parent_manifest_id': {'S': previous_manifest_id} if previous_manifest_id else {'NULL': True},
-                'blocks': {'S': json.dumps([asdict(b) for b in blocks])},
+                # [v3.33 FIX-A] Must use sort_keys=True to match manifest_hash
+                # computation (line 1873).  Without sort_keys, deserialized dict
+                # key ordering may differ → hash mismatch on re-verification.
+                'blocks': {'S': json.dumps([asdict(b) for b in blocks], sort_keys=True)},
                 'created_at': {'S': datetime.utcnow().isoformat()},
                 'status': {'S': 'ACTIVE'},
             }
@@ -1949,9 +1977,8 @@ class StateVersioningService:
             # Phase 5a: Store temperature-tier hashes in manifest
             if incremental_metadata:
                 manifest_dynamo_item['incremental_metadata'] = {
-                    'S': json.dumps(incremental_metadata)
+                    'S': json.dumps(incremental_metadata, sort_keys=True)
                 }
-                # Top-level fields for fast DynamoDB queries
                 for meta_key in ('hot_hash', 'warm_hash', 'cold_hash',
                                  'control_hash', 'incremental_root'):
                     if meta_key in incremental_metadata:
@@ -1963,32 +1990,118 @@ class StateVersioningService:
                 'Put': {
                     'TableName': self.table.name,
                     'Item': manifest_dynamo_item,
+                    # [v3.32 FIX] Prevent silent overwrite on manifest_id collision
+                    'ConditionExpression': 'attribute_not_exists(manifest_id)',
                 }
             }
-            
-            # DynamoDB 트랜잭션 실행 (100개 제한 준수)
-            # 🥨 [치명적 결함 #1 해결] 매니페스트를 마지막 배치에 포함
-            if len(transact_items) < 100:
-                # 100개 미만: 매니페스트 포함 단일 트랜잭션
+
+            # Execute: block refs + manifest (100-item batching)
+            if len(transact_items) < 99:
                 transact_items.append(manifest_item)
                 self.dynamodb_client.transact_write_items(TransactItems=transact_items)
             else:
-                # 100개 초과: 블록 참조 배치 처리 후 매니페스트 최종 컮밋
-                for i in range(0, len(transact_items), 100):
-                    batch = transact_items[i:i+100]
-                    
-                    # 마지막 배치에 매니페스트 포함 (🥨 원자성 보장)
-                    if i + 100 >= len(transact_items):
+                for i in range(0, len(transact_items), 99):
+                    batch = transact_items[i:i+99]
+                    if i + 99 >= len(transact_items):
                         batch.append(manifest_item)
-                    
                     try:
                         self.dynamodb_client.transact_write_items(TransactItems=batch)
                     except Exception as e:
                         logger.error(
-                            f"[Atomicity Protection] Batch {i//100 + 1} failed. "
+                            f"[Atomicity Protection] Batch {i//99 + 1} failed. "
                             f"Manifest NOT created (data integrity preserved): {e}"
                         )
-                        raise  # 🥨 실패 시 전체 중단 (부분 커밋 방지)
+                        raise
+
+            # ── Phase 2b: Conditional pointer advancement (with retry) ──
+            # [v3.33] Monotonic segment guard: only advance latest_manifest_id if
+            # segment_id >= currently stored value.  Prevents a late-finishing
+            # parallel branch from overwriting a pointer that a higher segment
+            # already set.  For fan-out branches with the SAME segment_id,
+            # last-writer-wins is acceptable — the aggregator reads branch states
+            # from S3 directly, not from this pointer.
+            #
+            # This is separated from Phase 2a so a ConditionalCheckFailedException
+            # (expected during parallel fan-out) does NOT abort block persistence.
+            #
+            # [v3.33 FIX] Exponential backoff retry for transient DynamoDB errors.
+            # Without retry, a transient throttle/network error leaves the pointer
+            # permanently stale — the "Ghost State" problem. Recovery (resume) would
+            # then read an outdated manifest and lose the successful computation.
+            # ConditionalCheckFailedException is still non-retryable (expected fan-out).
+            _POINTER_RETRYABLE_CODES = frozenset({
+                'ProvisionedThroughputExceededException',
+                'ThrottlingException',
+                'InternalServerError',
+                'ServiceUnavailable',
+                'RequestLimitExceeded',
+            })
+            _POINTER_MAX_RETRIES = 3
+            _POINTER_BASE_DELAY = 0.1  # 100ms → 200ms → 400ms
+
+            workflows_table_name = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
+            pointer_advanced = False
+
+            for _attempt in range(_POINTER_MAX_RETRIES):
+                try:
+                    self.dynamodb_client.update_item(
+                        TableName=workflows_table_name,
+                        Key={
+                            'ownerId': {'S': owner_id},
+                            'workflowId': {'S': workflow_id},
+                        },
+                        UpdateExpression=(
+                            'SET latest_manifest_id = :manifest_id, '
+                            'latest_segment_id = :segment_id, '
+                            'latest_execution_id = :execution_id, '
+                            'updated_at = :now'
+                        ),
+                        ConditionExpression=(
+                            'attribute_not_exists(latest_segment_id) OR '
+                            'latest_segment_id <= :segment_id'
+                        ),
+                        ExpressionAttributeValues={
+                            ':manifest_id': {'S': manifest_id},
+                            ':segment_id': {'N': str(segment_id)},
+                            ':execution_id': {'S': execution_id},
+                            ':now': {'S': datetime.utcnow().isoformat()},
+                        },
+                    )
+                    pointer_advanced = True
+                    break
+                except ClientError as ce:
+                    error_code = ce.response['Error']['Code']
+                    if error_code == 'ConditionalCheckFailedException':
+                        # Expected during parallel fan-out: a higher segment already
+                        # advanced the pointer.  Blocks + manifest are persisted; only
+                        # the global pointer stays at the higher segment.
+                        logger.info(
+                            f"[v3.33] Pointer not advanced (segment {segment_id} <= current). "
+                            f"Manifest {manifest_id} persisted independently."
+                        )
+                        pointer_advanced = True  # Not a failure — intentional skip
+                        break
+                    elif error_code in _POINTER_RETRYABLE_CODES:
+                        delay = _POINTER_BASE_DELAY * (2 ** _attempt)
+                        logger.warning(
+                            f"[v3.33] Pointer update transient error (attempt {_attempt + 1}/"
+                            f"{_POINTER_MAX_RETRIES}): {error_code}. Retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                    else:
+                        # Non-retryable unexpected error
+                        logger.error(
+                            f"[v3.33] Pointer update failed (non-retryable): {ce}"
+                        )
+                        break
+
+            if not pointer_advanced:
+                logger.error(
+                    f"[v3.33] [GHOST_STATE_RISK] Pointer update exhausted all retries. "
+                    f"manifest_id={manifest_id}, segment_id={segment_id}, "
+                    f"workflow_id={workflow_id}. Manifest is persisted but pointer is stale. "
+                    f"Recovery path must use manifest chain scan via ParentHashIndex."
+                )
             
             logger.info(
                 f"[KernelStateManager] ✅ Phase 2: DynamoDB committed "

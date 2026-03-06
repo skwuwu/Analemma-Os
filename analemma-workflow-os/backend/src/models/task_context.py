@@ -603,7 +603,11 @@ class TaskContext(BaseModel):
     class Config:
         json_encoders = {
             datetime: lambda v: v.isoformat(),
-            Decimal: lambda v: float(v),  # DynamoDB Decimal → JSON float
+            # [v3.33 FIX-E] Use str() not float() to match canonical hash path.
+            # float(Decimal("0.1") + Decimal("0.2")) → 0.30000000000000004
+            # str(Decimal("0.1") + Decimal("0.2"))   → "0.3"
+            # hash_utils._canonical_bytes uses str(), so float() causes hash divergence.
+            Decimal: lambda v: str(v),
         }
 
     def add_thought(

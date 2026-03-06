@@ -178,6 +178,14 @@ CONTROL_PLANE_MAX_SIZE = 10 * 1024  # 10KB - SFN 페이로드 목표
 DATA_PLANE_THRESHOLD = 50 * 1024   # 50KB - S3 오프로드 트리거
 FIELD_OFFLOAD_THRESHOLD = 10 * 1024  # 10KB - 개별 필드 오프로드 트리거
 
+# [v3.34] Required control plane fields — must survive dehydration.
+# If any of these are missing after dehydrate(), the SFN state machine
+# cannot route to the next segment or maintain Merkle chain continuity.
+REQUIRED_CONTROL_PLANE_FIELDS = frozenset({
+    "ownerId", "workflowId", "execution_id",
+    "segment_to_run", "total_segments",
+})
+
 # Control Plane 필드 (항상 SFN 컨텍스트에 유지)
 CONTROL_PLANE_FIELDS = frozenset({
     # 식별자
@@ -195,7 +203,11 @@ CONTROL_PLANE_FIELDS = frozenset({
     # 전략 및 모드
     "distributed_strategy", "distributed_mode", "MOCK_MODE",
     "AUTO_RESUME_HITP",   # 시뮬레이터 HITP 자동 승인 플래그 (StateHydrator 경로 보존)
-    
+
+    # Merkle DAG chain continuity
+    # [v3.32 FIX] 누락 시 dehydrate()가 제거 → 다음 세그먼트에서 parent=None → chain 단절
+    "current_manifest_id",
+
     # 세그먼트 메타데이터
     "llm_segments", "hitp_segments", "segment_type",
     
@@ -418,6 +430,13 @@ class SmartStateBag(dict):
         for key in CONTROL_PLANE_FIELDS:
             if key in self:
                 result[key] = super().get(key)
+        # [v3.34] Validate required fields — silent loss causes SFN routing failure
+        missing = REQUIRED_CONTROL_PLANE_FIELDS - result.keys()
+        if missing:
+            logger.warning(
+                "[SmartStateBag] Required control plane fields missing after "
+                "get_control_plane(): %s — SFN routing may fail", missing
+            )
         return result
     
     def get_lazy_pointers(self) -> Dict[str, S3Pointer]:
