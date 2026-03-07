@@ -295,7 +295,7 @@ class EventualConsistencyGuard:
             # ├─ 메타데이터: manifest_id, version, manifest_hash, config_hash, ...
             # └─ 데이터 본체: segments (list) ← segment_id 오름차순 정렬 보장
             #
-            # 해시 검증 대상: {workflow_id, version, config_hash, segment_hashes} 4필드만
+            # Hash verification fields: {workflow_id, version, config_hash, segment_hashes, parent_hash}
             # segments 키는 해시 대상이 아니므로 Envelope에 추가해도 무결성에 영향 없음.
             segments = sorted(
                 [

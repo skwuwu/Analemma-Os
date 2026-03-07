@@ -807,11 +807,14 @@ def _execute_initialization(event, context):
                             #    - segment_hashes: Must be dict (not list)
                             # 🛡️ [P1 FIX] None-safe type casting: int(manifest_obj.get('version') or 0)
                             #    Prevents TypeError if version is None or ValueError if empty string
+                            # [v3.34 FIX] Must include parent_hash to match
+                            # _compute_hash() in create_manifest (v3.33 FIX-B).
                             verification_target = {
                                 'workflow_id': manifest_obj.get('workflow_id'),
-                                'version': int(manifest_obj.get('version') or 0),  # 🔧 None-safe normalization
+                                'version': int(manifest_obj.get('version') or 0),  # None-safe normalization
                                 'config_hash': manifest_obj.get('config_hash'),
-                                'segment_hashes': manifest_obj.get('segment_hashes', {})  # 🔧 Default to dict
+                                'segment_hashes': manifest_obj.get('segment_hashes', {}),  # Default to dict
+                                'parent_hash': manifest_obj.get('parent_hash') or '',  # Match create_manifest normalization
                             }
                             
                             computed_hash = StateVersioningService.compute_hash(verification_target)
