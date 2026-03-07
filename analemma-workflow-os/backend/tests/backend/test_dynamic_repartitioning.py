@@ -195,23 +195,29 @@ class TestManifestRegenerator:
 class TestSegmentRunnerIntegration:
     """SegmentRunner 통합 테스트"""
     
-    @patch('src.services.execution.segment_runner_service.boto3.client')
+    @patch('boto3.client')
     def test_trigger_manifest_regeneration(self, mock_boto_client, recovery_segments):
         """ManifestRegenerator Lambda 호출 테스트"""
         from src.services.execution.segment_runner_service import SegmentRunnerService
-        
-        # Lambda Mock
+
+        # Lambda Mock — sync mode returns Payload with .read()
+        mock_payload = MagicMock()
+        mock_payload.read.return_value = json.dumps({
+            'status': 'success', 'new_manifest_id': 'new_123'
+        }).encode()
         mock_lambda = MagicMock()
-        mock_lambda.invoke.return_value = {'StatusCode': 202}
+        mock_lambda.invoke.return_value = {
+            'StatusCode': 200,
+            'Payload': mock_payload
+        }
         mock_boto_client.return_value = mock_lambda
-        
+
         # Service
         service = SegmentRunnerService(
-            state_bucket='test-bucket',
-            threshold=100000
+            s3_bucket='test-bucket'
         )
-        
-        # Execute
+
+        # Execute (workflow_config={} → small → sync/RequestResponse mode)
         result = service._trigger_manifest_regeneration(
             manifest_s3_path='s3://bucket/manifests/abc.json',
             workflow_id='wf_test',
@@ -220,16 +226,16 @@ class TestSegmentRunnerIntegration:
             reason='AGENT_REPLAN',
             workflow_config={}
         )
-        
-        # Verify
-        assert result is True
+
+        # Verify — method returns dict with status
+        assert result['status'] == 'MANIFEST_REGENERATED'
         mock_lambda.invoke.assert_called_once()
-        
+
         # 페이로드 검증
-        call_args = mock_lambda.invoke.call_args
-        assert call_args[1]['InvocationType'] == 'Event'  # 비동기
-        
-        payload = json.loads(call_args[1]['Payload'])
+        call_kwargs = mock_lambda.invoke.call_args.kwargs
+        assert call_kwargs['InvocationType'] == 'RequestResponse'
+
+        payload = json.loads(call_kwargs['Payload'])
         assert payload['modification_type'] == 'RECOVERY_INJECT'
         assert payload['workflow_id'] == 'wf_test'
         assert len(payload['modifications']['new_nodes']) > 0
@@ -237,37 +243,34 @@ class TestSegmentRunnerIntegration:
     def test_check_structural_change_llm(self):
         """LLM 노드 추가 시 구조적 변경 감지"""
         from src.services.execution.segment_runner_service import SegmentRunnerService
-        
+
         service = SegmentRunnerService(
-            state_bucket='test-bucket',
-            threshold=100000
+            s3_bucket='test-bucket'
         )
-        
-        # LLM 노드 포함 세그먼트
+
         segments_with_llm = [
             {
                 "nodes": [{"id": "n5", "type": "llm_chat"}],
                 "edges": []
             }
         ]
-        
+
+        # workflow_config must be truthy (non-empty) to pass guard clause
         result = service._check_structural_change(
             recovery_segments=segments_with_llm,
-            workflow_config={}
+            workflow_config={"nodes": []}
         )
-        
+
         assert result is True
-    
+
     def test_check_structural_change_parallel(self):
         """Parallel Group 추가 시 구조적 변경 감지"""
         from src.services.execution.segment_runner_service import SegmentRunnerService
-        
+
         service = SegmentRunnerService(
-            state_bucket='test-bucket',
-            threshold=100000
+            s3_bucket='test-bucket'
         )
-        
-        # Parallel Group 노드
+
         segments_with_parallel = [
             {
                 "nodes": [
@@ -280,36 +283,34 @@ class TestSegmentRunnerIntegration:
                 "edges": []
             }
         ]
-        
+
         result = service._check_structural_change(
             recovery_segments=segments_with_parallel,
-            workflow_config={}
+            workflow_config={"nodes": []}
         )
-        
+
         assert result is True
-    
+
     def test_check_structural_change_normal(self):
         """일반 노드는 구조적 변경 없음"""
         from src.services.execution.segment_runner_service import SegmentRunnerService
-        
+
         service = SegmentRunnerService(
-            state_bucket='test-bucket',
-            threshold=100000
+            s3_bucket='test-bucket'
         )
-        
-        # 일반 operator 노드만
+
         normal_segments = [
             {
                 "nodes": [{"id": "n7", "type": "operator"}],
                 "edges": []
             }
         ]
-        
+
         result = service._check_structural_change(
             recovery_segments=normal_segments,
-            workflow_config={}
+            workflow_config={"nodes": []}
         )
-        
+
         assert result is False
 
 
@@ -317,32 +318,45 @@ class TestStateVersioningService:
     """StateVersioningService 무효화 테스트"""
     
     @patch('src.services.state.state_versioning_service.boto3.resource')
-    def test_invalidate_manifest(self, mock_boto_resource):
+    @patch('src.services.state.state_versioning_service.boto3.client')
+    def test_invalidate_manifest(self, mock_boto_client, mock_boto_resource):
         """매니페스트 무효화 메서드 테스트"""
         from src.services.state.state_versioning_service import StateVersioningService
-        
+
         # DynamoDB Mock
         mock_table = MagicMock()
+        # get_manifest() calls get_item to load manifest before invalidation
+        mock_table.get_item.return_value = {
+            'Item': {
+                'manifest_id': 'old_manifest_123',
+                'version': 1,
+                'manifest_hash': 'hash_old_123',
+                'config_hash': 'config_hash_old',
+                'workflow_id': 'wf_test',
+                'status': 'ACTIVE',
+                's3_pointers': {'state_blocks': []}
+            }
+        }
         mock_dynamodb = MagicMock()
         mock_dynamodb.Table.return_value = mock_table
         mock_boto_resource.return_value = mock_dynamodb
-        
+
         # Service
         service = StateVersioningService(
             dynamodb_table='test-manifests',
             s3_bucket='test-bucket'
         )
-        
+
         # Execute
         result = service.invalidate_manifest(
             manifest_id='old_manifest_123',
             reason='Dynamic re-partitioning: AGENT_REPLAN'
         )
-        
+
         # Verify
         assert result is True
         mock_table.update_item.assert_called_once()
-        
+
         # Update Expression 검증
         call_args = mock_table.update_item.call_args
         assert call_args[1]['UpdateExpression'].startswith('SET #status = :status')
@@ -353,7 +367,7 @@ class TestStateVersioningService:
 class TestE2EScenario:
     """End-to-End 시나리오 테스트"""
     
-    @patch('src.services.execution.segment_runner_service.boto3.client')
+    @patch('boto3.client')
     @patch('src.handlers.core.manifest_regenerator.partition_workflow_advanced')
     @patch('src.handlers.core.manifest_regenerator.StateVersioningService')
     def test_agent_replanning_full_flow(
@@ -366,7 +380,7 @@ class TestE2EScenario:
     ):
         """
         에이전트 Re-planning 전체 플로우
-        
+
         1. SegmentRunner가 복구 세그먼트 삽입 요청 받음
         2. 구조적 변경 감지 (LLM 노드)
         3. ManifestRegenerator Lambda 호출
@@ -375,24 +389,30 @@ class TestE2EScenario:
         """
         from src.services.execution.segment_runner_service import SegmentRunnerService
         from src.handlers.core.manifest_regenerator import lambda_handler
-        
+
         # ===== Step 1: SegmentRunner =====
+        mock_payload = MagicMock()
+        mock_payload.read.return_value = json.dumps({
+            'status': 'success'
+        }).encode()
         mock_lambda = MagicMock()
-        mock_lambda.invoke.return_value = {'StatusCode': 202}
+        mock_lambda.invoke.return_value = {
+            'StatusCode': 200,
+            'Payload': mock_payload
+        }
         mock_boto_client.return_value = mock_lambda
-        
+
         service = SegmentRunnerService(
-            state_bucket='test-bucket',
-            threshold=100000
+            s3_bucket='test-bucket'
         )
-        
+
         recovery_segments = [
             {
                 "nodes": [{"id": "n4", "type": "llm_chat", "config": {}}],
                 "edges": []
             }
         ]
-        
+
         # 트리거
         trigger_result = service._trigger_manifest_regeneration(
             manifest_s3_path='s3://bucket/manifests/old.json',
@@ -402,8 +422,8 @@ class TestE2EScenario:
             reason='AGENT_REPLAN',
             workflow_config=sample_workflow_config
         )
-        
-        assert trigger_result is True
+
+        assert trigger_result['status'] in ('MANIFEST_REGENERATED', 'MANIFEST_REGENERATING')
         assert mock_lambda.invoke.called
         
         # ===== Step 2: ManifestRegenerator Lambda =====
@@ -438,7 +458,7 @@ class TestE2EScenario:
             mock_versioning_class.return_value = mock_versioning
             
             # Lambda 호출 페이로드 추출
-            invoke_payload = json.loads(mock_lambda.invoke.call_args[1]['Payload'])
+            invoke_payload = json.loads(mock_lambda.invoke.call_args.kwargs['Payload'])
             
             # ManifestRegenerator 실행
             regen_result = lambda_handler(invoke_payload, None)

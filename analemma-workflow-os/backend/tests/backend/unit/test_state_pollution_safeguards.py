@@ -72,9 +72,13 @@ class TestReservedStateKeys:
             f"Missing response envelope keys: {required_envelope_keys - RESERVED_STATE_KEYS}"
     
     def test_alias_compatibility_keys_present(self):
-        """Alias/Compatibility 키가 모두 포함되어 있는지 검증 (camelCase & snake_case)"""
+        """Alias/Compatibility 키가 모두 포함되어 있는지 검증 (camelCase & snake_case)
+
+        Note: ownerId is deliberately excluded from RESERVED_STATE_KEYS
+        for Step Functions JSONPath compatibility (see main.py line 363).
+        """
         required_alias_keys = {
-            "workflowId", "workflow_id", "ownerId", "owner_id"
+            "workflowId", "workflow_id", "owner_id"
         }
         assert required_alias_keys.issubset(RESERVED_STATE_KEYS), \
             f"Missing alias keys: {required_alias_keys - RESERVED_STATE_KEYS}"
@@ -163,22 +167,27 @@ class TestPydanticModelValidator:
     """SafeStateOutput Pydantic 모델 테스트 (Layer 2 방어선)"""
     
     def test_model_validator_blocks_extra_reserved_keys(self):
-        """model_validator가 extra 필드의 예약 키도 차단하는지 검증"""
+        """model_validator가 extra 필드의 예약 키도 차단하는지 검증
+
+        Note: __new_history_logs is in KERNEL_MANAGED_KEYS, so it is
+        deliberately allowed through the model_validator (legitimate kernel key).
+        Only non-kernel-managed reserved keys (like partition_map) are blocked.
+        """
         data = {
             "user_field": "custom",
-            "__new_history_logs": ["fake", "logs"],  # extra 필드이지만 예약 키
-            "partition_map": {"fake": "map"},  # extra 필드이지만 예약 키
+            "__new_history_logs": ["fake", "logs"],  # KERNEL_MANAGED — allowed through
+            "partition_map": {"fake": "map"},  # reserved, NOT kernel-managed — blocked
             "result": "success"
         }
-        
-        # model_validator에서 예약 키가 제거됨
+
         validated = SafeStateOutput(**data)
         dumped = validated.model_dump(exclude_none=True, exclude_unset=True)
-        
-        # 예약 키는 모델에서 제거되어야 함
-        assert "__new_history_logs" not in dumped
+
+        # partition_map is reserved (non-kernel-managed) → blocked
         assert "partition_map" not in dumped
-        # 안전한 키는 보존
+        # __new_history_logs is KERNEL_MANAGED → allowed through
+        assert "__new_history_logs" in dumped
+        # safe keys preserved
         assert "user_field" in dumped
         assert "result" in dumped
     

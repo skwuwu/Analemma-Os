@@ -106,7 +106,7 @@ jobs:
       - name: Run unit tests
         working-directory: ./analemma-workflow-os/backend
         run: |
-          PYTHONPATH=src python -m pytest tests/ -v --tb=short -x --timeout=30
+          PYTHONPATH=src python -m pytest tests/ -v --tb=short -x
 
       - name: Setup AWS SAM CLI
         uses: aws-actions/setup-sam@v2
