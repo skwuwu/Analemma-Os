@@ -8,7 +8,7 @@ Usage:
     # TTL settings
     ttl = int(time.time()) + TTLConfig.WEBSOCKET_CONNECTION
     
-    # 쿼터 제한
+    # Quota limits
     limit = QuotaLimits.get_workflow_limit(subscription_plan, stage_name)
 """
 
@@ -19,44 +19,44 @@ from enum import Enum
 
 
 class TTLConfig:
-    """TTL (Time To Live) 관련 상수"""
+    """TTL (Time To Live) constants"""
     
-    # WebSocket 연결 TTL (2시간)
+    # WebSocket connection TTL (2 hours)
     WEBSOCKET_CONNECTION = 7200
     
-    # Task Token TTL (1일)
+    # Task Token TTL (1 day)
     TASK_TOKEN_DEFAULT = 86400
     
-    # Pending Notification TTL (30일)
+    # Pending Notification TTL (30 days)
     PENDING_NOTIFICATION = 2592000
     
-    # Execution Record TTL (90일)
+    # Execution Record TTL (90 days)
     EXECUTION_RECORD = 90 * 24 * 3600
     
-    # Pricing Cache TTL (1시간)
+    # Pricing Cache TTL (1 hour)
     PRICING_CACHE = 3600
 
 
 class QuotaLimits:
-    """사용량 제한 관련 상수"""
+    """Usage quota limit constants"""
     
-    # 무료 티어 제한
+    # Free tier limits
     FREE_TIER_DEV = 10000
     FREE_TIER_PROD = 50
     
-    # 프리미엄 티어 제한
+    # Premium tier limit
     PREMIUM_TIER = 10**9
     
-    # 샘플링 제한
+    # Sampling limits
     USAGE_COLLECTION_SAMPLE_SIZE = 50
     USAGE_COLLECTION_MAX_DEPTH = 10
     
-    # 출력 크기 제한 (1MB)
+    # Max output size (1MB)
     MAX_OUTPUT_SIZE_BYTES = 1024 * 1024
     
     @classmethod
     def get_workflow_limit(cls, subscription_plan: str, stage_name: str) -> int:
-        """구독 플랜과 스테이지에 따른 워크플로우 제한 반환"""
+        """Return workflow limit based on subscription plan and stage."""
         if subscription_plan == 'free':
             return cls.FREE_TIER_DEV if stage_name == 'dev' else cls.FREE_TIER_PROD
         else:
@@ -64,7 +64,7 @@ class QuotaLimits:
 
 
 class ModelPricing:
-    """LLM 모델 가격 정보 (기본값, Parameter Store에서 오버라이드 가능)"""
+    """LLM model pricing defaults (overridable via Parameter Store)"""
     
     DEFAULT_MODELS = {
         "gpt-4": {
@@ -93,41 +93,41 @@ class ModelPricing:
         }
     }
     
-    # 기본 모델 (알 수 없는 모델일 때 사용)
+    # Fallback model (used for unknown models)
     DEFAULT_MODEL = "gpt-3.5-turbo"
     
-    # 토큰당 비용 계산 기준
+    # Token cost calculation base unit
     TOKENS_PER_THOUSAND = Decimal("1000")
     
-    # 비용 반올림 정밀도 (마이크로센트 단위)
+    # Cost rounding precision (microcent granularity)
     COST_PRECISION = Decimal("0.000001")
 
 
 class LLMModels:
     """
-    LLM 모델 ID 상수 통합
-    
+    Consolidated LLM model ID constants.
+
     Usage:
         from src.common.constants import LLMModels
-        
+
         model_id = LLMModels.CLAUDE_3_HAIKU
     """
     
-    # AWS Bedrock - Claude 모델
+    # AWS Bedrock - Claude models
     CLAUDE_3_HAIKU = os.getenv("HAIKU_MODEL_ID", "anthropic.claude-3-haiku-20240307-v1:0")
     CLAUDE_3_SONNET = os.getenv("SONNET_MODEL_ID", "anthropic.claude-3-sonnet-20240229-v1:0")
     CLAUDE_3_OPUS = os.getenv("OPUS_MODEL_ID", "anthropic.claude-3-opus-20240229-v1:0")
     
-    # Google Gemini 모델
+    # Google Gemini models
     GEMINI_2_0_FLASH = os.getenv("GEMINI_FLASH_2_MODEL_ID", "gemini-2.0-flash")
     GEMINI_1_5_PRO = os.getenv("GEMINI_PRO_MODEL_ID", "gemini-1.5-pro-latest")
     GEMINI_1_5_FLASH = os.getenv("GEMINI_FLASH_MODEL_ID", "gemini-1.5-flash")
     GEMINI_1_5_FLASH_8B = os.getenv("GEMINI_FLASH_8B_MODEL_ID", "gemini-1.5-flash-8b")
     
-    # 기본 모델 별칭
-    DEFAULT_ANALYSIS = CLAUDE_3_HAIKU  # 빠른 분석용
-    DEFAULT_REASONING = GEMINI_1_5_PRO  # 복잡한 추론용
-    DEFAULT_REALTIME = GEMINI_1_5_FLASH  # 실시간 협업용
+    # Default model aliases
+    DEFAULT_ANALYSIS = CLAUDE_3_HAIKU  # Fast analysis
+    DEFAULT_REASONING = GEMINI_1_5_PRO  # Complex reasoning
+    DEFAULT_REALTIME = GEMINI_1_5_FLASH  # Real-time collaboration
 
 
 class PayloadLimits:
@@ -154,13 +154,13 @@ class PayloadLimits:
 
 
 class HTTPStatusCodes:
-    """HTTP 상태 코드 상수"""
-    
-    # 성공
+    """HTTP status code constants"""
+
+    # Success
     OK = 200
     CREATED = 201
     
-    # 클라이언트 에러
+    # Client errors
     BAD_REQUEST = 400
     UNAUTHORIZED = 401
     FORBIDDEN = 403
@@ -168,85 +168,85 @@ class HTTPStatusCodes:
     CONFLICT = 409
     TOO_MANY_REQUESTS = 429
     
-    # 서버 에러
+    # Server errors
     INTERNAL_SERVER_ERROR = 500
     BAD_GATEWAY = 502
     SERVICE_UNAVAILABLE = 503
 
 
 class RetryConfig:
-    """재시도 관련 설정"""
-    
-    # 기본 재시도 간격 (초)
+    """Retry configuration constants"""
+
+    # Default retry interval (seconds)
     DEFAULT_RETRY_AFTER = 5
     
-    # DynamoDB 쓰로틀링 재시도 간격
+    # DynamoDB throttling retry interval
     DYNAMODB_THROTTLE_RETRY = 5
     DYNAMODB_THROUGHPUT_RETRY = 10
     
-    # S3 재시도 간격
+    # S3 retry interval
     S3_SLOWDOWN_RETRY = 5
     
-    # LLM API 재시도 간격
+    # LLM API retry interval
     LLM_RATE_LIMIT_RETRY = 60
 
 
 class WorkflowConfig:
-    """워크플로우 관련 설정"""
-    
-    # 워크플로우 ID 해시 길이
+    """Workflow configuration constants"""
+
+    # Workflow ID hash length
     WORKFLOW_ID_HASH_LENGTH = 32
     
-    # 워크플로우 이름 솔트
+    # Workflow name salt
     WORKFLOW_NAME_SALT = "analemma_workflow_v1"
     
-    # S3 상태 오프로드 임계값 (기본 250KB)
+    # S3 state offload threshold (default 250KB)
     DEFAULT_INLINE_THRESHOLD = 250000
     
-    # 메시지 윈도우 크기
+    # Message window size
     DEFAULT_MESSAGES_WINDOW = 20
 
 
 class LoggingConfig:
-    """로깅 관련 설정"""
-    
-    # 기본 로그 레벨
+    """Logging configuration constants"""
+
+    # Default log level
     DEFAULT_LOG_LEVEL = "INFO"
     
-    # 디버그 로그 최대 길이
+    # Debug log max length
     DEBUG_LOG_MAX_LENGTH = 2000
     
-    # 서비스 이름
+    # Service name
     DEFAULT_SERVICE_NAME = "analemma-backend"
 
 
 class SecurityConfig:
-    """보안 관련 설정"""
-    
-    # JWT 클레임 키
+    """Security configuration constants"""
+
+    # JWT claim key
     OWNER_ID_CLAIM = "sub"
     
-    # API Gateway 정책 버전
+    # API Gateway policy version
     POLICY_VERSION = "2012-10-17"
     
-    # WebSocket 인증 쿼리 파라미터
+    # WebSocket auth query parameter
     WEBSOCKET_TOKEN_PARAM = "token"
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 🛡️ Ring Protection: OS 수준 Privilege Isolation for AI Agents
+    # Ring Protection: OS-level Privilege Isolation for AI Agents
     # ═══════════════════════════════════════════════════════════════════════════
     
-    # Ring 레벨 정의 (CPU Ring Model 차용)
-    RING_0_KERNEL = 0      # 커널 수준: 불변 시스템 목적, 보안 정책
-    RING_1_DRIVER = 1      # 드라이버 수준: 내부 시스템 도구 (향후 확장)
-    RING_2_SERVICE = 2     # 서비스 수준: 제한된 외부 API (향후 확장)
-    RING_3_USER = 3        # 사용자 수준: 신뢰할 수 없는 외부 입력
+    # Ring level definitions (modeled after CPU Ring Model)
+    RING_0_KERNEL = 0      # Kernel: immutable system purpose, security policies
+    RING_1_DRIVER = 1      # Driver: internal system tools (future expansion)
+    RING_2_SERVICE = 2     # Service: restricted external APIs (future expansion)
+    RING_3_USER = 3        # User: untrusted external input
     
-    # Ring 0 (Kernel) 보호 프롬프트 접두사 - 절대 무시 불가
+    # Ring 0 (Kernel) protected prompt prefix -- must never be overridden
     RING_0_PREFIX = "[RING-0:IMMUTABLE]"
     RING_3_PREFIX = "[RING-3:UNTRUSTED]"
     
-    # 위험 도구 분류 (Ring 3에서 직접 접근 불가)
+    # Dangerous tools (not directly accessible from Ring 3)
     DANGEROUS_TOOLS = frozenset({
         's3_delete', 's3_write', 's3_put_object',
         'db_delete', 'db_write', 'db_update', 'dynamodb_delete',
@@ -256,7 +256,7 @@ class SecurityConfig:
         'delete_user', 'admin_action',
     })
     
-    # 안전 도구 (Ring 3에서 직접 사용 가능)
+    # Safe tools (directly accessible from Ring 3)
     SAFE_TOOLS = frozenset({
         's3_read', 's3_get_object', 's3_list',
         'db_read', 'db_query', 'db_scan',
@@ -265,7 +265,7 @@ class SecurityConfig:
         'log', 'print', 'format',
     })
     
-    # Prompt Injection 패턴 (Ring 3 → Ring 0 탈출 시도 탐지)
+    # Prompt injection patterns (detect Ring 3 -> Ring 0 escape attempts)
     INJECTION_PATTERNS = [
         r'(?i)ignore\s+(all\s+)?previous\s+instructions?',
         r'(?i)disregard\s+(all\s+)?(above|previous)',
@@ -274,25 +274,25 @@ class SecurityConfig:
         r'(?i)you\s+are\s+now\s+(a|an|the)',
         r'(?i)new\s+(role|instructions?|persona)\s*:',
         r'(?i)system\s*:\s*you\s+are',
-        r'(?i)\[RING-0',  # Ring 0 태그 위조 시도
+        r'(?i)\[RING-0',  # Ring 0 tag forgery attempt
         r'(?i)</?(RING|KERNEL|SYSTEM)[-_]',
         r'(?i)jailbreak|bypass|escape\s+mode',
     ]
     
-    # 보안 위반 심각도 레벨
-    SEVERITY_CRITICAL = "CRITICAL"    # 즉시 SIGKILL
-    SEVERITY_HIGH = "HIGH"            # 경고 + 세그먼트 중단
-    SEVERITY_MEDIUM = "MEDIUM"        # 경고 + 필터링 후 진행
-    SEVERITY_LOW = "LOW"              # 로깅만
+    # Security violation severity levels
+    SEVERITY_CRITICAL = "CRITICAL"    # Immediate SIGKILL
+    SEVERITY_HIGH = "HIGH"            # Warning + segment abort
+    SEVERITY_MEDIUM = "MEDIUM"        # Warning + filter then proceed
+    SEVERITY_LOW = "LOW"              # Logging only
     
-    # Ring Protection 활성화 여부
+    # Enable Ring Protection
     ENABLE_RING_PROTECTION = os.environ.get('ENABLE_RING_PROTECTION', 'true').lower() == 'true'
     
-    # 보안 위반 시 자동 SIGKILL 활성화
+    # Enable auto SIGKILL on security violation
     ENABLE_AUTO_SIGKILL = os.environ.get('ENABLE_AUTO_SIGKILL', 'true').lower() == 'true'
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 🛡️ Kernel Control Interface (v2.1 - Agent Governance)
+    # Kernel Control Interface (v2.1 - Agent Governance)
     # ═══════════════════════════════════════════════════════════════════════════
     
     # Reserved _kernel commands (Ring 0/1 only)
@@ -322,9 +322,9 @@ class SecurityConfig:
 
 
 class EnvironmentVariables:
-    """환경 변수 키 상수"""
-    
-    # 테이블 이름
+    """Environment variable key constants"""
+
+    # Table names
     WORKFLOWS_TABLE = "WORKFLOWS_TABLE"
     EXECUTIONS_TABLE = "EXECUTIONS_TABLE"
     USERS_TABLE = "USERS_TABLE"
@@ -333,7 +333,7 @@ class EnvironmentVariables:
     WEBSOCKET_CONNECTIONS_TABLE = "WEBSOCKET_CONNECTIONS_TABLE"
     USER_USAGE_TABLE = "USER_USAGE_TABLE"
     
-    # S3 버킷
+    # S3 bucket
     SKELETON_S3_BUCKET = "SKELETON_S3_BUCKET"
     
     # Step Functions
@@ -342,58 +342,58 @@ class EnvironmentVariables:
     # WebSocket
     WEBSOCKET_ENDPOINT_URL = "WEBSOCKET_ENDPOINT_URL"
     
-    # 설정
+    # Configuration
     MOCK_MODE = "MOCK_MODE"
     LOG_LEVEL = "LOG_LEVEL"
     STAGE_NAME = "STAGE_NAME"
     
-    # API 키 (Secrets Manager 참조)
+    # API keys (Secrets Manager references)
     OPENAI_API_KEY = "OPENAI_API_KEY"
     ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
     GOOGLE_API_KEY = "GOOGLE_API_KEY"
     
-    # 가격 설정
+    # Pricing configuration
     PRICING_CONFIG_PARAM = "PRICING_CONFIG_PARAM"
     
-    # TTL 설정
+    # TTL configuration
     TASK_TOKEN_TTL_SECONDS = "TASK_TOKEN_TTL_SECONDS"
     RETENTION_DAYS = "RETENTION_DAYS"
 
 
 class DynamoDBConfig:
-    """DynamoDB 관련 설정
-    
-    🚨 [Critical] 모든 기본값은 template.yaml의 실제 리소스명과 일치해야 함
-    - 테이블명: TableName 속성값 (예: Workflows-v3-${StageName})의 논리 이름 (WorkflowsTableV3)
-    - GSI명: template.yaml의 IndexName 속성값과 정확히 일치
+    """DynamoDB configuration constants.
+
+    [Critical] All defaults must match actual resource names in template.yaml.
+    - Table names: logical name of the TableName property (e.g., WorkflowsTableV3)
+    - GSI names: must exactly match the IndexName property in template.yaml
     """
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # 테이블 이름 (환경변수에서 가져옴)
-    # 기본값: template.yaml !Ref 리소스 논리 이름과 동일한 형식
+    # Table names (loaded from environment variables)
+    # Defaults: same format as template.yaml !Ref logical resource names
     # ═══════════════════════════════════════════════════════════════════════════
-    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')
-    EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'ExecutionsTableV3')
-    PENDING_NOTIFICATIONS_TABLE = os.environ.get('PENDING_NOTIFICATIONS_TABLE', 'PendingNotificationsTableV3')
-    # 🚨 [Critical Fix] 환경변수 통일: TASK_TOKENS_TABLE_NAME을 우선 사용 (template.yaml과 일치)
-    TASK_TOKENS_TABLE = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKENS_TABLE', 'TaskTokensTableV3'))
-    WEBSOCKET_CONNECTIONS_TABLE = os.environ.get('WEBSOCKET_CONNECTIONS_TABLE', 'WebsocketConnectionsTableV3')
-    USERS_TABLE = os.environ.get('USERS_TABLE', 'UsersTableV3')
-    IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE', 'IdempotencyTableV3')
-    USER_USAGE_TABLE = os.environ.get('USER_USAGE_TABLE', 'UserUsageTableV3')
-    BEDROCK_JOB_TABLE = os.environ.get('BEDROCK_JOB_TABLE', 'BedrockJobTableV3')
-    CHECKPOINTS_TABLE = os.environ.get('CHECKPOINTS_TABLE', 'CheckpointsTableV3')
-    SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'SkillsTableV3')
-    CORRECTION_LOGS_TABLE = os.environ.get('CORRECTION_LOGS_TABLE', 'CorrectionLogsTable')
-    DISTILLED_INSTRUCTIONS_TABLE = os.environ.get('DISTILLED_INSTRUCTIONS_TABLE', 'DistilledInstructionsTable')
-    WORKFLOW_BRANCHES_TABLE = os.environ.get('WORKFLOW_BRANCHES_TABLE', 'WorkflowBranchesTable')
-    CONFIRMATION_TOKENS_TABLE = os.environ.get('CONFIRMATION_TOKENS_TABLE', 'ConfirmationTokensTable')
-    NODE_STATS_TABLE = os.environ.get('NODE_STATS_TABLE', 'NodeStatsTable')
-    TASK_EVENTS_TABLE = os.environ.get('TASK_EVENTS_TABLE', 'TaskEventsTable')
+    WORKFLOWS_TABLE = os.environ.get('WORKFLOWS_TABLE', 'WorkflowsTableV3')  # env: WORKFLOWS_TABLE
+    EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE', 'ExecutionsTableV3')  # env: EXECUTIONS_TABLE
+    PENDING_NOTIFICATIONS_TABLE = os.environ.get('PENDING_NOTIFICATIONS_TABLE', 'PendingNotificationsTableV3')  # env: PENDING_NOTIFICATIONS_TABLE
+    # [Critical Fix] Unified env var: prefer TASK_TOKENS_TABLE_NAME (matches template.yaml)
+    TASK_TOKENS_TABLE = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('TASK_TOKENS_TABLE', 'TaskTokensTableV3'))  # env: TASK_TOKENS_TABLE_NAME
+    WEBSOCKET_CONNECTIONS_TABLE = os.environ.get('WEBSOCKET_CONNECTIONS_TABLE', 'WebsocketConnectionsTableV3')  # env: WEBSOCKET_CONNECTIONS_TABLE
+    USERS_TABLE = os.environ.get('USERS_TABLE', 'UsersTableV3')  # env: USERS_TABLE
+    IDEMPOTENCY_TABLE = os.environ.get('IDEMPOTENCY_TABLE', 'IdempotencyTableV3')  # env: IDEMPOTENCY_TABLE
+    USER_USAGE_TABLE = os.environ.get('USER_USAGE_TABLE', 'UserUsageTableV3')  # env: USER_USAGE_TABLE
+    BEDROCK_JOB_TABLE = os.environ.get('BEDROCK_JOB_TABLE', 'BedrockJobTableV3')  # env: BEDROCK_JOB_TABLE
+    CHECKPOINTS_TABLE = os.environ.get('CHECKPOINTS_TABLE', 'CheckpointsTableV3')  # env: CHECKPOINTS_TABLE
+    SKILLS_TABLE = os.environ.get('SKILLS_TABLE', 'SkillsTableV3')  # env: SKILLS_TABLE
+    CORRECTION_LOGS_TABLE = os.environ.get('CORRECTION_LOGS_TABLE', 'CorrectionLogsTable')  # env: CORRECTION_LOGS_TABLE
+    DISTILLED_INSTRUCTIONS_TABLE = os.environ.get('DISTILLED_INSTRUCTIONS_TABLE', 'DistilledInstructionsTable')  # env: DISTILLED_INSTRUCTIONS_TABLE
+    WORKFLOW_BRANCHES_TABLE = os.environ.get('WORKFLOW_BRANCHES_TABLE', 'WorkflowBranchesTable')  # env: WORKFLOW_BRANCHES_TABLE
+    CONFIRMATION_TOKENS_TABLE = os.environ.get('CONFIRMATION_TOKENS_TABLE', 'ConfirmationTokensTable')  # env: CONFIRMATION_TOKENS_TABLE
+    NODE_STATS_TABLE = os.environ.get('NODE_STATS_TABLE', 'NodeStatsTable')  # env: NODE_STATS_TABLE
+    TASK_EVENTS_TABLE = os.environ.get('TASK_EVENTS_TABLE', 'TaskEventsTable')  # env: TASK_EVENTS_TABLE
     
     # ═══════════════════════════════════════════════════════════════════════════
-    # GSI 이름 (template.yaml GlobalSecondaryIndexes.IndexName과 정확히 일치)
-    # ⚠️ V2 접미사 제거: template.yaml에는 V2 없음
+    # GSI names (must exactly match template.yaml GlobalSecondaryIndexes.IndexName)
+    # Note: V2 suffix removed -- template.yaml does not use V2
     # ═══════════════════════════════════════════════════════════════════════════
     # WorkflowsTableV3 GSI
     # Fixed: Use actual index name from DynamoDB table
@@ -432,28 +432,28 @@ class DynamoDBConfig:
     # TaskEventsTable GSI
     OWNER_ID_TIMESTAMP_INDEX = os.environ.get('OWNER_ID_TIMESTAMP_INDEX', 'OwnerIdTimestampIndex')
     
-    # 배치 크기
+    # Batch size
     BATCH_WRITE_SIZE = 25
     
-    # 쿼리 제한
+    # Query limits
     DEFAULT_QUERY_LIMIT = 100
     MAX_QUERY_LIMIT = 100
 
 
 def get_env_var(key: str, default: Any = None, required: bool = False) -> Any:
     """
-    환경 변수를 안전하게 가져오는 헬퍼 함수
-    
+    Safely retrieve an environment variable.
+
     Args:
-        key: 환경 변수 키
-        default: 기본값
-        required: 필수 여부
-    
+        key: Environment variable key
+        default: Default value
+        required: Whether the variable is required
+
     Returns:
-        환경 변수 값 또는 기본값
-    
+        Environment variable value or default
+
     Raises:
-        ValueError: required=True인데 환경 변수가 없을 때
+        ValueError: If required=True and the variable is not set
     """
     value = os.environ.get(key, default)
     
@@ -465,37 +465,37 @@ def get_env_var(key: str, default: Any = None, required: bool = False) -> Any:
 
 def get_table_name(table_key: str) -> str:
     """
-    테이블 이름을 환경 변수에서 가져오는 헬퍼 함수
-    
+    Retrieve a table name from environment variables.
+
     Args:
-        table_key: 환경 변수 키 (예: "WORKFLOWS_TABLE")
-    
+        table_key: Environment variable key (e.g., "WORKFLOWS_TABLE")
+
     Returns:
-        테이블 이름
-    
+        Table name
+
     Raises:
-        ValueError: 테이블 이름이 설정되지 않았을 때
+        ValueError: If the table name is not set
     """
     return get_env_var(table_key, required=True)
 
 
 def is_mock_mode() -> bool:
-    """MOCK_MODE 환경 변수 확인"""
+    """Check MOCK_MODE environment variable."""
     return get_env_var(EnvironmentVariables.MOCK_MODE, "false").lower() in {"true", "1", "yes", "on"}
 
 
 def get_stage_name() -> str:
-    """스테이지 이름 반환"""
+    """Return the stage name."""
     return get_env_var(EnvironmentVariables.STAGE_NAME, "dev")
 
 
 def get_log_level() -> str:
-    """로그 레벨 반환"""
+    """Return the log level."""
     return get_env_var(EnvironmentVariables.LOG_LEVEL, LoggingConfig.DEFAULT_LOG_LEVEL)
 
 
 def get_inline_threshold() -> int:
-    """S3 오프로드 임계값 반환"""
+    """Return the S3 offload threshold."""
     try:
         return int(get_env_var("STREAM_INLINE_THRESHOLD_BYTES", WorkflowConfig.DEFAULT_INLINE_THRESHOLD))
     except (ValueError, TypeError):
@@ -503,7 +503,7 @@ def get_inline_threshold() -> int:
 
 
 def get_messages_window() -> int:
-    """메시지 윈도우 크기 반환"""
+    """Return the message window size."""
     try:
         return int(get_env_var("MESSAGES_WINDOW", WorkflowConfig.DEFAULT_MESSAGES_WINDOW))
     except (ValueError, TypeError):

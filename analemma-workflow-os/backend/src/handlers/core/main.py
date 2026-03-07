@@ -47,12 +47,12 @@ except ImportError:
         if not isinstance(right, list): right = [right] if right else []
         return left + right
 
-# 커스텀 예외: Step Functions가 Error 필드로 쉽게 감지 가능 (비동기 처리용)
+# Custom exception: easily detectable by Step Functions Error field (for async processing)
 class AsyncLLMRequiredException(Exception):
     """Exception raised when async LLM processing is required"""
     pass
 
-# HITP (Human in the Loop) 엣지 타입들
+# HITP (Human in the Loop) edge types
 HITP_EDGE_TYPES = {"hitp", "human_in_the_loop", "pause"}
 
 # Configure basic logging
@@ -173,12 +173,12 @@ LAMBDA_TIMEOUT_BUFFER_MS = int(os.environ.get('LAMBDA_TIMEOUT_BUFFER_MS', '5000'
 # 2. State Schema Definition
 # -----------------------------------------------------------------------------
 
-# NOTE: WorkflowState TypedDict는 타입 힌트/문서화 목적으로만 유지됩니다.
-# 실제 LangGraph 1.0+ 실행 시에는 DynamicWorkflowBuilder에서 
-# Annotated[Dict[str, Any], merge_state_dict] 스키마를 사용하여
-# 동적 키를 완벽하게 지원합니다.
+# NOTE: WorkflowState TypedDict is retained for type hints/documentation only.
+# In actual LangGraph 1.0+ execution, DynamicWorkflowBuilder uses
+# Annotated[Dict[str, Any], merge_state_dict] schema to fully support
+# dynamic keys.
 #
-# 이 TypedDict는 IDE 자동완성 및 정적 분석에 활용됩니다.
+# This TypedDict is used for IDE autocompletion and static analysis.
 class WorkflowState(TypedDict, total=False):
     user_query: str
     user_api_keys: Dict[str, str]
@@ -202,18 +202,18 @@ class WorkflowState(TypedDict, total=False):
 
 # --- Pydantic Schemas for workflow config validation ---
 
-# 🛡️ [P2] 허용된 노드 타입 목록 - NODE_REGISTRY에 핸들러가 등록된 실행 가능한 타입들만 포함
-# ⚠️ 주의: branch, router, join, hitp, pause 등은 Edge로 처리되므로 노드 타입에서 제외
+# [P2] Allowed node types - only executable types with registered handlers in NODE_REGISTRY
+# Note: branch, router, join, hitp, pause are handled as Edges, excluded from node types
 ALLOWED_NODE_TYPES = {
-    # Core execution types (NODE_REGISTRY에 핸들러 등록됨)
+    # Core execution types (handlers registered in NODE_REGISTRY)
     "operator", "operator_custom", "operator_official",
     "llm_chat",
-    # Flow control (노드로 실행됨)
+    # Flow control (executed as nodes)
     "parallel_group", "aggregator", "for_each", "nested_for_each",
     "loop",  # Convergence support (v3.8)
     "route_condition",  # [v3.27] Explicit conditional routing (replaces edge.condition)
     "dynamic_router",  # [v3.27] LLM-based dynamic routing
-    # Subgraph (재귀적 워크플로우 실행)
+    # Subgraph (recursive workflow execution)
     "subgraph",
     # Infrastructure & Data
     "api_call", "db_query",
@@ -228,28 +228,28 @@ EDGE_HANDLED_TYPES = {
     "hitp", "pause",             # Handled via edge.type (HITP_EDGE_TYPES)
 }
 
-# 📌 UI 전용 마커 노드 - 실행되지 않음 (프론트엔드에서만 사용)
-# 이 타입들은 partition_service에서 무시되거나 passthrough됨
+# UI-only marker nodes - not executed (used only by frontend)
+# These types are ignored or passed through by partition_service
 UI_MARKER_TYPES = {
-    "input", "output", "start", "end", "trigger",  # trigger 추가 (API request는 start로 매핑)
+    "input", "output", "start", "end", "trigger",  # trigger added (API request maps to start)
 }
 
-# 🚀 Trigger 노드 타입 매핑
-# - API request trigger → start (현재 구현됨)
-# - Time trigger → TODO: 구현 예정 (cron 기반 스케줄링)
-# - External event trigger → TODO: 구현 예정 (EventBridge/SNS 연동)
+# Trigger node type mapping
+# - API request trigger -> start (currently implemented)
+# - Time trigger -> TODO: planned (cron-based scheduling)
+# - External event trigger -> TODO: planned (EventBridge/SNS integration)
 TRIGGER_TYPE_MAPPING = {
-    "request": "start",          # API request trigger → start node로 매핑
-    "api_request": "start",     # 별칭
-    # "time": "time_trigger",    # TODO: 구현 예정
-    # "schedule": "time_trigger", # TODO: 구현 예정  
-    # "event": "event_trigger",  # TODO: 구현 예정
-    # "webhook": "event_trigger", # TODO: 구현 예정
+    "request": "start",          # API request trigger -> maps to start node
+    "api_request": "start",     # alias
+    # "time": "time_trigger",    # TODO: planned
+    # "schedule": "time_trigger", # TODO: planned
+    # "event": "event_trigger",  # TODO: planned
+    # "webhook": "event_trigger", # TODO: planned
 }
 
-#  별칭(Alias) 매핑 - field_validator에서 정규 타입으로 변환됨
+# Alias mapping - converted to canonical types by field_validator
 NODE_TYPE_ALIASES = {
-    "code": "operator",      # 'code'는 'operator'의 별칭
+    "code": "operator",      # 'code' is an alias for 'operator'
     "aimodel": "llm_chat",   # [Fix] map to canonical 'llm_chat' (lowercase variant)
     "llm": "llm_chat",       # [Fix] legacy support
     "chat": "llm_chat",
@@ -276,13 +276,13 @@ class EdgeModel(BaseModel):
     target: constr(min_length=1, max_length=128)
     type: constr(min_length=1, max_length=64) = "edge"
     
-    # ❌ REMOVED: conditional_edge 필드 제거 (라우팅 주권 일원화)
-    # router_func: Optional[str] = None        # 제거: 라우터 함수명
-    # mapping: Optional[Dict[str, str]] = None  # 제거: 라우터 반환값 매핑
-    # condition: Optional[str] = None           # 제거: 조건 표현식
-    # 
-    # 이유: 엣지는 순수 연결 정보만 보유 (Passive Pipe)
-    #       모든 라우팅 결정은 노드(route_condition)가 수행
+    # REMOVED: conditional_edge fields removed (routing sovereignty unified to nodes)
+    # router_func: Optional[str] = None        # removed: router function name
+    # mapping: Optional[Dict[str, str]] = None  # removed: router return value mapping
+    # condition: Optional[str] = None           # removed: condition expression
+    #
+    # Reason: edges hold only pure connection info (Passive Pipe)
+    #         all routing decisions are made by nodes (route_condition)
     
     class Config:
         extra = "ignore"
@@ -296,8 +296,8 @@ class NodeModel(BaseModel):
     hitp: Optional[bool] = None
     config: Optional[Dict[str, Any]] = None
     next: Optional[str] = None
-    # [Fix] parallel_group support - branches와 resource_policy 필드 추가
-    # extra="ignore"로 인해 이 필드들이 누락되어 NoneType 에러 발생했음
+    # [Fix] parallel_group support - added branches and resource_policy fields
+    # These fields were missing due to extra="ignore", causing NoneType errors
     branches: Optional[List[Dict[str, Any]]] = None
     resource_policy: Optional[Dict[str, Any]] = None
     # [Fix] subgraph support
@@ -311,7 +311,7 @@ class NodeModel(BaseModel):
         🛡️ [P2] Validate and alias node types.
         - Aliases are converted to canonical types (e.g., 'code' -> 'operator')
         - Unknown types are rejected with clear error message
-        - trigger 노드는 trigger_type에 따라 start로 매핑됨 (API request만 현재 지원)
+        - trigger nodes map to start based on trigger_type (only API request currently supported)
         """
         if not isinstance(v, str):
             raise ValueError(f"Node type must be string, got {type(v).__name__}")
@@ -360,7 +360,7 @@ PII_REGEX_PATTERNS = [
 # 🛡️ State Pollution Safeguards - Kernel Protection Layer
 # -----------------------------------------------------------------------------
 RESERVED_STATE_KEYS = {
-    # System Context (Both Case Styles) - ownerId 제외 (Step Functions JSONPath 호환성)
+    # System Context (Both Case Styles) - ownerId excluded (Step Functions JSONPath compatibility)
     "workflowId", "workflow_id", "owner_id", 
     "execution_id", "user_id", "idempotency_key",
     
@@ -533,9 +533,9 @@ def execute_workflow_rollback(
     Rollback Order: REVERSE chronological (last executed first)
     Failure Policy: Stop at first failure, transition to CRITICAL_MANUAL_INTERVENTION
     
-    [v3.28.1 개선사항]:
-    - Rollback Progress Marker: __hidden_context에 진행 상황 기록
-    - 관리자 개입 시 "어디까지 원복되었고, 어디부터 수동 처리해야 하는지" 명확한 리포트 제공
+    [v3.28.1 Improvements]:
+    - Rollback Progress Marker: records progress in __hidden_context
+    - Provides a clear report for admin intervention: what was rolled back and what requires manual handling
     
     Args:
         state: Current workflow state
@@ -572,7 +572,7 @@ def execute_workflow_rollback(
         "successful_actions": 0,
         "failed_actions": 0,
         "current_action_node": None,
-        "action_results": [],  # 상세 결과 목록
+        "action_results": [],  # detailed result list
         "status": "IN_PROGRESS",
     }
     
@@ -658,17 +658,17 @@ def execute_workflow_rollback(
     # ────────────────────────────────────────────────────────────────────
     # [v3.28.1] S3 Consistency Guarantee: verify_commit_with_retry
     # ────────────────────────────────────────────────────────────────────
-    # 롤백 직후 커널이 상태를 읽으려는데, S3에 아직 반영되지 않은 구버전이 읽히는 것을 방지
-    # AsyncCommitService의 verify_commit_with_retry로 최신 무결성 상태 보장
+    # Prevent reading stale S3 state immediately after rollback
+    # Ensure latest integrity state via AsyncCommitService.verify_commit_with_retry
     if final_status in ["ROLLBACK_COMPLETE", "ROLLBACK_PARTIAL"]:
         try:
             from src.services.state.async_commit_service import AsyncCommitService
             
-            # S3 버킷 및 키 정보 (환경 변수 또는 state에서 추출)
+            # S3 bucket and key info (from environment variables or state)
             import os
             s3_bucket = os.environ.get("WORKFLOW_STATE_BUCKET", state.get("_s3_bucket"))
             
-            # Manifest ID 또는 현재 상태 키
+            # Manifest ID or current state key
             current_manifest_id = state.get("manifest_id", state.get("current_manifest_id"))
             
             if s3_bucket and current_manifest_id:
@@ -1042,7 +1042,7 @@ def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int 
         # Force data diet: Filter only safe data excluding system keys
         safe_output = {k: v for k, v in output.items() if k not in RESERVED_STATE_KEYS}
         
-        # [Telemetry] 위반 시도 기록 (선택적)
+        # [Telemetry] Record violation attempts (optional)
         # safe_output["__safeguard_violations"] = {
         #     "node_id": node_id,
         #     "blocked_keys": forbidden_attempts,
@@ -1060,32 +1060,32 @@ def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int 
 # -----------------------------------------------------------------------------
 class SafeStateOutput(BaseModel):
     """
-    🛡️ [Guard] Pydantic 모델 기반 스키마 검증 레이어
-    
-    노드 출력값의 타입 안전성을 보장하고, 예약 키 침범을 이중으로 차단합니다.
-    이 레이어는 _validate_output_keys의 "백업 가드"로 작동합니다.
-    
-    장점:
-    1. 타입 안전성: 잘못된 타입의 값이 state에 유입되는 것을 방지
-    2. 스키마 강제: 시스템 필수 필드의 구조 검증
-    3. 자동 변환: Pydantic의 coercion 기능으로 호환 가능한 타입 자동 변환
-    
-    아키텍처 개선 (2단계 방어):
-    - model_validator(mode='before'): extra 필드를 포함한 전체 입력 스캔
-    - 예약 키 발견 시 None 반환 대신 딕셔너리에서 제거 (상태 오염 방지)
+    [Guard] Pydantic model-based schema validation layer
+
+    Ensures type safety of node outputs and double-blocks reserved key intrusion.
+    This layer acts as a "backup guard" for _validate_output_keys.
+
+    Benefits:
+    1. Type safety: prevents values of incorrect types from entering state
+    2. Schema enforcement: validates structure of system-required fields
+    3. Auto-coercion: Pydantic coercion for compatible type conversion
+
+    Architecture (2-layer defense):
+    - model_validator(mode='before'): scans all input including extra fields
+    - On reserved key detection, removes keys from dict instead of returning None (prevents state pollution)
     """
     model_config = ConfigDict(
-        extra='allow',  # 사용자 정의 키는 허용
-        validate_assignment=True,  # 할당 시마다 검증
+        extra='allow',  # Allow user-defined keys
+        validate_assignment=True,  # Validate on every assignment
         arbitrary_types_allowed=True
     )
     
-    # 시스템 필수 필드 (읽기 전용, 노드가 설정 불가)
+    # System-required fields (read-only, nodes cannot set these)
     workflowId: Optional[str] = Field(None, frozen=True)
     ownerId: Optional[str] = Field(None, frozen=True)
     execution_id: Optional[str] = Field(None, frozen=True)
     
-    # Flow Control (노드가 절대 변경하면 안 되는 필드)
+    # Flow Control (fields nodes must never modify)
     loop_counter: Optional[int] = Field(None, frozen=True, ge=0)
     max_loop_iterations: Optional[int] = Field(None, frozen=True, ge=1)
     segment_id: Optional[int] = Field(None, frozen=True)
@@ -1138,34 +1138,34 @@ class SafeStateOutput(BaseModel):
 
 def validate_state_with_schema(output: Dict[str, Any], node_id: str) -> Dict[str, Any]:
     """
-    🛡️ [Guard] Pydantic 스키마를 사용한 추가 검증 레이어
-    
-    _validate_output_keys 이후 실행되어 타입 안전성과 스키마 정합성을 보장합니다.
-    
-    2단계 방어 시스템:
-    1. Layer 1 (_validate_output_keys): 예약 키 필터링 (기본 방어선)
-    2. Layer 2 (validate_state_with_schema): Pydantic 타입 검증 + extra 필드 스캔 (백업 방어선)
-    
+    [Guard] Additional validation layer using Pydantic schema
+
+    Runs after _validate_output_keys to ensure type safety and schema integrity.
+
+    2-layer defense system:
+    1. Layer 1 (_validate_output_keys): reserved key filtering (primary defense)
+    2. Layer 2 (validate_state_with_schema): Pydantic type validation + extra field scan (backup defense)
+
     Args:
-        output: 노드가 반환한 출력 딕셔너리 (Layer 1 통과 후)
-        node_id: 노드 식별자
-        
+        output: output dict returned by the node (after Layer 1)
+        node_id: node identifier
+
     Returns:
-        스키마 검증을 통과한 안전한 딕셔너리
+        Safe dictionary that passed schema validation
     """
     try:
-        # Pydantic 모델로 변환하여 검증
-        # model_validator에서 예약 키가 제거되고 타입 검증이 수행됨
+        # Convert to Pydantic model for validation
+        # model_validator removes reserved keys and performs type validation
         validated = SafeStateOutput(**output)
         
-        # 검증된 데이터만 추출 (exclude_none으로 None 필드는 제외)
+        # Extract only validated data (exclude_none to omit None fields)
         safe_dict = validated.model_dump(
-            exclude_none=True,  # None 값 제외 (상태 오염 방지)
-            exclude_unset=True,  # 설정되지 않은 필드 제외
-            mode='python'  # Python 네이티브 타입으로 변환
+            exclude_none=True,  # Exclude None values (prevent state pollution)
+            exclude_unset=True,  # Exclude unset fields
+            mode='python'  # Convert to Python native types
         )
         
-        # 원본 output에 있던 사용자 정의 키는 보존 (예약 키가 아닌 경우만)
+        # Preserve user-defined keys from original output (only non-reserved keys)
         for key, value in output.items():
             if key not in RESERVED_STATE_KEYS and key not in safe_dict:
                 safe_dict[key] = value
@@ -1176,7 +1176,7 @@ def validate_state_with_schema(output: Dict[str, Any], node_id: str) -> Dict[str
         logger.error(
             f"🚨 [Schema Validation Failed] Node '{node_id}' output failed Pydantic validation: {e}"
         )
-        # 검증 실패 시 원본 반환 (이미 _validate_output_keys를 통과했으므로)
+        # On validation failure, return original (already passed _validate_output_keys)
         return output
     except Exception as e:
         logger.error(
@@ -1212,56 +1212,56 @@ def humanize_llm_error(error: Exception, provider: str, node_id: str) -> str:
     error_msg = str(error).lower()
     error_type = type(error).__name__
 
-    # Rate Limit 에러
+    # Rate Limit error
     if any(keyword in error_msg for keyword in ["429", "quota", "rate limit", "resource exhausted", "throttling"]):
         return (
             f"🚦 AI service is currently busy. Please try again in a moment. "
             f"(Rate limit exceeded on {provider})"
         )
 
-    # Authentication/Authorization 에러
+    # Authentication/Authorization error
     elif any(keyword in error_msg for keyword in ["403", "forbidden", "unauthorized", "access denied", "permission"]):
         return (
             f"🔐 You don't have access to the AI service. Please contact your administrator. "
             f"(Authentication error on {provider})"
         )
 
-    # Timeout 에러
+    # Timeout error
     elif any(keyword in error_msg for keyword in ["timeout", "deadline", "read timeout"]):
         return (
             f"⏱️ AI service response is delayed. Please try again. "
             f"(Timeout on {provider})"
         )
 
-    # Content Safety 에러
+    # Content Safety error
     elif any(keyword in error_msg for keyword in ["blocked", "safety", "content", "inappropriate"]):
         return (
             f"🚫 Your request violates AI safety policies. Please modify your content. "
             f"(Content safety filter on {provider})"
         )
 
-    # Model Not Found 에러
+    # Model Not Found error
     elif any(keyword in error_msg for keyword in ["not found", "unavailable", "model", "resource not found"]):
         return (
             f"🤖 The requested AI model is not available. Please select a different model. "
             f"(Model unavailable on {provider})"
         )
 
-    # Network/Connection 에러
+    # Network/Connection error
     elif any(keyword in error_msg for keyword in ["connection", "network", "dns", "unreachable"]):
         return (
             f"🌐 There is a network connection issue. Please check your internet connection. "
             f"(Network error on {provider})"
         )
 
-    # Validation 에러
+    # Validation error
     elif any(keyword in error_msg for keyword in ["validation", "invalid", "malformed"]):
         return (
             f"📝 The input data format is incorrect. Please check your content. "
             f"(Validation error on {provider})"
         )
 
-    # 기타 에러
+    # Other errors
     else:
         return (
             f"⚠️ A temporary error occurred in the AI service. Please try again in a moment. "
@@ -1479,102 +1479,15 @@ def extract_text_from_bedrock_response(resp: Any) -> str:
         return str(resp)
 
 
-def clean_llm_json_response(text: str) -> str:
-    """
-    Clean LLM response to extract valid JSON.
-    
-    LLMs often wrap JSON in markdown code blocks or add explanatory text.
-    This function strips common artifacts:
-    - Markdown code fences: ```json ... ```
-    - Leading/trailing whitespace
-    - Text before first { or [
-    - Text after last } or ]
-    
-    Returns:
-        Cleaned JSON string ready for parsing
-    """
-    if not isinstance(text, str):
-        return str(text)
-    
-    # Remove markdown code fences
-    text = text.strip()
-    
-    # Pattern 1: ```json\n{...}\n```
-    if text.startswith("```json"):
-        text = text[7:]  # Remove ```json
-        if text.endswith("```"):
-            text = text[:-3]  # Remove closing ```
-    elif text.startswith("```"):
-        text = text[3:]  # Remove generic ```
-        if text.endswith("```"):
-            text = text[:-3]
-    
-    text = text.strip()
-    
-    # Pattern 2: Text before/after JSON object or array
-    # Find first { or [ and last } or ]
-    start_obj = text.find('{')
-    start_arr = text.find('[')
-    
-    # Determine actual start (whichever comes first, or -1 if neither found)
-    if start_obj == -1 and start_arr == -1:
-        return text  # No JSON structure found, return as-is
-    elif start_obj == -1:
-        start = start_arr
-    elif start_arr == -1:
-        start = start_obj
-    else:
-        start = min(start_obj, start_arr)
-    
-    # Find corresponding end
-    if text[start] == '{':
-        end = text.rfind('}')
-    else:
-        end = text.rfind(']')
-    
-    if end != -1 and end > start:
-        text = text[start:end+1]
-    
-    return text.strip()
-
-
-def parse_llm_json_response(text: str, fallback_value: Any = None) -> Any:
-    """
-    Attempt to parse LLM response as JSON with robust error handling.
-    
-    Args:
-        text: Raw LLM response text
-        fallback_value: Value to return if parsing fails (default: original text)
-    
-    Returns:
-        Parsed JSON object, or fallback_value if parsing fails
-    """
-    if not isinstance(text, str):
-        return fallback_value if fallback_value is not None else text
-    
-    try:
-        # First attempt: direct parsing
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    
-    try:
-        # Second attempt: clean markdown artifacts
-        cleaned = clean_llm_json_response(text)
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse LLM response as JSON: {e}. Returning raw text.")
-        return fallback_value if fallback_value is not None else text
-    except Exception as e:
-        logger.error(f"Unexpected error parsing LLM JSON: {e}")
-        return fallback_value if fallback_value is not None else text
+# [v3.35] LLM JSON parsing utilities extracted to common/json_utils.py
+from common.json_utils import clean_llm_json_response, parse_llm_json_response  # noqa: F401,E402
 
 def normalize_llm_usage(usage: Dict[str, Any], provider: str) -> Dict[str, Any]:
     """
     Normalize token usage statistics from different LLM providers.
     
-    Analemma 대시보드에서 일관된 비용 차트를 표시하기 위해 
-    Gemini와 Bedrock의 다른 필드명을 표준 인터페이스로 통합합니다.
+    Unifies different field names from Gemini and Bedrock into a standard interface
+    for consistent cost charts on the Analemma dashboard.
     
     Args:
         usage: Raw usage dictionary from provider
@@ -1583,13 +1496,13 @@ def normalize_llm_usage(usage: Dict[str, Any], provider: str) -> Dict[str, Any]:
     Returns:
         Normalized usage dict with standard keys for dashboard compatibility:
         {
-            "input_tokens": int,      # 입력 토큰 수
-            "output_tokens": int,     # 출력 토큰 수
-            "total_tokens": int,      # 총 토큰 수
-            "cached_tokens": int,     # Context Cache로 절감된 토큰 (Gemini only)
-            "estimated_cost_usd": float,  # 예상 비용 (USD)
-            "provider": str,          # 제공자 이름
-            "cost_saved_usd": float,  # 캐싱으로 절감된 비용 (Gemini only)
+            "input_tokens": int,      # input token count
+            "output_tokens": int,     # output token count
+            "total_tokens": int,      # total token count
+            "cached_tokens": int,     # tokens saved via Context Cache (Gemini only)
+            "estimated_cost_usd": float,  # estimated cost (USD)
+            "provider": str,          # provider name
+            "cost_saved_usd": float,  # cost saved via caching (Gemini only)
         }
     """
     normalized = {
@@ -1641,29 +1554,29 @@ def normalize_llm_usage(usage: Dict[str, Any], provider: str) -> Dict[str, Any]:
 
 def _auto_upload_image_to_s3(image_data: Union[str, bytes], state: Dict[str, Any], content_type: str = "image/png") -> Optional[str]:
     """
-    Base64 또는 bytes 이미지를 S3에 자동 업로드하고 URI를 반환합니다.
-    
+    Auto-upload Base64 or bytes image to S3 and return the URI.
+
     Args:
-        image_data: Base64 문자열 또는 bytes
-        state: 워크플로우 상태 (execution_id 등 추출용)
-        content_type: MIME 타입 (기본 image/png)
-    
+        image_data: Base64 string or bytes
+        state: workflow state (for extracting execution_id, etc.)
+        content_type: MIME type (default image/png)
+
     Returns:
-        S3 URI (s3://bucket/key) 또는 None (실패 시)
+        S3 URI (s3://bucket/key) or None (on failure)
     """
     import base64
     import uuid
     
     try:
-        # bytes 변환
+        # Convert to bytes
         if isinstance(image_data, str):
-            # Base64 문자열 - data URI prefix 제거
+            # Base64 string - remove data URI prefix
             if image_data.startswith('data:'):
-                # data:image/png;base64,xxxx 형식
+                # data:image/png;base64,xxxx format
                 parts = image_data.split(',', 1)
                 if len(parts) == 2:
                     header, image_data = parts
-                    # MIME 타입 추출
+                    # Extract MIME type
                     if 'image/jpeg' in header or 'image/jpg' in header:
                         content_type = 'image/jpeg'
                     elif 'image/png' in header:
@@ -1677,7 +1590,7 @@ def _auto_upload_image_to_s3(image_data: Union[str, bytes], state: Dict[str, Any
         else:
             image_bytes = image_data
         
-        # 확장자 결정
+        # Determine file extension
         ext_map = {
             'image/jpeg': '.jpg',
             'image/png': '.png',
@@ -1686,14 +1599,14 @@ def _auto_upload_image_to_s3(image_data: Union[str, bytes], state: Dict[str, Any
         }
         ext = ext_map.get(content_type, '.png')
         
-        # S3 키 생성
+        # Generate S3 key
         execution_id = state.get('execution_id') or state.get('llm_execution_id') or uuid.uuid4().hex[:8]
         s3_key = f"auto-uploaded/{execution_id}/image_{uuid.uuid4().hex[:8]}{ext}"
         
-        # S3 버킷 결정 (환경 변수 또는 기본값)
+        # Determine S3 bucket (from environment variable or default)
         s3_bucket = os.environ.get('WORKFLOW_STATE_BUCKET') or os.environ.get('S3_BUCKET') or 'analemma-workflows-dev'
         
-        # S3 업로드
+        # Upload to S3
         s3_client = boto3.client('s3', region_name=os.environ.get('AWS_REGION', 'ap-northeast-2'))
         s3_client.put_object(
             Bucket=s3_bucket,
@@ -1713,26 +1626,26 @@ def _auto_upload_image_to_s3(image_data: Union[str, bytes], state: Dict[str, Any
 
 def _preprocess_image_inputs(state: Dict[str, Any]) -> Dict[str, Any]:
     """
-    워크플로우 상태에서 이미지 데이터를 전처리합니다.
-    
-    지원 형식:
-    - image_data: Base64 문자열 또는 data URI
-    - image_bytes: bytes 객체
-    - image_base64: Base64 문자열
-    
-    이 데이터가 있으면 S3에 업로드하고 image_uri로 변환합니다.
-    
+    Preprocess image data from workflow state.
+
+    Supported formats:
+    - image_data: Base64 string or data URI
+    - image_bytes: bytes object
+    - image_base64: Base64 string
+
+    If present, uploads to S3 and converts to image_uri.
+
     Args:
-        state: 워크플로우 상태
-    
+        state: workflow state
+
     Returns:
-        업데이트된 상태 (image_uri 추가됨)
+        Updated state (with image_uri added)
     """
-    # 이미 image_uri가 있으면 처리 불필요
+    # No processing needed if image_uri already exists
     if state.get('image_uri') and state['image_uri'].startswith('s3://'):
         return state
     
-    # 이미지 데이터 소스 확인
+    # Check image data source
     image_data = state.get('image_data') or state.get('image_base64') or state.get('image_bytes')
     
     if not image_data:
@@ -1740,10 +1653,10 @@ def _preprocess_image_inputs(state: Dict[str, Any]) -> Dict[str, Any]:
     
     logger.info(f"🖼️ [Image Preprocess] Detected inline image data, auto-uploading to S3...")
     
-    # MIME 타입 추론
+    # Infer MIME type
     content_type = state.get('image_content_type') or state.get('image_mime_type') or 'image/png'
-    
-    # S3 업로드
+
+    # Upload to S3
     s3_uri = _auto_upload_image_to_s3(image_data, state, content_type)
     
     if s3_uri:
@@ -1764,11 +1677,11 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
     1. Legacy: Extract S3 URIs from prompt text
     2. Explicit: Use _explicit_media_inputs from state (image_inputs/video_inputs)
     
-    Gemini Vision API는 텍스트 + 이미지/비디오를 contents 리스트로 받아야 합니다.
-    이 함수는 프롬프트에서 S3 URI를 추출하거나 명시적 media inputs를 처리합니다.
+    Gemini Vision API requires text + image/video as a contents list.
+    This function extracts S3 URIs from the prompt or processes explicit media inputs.
     
     Args:
-        prompt: User prompt that may contain S3 URIs (e.g., "이 이미지 분석해줘 s3://bucket/image.jpg")
+        prompt: User prompt that may contain S3 URIs (e.g., "Analyze this image s3://bucket/image.jpg")
         state: Execution state with potential hydrated binary data or _explicit_media_inputs
     
     Returns:
@@ -1786,7 +1699,7 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
     if explicit_inputs:
         logger.info(f"🖼️ [Multimodal] Processing {len(explicit_inputs)} explicit media inputs")
         
-        # MIME type mapping (Gemini 지원 형식)
+        # MIME type mapping (Gemini supported formats)
         MIME_TYPE_MAP = {
             # Images
             ".jpg": "image/jpeg",
@@ -1806,9 +1719,9 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
             # Documents (Gemini 1.5+)
             ".pdf": "application/pdf",
         }
-        
+
         def get_mime_type(uri: str) -> str:
-            """확장자에서 MIME 타입 추출"""
+            """Extract MIME type from file extension"""
             uri_lower = uri.lower()
             for ext, mime in MIME_TYPE_MAP.items():
                 if uri_lower.endswith(ext):
@@ -1873,7 +1786,7 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
     if not s3_uris:
         return prompt, multimodal_parts
     
-    # MIME type mapping (Gemini 지원 형식)
+    # MIME type mapping (Gemini supported formats)
     MIME_TYPE_MAP = {
         # Images
         ".jpg": "image/jpeg",
@@ -1893,9 +1806,9 @@ def prepare_multimodal_content(prompt: str, state: Dict[str, Any]) -> Tuple[str,
         # Documents (Gemini 1.5+)
         ".pdf": "application/pdf",
     }
-    
+
     def get_mime_type(uri: str) -> str:
-        """확장자에서 MIME 타입 추출"""
+        """Extract MIME type from file extension"""
         uri_lower = uri.lower()
         for ext, mime in MIME_TYPE_MAP.items():
             if uri_lower.endswith(ext):
@@ -2080,7 +1993,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         raise Exception("Execution cancelled by user")
     
     # 1. Get Retry Config
-    # [Fix] None defense: actual_config['retry_config']가 None일 수 있음
+    # [Fix] None defense: actual_config['retry_config'] can be None
     retry_config = actual_config.get("retry_config") or {}
     max_retries = retry_config.get("max_retries", 0)  # Default 0 means single attempt
     base_delay = retry_config.get("base_delay", DEFAULT_RETRY_BASE_DELAY)
@@ -2118,27 +2031,27 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             # Render prompts with current attempt count
             prompt_template = actual_config.get("prompt_content") or actual_config.get("user_prompt_template") or actual_config.get("prompt_template") or actual_config.get("prompt", "")
             
-            # 🔧 [Workflow Chain Support] 프롬프트 템플릿이 없을 때 자동 생성
+            # [Workflow Chain Support] Auto-generate prompt template when missing
             if not prompt_template.strip():
-                # 워크플로우 중간 노드를 위한 기본 프롬프트 템플릿 생성
+                # Generate default prompt template for mid-workflow nodes
                 node_id = actual_config.get('id', 'llm')
                 logger.warning(f"🔧 [Auto-Prompt] No prompt template for node {node_id}, generating default...")
                 
-                # 1. messages가 있는 경우 (chat 형태)
+                # 1. If messages exist (chat format)
                 if 'messages' in current_attempt_state and isinstance(current_attempt_state['messages'], list):
                     prompt_template = "Continue the conversation based on the previous messages: {{messages | tojson}}"
                 
-                # 2. 이전 노드의 출력이 있는 경우
+                # 2. If previous node output exists
                 elif any(k.endswith('_output') or k == 'previous_output' or k.startswith('output_') for k in current_attempt_state.keys()):
                     output_keys = [k for k in current_attempt_state.keys() if k.endswith('_output') or k == 'previous_output' or k.startswith('output_')]
                     main_output_key = output_keys[0] if output_keys else 'previous_output'
                     prompt_template = f"Process and analyze the following input:\n\n{{{{ {main_output_key} }}}}"
                 
-                # 3. initial_state.user_prompt가 있는 경우 (첫 번째 노드)
+                # 3. If initial_state.user_prompt exists (first node)
                 elif 'initial_state' in current_attempt_state:
                     prompt_template = "Analyze and process the following content:\n\n{{ initial_state.user_prompt }}"
                 
-                # 4. 기본 fallback
+                # 4. Default fallback
                 else:
                     prompt_template = "Please provide a helpful response based on the available context: {{ __state_json }}"
                 
@@ -2179,7 +2092,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             
             # 2. Check Async Conditions
             # node_id already defined above check async
-            # [Fix] None defense: actual_config['llm_config']가 None일 수 있음
+            # [Fix] None defense: actual_config['llm_config'] can be None
             model = actual_config.get("model") or (actual_config.get("llm_config") or {}).get("model_id") or DEFAULT_LLM_MODEL
             max_tokens = actual_config.get("max_tokens") or (actual_config.get("llm_config") or {}).get("max_tokens", DEFAULT_MAX_TOKENS)
             temperature = actual_config.get("temperature") or (actual_config.get("llm_config") or {}).get("temperature", DEFAULT_TEMPERATURE)
@@ -2345,18 +2258,18 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         text = json.dumps(resp, default=str)
                     
                     # Normalize usage statistics
-                    # [Fix] None defense: resp['metadata']가 None일 수 있음
+                    # [Fix] None defense: resp['metadata'] can be None
                     raw_usage = (resp.get("metadata") or {}).get("token_usage", {})
                     usage = normalize_llm_usage(raw_usage, "gemini")
                     meta["provider"] = "gemini"
                     meta["multimodal"] = len(multimodal_parts) > 0
                     
                 except Exception as gemini_error:
-                    # 🛡️ [Enhanced Fallback Logging] Gemini 실패 시 상세한 폴백 로깅
+                    # [Enhanced Fallback Logging] Detailed fallback logging on Gemini failure
                     error_type = type(gemini_error).__name__
                     error_msg = str(gemini_error).lower()
                     
-                    # 에러 카테고리 분류
+                    # Classify error category
                     if any(keyword in error_msg for keyword in ["429", "quota", "rate limit", "resource exhausted"]):
                         error_category = "RATE_LIMIT"
                         log_level = logger.warning
@@ -2390,19 +2303,19 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         f"Error: {gemini_error}, Falling back to Bedrock"
                     )
                     
-                    # 재시도 가능한 에러인지 확인
+                    # Check if error is retryable
                     is_retryable = any(keyword in error_msg for keyword in [
                         "429", "quota", "rate limit", "resource exhausted",
                         "timeout", "deadline exceeded", "unavailable"
                     ])
                     
                     if is_retryable:
-                        # 재시도 가능한 에러 - 재시도 루프에 전달
+                        # Retryable error - propagate to retry loop
                         logger.info(f"Retryable Gemini error, propagating to retry loop: {gemini_error}")
                         raise gemini_error
                     else:
-                        # 비재시도 에러 - Bedrock 폴백 시도
-                        # [Critical] Vision/multimodal 요청은 Bedrock으로 폴백 불가
+                        # Non-retryable error - attempt Bedrock fallback
+                        # [Critical] Vision/multimodal requests cannot fall back to Bedrock
                         if multimodal_parts:
                             logger.error(
                                 f"🚫 [Vision Fallback Blocked] Node: {node_id}, "
@@ -2495,30 +2408,30 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             out_key = config.get("output_key") or config.get("writes_state_key") or f"{node_id}_output"
             logger.debug(f"[LLM Response] Output key resolved: {out_key} (from config: {config.get('output_key')})")
             
-            # [DEBUG] Provider Tracking - 폴백 없이 bedrock 표시 문제 디버깅
+            # [DEBUG] Provider Tracking - debugging bedrock display without fallback
             logger.info(f"🔍 [Provider Debug] Node: {node_id}, meta.provider: {meta.get('provider')}, usage.provider: {usage.get('provider')}")
             
             # ================================================================
             # 🛡️ [Quality Kernel] SlopDetector Integration (v2.5)
-            # LLM 응답에 대한 자동 슬롭 탐지 및 품질 검증
-            # 기본: 활성화 (QUALITY_KERNEL_AVAILABLE=True일 때)
-            # 비활성화: disable_kernel_quality_check=true 설정
+            # Automatic slop detection and quality verification for LLM responses
+            # Default: enabled (when QUALITY_KERNEL_AVAILABLE=True)
+            # Disable: set disable_kernel_quality_check=true
             # ================================================================
             kernel_quality_result = None
             
-            # 비활성화 조건 확인 (명시적으로 끄는 경우)
+            # Check disable conditions (explicitly turned off)
             disable_quality_check = (
                 actual_config.get("disable_kernel_quality_check", False) or
                 actual_config.get("quality_gate", {}).get("enabled") == False or
                 exec_state.get("disable_kernel_quality_check", False)
             )
             
-            # 기본 활성화 (Quality Kernel 사용 가능 + 비활성화 안됨)
+            # Enabled by default (Quality Kernel available + not disabled)
             enable_quality_check = QUALITY_KERNEL_AVAILABLE and not disable_quality_check
             
             if enable_quality_check and isinstance(text, str) and len(text) > 20:
                 try:
-                    # 도메인 추론 (quality_domain alias 지원)
+                    # Infer domain (quality_domain alias supported)
                     domain_hint = (
                         actual_config.get("quality_domain") or 
                         actual_config.get("content_domain") or 
@@ -2535,12 +2448,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     }
                     content_domain = domain_map.get(str(domain_hint).lower(), ContentDomain.GENERAL_TEXT)
                     
-                    # 인터셉터 생성 및 실행
+                    # Create and execute interceptor
                     interceptor = KernelMiddlewareInterceptor(
                         domain=content_domain,
                         slop_threshold=actual_config.get("slop_threshold", 0.5),
-                        enable_distillation=False,  # 현재는 탐지만
-                        enable_stage2=False  # Stage 2 LLM 검증은 비활성화
+                        enable_distillation=False,  # Detection only for now
+                        enable_stage2=False  # Stage 2 LLM verification disabled
                     )
                     
                     workflow_id = exec_state.get("workflow_id") or exec_state.get("execution_id", "unknown")
@@ -2573,7 +2486,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                         f"Combined: {intercept_result.combined_score:.3f}"
                     )
                     
-                    # REJECT 액션인 경우 경고 로깅 (현재는 차단하지 않음)
+                    # Log warning on REJECT action (not blocking for now)
                     if intercept_result.action == InterceptorAction.REJECT:
                         logger.warning(
                             f"⚠️ [Quality Kernel REJECT] Node: {node_id}, "
@@ -2585,7 +2498,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     kernel_quality_result = {"error": str(qk_error)}
             
             # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
-            # 사용자 코드가 생성한 output_value만 검증 - 커널 메타데이터는 검증 후 추가
+            # Validate only user-generated output_value - kernel metadata added after validation
             user_output = {out_key: output_value}
             
             # ═══════════════════════════════════════════════════════════════════════
@@ -2598,12 +2511,12 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                     user_output[f"{node_id}_thinking"] = thinking_data
                     logger.info(f"🧠 [Thinking Mode] Added {len(thinking_data)} thinking steps to state key: {node_id}_thinking")
             
-            # Quality Kernel 결과 추가 (사용자 출력에 포함 - 검증 대상)
+            # Add Quality Kernel result (included in user output - subject to validation)
             if kernel_quality_result:
                 user_output["_kernel_quality_check"] = kernel_quality_result
                 user_output["_kernel_action"] = kernel_quality_result.get("action", "PASS")
             
-            # 사용자 출력만 검증 (커널 메타데이터 제외)
+            # Validate user output only (excluding kernel metadata)
             validated_output = _validate_output_keys(user_output, node_id)
             
             # 🛡️ [Kernel] Accumulate LLM execution evidence — guaranteed by kernel, never lost
@@ -2622,7 +2535,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 "last_llm_result": output_value if not isinstance(output_value, (dict, list)) else "[Structured Data]",
             }
 
-            # 🛡️ [Kernel Metadata] 검증 후 커널 메타데이터 추가 (Reserved Keys이지만 커널이 관리)
+            # [Kernel Metadata] Add kernel metadata after validation (Reserved Keys but kernel-managed)
             validated_output[f"{node_id}_meta"] = meta
             validated_output["step_history"] = new_history
             validated_output["usage"] = usage
@@ -2656,7 +2569,7 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 attempt += 1
                 continue
             else:
-                # 🛡️ [Enhanced Final Error Handling] 모든 재시도 실패 시 사용자 친화적 에러
+                # [Enhanced Final Error Handling] User-friendly error after all retries exhausted
                 human_readable_error = humanize_llm_error(last_error, meta.get("provider", "unknown"), node_id)
                 
                 logger.error(
@@ -2724,12 +2637,12 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
     # [FLATTEN_ALL] Merge policy: expand branch sub-dicts into top-level state keys
     merge_policy = inner_config.get("merge_policy", "DEFAULT")
     
-    # [Token Aggregation] 여러 소스의 토큰 사용량 합산
+    # [Token Aggregation] Aggregate token usage from multiple sources
     total_input_tokens = 0
     total_output_tokens = 0
     aggregation_sources = []
     
-    # 1. 병렬 그룹 결과 합산
+    # 1. Aggregate parallel group results
     # [FIX] Support flattened structure from parallel_group_runner (payload size optimization)
     # Strategy 1: Use pre-computed branch_token_details if available
     if 'branch_token_details' in state:
@@ -2773,7 +2686,7 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
         else:
             logger.warning(f"Aggregator {node_id}: No parallel branch results found in state")
     
-    # 2. ForEach/Map 결과 합산
+    # 2. Aggregate ForEach/Map results
     foreach_result = state.get('for_each_result') or state.get('map_result')
     if foreach_result and isinstance(foreach_result, list):
         for i, item_result in enumerate(foreach_result):
@@ -2793,7 +2706,7 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
                     'total_tokens': input_tokens + output_tokens
                 })
     
-    # 3. 중첩 ForEach 결과 합산
+    # 3. Aggregate nested ForEach results
     nested_result = state.get('nested_for_each_result')
     if nested_result and isinstance(nested_result, list):
         usage = aggregate_tokens_from_nested(nested_result)
@@ -2818,12 +2731,12 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
                             'total_tokens': inner_usage['total_tokens']
                         })
     
-    # 4. 직접적인 토큰 사용량 필드 합산 제거 (token_utils.accumulate_tokens_in_state로 대체)
-    # accumulate_tokens_in_state가 이전 상태의 토큰을 자동으로 누적하므로 수동 합산 불필요
+    # 4. Removed direct token usage field aggregation (replaced by token_utils.accumulate_tokens_in_state)
+    # accumulate_tokens_in_state auto-accumulates tokens from previous state, no manual aggregation needed
     
     total_tokens = total_input_tokens + total_output_tokens
     
-    # 결과 업데이트
+    # Update result
     result = {
         'total_input_tokens': total_input_tokens,
         'total_output_tokens': total_output_tokens,
@@ -2832,16 +2745,16 @@ def aggregator_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
         'aggregated_at': node_id
     }
     
-    # [Accumulation] 이전 상태의 토큰 값과 누적
+    # [Accumulation] Accumulate with previous state token values
     result = accumulate_tokens_in_state(result, state)
-    
-    # 비용 계산 추가
+
+    # Add cost calculation
     estimated_cost = calculate_cost_usd({
         'input_tokens': result['total_input_tokens'],
         'output_tokens': result['total_output_tokens']
     })
     result['estimated_cost_usd'] = estimated_cost
-    
+
     logger.info(f"Aggregator {node_id}: Aggregated {len(aggregation_sources)} sources, "
                 f"total tokens: {result['total_tokens']} "
                 f"({result['total_input_tokens']} input + {result['total_output_tokens']} output), "
@@ -3311,12 +3224,12 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
     validated_output = _validate_output_keys(user_output, node_id)
     
-    # 🛡️ [Kernel Metadata] 검증 후 커널이 관리하는 메타데이터 추가
+    # [Kernel Metadata] Add kernel-managed metadata after validation
     # Append to skill execution log (uses Annotated accumulator)
     current_log = exec_state.get("skill_execution_log", [])
     validated_output["skill_execution_log"] = current_log + [log_entry]
-    
-    # Update step history (커널 관리 필드)
+
+    # Update step history (kernel-managed field)
     current_history = exec_state.get("step_history", [])
     validated_output["step_history"] = current_history + [f"{node_id}:skill_executor:{skill_ref}.{tool_call}"]
     
@@ -3446,10 +3359,10 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     else:
         input_list = input_val if isinstance(input_val, list) else []
 
-    # 2. Resolve Multi-node Sub-workflow (우선순위: subgraph_ref > subgraph_inline > sub_workflow)
+    # 2. Resolve Multi-node Sub-workflow (priority: subgraph_ref > subgraph_inline > sub_workflow)
     sub_nodes = []
     
-    # [LAZY_LOADING] subgraph_ref가 있으면 S3에서 서브그래프 로딩
+    # [LAZY_LOADING] Load subgraph from S3 if subgraph_ref exists
     if inner_config.get("subgraph_ref"):
         try:
             from src.services.state.subgraph_store import create_subgraph_store
@@ -3464,7 +3377,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             logger.error(f"[FOR_EACH_LAZY] Failed to load subgraph: {e}")
             return {}
     
-    # [INLINE] subgraph_inline 또는 sub_workflow (하위 호환)
+    # [INLINE] subgraph_inline or sub_workflow (backward compatible)
     elif inner_config.get("subgraph_inline"):
         sw_def = inner_config["subgraph_inline"]
         sub_nodes = sw_def.get("nodes", [])
@@ -3484,30 +3397,30 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         logger.warning(f"for_each truncated {len(input_list)} -> {max_iterations}")
         input_list = input_list[:max_iterations]
 
-    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
-    # deepcopy 50MB → Proxy 11MB
+    # [v3.20] StateViewContext: Proxy Pattern (78% memory reduction)
+    # deepcopy 50MB -> Proxy 11MB
     try:
         from src.common.state_view_context import create_state_view_context
         ring_level = state.get('ring_level', 3)
         state_view_context = create_state_view_context(state)
-        
-        # Ring별 Proxy View 생성 (Lazy Projection)
+
+        # Create per-Ring Proxy View (Lazy Projection)
         state_view = state_view_context.create_view(
             ring_level=ring_level
         )
-        
-        # 메모리 절감 효과 로깅
+
+        # Log memory reduction effect
         import json
         original_size_kb = len(json.dumps(state, default=str)) // 1024
         proxy_size_kb = len(json.dumps(dict(state_view), default=str)) // 1024
         reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
-        
+
         logger.info(
             f"[FOR_EACH] StateViewContext Ring {ring_level}: "
-            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction)"
+            f"{original_size_kb}KB -> {proxy_size_kb}KB ({reduction_pct}% reduction)"
         )
     except Exception:
-        # Fallback: deepcopy (하위 호환)
+        # Fallback: deepcopy (backward compatible)
         import copy
         state_view = copy.deepcopy(state)
         state_view_context = None
@@ -3559,7 +3472,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     iteration_token_details = []
     
     for i, result in enumerate(results):
-        # 각 iteration 결과에서 토큰 사용량 추출 (usage 또는 token_usage 키 지원)
+        # Extract token usage from each iteration result (supports usage or token_usage keys)
         if isinstance(result, dict):
             usage = extract_token_usage(result)
             input_tokens = usage['input_tokens']
@@ -3575,7 +3488,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 'total_tokens': input_tokens + output_tokens
             })
     
-    # 합산된 토큰 정보를 결과에 추가
+    # Add aggregated token info to result
     result_updates = {output_key: results}
     
     # 🛡️ [v3.9] Stage 6 Forced Offloading (Payload Protection)
@@ -3618,7 +3531,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # Auto-metadata: kernel records actual iteration count (accessible by downstream verifiers/nodes)
     result_updates[f'{node_id}_iteration_count'] = len(results)
     
-    # [Accumulation] 이전 상태의 토큰 값과 누적
+    # [Accumulation] Accumulate with previous state token values
     temp_result = {
         'total_input_tokens': result_updates['total_input_tokens'],
         'total_output_tokens': result_updates['total_output_tokens'],
@@ -3632,7 +3545,7 @@ def for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     from src.common.statebag import ensure_state_bag
     final_updates = ensure_state_bag(result_updates)
     
-    # 비용 계산 추가
+    # Add cost calculation
     estimated_cost = calculate_cost_usd({
         'input_tokens': result_updates['total_input_tokens'],
         'output_tokens': result_updates['total_output_tokens']
@@ -3654,9 +3567,9 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # [Fix] Support both config structures with fallback pattern
     inner_config = config.get("config") or config
     
-    # 1. Configuration (우선순위: subgraph_ref > subgraph_inline > nodes)
+    # 1. Configuration (priority: subgraph_ref > subgraph_inline > nodes)
     
-    # [LAZY_LOADING] subgraph_ref가 있으면 S3에서 서브그래프 로딩
+    # [LAZY_LOADING] Load subgraph from S3 if subgraph_ref exists
     if inner_config.get("subgraph_ref"):
         try:
             from src.services.state.subgraph_store import create_subgraph_store
@@ -3671,11 +3584,11 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
             logger.error(f"[LOOP_LAZY] Failed to load subgraph: {e}")
             sub_nodes = []
     elif inner_config.get("subgraph_inline"):
-        # [INLINE] subgraph_inline (중간 크기)
+        # [INLINE] subgraph_inline (medium size)
         sw_def = inner_config["subgraph_inline"]
         sub_nodes = sw_def.get("nodes", [])
     else:
-        # [LEGACY] nodes (기본)
+        # [LEGACY] nodes (default)
         sub_nodes = inner_config.get("nodes", [])
     
     condition = inner_config.get("condition", "false")
@@ -3691,31 +3604,31 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # [Cancellation]
     execution_arn = state.get("execution_arn") or state.get("ExecutionArn")
     
-    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
+    # [v3.20] StateViewContext: Proxy Pattern (78% memory reduction)
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
     try:
         from src.common.state_view_context import create_state_view_context
         ring_level = state.get('ring_level', 3)
         state_view_context = create_state_view_context(state)
-        
-        # Ring별 Proxy View 생성
+
+        # Create per-Ring Proxy View
         current_state = state_view_context.create_view(
             ring_level=ring_level
         )
-        
-        # 메모리 절감 효과 로깅
+
+        # Log memory reduction effect
         import json
         original_size_kb = len(json.dumps(state, default=str)) // 1024
         proxy_size_kb = len(json.dumps(dict(current_state), default=str)) // 1024
         reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
-        
+
         logger.info(
             f"[LOOP] StateViewContext Ring {ring_level}: "
-            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
+            f"{original_size_kb}KB -> {proxy_size_kb}KB ({reduction_pct}% reduction), "
             f"max_iterations={max_iterations}"
         )
     except Exception:
-        # Fallback: deepcopy (하위 호환)
+        # Fallback: deepcopy (backward compatible)
         import copy
         current_state = copy.deepcopy(state)
         state_view_context = None
@@ -3777,7 +3690,7 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
             # 2. Score-based convergence (Stage 6)
             if convergence_key:
                 score = _get_nested_value(current_state, convergence_key)
-                # [Fix] 수렴 점수가 None이거나 숫자가 아닌 경우에 대한 방어 로직 강화
+                # [Fix] Strengthen defense for None or non-numeric convergence scores
                 if isinstance(score, (int, float)) and score >= target_score:
                     logger.info(f"✅ [Loop] Convergence reached (score: {score} >= {target_score})")
                     all_loop_updates["loop_exit_reason"] = "convergence_reached"
@@ -3801,20 +3714,20 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
     # 🛡️ Result integrity
     final_updates = ensure_state_bag(all_loop_updates)
     
-    # 비용 계산
+    # Cost calculation
     estimated_cost = calculate_cost_usd({
         'input_tokens': total_input_tokens,
         'output_tokens': total_output_tokens
     })
     final_updates['estimated_cost_usd'] = estimated_cost
     
-    # 🛡️ [Kernel Metadata] step_history를 분리하여 검증 후 추가
+    # [Kernel Metadata] Separate step_history for post-validation addition
     preserved_step_history = final_updates.pop("step_history", None)
     
     # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
     validated_output = _validate_output_keys(final_updates, node_id)
     
-    # 🛡️ [Kernel Metadata] 검증 후 step_history 복원 (커널 관리 필드)
+    # [Kernel Metadata] Restore step_history after validation (kernel-managed field)
     if preserved_step_history is not None:
         validated_output["step_history"] = preserved_step_history
     
@@ -3824,19 +3737,19 @@ def loop_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]
 
 def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Nested Map-in-Map 처리를 위한 재귀적 ForEach Runner.
-    
-    V3 하이퍼-스트레스 시나리오 지원:
-    - 10개 국가 × 5개 산업군 = 50개 병렬 태스크
-    - 중첩된 Map 구조 자동 처리
-    
-    Config 예시:
+    Recursive ForEach Runner for nested Map-in-Map processing.
+
+    V3 hyper-stress scenario support:
+    - 10 countries x 5 industries = 50 parallel tasks
+    - Automatic nested Map structure handling
+
+    Config example:
     {
         "type": "nested_for_each",
-        "input_list_key": "countries",          # 외부 리스트
+        "input_list_key": "countries",          # outer list
         "nested_config": {
-            "input_list_key": "industries",     # 내부 리스트 (item 내 속성)
-            "sub_node_config": {...}            # 최종 처리 노드
+            "input_list_key": "industries",     # inner list (property within item)
+            "sub_node_config": {...}            # final processing node
         },
         "output_key": "analysis_results",
         "max_outer_iterations": 10,
@@ -3847,7 +3760,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     # [Fix] Support both flattened and nested config structures
     inner_config = config.get("config") or config
     input_list_key = inner_config.get("input_list_key", "")
-    # [Fix] None defense: nested_config, metadata가 None일 수 있음
+    # [Fix] None defense: nested_config, metadata can be None
     nested_config = inner_config.get("nested_config") or {}
     output_key = inner_config.get("output_key", "nested_results")
     max_outer = inner_config.get("max_outer_iterations", 10)
@@ -3860,7 +3773,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     import copy
     state_snapshot = copy.deepcopy(state)
     
-    # 외부 리스트 가져오기 - with S3 hydration support
+    # Get outer list - with S3 hydration support
     if "." in input_list_key:
         input_list_key = input_list_key.split(".")[-1]
     
@@ -3884,14 +3797,14 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
         logger.warning(f"Nested ForEach: {input_list_key} is not a list")
         return {output_key: []}
     
-    # 외부 제한 적용
+    # Apply outer limit
     if len(outer_list) > max_outer:
         logger.warning(f"Nested ForEach: truncating outer {len(outer_list)} -> {max_outer}")
         outer_list = outer_list[:max_outer]
     
-    # 내부 설정 추출
+    # Extract inner config
     inner_list_key = nested_config.get("input_list_key", "")
-    # [Fix] None defense: nested_config['sub_node_config']가 None일 수 있음
+    # [Fix] None defense: nested_config['sub_node_config'] can be None
     sub_node_config = nested_config.get("sub_node_config") or {}
     
     if not sub_node_config:
@@ -3908,12 +3821,12 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
             raise ValueError(f"Unknown nested sub-node: {sub_node_type}")
     
     def process_outer_item(outer_idx: int, outer_item: Any) -> Dict[str, Any]:
-        """외부 아이템 처리 (내부 리스트 포함)"""
+        """Process outer item (including inner list)"""
         outer_item_id = outer_item.get("id", f"outer_{outer_idx}") if isinstance(outer_item, dict) else f"outer_{outer_idx}"
         
-        # 내부 리스트 추출
+        # Extract inner list
         if isinstance(outer_item, dict) and inner_list_key:
-            # inner_list_key에서 $. 제거
+            # Remove $. prefix from inner_list_key
             clean_inner_key = inner_list_key.replace("$.", "").replace("$.item.", "")
             inner_list = outer_item.get(clean_inner_key, [])
         else:
@@ -3922,7 +3835,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
         if not isinstance(inner_list, list):
             inner_list = [inner_list] if inner_list else []
         
-        # 내부 제한 적용
+        # Apply inner limit
         if len(inner_list) > max_inner:
             logger.debug(f"Nested ForEach [{outer_item_id}]: truncating inner {len(inner_list)} -> {max_inner}")
             inner_list = inner_list[:max_inner]
@@ -3930,14 +3843,14 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
         inner_results = []
         
         def process_inner_item(inner_item: Any) -> Dict[str, Any]:
-            """내부 아이템 처리"""
+            """Process inner item"""
             # [Critical Fix] Use dict merge for true isolation instead of ChainMap
             # ChainMap with shared state causes race conditions
             item_state = {
                 **state_snapshot,
                 "outer_item": outer_item,
                 "inner_item": inner_item,
-                "item": inner_item,  # 기존 호환성 유지
+                "item": inner_item,  # backward compatibility
                 "parent": outer_item
             }
             
@@ -3954,11 +3867,11 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
                 except Exception as e:
                     logger.warning(f"[Nested ForEach] Failed to hydrate inner_item: {e}")
             
-            # 메시지 복사 (레이스 컨디션 방지)
+            # Copy messages (prevent race condition)
             if "messages" in item_state and isinstance(item_state["messages"], list):
                 item_state["messages"] = item_state["messages"].copy()
             
-            # 서브노드 설정 렌더링
+            # Render sub-node config
             c = sub_node_config.copy()
             c["id"] = f"{node_id}_{outer_item_id}_sub"
             rendered_sub = _render_template(c, item_state)
@@ -3973,10 +3886,10 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
                 logger.error(f"Nested ForEach inner error [{outer_item_id}]: {e}")
                 return {"error": str(e), "outer": outer_item_id}
         
-        # 내부 리스트 병렬 처리
+        # Process inner list in parallel
         if inner_list:
             cpu_count = os.cpu_count() or 2
-            inner_workers = min(len(inner_list), max(1, cpu_count // 4))  # 보수적: 1/4 코어
+            inner_workers = min(len(inner_list), max(1, cpu_count // 4))  # conservative: 1/4 cores
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=inner_workers) as inner_executor:
                 inner_results = list(inner_executor.map(process_inner_item, inner_list))
@@ -3988,7 +3901,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
             "inner_results": inner_results
         }
     
-    # 외부 리스트 병렬 처리
+    # Process outer list in parallel
     all_results = []
     if outer_list:
         cpu_count = os.cpu_count() or 2
@@ -4007,17 +3920,17 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
                     logger.error(f"Nested ForEach outer error: {e}")
                     all_results.append({"error": str(e)})
     
-    # 결과 집계
+    # Aggregate results
     total_inner_processed = sum(r.get("inner_count", 0) for r in all_results)
     logger.info(f"✅ Nested ForEach complete: {len(all_results)} outer × {total_inner_processed} inner tasks")
     
-    # [Token Aggregation] 중첩 for_each의 토큰 사용량 합산 (재귀적 처리)
+    # [Token Aggregation] Aggregate token usage from nested for_each (recursive)
     usage = aggregate_tokens_from_nested(all_results)
     total_input_tokens = usage['input_tokens']
     total_output_tokens = usage['output_tokens']
     total_tokens = usage['total_tokens']
     
-    # 상세 토큰 정보 수집 (디버깅용, 합산과 별도)
+    # Collect detailed token info (for debugging, separate from aggregation)
     nested_token_details = []
     for outer_result in all_results:
         if isinstance(outer_result, dict):
@@ -4035,7 +3948,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
                         'total_tokens': inner_usage['total_tokens']
                     })
     
-    # 합산된 토큰 정보를 결과에 추가
+    # Add aggregated token info to result
     result_updates = {
         output_key: all_results,
         f"{output_key}_summary": {
@@ -4049,7 +3962,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     result_updates['total_tokens'] = total_tokens
     result_updates['nested_token_details'] = nested_token_details
     
-    # [Accumulation] 이전 상태의 토큰 값과 누적
+    # [Accumulation] Accumulate with previous state token values
     temp_result = {
         'total_input_tokens': result_updates['total_input_tokens'],
         'total_output_tokens': result_updates['total_output_tokens'],
@@ -4058,7 +3971,7 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
     accumulated_result = accumulate_tokens_in_state(temp_result, state)
     result_updates.update(accumulated_result)
     
-    # 비용 계산 추가
+    # Add cost calculation
     estimated_cost = calculate_cost_usd({
         'input_tokens': result_updates['total_input_tokens'],
         'output_tokens': result_updates['total_output_tokens']
@@ -4078,13 +3991,13 @@ def nested_for_each_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dic
 
 def route_condition(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    🔀 명시적 조건부 라우팅 노드 (Explicit Conditional Routing)
-    
-    [v3.27 New] Edge에서 Node로 라우팅 주권 일원화
+    Explicit Conditional Routing Node
+
+    [v3.27 New] Routing sovereignty unified from Edge to Node
     [v3.28 Enhanced] Whitelist validation, alias/tag support
-    
-    EdgeModel에서 condition, router_func, mapping 필드가 제거되면서,
-    모든 조건부 라우팅은 이 노드를 통해 명시적으로 수행됩니다.
+
+    With condition, router_func, mapping fields removed from EdgeModel,
+    all conditional routing is performed explicitly through this node.
     
     Config Structure:
     {
@@ -4221,15 +4134,15 @@ def route_condition(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
 
 def dynamic_router(state: Dict[str, Any], config: Dict[str, Any]) -> str:
     """
-    범용 동적 라우터 - LLM이 평가한 결과를 기반으로 분기 결정
-    
+    General-purpose dynamic router - branching decisions based on LLM evaluation results
+
     [v3.28 Enhanced] Whitelist validation, alias/tag support
-    
-    While 루프의 자연어 조건 평가와 동일한 패턴을 사용:
-    1. Frontend에서 자연어 조건들을 입력
-    2. 숨겨진 LLM 평가 노드가 자동으로 추가됨
-    3. LLM이 조건들을 평가하고 선택할 브랜치를 반환
-    4. 이 router가 LLM 결과를 읽어서 매칭되는 브랜치로 라우팅
+
+    Uses the same pattern as while-loop natural language condition evaluation:
+    1. Frontend inputs natural language conditions
+    2. Hidden LLM evaluation node is auto-added
+    3. LLM evaluates conditions and returns selected branch
+    4. This router reads LLM result and routes to matching branch
     
     Expected state structure (automatically injected by frontend):
     {
@@ -4303,31 +4216,31 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     if not branches:
         return {}
 
-    # [v3.20] StateViewContext: Proxy Pattern (메모리 78% 절감)
+    # [v3.20] StateViewContext: Proxy Pattern (78% memory reduction)
     # Note: Top-level state S3 hydration is already handled by segment_runner_service.execute_segment()
     try:
         from src.common.state_view_context import create_state_view_context
         ring_level = state.get('ring_level', 3)
         state_view_context = create_state_view_context(state)
-        
-        # Ring별 Proxy View 생성
+
+        # Create per-Ring Proxy View
         state_snapshot = state_view_context.create_view(
             ring_level=ring_level
         )
-        
-        # 메모리 절감 효과 로깅
+
+        # Log memory reduction effect
         import json
         original_size_kb = len(json.dumps(state, default=str)) // 1024
         proxy_size_kb = len(json.dumps(dict(state_snapshot), default=str)) // 1024
         reduction_pct = int((1 - proxy_size_kb / max(original_size_kb, 1)) * 100) if original_size_kb > 0 else 0
-        
+
         logger.info(
             f"[PARALLEL] StateViewContext Ring {ring_level}: "
-            f"{original_size_kb}KB → {proxy_size_kb}KB ({reduction_pct}% reduction), "
+            f"{original_size_kb}KB -> {proxy_size_kb}KB ({reduction_pct}% reduction), "
             f"{len(branches)} branches"
         )
     except Exception:
-        # Fallback: deepcopy (하위 호환)
+        # Fallback: deepcopy (backward compatible)
         import copy
         state_snapshot = copy.deepcopy(state)
         state_view_context = None
@@ -4335,7 +4248,7 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     def run_branch(branch):
         branch_id = branch.get("branch_id", "sub")
         
-        # [LAZY_LOADING] 서브그래프 참조 우선 처리
+        # [LAZY_LOADING] Process subgraph reference first
         branch_nodes = None
         if branch.get("subgraph_ref"):
             try:
@@ -4351,10 +4264,10 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
                 logger.error(f"[PARALLEL_LAZY] Branch {branch_id} subgraph load failed: {e}")
                 branch_nodes = []
         elif branch.get("nodes"):
-            # [INLINE] nodes (기본)
+            # [INLINE] nodes (default)
             branch_nodes = branch.get("nodes")
         elif "sub_workflow" in branch:
-            # [LEGACY] sub_workflow (하위 호환)
+            # [LEGACY] sub_workflow (backward compatible)
             branch_def = branch["sub_workflow"]
             if isinstance(branch_def, dict):
                 branch_nodes = branch_def.get("nodes", [])
@@ -4397,13 +4310,13 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     for branch_id in branch_results.keys():
         combined_updates[f"{branch_id}_executed"] = True
     
-    # [Token Aggregation] 병렬 브랜치들의 토큰 사용량 합산
+    # [Token Aggregation] Aggregate token usage from parallel branches
     total_input_tokens = 0
     total_output_tokens = 0
     branch_token_details = []
     
     for branch_id, updates in branch_results.items():
-        # 각 브랜치의 토큰 사용량 추출 (usage 또는 token_usage 키 지원)
+        # Extract token usage from each branch (supports usage or token_usage keys)
         usage = extract_token_usage(updates)
         input_tokens = usage['input_tokens']
         output_tokens = usage['output_tokens']
@@ -4418,13 +4331,13 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
             'total_tokens': input_tokens + output_tokens
         })
     
-    # 합산된 토큰 정보를 state에 기록
+    # Record aggregated token info in state
     combined_updates['total_input_tokens'] = total_input_tokens
     combined_updates['total_output_tokens'] = total_output_tokens
     combined_updates['total_tokens'] = total_input_tokens + total_output_tokens
     combined_updates['branch_token_details'] = branch_token_details
     
-    # [Accumulation] 이전 상태의 토큰 값과 누적
+    # [Accumulation] Accumulate with previous state token values
     temp_result = {
         'total_input_tokens': combined_updates['total_input_tokens'],
         'total_output_tokens': combined_updates['total_output_tokens'],
@@ -4433,7 +4346,7 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     accumulated_result = accumulate_tokens_in_state(temp_result, state)
     combined_updates.update(accumulated_result)
     
-    # 비용 계산 추가
+    # Add cost calculation
     estimated_cost = calculate_cost_usd({
         'input_tokens': combined_updates['total_input_tokens'],
         'output_tokens': combined_updates['total_output_tokens']
@@ -4462,28 +4375,28 @@ def parallel_group_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
 
 def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Gemini Vision을 활용한 이미지/비디오 분석 Runner.
-    
-    워크플로우 노드에서 멀티모달 분석을 수행합니다:
-    - 이미지에서 텍스트/스펙 추출 (OCR)
-    - 제품 이미지 분석
-    - 스크린샷 해석
-    - 다이어그램/차트 분석
-    
+    Image/video analysis Runner using Gemini Vision.
+
+    Performs multimodal analysis in workflow nodes:
+    - Extract text/specs from images (OCR)
+    - Product image analysis
+    - Screenshot interpretation
+    - Diagram/chart analysis
+
     Config Options:
-        image_inputs: List[str] - 이미지 소스 리스트 (S3 URI, HTTP URL, state 키)
-        prompt_content: str - 분석 프롬프트 (템플릿 지원)
-        system_prompt: str - 시스템 지침
-        output_key: str - 결과 저장 키
-        max_tokens: int - 최대 출력 토큰
-        temperature: float - 샘플링 온도
+        image_inputs: List[str] - image source list (S3 URI, HTTP URL, state key)
+        prompt_content: str - analysis prompt (template supported)
+        system_prompt: str - system instructions
+        output_key: str - result storage key
+        max_tokens: int - max output tokens
+        temperature: float - sampling temperature
         
     Example Config:
         {
             "type": "vision",
             "config": {
                 "image_inputs": ["{{product_image_s3_uri}}", "{{spec_sheet_url}}"],
-                "prompt_content": "이 제품 이미지들에서 스펙을 JSON으로 추출해주세요",
+                "prompt_content": "Extract specs as JSON from these product images",
                 "output_key": "extracted_specs"
             }
         }
@@ -4530,14 +4443,14 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     if not media_inputs:
         logger.warning(f"No media sources resolved for vision node {node_id}")
         out_key = vision_config.get("output_key", f"{node_id}_output")
-        # 🛡️ 커널 내부 에러 처리 - _validate_output_keys 거치지 않음 (Reserved key 직접 사용 허용)
+        # Kernel internal error handling - bypasses _validate_output_keys (direct Reserved key use allowed)
         return {
             out_key: "[Error: No media provided]", 
             "step_history": state.get("step_history", []) + [f"{node_id}:no_media"]
         }
     
     # 3. Render prompt
-    prompt_template = vision_config.get("prompt_content") or vision_config.get("user_prompt_template", "이 컨텐츠를 분석해주세요.")
+    prompt_template = vision_config.get("prompt_content") or vision_config.get("user_prompt_template", "Analyze this content.")
     prompt = _render_template(prompt_template, exec_state)
     
     system_prompt_tmpl = vision_config.get("system_prompt", "")
@@ -4551,7 +4464,7 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     try:
         from src.services.llm.gemini_service import GeminiService, GeminiConfig, GeminiModel
         
-        # Vision 지원 모델 사용
+        # Use Vision-capable model
         model_name = vision_config.get("model", "gemini-2.0-flash")  # 1.5-flash deprecated
         # Model selection logic... (simplified mapping)
         model_enum = GeminiModel.GEMINI_2_0_FLASH  # default: 2.0-flash
@@ -4597,7 +4510,7 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
         
         out_key = vision_config.get("output_key", f"{node_id}_output")
         
-        # 🛡️ [Guard] Layer 1: USER 출력만 검증 (커널 메타데이터 제외)
+        # [Guard] Layer 1: Validate USER output only (excluding kernel metadata)
         user_output = {
             out_key: text,
             f"{node_id}_meta": {
@@ -4612,7 +4525,7 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
         
         validated_output = _validate_output_keys(user_output, node_id)
         
-        # 🛡️ [Kernel Metadata] 검증 후 step_history 추가 (커널 관리)
+        # [Kernel Metadata] Add kernel-managed step_history after validation
         validated_output["step_history"] = new_history
         
         # 🛡️ [Guard] Layer 2: Schema validation (Type safety)
@@ -4621,7 +4534,7 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     except Exception as e:
         logger.exception(f"Vision runner failed for node {node_id}: {e}")
         out_key = vision_config.get("output_key", f"{node_id}_output")
-        # 🛡️ 커널 내부 에러 처리 - _validate_output_keys 거치지 않음
+        # [Guard] Internal kernel error handling - bypasses _validate_output_keys
         return {
             out_key: f"[Vision Error: {str(e)}]",
             "step_history": state.get("step_history", []) + [f"{node_id}:error"]
@@ -4663,7 +4576,7 @@ def register_node(name: str, func: Callable) -> None:
 
 # Register Nodes
 register_node("operator", operator_runner)
-register_node("operator_custom", operator_runner)  # 사용자 정의 코드/sets 전용 (MOCK_MODE에서만 exec 허용)
+register_node("operator_custom", operator_runner)  # Custom code/sets only (exec allowed in MOCK_MODE only)
 
 # -----------------------------------------------------------------------------
 # Safe Operator Official Runner - Production-ready built-in transformations
@@ -4780,7 +4693,7 @@ def operator_official_runner(state: Dict[str, Any], config: Dict[str, Any]) -> D
     # 🛡️ [Guard] Layer 1: Validate USER output keys only (Reserved key check)
     validated_output = _validate_output_keys(user_output, node_id)
     
-    # 🛡️ [Kernel Metadata] 검증 후 커널이 관리하는 step_history 추가
+    # [Kernel Metadata] Add kernel-managed step_history after validation
     current_history = state.get("step_history", [])
     validated_output["step_history"] = current_history + [f"{node_id}:operator_official:{strategy}"]
     
@@ -4791,7 +4704,7 @@ register_node("operator_official", operator_official_runner)
 register_node("safe_operator", operator_official_runner)  # Alias for operator_official
 register_node("llm_chat", llm_chat_runner)
 register_node("video_chunker", video_chunker_runner)
-register_node("aiModel", llm_chat_runner)  # aiModel은 llm_chat과 동일하게 처리
+register_node("aiModel", llm_chat_runner)  # aiModel is handled identically to llm_chat
 register_node("api_call", api_call_runner)
 register_node("db_query", db_query_runner)
 register_node("for_each", for_each_runner)
@@ -4810,28 +4723,28 @@ register_node("image_analysis", vision_runner)  # Alias for vision
 from src.handlers.governance.governor_runner import governor_node_runner
 register_node("governor", governor_node_runner)  # Agent output validation and _kernel command generation
 
-# Note: 'code' 타입은 NODE_REGISTRY에 추가하지 않음
-# Pydantic field_validator에서 'code' -> 'operator'로 변환되므로 여기 도달 불가
-# 만약 'code' 타입이 여기 도달하면 검증 단계를 우회한 것이므로 에러가 맞음
+# Note: 'code' type is not added to NODE_REGISTRY.
+# Pydantic field_validator converts 'code' -> 'operator', so it never reaches here.
+# If 'code' type does reach here, it means the validation stage was bypassed, so an error is correct.
 
-# SubGraph/Group 노드 러너 - DynamicWorkflowBuilder에서 재귀적으로 처리
+# SubGraph/Group node runner - handled recursively by DynamicWorkflowBuilder
 def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
     """
-    SubGraph/Group 노드 실행 핸들러.
-    
+    SubGraph/Group node execution handler.
+
     [v3.28] Ring Level Inheritance Capping:
-    서브그래프의 모든 노드는 부모 워크플로우의 Ring Level을 초과할 수 없습니다.
-    이는 권한 상승(Privilege Escalation) 공격을 방지합니다.
-    
-    실제 서브그래프 컴파일 및 실행은 DynamicWorkflowBuilder에서 처리됩니다.
-    이 핸들러는 세그먼트 러너에서 직접 호출될 때를 위한 폴백입니다.
-    
-    Config 옵션:
-    - subgraph_ref: 참조할 서브그래프 ID
-    - subgraph_inline: 인라인 서브그래프 정의
-    - skill_ref: 참조할 Skill ID
-    - input_mapping: 부모→자식 상태 매핑
-    - output_mapping: 자식→부모 상태 매핑
+    All nodes in a subgraph cannot exceed the parent workflow's Ring Level.
+    This prevents Privilege Escalation attacks.
+
+    Actual subgraph compilation and execution is handled by DynamicWorkflowBuilder.
+    This handler is a fallback for direct invocation from the segment runner.
+
+    Config options:
+    - subgraph_ref: SubGraph ID to reference
+    - subgraph_inline: Inline subgraph definition
+    - skill_ref: Skill ID to reference
+    - input_mapping: Parent->child state mapping
+    - output_mapping: Child->parent state mapping
     """
     node_id = config.get("id", "subgraph")
     # [Fix] Support both flattened and nested config structures
@@ -4845,7 +4758,7 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         # DynamicWorkflowBuilder import
         from src.services.workflow.builder import DynamicWorkflowBuilder
         
-        # 서브그래프 정의 해석
+        # Resolve subgraph definition
         subgraph_def = None
         
         if inner_config.get("subgraph_inline"):
@@ -4856,8 +4769,8 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 f"This will be removed in v3.30. Use subgraph_ref instead."
             )
         elif inner_config.get("subgraph_ref"):
-            # subgraph_ref는 워크플로우 컨텍스트에서 해석되어야 함
-            # 여기서는 state에서 subgraphs를 찾음
+            # subgraph_ref must be resolved from the workflow context
+            # Here we look up subgraphs from state
             subgraphs = state.get("_workflow_subgraphs", {})
             ref = inner_config["subgraph_ref"]
             if ref in subgraphs:
@@ -4866,7 +4779,7 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 logger.warning(f"SubGraph reference '{ref}' not found.")
                 return {"subgraph_error": f"SubGraph ref not found: {ref}"}
         elif inner_config.get("skill_ref"):
-            # Skill 기반 서브그래프
+            # Skill-based subgraph
             try:
                 from src.services.skill_repository import get_skill_repository
                 repo = get_skill_repository()
@@ -4904,14 +4817,14 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
                 f"Violations: {violations}"
             )
         
-        # 입력 매핑 적용
+        # Apply input mapping
         input_mapping = config.get("input_mapping", {})
         child_state = {}
         for parent_key, child_key in input_mapping.items():
             if parent_key in state:
                 child_state[child_key] = state[parent_key]
         
-        # 기본 필드 상속
+        # Inherit default fields
         for key in ["execution_id", "workflow_id", "owner_id"]:
             if key in state and key not in child_state:
                 child_state[key] = state[key]
@@ -4919,19 +4832,19 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         # ✅ [v3.28] Pass parent ring level to child state
         child_state["__parent_ring_level"] = parent_ring_level
         
-        # 서브그래프 빌드 및 실행
+        # Build and execute subgraph
         builder = DynamicWorkflowBuilder(subgraph_def, use_lightweight_state=True)
         compiled = builder.build()
         child_output = compiled.invoke(child_state)
         
-        # 출력 매핑 적용
+        # Apply output mapping
         output_mapping = config.get("output_mapping", {})
         result = {}
         for child_key, parent_key in output_mapping.items():
             if child_key in child_output:
                 result[parent_key] = child_output[child_key]
         
-        # step_history 병합
+        # Merge step_history
         if "step_history" in child_output:
             current_history = state.get("step_history", [])
             result["step_history"] = current_history + child_output["step_history"]
@@ -4949,8 +4862,8 @@ def subgraph_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         else:
             raise
 
-register_node("group", subgraph_runner)  # SubGraph 노드 (group 타입)
-register_node("subgraph", subgraph_runner)  # SubGraph 노드 (subgraph 타입)
+register_node("group", subgraph_runner)  # SubGraph node (group type)
+register_node("subgraph", subgraph_runner)  # SubGraph node (subgraph type)
 
 
 def _get_mock_config(mock_behavior: str) -> Dict[str, Any]:
@@ -5034,14 +4947,14 @@ def run_workflow(config_json: str | Dict[str, Any], initial_state: Dict[str, Any
             logger.warning("DynamoDBSaver not found, skipping persistence")
 
     # 5. Execution
-    # [수정] run_config가 없으면 빈 딕셔너리로 초기화
+    # [Fix] Initialize as empty dict if run_config is None
     final_config = run_config.copy() if run_config else {}
     
-    # configurable이 없으면 생성
+    # Create configurable if absent
     if "configurable" not in final_config:
         final_config["configurable"] = {}
     
-    # thread_id 및 conversation_id 보정
+    # Ensure thread_id and conversation_id
     configurable = final_config["configurable"]
     if not configurable.get("thread_id"):
         configurable["thread_id"] = conversation_id or "default_thread"
@@ -5130,7 +5043,7 @@ def run_workflow(config_json: str | Dict[str, Any], initial_state: Dict[str, Any
     # Run!
     logger.info("🚀 Invoking workflow...")
     try:
-        # [수정] config 전체를 넘겨야 metadata 등이 함께 전달됨
+        # [Fix] Pass the entire config so metadata etc. are included
         result = app.invoke(initial_state, config=final_config) 
         
         # [NEW] Attach collected logs to the result (if result is a dict)
@@ -5155,23 +5068,23 @@ def run_workflow(config_json: str | Dict[str, Any], initial_state: Dict[str, Any
 
 def partition_workflow(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
-    워크플로우를 세그먼트로 분할하는 함수.
-    partition_workflow_advanced의 alias로, Lambda 호환성을 위해 유지.
+    Partition a workflow into segments.
+    Alias for partition_workflow_advanced, kept for Lambda compatibility.
     """
     from src.services.workflow.partition_service import partition_workflow_advanced
-    
-    # partition_workflow_advanced는 {"partition_map": [...], ...} 형태로 반환하므로
-    # partition_map 리스트만 추출
+
+    # partition_workflow_advanced returns {"partition_map": [...], ...},
+    # so extract the partition_map list only
     result = partition_workflow_advanced(config)
     return result.get("partition_map", [])
 
 
 def _build_segment_config(segment: Dict[str, Any]) -> Dict[str, Any]:
     """
-    세그먼트 객체를 실행 가능한 워크플로우 config로 변환.
-    
-    세그먼트는 {"id": str, "nodes": [...], "edges": [...], "type": str, "node_ids": [...]} 형태.
-    이를 run_workflow에 전달할 수 있는 {"nodes": [...], "edges": [...]} 형태로 변환.
+    Convert a segment object into an executable workflow config.
+
+    A segment has the shape {"id": str, "nodes": [...], "edges": [...], "type": str, "node_ids": [...]}.
+    This converts it into {"nodes": [...], "edges": [...]} suitable for run_workflow.
     """
     return {
         "nodes": segment.get("nodes", []),
@@ -5181,19 +5094,19 @@ def _build_segment_config(segment: Dict[str, Any]) -> Dict[str, Any]:
 
 def run_workflow_from_dynamodb(table_name: str, key_name: str, key_value: str, initial_state: Optional[Dict[str, Any]] = None, user_api_keys: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """
-    DynamoDB에서 워크플로우 config를 가져와서 실행.
-    
+    Fetch workflow config from DynamoDB and execute it.
+
     Args:
-        table_name: DynamoDB 테이블 이름
-        key_name: 파티션 키 이름
-        key_value: 파티션 키 값
-        initial_state: 초기 상태 (옵션)
-        user_api_keys: 사용자 API 키 (옵션)
-    
+        table_name: DynamoDB table name
+        key_name: Partition key name
+        key_value: Partition key value
+        initial_state: Initial state (optional)
+        user_api_keys: User API keys (optional)
+
     Returns:
-        워크플로우 실행 결과
+        Workflow execution result
     """
-    # DynamoDB에서 config 가져오기 - 리전을 환경변수에서 가져옴
+    # Fetch config from DynamoDB - region from environment variable
     region = os.environ.get('AWS_REGION', 'ap-northeast-2')
     dynamodb = boto3.resource('dynamodb', region_name=region)
     table = dynamodb.Table(table_name)
@@ -5232,9 +5145,9 @@ def run_workflow_from_dynamodb(table_name: str, key_name: str, key_value: str, i
     if not config_json:
         raise ValueError(f"No config_json found in DynamoDB item")
     
-    # JSON 파싱 (필요한 경우)
+    # Parse JSON if needed
     if isinstance(config_json, str):
         config_json = json.loads(config_json)
     
-    # 워크플로우 실행
+    # Execute workflow
     return run_workflow(config_json, initial_state, user_api_keys)
