@@ -81,11 +81,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     execution_id = f"llm-suite-{uuid.uuid4().hex[:8]}"
     sfn_input = {
         "simulator_execution_id": execution_id,
-        "scenarios": scenarios, # If None, SFN defaults to ALL
         "orchestrator_type": orchestrator_type,
         "dry_run": dry_run,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
+    # Only include scenarios when explicitly provided.
+    # SFN CheckScenarios uses IsPresent — null value would bypass
+    # SetDefaultScenarios fallback.
+    if scenarios:
+        sfn_input["scenarios"] = scenarios
     
     if dry_run:
         logger.info("DRY RUN: Would have started execution with payload:")

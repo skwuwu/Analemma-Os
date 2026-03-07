@@ -187,12 +187,15 @@ class EventualConsistencyGuard:
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
         # Phase 2 retry config: exponential backoff for transient DynamoDB errors
         MAX_RETRIES = 3
+        # TransactionCanceledException is only retryable when caused by
+        # transient reasons (TransactionConflict, throttling).  Non-transient
+        # reasons (ValidationError, ConditionalCheckFailed) must NOT be retried.
         RETRYABLE_ERROR_CODES = {
-            'TransactionCanceledException',
             'ProvisionedThroughputExceededException',
             'RequestLimitExceeded',
             'InternalServerError',
         }
+        NON_RETRYABLE_CANCEL_REASONS = {'ValidationError', 'ConditionalCheckFailed'}
 
         try:
             # Step 1: batch update block references (outside retry loop)
@@ -203,24 +206,32 @@ class EventualConsistencyGuard:
             # [v3.33 FIX-B] parent_hash must be persisted for Merkle chain
             # continuity.  Without it, get_manifest() returns parent_hash=None
             # and the next child manifest computes a different merkle root.
+            #
+            # [v3.34 FIX] parent_hash is a GSI HASH key (ParentHashIndex).
+            # DynamoDB GSI keys must be type S — {'NULL': True} causes
+            # TransactionCanceledException [ValidationError].  Omit the
+            # attribute entirely for root manifests (no parent).
+            item_attrs = {
+                'manifest_id': {'S': manifest_id},
+                'version': {'N': str(version)},
+                'workflow_id': {'S': workflow_id},
+                'manifest_hash': {'S': manifest_hash},
+                'config_hash': {'S': config_hash},
+                'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
+                'transaction_id': {'S': transaction_id},
+                'metadata': {'M': {
+                    k: {'S': str(v)} for k, v in metadata.items()
+                }},
+                'created_at': {'S': datetime.utcnow().isoformat()},
+                'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
+            }
+            if parent_hash:
+                item_attrs['parent_hash'] = {'S': parent_hash}
+
             manifest_item = {
                 'Put': {
                     'TableName': self.dynamodb_table,
-                    'Item': {
-                        'manifest_id': {'S': manifest_id},
-                        'version': {'N': str(version)},
-                        'workflow_id': {'S': workflow_id},
-                        'parent_hash': {'S': parent_hash} if parent_hash else {'NULL': True},
-                        'manifest_hash': {'S': manifest_hash},
-                        'config_hash': {'S': config_hash},
-                        'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
-                        'transaction_id': {'S': transaction_id},
-                        'metadata': {'M': {
-                            k: {'S': str(v)} for k, v in metadata.items()
-                        }},
-                        'created_at': {'S': datetime.utcnow().isoformat()},
-                        'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
-                    },
+                    'Item': item_attrs,
                     'ConditionExpression': 'attribute_not_exists(manifest_id)'
                 }
             }
@@ -231,7 +242,20 @@ class EventualConsistencyGuard:
                     break  # Success — exit retry loop
                 except ClientError as e:
                     error_code = e.response['Error']['Code']
-                    if error_code in RETRYABLE_ERROR_CODES and attempt < MAX_RETRIES - 1:
+                    is_retryable = error_code in RETRYABLE_ERROR_CODES
+                    # TransactionCanceledException is retryable ONLY if
+                    # none of the cancellation reasons are non-transient
+                    if error_code == 'TransactionCanceledException':
+                        reasons = [
+                            r.get('Code', '') for r in
+                            e.response.get('CancellationReasons', [])
+                        ]
+                        if any(r in NON_RETRYABLE_CANCEL_REASONS for r in reasons):
+                            is_retryable = False
+                        else:
+                            is_retryable = True
+
+                    if is_retryable and attempt < MAX_RETRIES - 1:
                         backoff = 0.1 * (2 ** attempt)
                         logger.warning(
                             f"Phase 2 transient error (attempt {attempt + 1}/{MAX_RETRIES}): "

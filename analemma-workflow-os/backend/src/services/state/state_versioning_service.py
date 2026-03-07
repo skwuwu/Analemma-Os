@@ -523,34 +523,38 @@ class StateVersioningService:
                 # [ATOMICITY FIX] 원자적 트랜잭션으로 Dangling Pointer 방지
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 
-                # 매니페스트 저장 아이템
+                # [v3.34 FIX] parent_hash is a GSI HASH key (ParentHashIndex).
+                # Omit when None — DynamoDB GSI keys cannot be NULL type.
+                manifest_item_attrs = {
+                    'manifest_id': {'S': manifest_id},
+                    'version': {'N': str(version)},
+                    'workflow_id': {'S': workflow_id},
+                    'manifest_hash': {'S': manifest_hash},
+                    'config_hash': {'S': config_hash},
+                    'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
+                    's3_pointers': {'M': {
+                        'manifest': {'S': f"s3://{self.bucket}/manifests/{manifest_id}.json"},
+                        'config': {'S': f"s3://{self.bucket}/{config_s3_key}"},
+                        'state_blocks': {'L': [{'S': block.s3_path} for block in blocks]}
+                    }},
+                    'metadata': {'M': {
+                        'created_at': {'S': datetime.utcnow().isoformat()},
+                        'segment_count': {'N': str(len(segment_manifest))},
+                        'total_size': {'N': str(sum(block.size for block in blocks))},
+                        'compression': {'S': 'none'},
+                        'blocks_stored': {'N': str(stored_blocks)},
+                        'blocks_reused': {'N': str(reused_blocks)},
+                        'transaction_id': {'S': transaction_id}
+                    }},
+                    'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
+                }
+                if parent_hash:
+                    manifest_item_attrs['parent_hash'] = {'S': parent_hash}
+
                 manifest_item = {
                     'Put': {
                         'TableName': self.table.table_name,
-                        'Item': {
-                            'manifest_id': {'S': manifest_id},
-                            'version': {'N': str(version)},
-                            'workflow_id': {'S': workflow_id},
-                            'parent_hash': {'S': parent_hash} if parent_hash else {'NULL': True},
-                            'manifest_hash': {'S': manifest_hash},
-                            'config_hash': {'S': config_hash},
-                            'segment_hashes': {'M': {k: {'S': v} for k, v in segment_hashes.items()}},
-                            's3_pointers': {'M': {
-                                'manifest': {'S': f"s3://{self.bucket}/manifests/{manifest_id}.json"},
-                                'config': {'S': f"s3://{self.bucket}/{config_s3_key}"},
-                                'state_blocks': {'L': [{'S': block.s3_path} for block in blocks]}
-                            }},
-                            'metadata': {'M': {
-                                'created_at': {'S': datetime.utcnow().isoformat()},
-                                'segment_count': {'N': str(len(segment_manifest))},
-                                'total_size': {'N': str(sum(block.size for block in blocks))},
-                                'compression': {'S': 'none'},
-                                'blocks_stored': {'N': str(stored_blocks)},
-                                'blocks_reused': {'N': str(reused_blocks)},
-                                'transaction_id': {'S': transaction_id}  # ✅ Transaction ID 저장
-                            }},
-                            'ttl': {'N': str(int(time.time()) + 30 * 24 * 3600)}
-                        },
+                        'Item': manifest_item_attrs,
                         'ConditionExpression': 'attribute_not_exists(manifest_id)'
                     }
                 }

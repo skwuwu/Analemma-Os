@@ -215,6 +215,7 @@ def benchmark_parallel_io() -> Dict[str, Any]:
                 s3.put_object(Bucket=bucket, Key=block["s3_key"], Body=block["body"], ContentType="application/json")
             # DynamoDB manifest write
             manifest_id = f"bench_seq_{test_id}_{trial}"
+            # [v3.34 FIX] parent_hash is a GSI key — omit instead of NULL
             dynamodb.put_item(
                 TableName=table,
                 Item={
@@ -223,7 +224,6 @@ def benchmark_parallel_io() -> Dict[str, Any]:
                     "workflow_id": {"S": f"bench_{test_id}"},
                     "manifest_hash": {"S": hashlib.sha256(manifest_id.encode()).hexdigest()},
                     "config_hash": {"S": "bench_config"},
-                    "parent_hash": {"NULL": True},
                     "ttl": {"N": str(int(time.time()) + 300)},  # 5min TTL
                     "metadata": {"M": {"benchmark": {"S": "true"}}},
                 },
@@ -248,6 +248,7 @@ def benchmark_parallel_io() -> Dict[str, Any]:
                 for f in as_completed(futures):
                     f.result()  # Raise on error
             manifest_id = f"bench_par_{test_id}_{trial}"
+            # [v3.34 FIX] parent_hash is a GSI key — omit instead of NULL
             dynamodb.put_item(
                 TableName=table,
                 Item={
@@ -256,7 +257,6 @@ def benchmark_parallel_io() -> Dict[str, Any]:
                     "workflow_id": {"S": f"bench_{test_id}"},
                     "manifest_hash": {"S": hashlib.sha256(manifest_id.encode()).hexdigest()},
                     "config_hash": {"S": "bench_config"},
-                    "parent_hash": {"NULL": True},
                     "ttl": {"N": str(int(time.time()) + 300)},
                     "metadata": {"M": {"benchmark": {"S": "true"}}},
                 },
