@@ -11,13 +11,16 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'sr
 import pytest
 from decimal import Decimal
 from common.hash_utils import (
+    canonical_bytes,
     canonical_json,
+    content_hash,
     streaming_content_hash,
     SubBlockHashRegistry,
     HOT_FIELDS,
     WARM_FIELDS,
     COLD_FIELDS,
 )
+from services.state.state_versioning_service import StateVersioningService
 
 
 class TestCanonicalJson:
@@ -99,3 +102,62 @@ class TestSubBlockHashRegistry:
         assert "llm_response" in HOT_FIELDS
         assert "step_history" in WARM_FIELDS
         assert "workflow_config" in COLD_FIELDS
+
+
+class TestCanonicalBytes:
+    def test_public_alias_matches_internal(self):
+        """canonical_bytes() is a public alias for _canonical_bytes()."""
+        data = {"workflow_id": "wf-123", "version": 5}
+        assert canonical_bytes(data) == canonical_json(data).encode("utf-8")
+
+
+class TestHashMigrationCompatibility:
+    """Verify hash_utils and StateVersioningService produce identical output
+    for manifest-level data (primitive dicts).
+
+    If these tests FAIL, do NOT unify the implementations — the serialization
+    divergence would break existing Merkle DAG roots stored in DynamoDB/S3.
+    """
+
+    MANIFEST_SAMPLES = [
+        {
+            "workflow_id": "wf-test-001",
+            "version": 3,
+            "config_hash": "abc123def456",
+            "segment_hashes": {"seg_0": "hash_a", "seg_1": "hash_b"},
+            "parent_hash": "parent_xyz",
+        },
+        {
+            "workflow_id": "wf-test-002",
+            "version": 1,
+            "config_hash": "deadbeef",
+            "segment_hashes": {},
+            "parent_hash": "",
+        },
+        {
+            "workflow_id": "wf-unicode-한글",
+            "version": 99,
+            "config_hash": "utf8test",
+            "segment_hashes": {"s0": "h0"},
+        },
+    ]
+
+    @pytest.mark.parametrize("sample", MANIFEST_SAMPLES)
+    def test_canonical_bytes_identical(self, sample):
+        """hash_utils.canonical_bytes() == SVS.get_canonical_json() for manifest data."""
+        hu_bytes = canonical_bytes(sample)
+        svs_bytes = StateVersioningService.get_canonical_json(sample)
+        assert hu_bytes == svs_bytes, (
+            f"Serialization divergence detected!\n"
+            f"hash_utils:  {hu_bytes!r}\n"
+            f"SVS:         {svs_bytes!r}"
+        )
+
+    @pytest.mark.parametrize("sample", MANIFEST_SAMPLES)
+    def test_hash_identical(self, sample):
+        """hash_utils.content_hash() == SVS.compute_hash() for manifest data."""
+        hu_hash = content_hash(sample)
+        svs_hash = StateVersioningService.compute_hash(sample)
+        assert hu_hash == svs_hash, (
+            f"Hash divergence: hash_utils={hu_hash}, SVS={svs_hash}"
+        )

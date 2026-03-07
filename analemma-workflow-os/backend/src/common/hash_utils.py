@@ -97,6 +97,23 @@ def _canonical_bytes(data: Any) -> bytes:
         return repr(data).encode('utf-8')
 
 
+def canonical_bytes(data: Any) -> bytes:
+    """Public alias for ``_canonical_bytes``.
+
+    Returns canonical JSON as UTF-8 bytes for deterministic hashing.
+
+    Note: This is NOT a drop-in replacement for
+    ``StateVersioningService.get_canonical_json()``.  The two share the same
+    core contract (sort_keys, separators, ensure_ascii=False) but diverge on
+    edge-case handling:
+      - ``__dict__``: this function filters private keys; SVS does not.
+      - unknown types: this function raises TypeError (fail-fast);
+        SVS falls back to ``str(obj)``.
+    For manifest-level data (primitive dicts) they produce identical output.
+    """
+    return _canonical_bytes(data)
+
+
 def canonical_json(data: Any) -> str:
     """Canonical JSON string for deterministic, type-safe serialization.
 
