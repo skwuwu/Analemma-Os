@@ -446,7 +446,8 @@ def _normalize_segment_config(segment_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class SegmentRunnerService:
-    def __init__(self, s3_bucket: Optional[str] = None):
+    def __init__(self, s3_bucket: Optional[str] = None, deadline_ms: float = None):
+        self._deadline_ms = deadline_ms
         self.state_manager = StateManager()
         self.healer = SelfHealingService()
         self.repo = WorkflowRepository()
@@ -501,7 +502,15 @@ class SegmentRunnerService:
         
         # [v3.20] StateViewContext: 프록시 패턴 (메모리 78% 절감)
         self._state_view_context = None
-    
+
+    def _check_deadline(self, phase: str):
+        """[v3.35] Graceful shutdown: raise TimeoutError before Lambda hard-kills."""
+        if self._deadline_ms and time.time() * 1000 > self._deadline_ms:
+            raise TimeoutError(
+                f"Lambda deadline approaching during '{phase}'. "
+                f"Graceful exit to preserve state integrity."
+            )
+
     @property
     def security_guard(self):
         """Lazy Security Guard initialization"""
@@ -2216,7 +2225,11 @@ class SegmentRunnerService:
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {executor.submit(fetch_branch_s3, item): item for item in branches_needing_s3}
                 
-                for future in as_completed(futures, timeout=60):  # 60초 전체 timeout
+                # [v3.35] Deadline-aware timeout: use remaining Lambda time if available
+                _pool_timeout = 60
+                if self._deadline_ms:
+                    _pool_timeout = max(10, (self._deadline_ms - time.time() * 1000) / 1000 - 10)
+                for future in as_completed(futures, timeout=_pool_timeout):
                     try:
                         idx, state = future.result(timeout=5)  # 개별 5초 timeout
                         if state:
@@ -3104,7 +3117,12 @@ class SegmentRunnerService:
             initial_state.get('prompt', 'Execute the workflow segment.'),
         )
 
-        vsm_endpoint = os.environ.get("ANALEMMA_KERNEL_ENDPOINT", "http://localhost:8765")
+        vsm_endpoint = os.environ.get("ANALEMMA_KERNEL_ENDPOINT")
+        if not vsm_endpoint:
+            raise ValueError(
+                "ANALEMMA_KERNEL_ENDPOINT environment variable is required for ReactExecutor. "
+                "Set it to the VSM Lambda Function URL."
+            )
 
         try:
             bridge = _ReactBridge(
@@ -3240,6 +3258,9 @@ class SegmentRunnerService:
                 "segment_id": 0
             }
         
+        # [v3.35] Lambda Timeout Watchdog: check deadline before hydration
+        self._check_deadline("hydration")
+
         # 🛡️ [v3.11] Unified State Hydration (Input)
         # Hydrate the event (convert to SmartStateBag) using pre-initialized hydrator
         # This handles "__s3_offloaded" restoration automatically
@@ -3320,6 +3341,9 @@ class SegmentRunnerService:
             2. No separate SyncStateData call needed for state mutation
             3. ASL always receives consistent {state_data, next_action} format
             """
+            # [v3.35] Lambda Timeout Watchdog: check deadline before seal
+            self._check_deadline("seal")
+
             # 1. Validation & Safety Defaults
             if not isinstance(res, dict):
                 logger.error(f"[Alert] [Kernel] Invalid response type: {type(res)}! Emergency fallback.")
@@ -4182,7 +4206,8 @@ class SegmentRunnerService:
                 try:
                     payload_json = json.dumps(response_payload, ensure_ascii=False)
                     payload_size = len(payload_json.encode('utf-8'))
-                except:
+                except Exception as e:
+                    logger.debug("Failed to estimate response payload size: %s", e)
                     payload_size = 0 # Fallback
                 
                 # 2. Extract state to potentially offload

@@ -55,10 +55,8 @@ from .shared_policy import DESTRUCTIVE_ACTIONS, DESTRUCTIVE_PATTERNS
 
 logger = logging.getLogger(__name__)
 
-# 환경 변수: VSM 서버 URL (기본값: localhost:8765)
-_DEFAULT_KERNEL_ENDPOINT: str = os.environ.get(
-    "ANALEMMA_KERNEL_ENDPOINT", "http://localhost:8765"
-)
+# VSM server URL (required in production; no localhost fallback)
+_DEFAULT_KERNEL_ENDPOINT: str = os.environ.get("ANALEMMA_KERNEL_ENDPOINT", "")
 # 환경 변수: 초기화 시 Policy Sync 자동 수행 여부
 _AUTO_SYNC_POLICY: bool = os.environ.get("ANALEMMA_SYNC_POLICY", "").strip() == "1"
 

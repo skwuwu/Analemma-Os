@@ -24,10 +24,11 @@ try:
         level=log_level,
         child=True
     )
-except:
+except Exception as e:
     import logging
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
+    logger.warning("Failed to initialize Powertools Logger, falling back to standard logging: %s", e)
 
 # 환경 변수
 EXECUTIONS_TABLE = os.environ.get('EXECUTIONS_TABLE')

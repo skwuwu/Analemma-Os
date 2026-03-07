@@ -103,6 +103,11 @@ jobs:
         run: |
           pip install -r src/requirements.txt
 
+      - name: Run unit tests
+        working-directory: ./analemma-workflow-os/backend
+        run: |
+          PYTHONPATH=src python -m pytest tests/ -v --tb=short -x --timeout=30
+
       - name: Setup AWS SAM CLI
         uses: aws-actions/setup-sam@v2
 

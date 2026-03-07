@@ -1171,14 +1171,16 @@ async def _lambda_handler_streaming_async(event, response_stream, context):
                 "user_action": error_info.get("user_action")
             }, ensure_ascii=False).encode('utf-8') + b"\n"
             response_stream.write(error_chunk)
-        except:
+        except Exception as e:
+            logger.warning("Failed to write error chunk to response stream: %s", e)
             pass  # response_stream 자체가 망가진 경우 무시
     
     finally:
         # 항상 스트림 종료
         try:
             response_stream.close()
-        except:
+        except Exception as e:
+            logger.warning("Failed to close response stream: %s", e)
             pass
 
 

@@ -522,7 +522,8 @@ def _multipart_upload_chunks(
                 Key=chunks_key,
                 UploadId=upload_id
             )
-        except:
+        except Exception as e:
+            logger.warning("Failed to abort multipart upload (UploadId=%s): %s", upload_id, e)
             pass
         raise
 

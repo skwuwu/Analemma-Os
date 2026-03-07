@@ -1,5 +1,7 @@
-boto3
-botocore
+# AWS SDK — minimum 1.34.0 required for Bedrock Inference Profile support
+boto3>=1.34.0
+botocore>=1.34.0
+
 croniter
 pytest
 moto
@@ -8,16 +10,15 @@ moto
 zstandard>=0.22.0  # High-performance compression (68% ratio, 4x faster than gzip)
 
 # Vertex AI SDK (Gemini Native)
-google-cloud-aiplatform>=1.51.0  # ResponseSchema, Context Caching 지원
+google-cloud-aiplatform>=1.51.0  # ResponseSchema, Context Caching support
 langgraph>=0.0.40
-openai
-# jsonpath-ng  # REMOVED: Not used in codebase (v2.0 cold start optimization)
-# jsonschema   # REMOVED: Not used in codebase, was adding ~1.4s cold start (v2.0 optimization)
+openai>=2.15.0
+
 # Anthropic SDK (ReactExecutor — Claude via Bedrock)
 anthropic[bedrock]>=0.39.0
 pydantic>=2.7.4
 dill==0.3.6
-aws-lambda-powertools
+aws-lambda-powertools>=2.32.0
 PyJWT[crypto]
 ijson>=3.2.0  # Streaming JSON parser (for large S3 result processing)
 

@@ -192,7 +192,8 @@ class StateViewProxy(MutableMapping):
                 return True
             transformer = policy.get(self._ring_level)
             return transformer is None
-        except:
+        except Exception as e:
+            logger.debug("Failed to check field visibility for key '%s': %s", key, e)
             return True
     
     def _is_reserved_key(self, key: str) -> bool:

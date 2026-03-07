@@ -735,7 +735,10 @@ Resources:
               - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:backend-workflow-${StageName}-gcp_service_account-*"
           - Effect: Allow
             Action: bedrock:InvokeModel*
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
@@ -776,21 +779,13 @@ Resources:
         Variables:
           ANALEMMA_VSM_API_KEY: !Sub "analemma-vsm-${StageName}-${AWS::AccountId}"
 
-  # VSM Function URL — AuthType NONE at transport level; X-Analemma-Key
-  # middleware in handler.py provides application-level auth.
+  # VSM Function URL — AWS_IAM at transport level + X-Analemma-Key
+  # middleware in handler.py provides application-level auth (defense-in-depth).
   VSMFunctionUrl:
     Type: AWS::Lambda::Url
     Properties:
-      AuthType: NONE
+      AuthType: AWS_IAM
       TargetFunctionArn: !GetAtt VSMFunction.Arn
-
-  VSMFunctionUrlPermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      FunctionName: !Ref VSMFunction
-      Action: lambda:InvokeFunctionUrl
-      Principal: "*"
-      FunctionUrlAuthType: NONE
 
   # ── E2E IoT Core MQTT Proxy (waitForTaskToken bridge) ────────────────────
   # Routes SFN segment execution to a local MQTT subscriber via IoT Core.
@@ -838,6 +833,7 @@ Resources:
           WORKFLOW_STATE_BUCKET: !If [CreateWorkflowStateBucket, !Ref WorkflowStateBucketResource, !Ref WorkflowStateBucket]
       Policies:
         - Statement:
+            # NOTE: Resource: "*" required — task tokens are not ARN-addressable per AWS IAM docs
             - Effect: Allow
               Action:
                 - states:SendTaskSuccess
@@ -921,7 +917,10 @@ Resources:
         - Statement:
           - Effect: Allow
             Action: bedrock:InvokeModel*
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
             # WebSocket 전송 권한 추가
           - Effect: Allow
             Action:
@@ -1007,7 +1006,10 @@ Resources:
         - Statement:
           - Effect: Allow
             Action: bedrock:InvokeModel*
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
           # FIX: states:SendTaskSuccess/Failure is "not resource-type specific" per AWS IAM docs.
           # Task tokens are not ARN-addressable → Resource: "*" is the only valid form.
           # Using a stateMachine/execution ARN causes resource type mismatch → AccessDeniedException.
@@ -1227,7 +1229,10 @@ Resources:
             Action:
               - bedrock:InvokeModel
               - bedrock:InvokeModelWithResponseStream
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
@@ -1305,7 +1310,10 @@ Resources:
             Action:
               - bedrock:InvokeModel
               - bedrock:InvokeModelWithResponseStream
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
@@ -1801,6 +1809,7 @@ Resources:
         - DynamoDBReadPolicy:
             TableName: !Ref TaskTokensTableV3
         - Statement:
+          # NOTE: Resource: "*" required — task tokens are not ARN-addressable per AWS IAM docs
           - Effect: Allow
             Action: states:SendTaskSuccess
             Resource: "*"
@@ -2288,7 +2297,10 @@ Resources:
           - Effect: Allow
             Action:
               - bedrock:InvokeModel
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
           - Effect: Allow
             Action:
               - cloudwatch:PutMetricData
@@ -2404,7 +2416,10 @@ Resources:
           - Effect: Allow
             Action:
               - bedrock:InvokeModel
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
 
   # --- Distributed Task Token Storage Function ---
   StoreDistributedTaskTokenFunction:
@@ -2458,7 +2473,10 @@ Resources:
         - Statement:
           - Effect: Allow
             Action: bedrock:InvokeModel*
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
       Events:
         AuditApi:
           Type: HttpApi
@@ -3063,6 +3081,8 @@ Resources:
               KeyType: RANGE
           Projection:
             ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   UsersTableV3:
     Type: AWS::DynamoDB::Table
@@ -3075,6 +3095,8 @@ Resources:
       KeySchema:
         - AttributeName: userId
           KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   IdempotencyTableV3:
     Type: AWS::DynamoDB::Table
@@ -3183,6 +3205,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   ExecutionsTableV3:
     Type: AWS::DynamoDB::Table
@@ -3234,6 +3258,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expiration_timestamp
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   UserUsageTableV3:
     Type: AWS::DynamoDB::Table
@@ -3641,6 +3667,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: ttl
         Enabled: true  # 30일 후 자동 GC (Phase 6)
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES  # GC 이벤트 추적
       Tags:
@@ -3732,6 +3760,8 @@ Resources:
         Enabled: true  # 90일 후 자동 삭제 (보안 감사 기록 보존 기간)
       StreamSpecification:
         StreamViewType: NEW_AND_OLD_IMAGES  # CloudWatch 메트릭 집계용
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       Tags:
         - Key: Purpose
           Value: AgentGovernance
@@ -3822,7 +3852,10 @@ Resources:
           - Effect: Allow
             Action:
               - bedrock:InvokeModel
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
         - Statement:
           - Effect: Allow
             Action:
@@ -3883,7 +3916,10 @@ Resources:
           - Effect: Allow
             Action:
               - bedrock:InvokeModel
-            Resource: "*"
+            Resource:
+              - !Sub "arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*"
+              - "arn:aws:bedrock:*::foundation-model/anthropic.*"
+              - "arn:aws:bedrock:*::foundation-model/amazon.*"
 
   # --- Clone Instructions API Lambda ---
   # 기존 에이전트의 학습된 지침을 새 에이전트로 복제
@@ -4065,6 +4101,7 @@ Resources:
         - StepFunctionsExecutionPolicy:
             StateMachineName: !GetAtt StepFunctionDistributedOrchestrator.Name
         - Statement:
+          # NOTE: Resource: "*" required — task tokens are not ARN-addressable per AWS IAM docs
           - Effect: Allow
             Action:
               - states:SendTaskSuccess
@@ -4522,6 +4559,17 @@ Resources:
             Status: Enabled
             Prefix: mqtt-payloads/
             ExpirationInDays: 1
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       Tags:
         - Key: Stage
           Value: !Ref StageName
@@ -4584,8 +4632,17 @@ Resources:
       BucketName: !Sub
         - "analemma-executions-archive-${StageName}-${AccountId}"
         - AccountId: !Ref "AWS::AccountId"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
       VersioningConfiguration:
         Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
       LifecycleConfiguration:
         Rules:
           - Id: GlacierTransition

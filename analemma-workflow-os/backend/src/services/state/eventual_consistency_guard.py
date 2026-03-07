@@ -185,12 +185,21 @@ class EventualConsistencyGuard:
         # Phase 2: Commit (DynamoDB 원자적 트랜잭션)
         # ⚠️ TransactWriteItems 최대 100 아이템 제한 고려
         # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        # Phase 2 retry config: exponential backoff for transient DynamoDB errors
+        MAX_RETRIES = 3
+        RETRYABLE_ERROR_CODES = {
+            'TransactionCanceledException',
+            'ProvisionedThroughputExceededException',
+            'RequestLimitExceeded',
+            'InternalServerError',
+        }
+
         try:
-            # Step 1: 블록 참조 카운트 배치 업데이트 (100개 초과 시 분할)
+            # Step 1: batch update block references (outside retry loop)
             if len(block_uploads) > 0:
                 self._batch_update_block_references(workflow_id, block_uploads, transaction_id)
-            
-            # Step 2: 매니페스트 등록 (최종 원자적 트랜잭션)
+
+            # Step 2: manifest registration (atomic transaction) with retry
             # [v3.33 FIX-B] parent_hash must be persisted for Merkle chain
             # continuity.  Without it, get_manifest() returns parent_hash=None
             # and the next child manifest computes a different merkle root.
@@ -215,9 +224,24 @@ class EventualConsistencyGuard:
                     'ConditionExpression': 'attribute_not_exists(manifest_id)'
                 }
             }
-            
-            self.dynamodb_client.transact_write_items(TransactItems=[manifest_item])
-            
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    self.dynamodb_client.transact_write_items(TransactItems=[manifest_item])
+                    break  # Success — exit retry loop
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    if error_code in RETRYABLE_ERROR_CODES and attempt < MAX_RETRIES - 1:
+                        backoff = 0.1 * (2 ** attempt)
+                        logger.warning(
+                            f"Phase 2 transient error (attempt {attempt + 1}/{MAX_RETRIES}): "
+                            f"{error_code} — retrying in {backoff:.2f}s"
+                        )
+                        time.sleep(backoff)
+                        continue
+                    # Non-retryable error or max retries exhausted
+                    raise
+
             logger.info(
                 f"Phase 2 Complete: Committed manifest {manifest_id} + "
                 f"{len(block_uploads)} block references (batched updates)"
@@ -227,7 +251,7 @@ class EventualConsistencyGuard:
 
         except Exception as e:
             logger.error(f"Phase 2 Failed: DynamoDB transaction error - {e}")
-            # Phase 2 실패: GC 스케줄 (S3 블록 정리)
+            # Phase 2 failure: schedule GC to clean up S3 blocks
             self._schedule_gc(block_uploads, transaction_id, "phase2_failure")
             transaction.status = "failed"
             raise

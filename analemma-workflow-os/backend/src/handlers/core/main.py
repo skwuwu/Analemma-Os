@@ -1373,7 +1373,7 @@ def _render_template(template: Any, state: Dict[str, Any]) -> Any:
 
             if key == "__state_json":
                 try: return json.dumps(state, ensure_ascii=False)
-                except: return str(state)
+                except Exception: return str(state)
             
             val = _get_nested_value(state, key, "")
             
@@ -1384,7 +1384,7 @@ def _render_template(template: Any, state: Dict[str, Any]) -> Any:
             
             if isinstance(val, (dict, list)):
                 try: return json.dumps(val, ensure_ascii=False)
-                except: return str(val)
+                except Exception: return str(val)
             return str(val)
             
         return re.sub(r"\{\{\s*(.+?)\s*\}\}", _repl, template)

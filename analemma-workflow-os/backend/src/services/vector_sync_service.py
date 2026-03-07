@@ -630,7 +630,8 @@ class VectorSyncService:
                         )
                         if datetime.now(timezone.utc) - last_attempt < timedelta(hours=1):
                             recent_failures += 1
-                    except:
+                    except Exception as e:
+                        logger.warning("Failed to parse last_vector_sync_attempt timestamp: %s", e)
                         pass
             
             sync_rate = (status_counts[VectorSyncStatus.SUCCESS] / total_corrections * 100) if total_corrections > 0 else 0

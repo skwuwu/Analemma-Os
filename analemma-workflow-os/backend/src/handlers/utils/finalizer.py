@@ -129,7 +129,8 @@ def lambda_handler(event, context):
                 # [Fix] Convert floats to Decimals for DynamoDB
                 parsed_output = json.loads(output_raw)
                 expression_attr_values[':o'] = _convert_floats_to_decimals(parsed_output)
-            except:
+            except Exception as e:
+                logger.warning("Failed to parse output_raw as JSON for DynamoDB: %s", e)
                 expression_attr_values[':o'] = output_raw
 
         # 에러 시 Error/Cause 저장 (선택)

@@ -98,7 +98,8 @@ def quick_size_check(data: Any) -> int:
         # String conversion approximation (not precise)
         try:
             return len(str(data)) // 1024
-        except:
+        except Exception as e:
+            logger.warning("Failed to estimate payload size: %s", e)
             return 0
     return 0
 
@@ -331,7 +332,8 @@ def cached_load_from_s3(s3_path: str) -> Any:
         # 🛡️ [OOM Guard] 크기 체크
         try:
             data_size_mb = len(json.dumps(data, default=str).encode('utf-8')) / (1024 * 1024)
-        except:
+        except Exception as e:
+            logger.warning("Failed to calculate S3 cache item size: %s", e)
             data_size_mb = 0
         
         # 개별 항목 크기 제한
@@ -421,7 +423,8 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
     # 🛡️ [P0 Critical] Calculate total state size first
     try:
         total_size_kb = calculate_payload_size(current_state)
-    except:
+    except Exception as e:
+        logger.warning("Failed to calculate total state size: %s", e)
         total_size_kb = 0
         
     optimized_state = current_state.copy()
@@ -457,7 +460,8 @@ def optimize_current_state(current_state: Dict[str, Any], idempotency_key: str) 
         # Precise calculation only when approximation is near threshold
         try:
             field_size = calculate_payload_size({field: field_data})
-        except:
+        except Exception as e:
+            logger.warning("Failed to calculate field size for '%s': %s", field, e)
             continue
             
         # Move to S3 if field is larger than 30KB (Lowered from 50KB for safety)

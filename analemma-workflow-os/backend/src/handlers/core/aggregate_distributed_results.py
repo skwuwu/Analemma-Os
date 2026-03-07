@@ -347,7 +347,8 @@ def _sort_logs_by_timestamp(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                             # ISO 형식 파싱 시도
                             from datetime import datetime
                             return datetime.fromisoformat(log_entry[ts_field].replace('Z', '+00:00')).timestamp()
-                    except:
+                    except Exception as e:
+                        logger.warning("Failed to parse timestamp from log entry: %s", e)
                         continue
         return 0  # 타임스탬프가 없으면 0으로 처리
     
@@ -749,7 +750,8 @@ def _extract_complete_json_objects(content: str, from_start: bool = True) -> Lis
                                 obj = json.loads(current_obj.strip().rstrip(','))
                                 if isinstance(obj, dict):
                                     objects.append(obj)
-                            except:
+                            except Exception as e:
+                                logger.warning("Failed to parse JSON object during extraction: %s", e)
                                 pass
                             current_obj = ""
         

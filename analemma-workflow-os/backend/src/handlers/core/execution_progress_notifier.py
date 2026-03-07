@@ -601,7 +601,8 @@ def _update_execution_status(owner_id: str, notification_payload: dict) -> bool:
 
         try:
             MAX_HISTORY = int(os.environ.get('STATE_HISTORY_MAX_ENTRIES', '50'))
-        except:
+        except Exception as e:
+            logger.warning("Failed to parse STATE_HISTORY_MAX_ENTRIES env var: %s", e)
             MAX_HISTORY = 50
 
         if new_logs and isinstance(new_logs, list):

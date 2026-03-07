@@ -722,7 +722,8 @@ class TaskService:
                 if isinstance(initial_input, str):
                     try:
                         initial_input = json.loads(initial_input)
-                    except:
+                    except Exception as e:
+                        logger.warning("Failed to parse initial_input JSON: %s", e)
                         initial_input = {}
                 
                 current_segment = sfn_state.get('current_segment', 0)
@@ -763,7 +764,8 @@ class TaskService:
                 if isinstance(final_result, str):
                     try:
                         final_result = json.loads(final_result)
-                    except:
+                    except Exception as e:
+                        logger.warning("Failed to parse final_result JSON: %s", e)
                         pass
                 
                 if isinstance(final_result, dict):

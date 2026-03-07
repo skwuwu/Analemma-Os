@@ -1,6 +1,8 @@
 import logging
 import os
 import json
+import time
+import boto3
 from typing import Dict, Any
 
 from src.services.execution.segment_runner_service import SegmentRunnerService
@@ -31,10 +33,25 @@ if not _S3_BUCKET:
 else:
     logger.info(f"✅ S3 bucket configured for state offloading: {_S3_BUCKET}")
 
+# [v3.35] Segment-level idempotency guard
+_IDEMPOTENCY_TABLE_NAME = os.environ.get('TASK_TOKENS_TABLE_NAME', os.environ.get('IDEMPOTENCY_TABLE'))
+try:
+    from src.common.aws_clients import get_dynamodb_resource
+    _dynamodb = get_dynamodb_resource()
+except ImportError:
+    _dynamodb = boto3.resource('dynamodb')
+_idempotency_table = _dynamodb.Table(_IDEMPOTENCY_TABLE_NAME) if _IDEMPOTENCY_TABLE_NAME else None
+
+try:
+    from src.common.aws_clients import get_s3_client
+    _s3_client = get_s3_client()
+except ImportError:
+    _s3_client = boto3.client('s3')
+
 def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
     Entry point for Segment Executions.
-    
+
     Refactored to "Tiny Handler" pattern.
     Logic delegated to:
     - src.services.execution.segment_runner_service.SegmentRunnerService
@@ -71,7 +88,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "state_data": {"bag": error_result},
             "next_action": "FAILED"
         }
-    
+
     try:
         # PII / Logging safety check
         # Limit log size
@@ -81,18 +98,46 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
              logger.info("🚀 Segment Runner started. Event size: %s (large event truncated)", log_size)
         else:
              logger.info("🚀 Segment Runner started. Event: %s", event_str)
-        
+
+        # [v3.35] Lambda Timeout Watchdog: extract deadline for graceful shutdown
+        deadline_ms = None
+        if context and hasattr(context, 'get_remaining_time_in_millis'):
+            remaining = context.get_remaining_time_in_millis()
+            deadline_ms = time.time() * 1000 + remaining - 15000  # 15s buffer for seal
+
+        # [v3.35] Segment idempotency: skip if this exact segment was already processed
+        _seg_idem_key = None
+        _exec_id = None
+        if isinstance(event, dict):
+            _exec_id = event.get('execution_id', '')
+            _seg_num = event.get('segment_to_run', 0)
+            if _exec_id:
+                _seg_idem_key = f"{_exec_id}#seg_{_seg_num}"
+
+        if _seg_idem_key and _idempotency_table:
+            try:
+                _existing = _idempotency_table.get_item(Key={'idempotency_key': _seg_idem_key}).get('Item')
+                if _existing and _existing.get('status') == 'COMPLETED':
+                    logger.info(f"Segment already processed (idempotent skip): {_seg_idem_key}")
+                    if _existing.get('result_s3_path'):
+                        _cached = _s3_client.get_object(Bucket=_S3_BUCKET, Key=_existing['result_s3_path'])
+                        return json.loads(_cached['Body'].read().decode('utf-8'))
+                    elif _existing.get('result_json'):
+                        return json.loads(_existing['result_json'])
+            except Exception as e:
+                logger.warning(f"Segment idempotency check failed (proceeding): {e}")
+
         # 🛡️ [v2.5] S3 bucket 강제 동기화 - 핸들러에서 서비스로 전달
-        service = SegmentRunnerService(s3_bucket=_S3_BUCKET)
+        service = SegmentRunnerService(s3_bucket=_S3_BUCKET, deadline_ms=deadline_ms)
         result = service.execute_segment(event)
-        
+
         # 🛡️ [v2.5] TypeError 방어 코드 - total_segments 보장 (강제 캐스팅)
         if result and isinstance(result, dict):
             # 🛡️ [Critical Fix] 어떤 타입이든 int로 강제 변환 시도
             raw_total = result.get('total_segments')
             if raw_total is None:
                 raw_total = event.get('total_segments')
-            
+
             try:
                 # Dict, List 등 잘못된 타입이 들어와도 int()로 변환 시도
                 if isinstance(raw_total, (int, float)):
@@ -113,13 +158,38 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 # 모든 변환 시도 실패 시
                 logger.error(f"🚨 Failed to convert total_segments: {e}, raw_value={raw_total}")
                 result['total_segments'] = 1
-            
+
             # 🛡️ [v3.3] threshold 안전 추출 (AttributeError 방지)
             # service.threshold 속성이 없을 수 있으므로 getattr 사용
             if 'state_size_threshold' not in result:
                 result['state_size_threshold'] = getattr(service, 'threshold', 180)
-        
+
         logger.info("✅ Segment Runner finished successfully.")
+
+        # [v3.35] Record segment completion for idempotency
+        if _seg_idem_key and _idempotency_table and result:
+            try:
+                _result_json = json.dumps(result, default=str)
+                if len(_result_json) > 350000:
+                    _s3_idem_key = f"idempotency/{_seg_idem_key}.json"
+                    _s3_client.put_object(Bucket=_S3_BUCKET, Key=_s3_idem_key, Body=_result_json)
+                    _idempotency_table.put_item(Item={
+                        'idempotency_key': _seg_idem_key,
+                        'status': 'COMPLETED',
+                        'result_s3_path': _s3_idem_key,
+                        'completed_at': int(time.time()),
+                        'ttl': int(time.time()) + 86400
+                    })
+                else:
+                    _idempotency_table.put_item(Item={
+                        'idempotency_key': _seg_idem_key,
+                        'status': 'COMPLETED',
+                        'result_json': _result_json,
+                        'completed_at': int(time.time()),
+                        'ttl': int(time.time()) + 86400
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to record segment idempotency: {e}")
 
         # 🎒 [v3.13] ASL contract enforcement: ensure result has next_action
         # service.execute_segment() has multiple return paths:
@@ -142,6 +212,8 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
         return result
 
     except Exception as e:
+        if isinstance(e, TimeoutError):
+            logger.warning("Lambda deadline reached — state sealed safely via graceful shutdown")
         logger.exception("❌ Segment Runner failed")
         # Return error state that Step Functions can catch
         # 🎒 [v3.13] Use seal_state_bag for ASL contract compliance
@@ -149,12 +221,12 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "error": str(e),
             "error_type": type(e).__name__
         }
-        
+
         # 🛡️ [v3.3] total_segments 추출 로직 강화 (S3 포인터 대응)
         # 우선순위: event.total_segments > partition_map 길이 > 기본값 유지
         raw_total = event.get('total_segments') if event else None
         p_map = event.get('partition_map') if event else None
-        
+
         # 1. 숫자로 변환 가능한 경우
         if raw_total is not None:
             try:
@@ -168,11 +240,11 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 safe_total_segments = None
         else:
             safe_total_segments = None
-        
+
         # 2. partition_map이 실제 리스트인 경우
         if safe_total_segments is None and isinstance(p_map, list) and p_map:
             safe_total_segments = len(p_map)
-        
+
         # 3. 최후의 보루: S3 포인터만 있거나 완전히 없는 경우
         if safe_total_segments is None:
             safe_total_segments = 1
@@ -181,7 +253,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                     f"🛡️ [v3.3] total_segments unknown (partition_map offloaded to S3). "
                     f"Using fallback=1. This may cause premature workflow termination."
                 )
-        
+
         # 🎒 [v3.13] Build error result for seal_state_bag
         # 🛡️ [v3.21 Fix] Must include '_status' = 'FAILED' so USC _compute_next_action
         # reads the correct status from delta._status (not delta.status which USC ignores).
@@ -201,7 +273,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
             "total_segments": safe_total_segments,
             "segment_id": event.get('segment_id', 0) if event else 0
         }
-        
+
         # 🎒 [v3.13] Use seal_state_bag for ASL contract compliance
         if KERNEL_PROTOCOL_AVAILABLE:
             try:
@@ -214,7 +286,7 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
                 action='error',
                 context={'error_type': type(e).__name__}
             )
-        
+
         # Fallback: wrap in state_data.bag for ASL compatibility
         # 🔧 [Fix] Match initialize_state_data error response structure
         # ASL JSONPath: $.state_data.bag.error_type
@@ -236,4 +308,3 @@ def lambda_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]
 # def some_function():
 #     from src.services.state.state_manager import StateManager
 #     ...
-

@@ -269,7 +269,8 @@ class PartitionCacheService:
                         'mtime': stat.st_mtime, 
                         'size': stat.st_size
                     })
-                except: pass
+                except Exception as e:
+                    logger.debug("Failed to stat cache file %s: %s", path, e)
             
             # Sort by mtime (oldest first)
             files.sort(key=lambda x: x['mtime'])
@@ -300,7 +301,8 @@ class PartitionCacheService:
     def _safe_remove_file(self, path: str):
         try:
             if os.path.exists(path): os.remove(path)
-        except: pass
+        except Exception as e:
+            logger.debug("Failed to remove cache file %s: %s", path, e)
 
     def _parse_s3_uri(self, uri: str):
         if not uri.startswith("s3://"): raise ValueError("Invalid S3 URI")
@@ -320,7 +322,8 @@ class PartitionCacheService:
                     'usage_ratio': used / total if total else 0
                 }
             }
-        except:
+        except Exception as e:
+             logger.debug("Failed to collect cache stats: %s", e)
              return {'error': 'Stats failed'}
     
     def clear_cache(self):
