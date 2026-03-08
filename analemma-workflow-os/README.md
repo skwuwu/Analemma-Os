@@ -273,6 +273,71 @@ aws stepfunctions describe-execution --execution-arn <ARN> --query "output" --ou
 
 ---
 
+## Core Logic Navigation
+
+> Direct links to the critical functions/classes an engineer needs to understand the system.
+> All paths relative to `backend/src/`.
+
+### Ring 0 — Kernel Protocol
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`seal_state_bag()`](backend/src/common/kernel_protocol.py#L55) | `common/kernel_protocol.py:55` | Every Lambda exit — standardized state serialization + dehydration |
+| [`open_state_bag()`](backend/src/common/kernel_protocol.py#L120) | `common/kernel_protocol.py:120` | Every Lambda entry — extract payload from SFN envelope |
+| [`run_workflow()`](backend/src/handlers/core/main.py#L4978) | `handlers/core/main.py:4978` | Top-level workflow execution entry point |
+
+### Segment Execution Pipeline
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`SegmentRunnerService`](backend/src/services/execution/segment_runner_service.py#L448) | `services/execution/segment_runner_service.py:448` | Core service orchestrating node-by-node execution |
+| [`execute_segment()`](backend/src/services/execution/segment_runner_service.py#L3225) | `services/execution/segment_runner_service.py:3225` | Main execution loop (rehydrate → execute → verify → seal) |
+
+### State Management
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`SmartStateBag`](backend/src/common/state_hydrator.py#L309) | `common/state_hydrator.py:309` | Temperature-aware dict with dirty-block tracking |
+| [`get_control_plane()`](backend/src/common/state_hydrator.py#L427) | `common/state_hydrator.py:427` | Extract CONTROL_PLANE_FIELDS — the only keys surviving dehydration |
+| [`StateHydrator`](backend/src/common/state_hydrator.py#L458) | `common/state_hydrator.py:458` | Dehydrate (→ S3 batches) / Rehydrate (S3 → SmartStateBag) |
+
+### Merkle DAG & State Versioning
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`ManifestPointer`](backend/src/services/state/state_versioning_service.py#L60) | `services/state/state_versioning_service.py:60` | Immutable pointer — `parent_hash` links form the DAG chain |
+| [`_compute_merkle_root()`](backend/src/services/state/state_versioning_service.py#L835) | `services/state/state_versioning_service.py:835` | `SHA-256(config_hash ‖ parent_hash ‖ blocks_hash)` |
+| [`save_state_delta()`](backend/src/services/state/state_versioning_service.py#L1746) | `services/state/state_versioning_service.py:1746` | Delta persistence: parallel S3 upload + incremental Merkle root |
+| [`create_manifest_with_consistency()`](backend/src/services/state/eventual_consistency_guard.py#L88) | `services/state/eventual_consistency_guard.py:88` | 2PC: S3 upload → DynamoDB transact → S3 tag confirm |
+| [`_verify_still_unreachable()`](backend/src/services/state/merkle_gc_service.py#L410) | `services/state/merkle_gc_service.py:410` | GC TOCTOU defense — conditional delete with reachability re-check |
+
+### Incremental Hashing
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`SubBlockHashRegistry`](backend/src/common/hash_utils.py#L258) | `common/hash_utils.py:258` | Temperature-aligned sub-blocks (HOT/WARM/COLD/CONTROL) |
+| [`compute_incremental_root()`](backend/src/common/hash_utils.py#L282) | `common/hash_utils.py:282` | O(dirty_blocks) Merkle root — unchanged blocks reuse previous hash |
+
+### Quality Gate & Speculative Execution
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`QualityGate.evaluate()`](backend/src/services/quality_kernel/quality_gate.py#L495) | `services/quality_kernel/quality_gate.py:495` | Full Stage 1 + Stage 2 pipeline |
+| [`evaluate_stage1_only()`](backend/src/services/quality_kernel/quality_gate.py#L818) | `services/quality_kernel/quality_gate.py:818` | Fast path: <5ms, $0 — entropy + slop scoring only |
+| [`should_speculate()`](backend/src/services/execution/speculative_controller.py#L192) | `services/execution/speculative_controller.py:192` | Default-Deny gate: all nodes must be in SPECULATABLE allowlist |
+| [`begin_speculative()`](backend/src/services/execution/speculative_controller.py#L242) | `services/execution/speculative_controller.py:242` | Snapshot state + start background verification thread |
+| [`check_abort()`](backend/src/services/execution/speculative_controller.py#L337) | `services/execution/speculative_controller.py:337` | Next segment entry: COMMITTED → continue, ABORTED → rollback |
+
+### Bridge & REACT Agent
+
+| Function | Location | Purpose |
+|---|---|---|
+| [`AnalemmaBridge.segment()`](backend/src/bridge/python_bridge.py#L231) | `bridge/python_bridge.py:231` | Ring-level governance gate for every tool call |
+| [`ReactExecutor`](backend/src/bridge/react_executor.py#L143) | `bridge/react_executor.py:143` | Autonomous agent — Claude Sonnet 4 via Bedrock with tool_use |
+| [`ReactExecutor.run()`](backend/src/bridge/react_executor.py#L274) | `bridge/react_executor.py:274` | Main REACT loop: LLM → tool dispatch → budget check → repeat |
+
+---
+
 ## Project Structure
 
 ```
@@ -283,22 +348,20 @@ analemma-workflow-os/
         python_bridge.py       # AnalemmaBridge — Ring-level governance
         react_executor.py      # REACT autonomous agent executor
         virtual_segment_manager.py  # FastAPI loop virtualization
-      handlers/core/           # Lambda handlers (33 files)
+      handlers/core/           # Lambda handlers
       handlers/governance/     # Governor runner
       services/execution/      # Segment runner, speculative controller, optimistic verifier
       services/quality_kernel/ # Quality gate, kernel middleware, slop detector
       services/state/          # State versioning, merkle GC, eventual consistency
       common/                  # Hash utils, state hydrator, kernel protocol
-    template.yaml              # SAM template (64+ Lambda functions)
+    template.yaml              # SAM template (78 Lambda functions, 23 DynamoDB tables)
   frontend/
     apps/web/src/
-      components/              # 110+ React components
-      hooks/                   # 20 custom hooks
+      components/              # React components
+      hooks/                   # Custom hooks
       lib/                     # API clients, stores, utilities
   tests/
-    backend/unit/              # 50+ unit tests
-    backend/integration/       # 20+ integration tests
-    backend/e2e/               # 7 E2E tests
+    backend/                   # Unit + benchmark tests
   docs/                        # Technical whitepapers
 ```
 
