@@ -1,4 +1,4 @@
-import { useCallback, useState, useMemo, useEffect, Fragment, lazy, Suspense } from 'react';
+import { useCallback, useState, useMemo, useEffect, Fragment } from 'react';
 import {
   ReactFlow,
   Background,
@@ -18,13 +18,12 @@ import { fetchAuthSession } from '@aws-amplify/auth';
 import { useShallow } from 'zustand/react/shallow';
 import '@xyflow/react/dist/style.css';
 
-// Node components - lazy loaded to break circular dependencies and control execution order
-const AIModelNode = lazy(() => import('./nodes/AIModelNode').then(m => ({ default: m.AIModelNode })));
-const OperatorNode = lazy(() => import('./nodes/OperatorNode').then(m => ({ default: m.OperatorNode })));
-const TriggerNode = lazy(() => import('./nodes/TriggerNode').then(m => ({ default: m.TriggerNode })));
-const ControlNode = lazy(() => import('./nodes/ControlNode').then(m => ({ default: m.ControlNode })));
-const ControlBlockNode = lazy(() => import('./nodes/ControlBlockNode').then(m => ({ default: m.ControlBlockNode })));
-const GroupNode = lazy(() => import('./nodes/GroupNode').then(m => ({ default: m.GroupNode })));
+import { AIModelNode } from './nodes/AIModelNode';
+import { OperatorNode } from './nodes/OperatorNode';
+import { TriggerNode } from './nodes/TriggerNode';
+import { ControlNode } from './nodes/ControlNode';
+import { ControlBlockNode } from './nodes/ControlBlockNode';
+import { GroupNode } from './nodes/GroupNode';
 import { SmartEdge } from './edges/SmartEdge';
 
 // Dialog/Modal/Panel components - static imports to avoid runtime initialization issues
@@ -79,39 +78,13 @@ const WorkflowCanvasInner = () => {
   // ==========================================
   // 2. NODE/EDGE TYPES (useMemo)
   // ==========================================
-  // Wrap lazy-loaded nodes with Suspense to control execution order
-  // This prevents "Cannot access X before initialization" errors
   const nodeTypes: NodeTypes = useMemo(() => ({
-    aiModel: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <AIModelNode {...props} />
-      </Suspense>
-    ),
-    operator: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <OperatorNode {...props} />
-      </Suspense>
-    ),
-    trigger: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <TriggerNode {...props} />
-      </Suspense>
-    ),
-    control: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <ControlNode {...props} />
-      </Suspense>
-    ),
-    control_block: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <ControlBlockNode {...props} />
-      </Suspense>
-    ),
-    group: (props: any) => (
-      <Suspense fallback={<div className="p-4 bg-muted/50 animate-pulse rounded-lg border border-border" />}>
-        <GroupNode {...props} />
-      </Suspense>
-    ),
+    aiModel: AIModelNode,
+    operator: OperatorNode,
+    trigger: TriggerNode,
+    control: ControlNode,
+    control_block: ControlBlockNode,
+    group: GroupNode,
   }), []);
 
   const edgeTypes = useMemo(() => ({
@@ -389,18 +362,13 @@ const WorkflowCanvasInner = () => {
     clearWorkflow();
   }, [clearWorkflow]);
 
-  // Make edges non-editable (deletable, reconnectable, and selectable disabled)
-  const edgesWithRestrictions = useMemo(
-    () =>
-      edges.map((edge) => ({
-        ...edge,
-        deletable: false,
-        reconnectable: false,
-        selectable: false,
-        focusable: false,
-      })),
-    [edges]
-  );
+  // Edge restrictions via defaultEdgeOptions — avoids creating new edge objects per render
+  const defaultEdgeOptions = useMemo(() => ({
+    deletable: false,
+    reconnectable: false,
+    selectable: false,
+    focusable: false,
+  }), []);
 
   // 다이얼로그에 전달할 연결 데이터를 미리 계산
   const dialogConnectionData = useMemo(() => {
@@ -616,7 +584,8 @@ const WorkflowCanvasInner = () => {
 
           <ReactFlow
             nodes={nodes}
-            edges={edgesWithRestrictions}
+            edges={edges}
+            defaultEdgeOptions={defaultEdgeOptions}
             onNodesChange={onNodesChangeWithTracking}
             onEdgesChange={onEdgesChangeWithTracking}
             onConnect={onConnect}
