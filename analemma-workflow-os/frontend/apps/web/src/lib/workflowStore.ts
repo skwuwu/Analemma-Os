@@ -159,7 +159,14 @@ export const useWorkflowStore = create<WorkflowState>()(
 
       removeEdge: (id) => set((state) => ({ edges: state.edges.filter((e) => e.id !== id) })),
 
-      onNodesChange: (changes) => set((state) => ({ nodes: applyNodeChanges(changes, state.nodes) })),
+      onNodesChange: (changes) => {
+        // Filter out dimension changes — ReactFlow manages these internally.
+        // Applying them back to our store creates a feedback loop:
+        // dimensions → store update → new array ref → ReactFlow syncs → re-measures → loop (React #185)
+        const meaningful = changes.filter(c => c.type !== 'dimensions');
+        if (meaningful.length === 0) return;
+        set((state) => ({ nodes: applyNodeChanges(meaningful, state.nodes) }));
+      },
 
       onEdgesChange: (changes) => set((state) => ({ edges: applyEdgeChanges(changes, state.edges) })),
 
@@ -759,10 +766,17 @@ export const useWorkflowStore = create<WorkflowState>()(
       },
     }),
     {
-      name: 'workflow-storage', // LocalStorage Key 이름
-      storage: createJSONStorage(() => localStorage), // 저장소 지정 (sessionStorage로 변경 가능)
-      // 필요 시 특정 필드만 저장하도록 partialize 옵션 사용 가능
-      // partialize: (state) => ({ nodes: state.nodes, edges: state.edges }), 
+      name: 'workflow-storage',
+      storage: createJSONStorage(() => localStorage),
+      partialize: (state) => ({
+        nodes: state.nodes,
+        edges: state.edges,
+        currentWorkflowId: state.currentWorkflowId,
+        currentWorkflowName: state.currentWorkflowName,
+        currentWorkflowInputs: state.currentWorkflowInputs,
+        subgraphs: state.subgraphs,
+        navigationPath: state.navigationPath,
+      }),
     }
   )
 );
