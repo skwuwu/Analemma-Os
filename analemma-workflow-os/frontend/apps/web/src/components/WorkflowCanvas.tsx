@@ -45,7 +45,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
-import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
+import { CanvasActionsContext } from '@/contexts/CanvasActionsContext';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
 import { useCanvasMode } from '@/hooks/useCanvasMode';
@@ -131,7 +131,7 @@ const WorkflowCanvasInner = () => {
       navigationPath: state.navigationPath || ['root'],
     }))
   );
-  // Actions (separate subscription to avoid re-renders on node/edge changes)
+  // Actions (stable references — useShallow prevents re-renders from unrelated state changes)
   const {
     addNode,
     updateNode,
@@ -148,7 +148,25 @@ const WorkflowCanvasInner = () => {
     navigateToSubgraph,
     navigateUp,
     setSelectedNodeId,
-  } = useWorkflowStore();
+  } = useWorkflowStore(
+    useShallow((state) => ({
+      addNode: state.addNode,
+      updateNode: state.updateNode,
+      removeNode: state.removeNode,
+      removeEdge: state.removeEdge,
+      addEdge: state.addEdge,
+      clearWorkflow: state.clearWorkflow,
+      loadWorkflow: state.loadWorkflow,
+      onNodesChange: state.onNodesChange,
+      onEdgesChange: state.onEdgesChange,
+      onConnect: state.onConnect,
+      groupNodes: state.groupNodes,
+      ungroupNode: state.ungroupNode,
+      navigateToSubgraph: state.navigateToSubgraph,
+      navigateUp: state.navigateUp,
+      setSelectedNodeId: state.setSelectedNodeId,
+    }))
+  );
 
   // Handle selection changes for both single and multi-node selection
   const handleSelectionChange = useCallback(({ nodes }: { nodes: Node[] }) => {
@@ -202,33 +220,32 @@ const WorkflowCanvasInner = () => {
   // Canvas mode detection
   const canvasMode = useCanvasMode();
 
-  // Auto-validation using graphAnalysis
+  // Stable structure keys — only change when graph topology changes (not on position/selection updates)
+  const nodeStructureKey = useMemo(
+    () => nodes.map(n => n.id).sort().join(','),
+    [nodes]
+  );
+  const edgeStructureKey = useMemo(
+    () => edges.map(e => `${e.source}-${e.target}`).sort().join(','),
+    [edges]
+  );
+
+  // Auto-validation using graphAnalysis (recalculates only when topology changes)
   const validation = useMemo(() => {
     if (nodes.length === 0) {
       return { issueCount: 0, hasErrors: false, hasWarnings: false, warnings: [] };
     }
-    
+
     const analysisResult = analyzeWorkflowGraph(nodes, edges);
     const warnings = analysisResult.warnings || [];
-    
-    // 안정적인 참조를 위해 warnings 배열을 정렬된 문자열로 키 생성
-    const warningsKey = warnings.map(w => `${w.type}:${w.nodeIds.join(',')}`).sort().join('|');
-    
+
     return {
       issueCount: warnings.length,
       hasErrors: warnings.some(w => w.type === 'unreachable_node'),
       hasWarnings: warnings.length > 0,
       warnings,
-      _warningsKey: warningsKey // 내부 비교용 키
     };
-  }, [
-    nodes.length,
-    edges.length,
-    // 더 안정적인 비교: 노드 ID들의 정렬된 문자열
-    ...nodes.map(n => n.id).sort(),
-    // 엣지 연결들의 정렬된 문자열
-    ...edges.map(e => `${e.source}-${e.target}`).sort()
-  ]);
+  }, [nodeStructureKey, edgeStructureKey]);
 
   // Wrap workflow actions to record changes for Co-design
   const addNodeWithTracking = useCallback((node: Node) => {
@@ -373,17 +390,10 @@ const WorkflowCanvasInner = () => {
     clearWorkflow();
   }, [clearWorkflow]);
 
-  // Memoize nodes with onDelete handler to prevent unnecessary re-renders
-  const nodesWithHandlers = useMemo(
-    () =>
-      nodes.map((node) => ({
-        ...node,
-        data: {
-          ...node.data,
-          onDelete: handleNodeDelete,
-        },
-      })),
-    [nodes, handleNodeDelete]
+  // Canvas actions context value — stable reference for node components to access handlers
+  const canvasActionsValue = useMemo(
+    () => ({ deleteNode: handleNodeDelete }),
+    [handleNodeDelete]
   );
 
   // Make edges non-editable (deletable, reconnectable, and selectable disabled)
@@ -448,22 +458,29 @@ const WorkflowCanvasInner = () => {
   // Co-design: 변경사항이 있을 때 AI 제안 요청
   useEffect(() => {
     if (recentChanges.length > 0) {
+      let isCancelled = false;
       const timeoutId = setTimeout(async () => {
         try {
           const session = await fetchAuthSession();
+          if (isCancelled) return;
           const idToken = session.tokens?.idToken?.toString();
-          
+
           const currentNodes = useWorkflowStore.getState().nodes;
           const currentEdges = useWorkflowStore.getState().edges;
-          
+
           requestSuggestions({ nodes: currentNodes, edges: currentEdges }, idToken);
           requestAudit({ nodes: currentNodes, edges: currentEdges }, idToken);
         } catch (error) {
-          console.error('Failed to get auth token for codesign:', error);
+          if (!isCancelled) {
+            console.error('Failed to get auth token for codesign:', error);
+          }
         }
-      }, 2000); // 2초 디바운스
+      }, 2000);
 
-      return () => clearTimeout(timeoutId);
+      return () => {
+        isCancelled = true;
+        clearTimeout(timeoutId);
+      };
     }
   }, [recentChanges.length, requestSuggestions, requestAudit]);
 
@@ -473,9 +490,14 @@ const WorkflowCanvasInner = () => {
       const target = event.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
-      if ((event.key === 'Delete' || event.key === 'Backspace') && selectedNode) {
+      if ((event.key === 'Delete' || event.key === 'Backspace') && (selectedNodes.length > 0 || selectedNode)) {
         event.preventDefault();
-        handleNodeDelete(selectedNode.id);
+        if (selectedNodes.length > 1) {
+          selectedNodes.forEach(n => handleNodeDelete(n.id));
+          setSelectedNodes([]);
+        } else if (selectedNode) {
+          handleNodeDelete(selectedNode.id);
+        }
         setSelectedNode(null);
         setEditorOpen(false);
       }
@@ -493,7 +515,7 @@ const WorkflowCanvasInner = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNode, editorOpen, handleNodeDelete]);
+  }, [selectedNode, selectedNodes, editorOpen, handleNodeDelete]);
 
   // 노드 선택 핸들러
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -515,7 +537,7 @@ const WorkflowCanvasInner = () => {
   }, [timeMachine]);
 
   return (
-    <>
+    <CanvasActionsContext.Provider value={canvasActionsValue}>
       <div className="h-full w-full relative flex overflow-hidden bg-[#121212]">
         {/* Main Canvas Area */}
         <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
@@ -523,26 +545,24 @@ const WorkflowCanvasInner = () => {
           <div className="absolute top-4 right-4 z-10 flex gap-2">
             {/* Clear Canvas Button */}
             {nodes.length > 0 && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => {
-                      if (confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
-                        clearCanvas();
-                      }
-                    }}
-                    className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Clear
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom" className="text-xs">
+              <div className="group/clear relative">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    if (confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
+                      clearCanvas();
+                    }
+                  }}
+                  className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Clear
+                </Button>
+                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 hidden group-hover/clear:block z-50 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
                   Clear entire canvas
-                </TooltipContent>
-              </Tooltip>
+                </div>
+              </div>
             )}
             
             <AnimatePresence>
@@ -602,7 +622,7 @@ const WorkflowCanvasInner = () => {
           )}
 
           <ReactFlow
-            nodes={nodesWithHandlers}
+            nodes={nodes}
             edges={edgesWithRestrictions}
             onNodesChange={onNodesChangeWithTracking}
             onEdgesChange={onEdgesChangeWithTracking}
@@ -629,16 +649,14 @@ const WorkflowCanvasInner = () => {
             <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={{ opacity: 0.4 }} />
           </ReactFlow>
 
-          {/* Shortcuts Info */}
+          {/* Shortcuts Info — CSS hover instead of Radix Tooltip to avoid render conflicts */}
           <div className="absolute bottom-4 left-4 z-10 flex items-center gap-3">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-900/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-slate-800 cursor-help hover:text-slate-300 transition-colors">
-                  <Keyboard className="w-3.5 h-3.5" />
-                  SHORTCUTS
-                </div>
-              </TooltipTrigger>
-              <TooltipContent side="top" className="bg-slate-900 border-slate-800 p-3 rounded-xl shadow-2xl">
+            <div className="group/shortcuts relative">
+              <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-900/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-slate-800 cursor-help hover:text-slate-300 transition-colors">
+                <Keyboard className="w-3.5 h-3.5" />
+                SHORTCUTS
+              </div>
+              <div className="absolute bottom-full left-0 mb-2 hidden group-hover/shortcuts:block z-50 bg-slate-900 border border-slate-800 p-3 rounded-xl shadow-2xl">
                 <div className="grid grid-cols-2 gap-x-6 gap-y-2">
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DEL</kbd> Delete Node</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ENT</kbd> Edit Params</div>
@@ -646,8 +664,8 @@ const WorkflowCanvasInner = () => {
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">⇧+DRAG</kbd> Multi-Select</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DBL-CLICK</kbd> Enter Group</div>
                 </div>
-              </TooltipContent>
-            </Tooltip>
+              </div>
+            </div>
             <span className="text-[10px] text-slate-600">
               <kbd className="px-1 py-0.5 bg-slate-800/50 rounded text-slate-500">⇧</kbd>+Drag to select · Double-click group to enter
             </span>
@@ -722,7 +740,7 @@ const WorkflowCanvasInner = () => {
           </motion.div>
         )}
       </AnimatePresence>
-    </>
+    </CanvasActionsContext.Provider>
   );
 }
 

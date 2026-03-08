@@ -1,12 +1,12 @@
 import { Handle, Position } from '@xyflow/react';
-import { Clock, Webhook, Zap, X, Play } from 'lucide-react';
+import { Clock, Webhook, Zap, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-// CSS hover tooltip used instead of Radix Tooltip to prevent React #185 inside ReactFlow
 import { cn } from '@/lib/utils';
+import { useCanvasActions } from '@/contexts/CanvasActionsContext';
+import { memo } from 'react';
 import { TRIGGER_CONFIG, type TriggerType } from '@/lib/nodeConstants';
 
-// Icon name to component mapping
 const ICON_MAP = {
   Clock,
   Webhook,
@@ -17,15 +17,15 @@ interface TriggerNodeProps {
   data: {
     label: string;
     triggerType?: keyof typeof TRIGGER_CONFIG;
-    configValue?: string; // 예: "0 9 * * *", "POST /hook", "On User Signup"
-    onRun?: () => void;   // 수동 실행 핸들러
+    configValue?: string;
+    triggerId?: string;
   };
   id: string;
-  onDelete?: (id: string) => void;
   selected?: boolean;
 }
 
-export const TriggerNode = ({ data, id, onDelete, selected }: TriggerNodeProps) => {
+const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
+  const { deleteNode } = useCanvasActions();
   const config = TRIGGER_CONFIG[data.triggerType || 'default'] || TRIGGER_CONFIG.default;
   const Icon = ICON_MAP[config.iconName as keyof typeof ICON_MAP] || Zap;
 
@@ -41,44 +41,19 @@ export const TriggerNode = ({ data, id, onDelete, selected }: TriggerNodeProps) 
         boxShadow: `0 0 20px hsl(${config.color} / 0.15)`
       }}
     >
-      {/* Trigger는 시작점이므로 Target Handle이 없습니다. Source만 존재. */}
-
-      {/* 상단 액션 버튼 그룹 */}
+      {/* Action buttons */}
       <div className="absolute -top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-        {/* 수동 실행 버튼 (테스트용) */}
-        {data.onRun && (
-          <div className="group/run relative">
-            <Button
-              size="icon"
-              variant="outline"
-              className="h-6 w-6 rounded-full border-primary/50 bg-background hover:bg-primary hover:text-primary-foreground"
-              onClick={(e) => {
-                e.stopPropagation();
-                data.onRun?.();
-              }}
-            >
-              <Play className="w-3 h-3" />
-            </Button>
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover/run:block z-50 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
-              Test Run
-            </div>
-          </div>
-        )}
-
-        {/* 삭제 버튼 */}
-        {onDelete && (
-           <Button
-             size="icon"
-             variant="destructive"
-             className="h-6 w-6 rounded-full shadow-sm"
-             onClick={(e) => {
-               e.stopPropagation();
-               onDelete(id);
-             }}
-           >
-             <X className="w-3 h-3" />
-           </Button>
-        )}
+        <Button
+          size="icon"
+          variant="destructive"
+          className="h-6 w-6 rounded-full shadow-sm"
+          onClick={(e) => {
+            e.stopPropagation();
+            deleteNode(id);
+          }}
+        >
+          <X className="w-3 h-3" />
+        </Button>
       </div>
 
       <div className="flex items-start gap-3">
@@ -100,7 +75,6 @@ export const TriggerNode = ({ data, id, onDelete, selected }: TriggerNodeProps) 
             {data.label}
           </span>
 
-          {/* 상세 설정값 표시 (Cron, Method 등) */}
           {data.configValue && (
             <Badge
               variant="secondary"
@@ -125,3 +99,16 @@ export const TriggerNode = ({ data, id, onDelete, selected }: TriggerNodeProps) 
     </div>
   );
 };
+
+export const TriggerNode = memo(TriggerNodeInner, (prev, next) => {
+  if (prev.selected !== next.selected) return false;
+  if (prev.id !== next.id) return false;
+  const pd = prev.data;
+  const nd = next.data;
+  return (
+    pd.label === nd.label &&
+    pd.triggerType === nd.triggerType &&
+    pd.configValue === nd.configValue &&
+    pd.triggerId === nd.triggerId
+  );
+});
