@@ -2,7 +2,7 @@ import { Handle, Position, useReactFlow } from '@xyflow/react';
 import { GitBranch, Repeat, Plus, Trash2, Settings } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+// Native select used instead of Radix Select to prevent React #185 inside ReactFlow
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
@@ -181,18 +181,17 @@ export const ControlBlockNode = ({ data, id, selected }: ControlBlockNodeProps) 
           {/* 블록 타입 선택 */}
           <div className="space-y-1.5">
             <Label className="text-xs">Block Type</Label>
-            <Select value={data.blockType} onValueChange={handleTypeChange}>
-              <SelectTrigger className="h-8 text-xs">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(BLOCK_TYPE_CONFIG).map(([key, cfg]) => (
-                  <SelectItem key={key} value={key} className="text-xs">
-                    {cfg.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <select
+              value={data.blockType}
+              onChange={(e) => handleTypeChange(e.target.value as ControlBlockType)}
+              className="h-8 w-full text-xs rounded-md border border-input bg-background px-3 py-1 ring-offset-background focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+            >
+              {Object.entries(BLOCK_TYPE_CONFIG).map(([key, cfg]) => (
+                <option key={key} value={key}>
+                  {cfg.label}
+                </option>
+              ))}
+            </select>
             <p className="text-[10px] text-muted-foreground">{config.description}</p>
           </div>
 

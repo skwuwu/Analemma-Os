@@ -2,7 +2,7 @@ import { Handle, Position } from '@xyflow/react';
 import { Clock, Webhook, Zap, X, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+// CSS hover tooltip used instead of Radix Tooltip to prevent React #185 inside ReactFlow
 import { cn } from '@/lib/utils';
 import { TRIGGER_CONFIG, type TriggerType } from '@/lib/nodeConstants';
 
@@ -47,22 +47,22 @@ export const TriggerNode = ({ data, id, onDelete, selected }: TriggerNodeProps) 
       <div className="absolute -top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
         {/* 수동 실행 버튼 (테스트용) */}
         {data.onRun && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                size="icon"
-                variant="outline"
-                className="h-6 w-6 rounded-full border-primary/50 bg-background hover:bg-primary hover:text-primary-foreground"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  data.onRun?.();
-                }}
-              >
-                <Play className="w-3 h-3" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">Test Run</TooltipContent>
-          </Tooltip>
+          <div className="group/run relative">
+            <Button
+              size="icon"
+              variant="outline"
+              className="h-6 w-6 rounded-full border-primary/50 bg-background hover:bg-primary hover:text-primary-foreground"
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onRun?.();
+              }}
+            >
+              <Play className="w-3 h-3" />
+            </Button>
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover/run:block z-50 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+              Test Run
+            </div>
+          </div>
         )}
 
         {/* 삭제 버튼 */}

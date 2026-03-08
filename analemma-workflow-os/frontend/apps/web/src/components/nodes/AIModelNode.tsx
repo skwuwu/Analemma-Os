@@ -15,7 +15,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+// CSS hover tooltip used instead of Radix Tooltip to prevent React #185 inside ReactFlow
 import { cn } from '@/lib/utils';
 import { useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -135,27 +135,25 @@ export const AIModelNode = ({ data, id, onDelete, selected }: AIModelNodeProps) 
 
       {/* Tools/Skills Badge */}
       {(data.tools?.length || data.toolsCount) ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <div className="flex items-center gap-1.5 px-2 py-1.5 mb-3 rounded-lg bg-amber-500/10 text-[10px] text-amber-400 border border-amber-500/20 cursor-help">
-              <Wrench className="w-3 h-3" />
-              <span className="font-bold">{data.tools?.length || data.toolsCount} Tools</span>
-              {data.tools && data.tools.length > 0 && (
-                <span className="text-amber-400/60 truncate ml-1">
-                  ({data.tools.slice(0, 2).map(t => t.name).join(', ')}{data.tools.length > 2 ? '...' : ''})
-                </span>
-              )}
-            </div>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="max-w-[250px]">
+        <div className="group/tools relative">
+          <div className="flex items-center gap-1.5 px-2 py-1.5 mb-3 rounded-lg bg-amber-500/10 text-[10px] text-amber-400 border border-amber-500/20 cursor-help">
+            <Wrench className="w-3 h-3" />
+            <span className="font-bold">{data.tools?.length || data.toolsCount} Tools</span>
+            {data.tools && data.tools.length > 0 && (
+              <span className="text-amber-400/60 truncate ml-1">
+                ({data.tools.slice(0, 2).map(t => t.name).join(', ')}{data.tools.length > 2 ? '...' : ''})
+              </span>
+            )}
+          </div>
+          <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 hidden group-hover/tools:block z-50 max-w-[250px] rounded-md border bg-popover p-2 text-popover-foreground shadow-md">
             <div className="space-y-1">
               <p className="font-bold text-xs">Enabled Tools:</p>
               {data.tools?.map((tool, i) => (
                 <p key={i} className="text-[10px] text-muted-foreground">• {tool.name}</p>
               )) || <p className="text-[10px] text-muted-foreground">{data.toolsCount} tools configured</p>}
             </div>
-          </TooltipContent>
-        </Tooltip>
+          </div>
+        </div>
       ) : null}
 
       {/* Streaming / Output Area */}
