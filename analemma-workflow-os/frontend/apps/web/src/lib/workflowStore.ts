@@ -160,11 +160,12 @@ export const useWorkflowStore = create<WorkflowState>()(
       removeEdge: (id) => set((state) => ({ edges: state.edges.filter((e) => e.id !== id) })),
 
       onNodesChange: (changes) => {
-        // Whitelist: only persist changes that affect our data model.
-        // 'dimensions' and 'select' are managed by ReactFlow internally.
-        // Applying them back creates a feedback loop → React #185.
+        // Whitelist: only apply changes that affect our data model.
+        // 'dimensions' is managed by ReactFlow internally — applying it back
+        // creates a feedback loop (ResizeObserver → store → re-render → React #185).
+        // 'select' is safe (one-shot, no feedback loop) and needed for node selection UI.
         const storable = changes.filter(c =>
-          c.type === 'position' || c.type === 'remove' || c.type === 'add' || c.type === 'replace' || c.type === 'reset'
+          c.type === 'position' || c.type === 'select' || c.type === 'remove' || c.type === 'add' || c.type === 'replace'
         );
         if (storable.length === 0) return;
         set((state) => ({ nodes: applyNodeChanges(storable, state.nodes) }));
@@ -793,6 +794,8 @@ export const useWorkflowStore = create<WorkflowState>()(
         navigationPath: state.navigationPath,
       }),
       merge: (persistedState, currentState) => {
+        // Guard: persistedState is null/undefined when storage is empty (e.g. incognito)
+        if (!persistedState) return currentState;
         const persisted = persistedState as Partial<WorkflowState>;
         return {
           ...currentState,
