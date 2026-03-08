@@ -45,7 +45,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
-import { TooltipProvider } from './ui/tooltip';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
@@ -524,28 +523,26 @@ const WorkflowCanvasInner = () => {
           <div className="absolute top-4 right-4 z-10 flex gap-2">
             {/* Clear Canvas Button */}
             {nodes.length > 0 && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => {
-                        if (confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
-                          clearCanvas();
-                        }
-                      }}
-                      className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      Clear
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="text-xs">
-                    Clear entire canvas
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (confirm('Are you sure you want to clear the entire canvas? This action cannot be undone.')) {
+                        clearCanvas();
+                      }
+                    }}
+                    className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Clear
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" className="text-xs">
+                  Clear entire canvas
+                </TooltipContent>
+              </Tooltip>
             )}
             
             <AnimatePresence>
@@ -731,8 +728,6 @@ const WorkflowCanvasInner = () => {
 
 export const WorkflowCanvas = () => (
   <ReactFlowProvider>
-    <TooltipProvider>
-      <WorkflowCanvasInner />
-    </TooltipProvider>
+    <WorkflowCanvasInner />
   </ReactFlowProvider>
 );
