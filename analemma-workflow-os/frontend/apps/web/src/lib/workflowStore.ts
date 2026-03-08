@@ -147,7 +147,14 @@ export const useWorkflowStore = create<WorkflowState>()(
 
       updateEdge: (id, changes) =>
         set((state) => ({
-          edges: state.edges.map((e) => (e.id === id ? { ...e, ...changes } : e)),
+          edges: state.edges.map((e) => {
+            if (e.id !== id) return e;
+            // Merge data instead of overriding (consistent with updateNode)
+            if (changes.data) {
+              return { ...e, ...changes, data: { ...e.data, ...changes.data } };
+            }
+            return { ...e, ...changes };
+          }),
         })),
 
       removeEdge: (id) => set((state) => ({ edges: state.edges.filter((e) => e.id !== id) })),

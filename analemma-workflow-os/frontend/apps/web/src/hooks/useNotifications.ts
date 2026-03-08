@@ -43,7 +43,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
         return [];
       }
 
-      console.log('📥 Fetching saved notifications from API...');
+      // console.log('Fetching saved notifications from API...');
       const response = await makeAuthenticatedRequest(`${API_BASE}/notifications?status=pending&limit=50`);
 
       if (!response.ok) {
@@ -55,7 +55,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
       const data = parsed.body ? JSON.parse(parsed.body) : parsed;
 
       if (data.notifications && Array.isArray(data.notifications)) {
-        console.log(`📥 Found ${data.notifications.length} saved notifications`);
+        // console.log(`Found ${data.notifications.length} saved notifications`);
         return data.notifications.map((item: PendingNotification) => convertToNotificationItem(item));
       }
       return [];
@@ -181,27 +181,28 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     }
   }, [updateNotificationsCache]);
 
-  // Initialize or reuse singleton WebSocketManager
+  // Stable refs for WS callbacks to avoid re-creating the connection on every render
+  const handleNotificationMessageRef = useRef(handleNotificationMessage);
+  handleNotificationMessageRef.current = handleNotificationMessage;
+  const refetchRef = useRef(refetch);
+  refetchRef.current = refetch;
+
+  // Initialize or reuse singleton WebSocketManager (runs once per mount)
   useEffect(() => {
     subscriberCount++;
-    
+
     if (!globalWsManager) {
       globalWsManager = new WebSocketManager({
         url: WS_URL,
         maxReconnectAttempts: 10,
-        onMessage: handleNotificationMessage,
-        onComponentStream: optionsRef.current.onWorkflowComponentStream,
+        onMessage: (n) => handleNotificationMessageRef.current(n),
+        onComponentStream: (d) => optionsRef.current.onWorkflowComponentStream?.(d),
         onConnected: () => {
-          refetch();
+          refetchRef.current();
         },
       });
       globalWsManager.connect();
     } else {
-      // Update callbacks for existing manager
-      globalWsManager.updateCallbacks({
-        onMessage: handleNotificationMessage,
-        onComponentStream: optionsRef.current.onWorkflowComponentStream,
-      });
       // Ensure connection is active
       if (!globalWsManager.isConnected()) {
         globalWsManager.connect();
@@ -215,7 +216,8 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
         globalWsManager = null;
       }
     };
-  }, [handleNotificationMessage, refetch]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Update callbacks when options change (without reconnecting)
   useEffect(() => {
@@ -250,7 +252,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
     });
 
     if (itemToRemove) {
-      console.log('🗑️ Removing notification:', { id, action: itemToRemove.action });
+      // console.log('Removing notification:', id);
 
       const executionId = itemToRemove.execution_id || itemToRemove.id;
       if (executionId && executionId.startsWith('arn:aws:states:')) {
@@ -260,7 +262,7 @@ export const useNotifications = (options: UseNotificationsOptions = {}) => {
             method: 'POST',
             body: JSON.stringify({ executionId })
           });
-          console.log('✅ Notification dismissed on backend');
+          // console.log('Notification dismissed on backend');
         } catch (e) {
           console.error('Failed to dismiss notification on backend:', e);
         }

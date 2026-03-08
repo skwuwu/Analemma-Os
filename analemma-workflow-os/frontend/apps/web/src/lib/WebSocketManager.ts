@@ -51,6 +51,9 @@ export class WebSocketManager {
       token = session.tokens?.idToken?.toString() || null;
     } catch (e) {
       console.warn('Failed to get auth token for WS connection', e);
+      // Don't connect without auth — schedule a retry instead
+      this.scheduleReconnect();
+      return;
     }
 
     if (token) {
@@ -131,8 +134,10 @@ export class WebSocketManager {
     this.ws.onclose = (ev) => {
       console.log(`Notifications WS closed (code: ${ev.code})`);
       this.ws = null;
+      // Reset reconnecting flag so scheduleReconnect can proceed
+      this.isReconnecting = false;
       this.config.onDisconnected?.();
-      
+
       if (ev.code !== 1000) {
         this.scheduleReconnect();
       }

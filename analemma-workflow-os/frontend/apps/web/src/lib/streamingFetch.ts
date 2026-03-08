@@ -208,12 +208,14 @@ export async function streamDesignAssistant(body: unknown, opts: StreamOptions =
   try {
     res = await fetch(resolved.url, fetchOptions);
   } catch (err) {
+    cleanup();
     const e = err instanceof Error ? err : new Error(String(err));
     onError && onError(e);
     throw e;
   }
 
   if (!res.ok) {
+    cleanup();
     const text = await res.text();
     const e = new Error(`HTTP ${res.status}: ${text}`);
     onError && onError(e);
@@ -260,6 +262,7 @@ export async function streamCoDesignAssistant(endpoint: string, body: unknown, o
     res = await fetch(resolved.url, fetchOptions);
     console.log('[CoDesign] Response received:', { status: res.status, ok: res.ok });
   } catch (err) {
+    cleanup();
     console.error('[CoDesign] Fetch error:', err);
     const e = err instanceof Error ? err : new Error(String(err));
     onError && onError(e);
@@ -267,6 +270,7 @@ export async function streamCoDesignAssistant(endpoint: string, body: unknown, o
   }
 
   if (!res.ok) {
+    cleanup();
     const text = await res.text();
     const e = new Error(`HTTP ${res.status}: ${text}`);
     onError && onError(e);

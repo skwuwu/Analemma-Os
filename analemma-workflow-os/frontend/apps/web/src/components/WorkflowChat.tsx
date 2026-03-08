@@ -41,6 +41,7 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
   const abortCtrlRef = useRef<AbortController | null>(null);
   const [showLogs, setShowLogs] = useState(false);
   const [logs, setLogs] = useState<string[]>([]);
+  const mountedRef = useRef(true);
 
   const canvasMode = useCanvasMode();
   const recovery = useWorkflowRecovery();
@@ -84,6 +85,7 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
   // Request cleanup
   useEffect(() => {
     return () => {
+      mountedRef.current = false;
       if (abortCtrlRef.current) abortCtrlRef.current.abort();
     };
   }, []);
@@ -133,11 +135,11 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
         signal: abortCtrlRef.current.signal,
         onMessage: processStreamingChunk,
         onDone: () => {
-          setIsLoading(false);
+          if (mountedRef.current) setIsLoading(false);
           if (isDesignerMode) recovery.markGenerationComplete();
         },
         onError: (e) => {
-          setIsLoading(false);
+          if (mountedRef.current) setIsLoading(false);
           const errMsg = e?.message || 'Co-design error';
 
           if (isDesignerMode) {
@@ -151,7 +153,7 @@ export const WorkflowChat = ({ onWorkflowUpdate }: WorkflowChatProps) => {
       });
     } catch (error) {
       console.error('Chat error:', error);
-      setIsLoading(false);
+      if (mountedRef.current) setIsLoading(false);
       addMessage('assistant', `System Error: ${(error as Error).message}`);
     }
   };

@@ -122,6 +122,8 @@ export const useExecutionTimeline = (
     const [executionTimelines, setExecutionTimelines] = useState<Record<string, TimelineEntry[]>>({});
     const [timelineStates, setTimelineStates] = useState<Record<string, TimelineState>>({});
     const seqCountersRef = useRef<Record<string, number>>({});
+    const executionTimelinesRef = useRef(executionTimelines);
+    executionTimelinesRef.current = executionTimelines;
 
     // Configuration
     const TIMELINE_TTL_MS = 1000 * 60 * 60 * 24; // 24 hours
@@ -160,11 +162,12 @@ export const useExecutionTimeline = (
                 return next;
             });
 
-            // Prune timeline states as well
+            // Prune timeline states using ref to avoid stale closure
             setTimelineStates(prev => {
+                const currentTimelines = executionTimelinesRef.current;
                 const next: Record<string, TimelineState> = {};
                 for (const [key, state] of Object.entries(prev)) {
-                    if (executionTimelines[key]) {
+                    if (currentTimelines[key]) {
                         next[key] = state;
                     }
                 }
@@ -173,7 +176,8 @@ export const useExecutionTimeline = (
         }, PRUNE_INTERVAL_MS);
 
         return () => clearInterval(id);
-    }, [executionTimelines]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // 2. Append new notifications (with deterministic IDs)
     useEffect(() => {
@@ -212,7 +216,7 @@ export const useExecutionTimeline = (
     const fetchExecutionTimeline = useCallback(async (executionId: string, force = false) => {
         if (!executionId) return [];
 
-        const local = executionTimelines[executionId];
+        const local = executionTimelinesRef.current[executionId];
         if (!force && local && local.length > 0) {
             return local;
         }
@@ -301,7 +305,8 @@ export const useExecutionTimeline = (
 
         setExecutionTimelines(prev => ({ ...prev, [executionId]: prev[executionId] || [] }));
         return [];
-    }, [API_BASE, executionTimelines]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [API_BASE]);
 
     return { executionTimelines, timelineStates, fetchExecutionTimeline };
 };

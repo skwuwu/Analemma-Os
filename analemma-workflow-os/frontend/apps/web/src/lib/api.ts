@@ -72,32 +72,31 @@ export const makeAuthenticatedRequest = async (url: string, options: RequestInit
             });
         }
 
-        // 401 오류 시 토큰 갱신 후 재시도
+        // 401: refresh token then retry once
         if (response.status === 401) {
             console.log('401 error, refreshing token and retrying...');
 
+            // Step 1: Refresh token (isolated try-catch)
+            let refreshedToken: string;
             try {
-                // 토큰 갱신 시도
-                idToken = await getIdTokenWithRefresh(true);
-
-                // 새 토큰으로 재시도
-                response = await fetch(url, {
-                    ...options,
-                    headers: {
-                        ...options.headers,
-                        Authorization: `Bearer ${idToken}`,
-                    },
-                });
-
-                // 재시도도 실패한 경우
-                if (response.status === 401 || response.status === 403) {
-                    console.error('Retry failed after refresh. Session invalid.');
-                    throw new Error('Session expired. Please log in again.');
-                }
-
+                refreshedToken = await getIdTokenWithRefresh(true);
             } catch (refreshError) {
                 console.error('Failed to refresh token:', refreshError);
                 throw new Error('Token refresh failed. Please log in again.');
+            }
+
+            // Step 2: Retry with refreshed token
+            response = await fetch(url, {
+                ...options,
+                headers: {
+                    ...options.headers,
+                    Authorization: `Bearer ${refreshedToken}`,
+                },
+            });
+
+            if (response.status === 401 || response.status === 403) {
+                console.error('Retry failed after refresh. Session invalid.');
+                throw new Error('Session expired. Please log in again.');
             }
         }
 
@@ -134,7 +133,16 @@ export const parseApiResponse = async <T>(response: Response): Promise<T> => {
     }
 
     // Handle Lambda response format vs direct response
-    const data: T = parsed.body ? JSON.parse(parsed.body) : parsed;
+    let data: T;
+    if (parsed.body) {
+        try {
+            data = JSON.parse(parsed.body);
+        } catch {
+            data = parsed.body;
+        }
+    } else {
+        data = parsed;
+    }
     return data;
 };
 

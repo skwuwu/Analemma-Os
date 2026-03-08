@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useEffect } from 'react';
 import { convertWorkflowFromBackendFormat } from '@/lib/workflowConverter';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore } from '@/lib/codesignStore';
@@ -61,6 +61,16 @@ export const useWorkflowStreamProcessor = ({
   onMessage,
   onLog
 }: UseWorkflowStreamProcessorProps) => {
+  // Stable refs for callback props to prevent cascading re-creations
+  const onWorkflowUpdateRef = useRef(onWorkflowUpdate);
+  const onMessageRef = useRef(onMessage);
+  const onLogRef = useRef(onLog);
+  useEffect(() => {
+    onWorkflowUpdateRef.current = onWorkflowUpdate;
+    onMessageRef.current = onMessage;
+    onLogRef.current = onLog;
+  });
+
   // Co-design store access
   const { recordChange, addMessage, setRemoteMode } = useCodesignStore();
   const idCounterRef = useRef<number>(0);
@@ -76,8 +86,8 @@ export const useWorkflowStreamProcessor = ({
   }, []);
 
   const addDebugLog = useCallback((message: string) => {
-    onLog?.(message);
-  }, [onLog]);
+    onLogRef.current?.(message);
+  }, []);
 
   /**
    * DRY: 공통 워크플로우 로드 로직
@@ -105,15 +115,15 @@ export const useWorkflowStreamProcessor = ({
         edgeCount
       });
 
-      if (onWorkflowUpdate) {
-        onWorkflowUpdate({
+      if (onWorkflowUpdateRef.current) {
+        onWorkflowUpdateRef.current({
           ...frontendWorkflow,
           name: workflowName,
           id: generateId()
         });
       }
 
-      onMessage?.({
+      onMessageRef.current?.({
         role: 'assistant',
         content: `✨ Created workflow: "${workflowName}" with ${nodeCount} nodes`
       });
@@ -122,13 +132,13 @@ export const useWorkflowStreamProcessor = ({
     } catch (e) {
       console.error(`Failed to load ${context} workflow:`, e);
       addDebugLog(`error: failed to load ${context} workflow - ${(e as Error).message}`);
-      onMessage?.({
+      onMessageRef.current?.({
         role: 'assistant',
         content: 'Generated workflow structure, but failed to render on canvas.'
       });
       return true;
     }
-  }, [onWorkflowUpdate, onMessage, addDebugLog, generateId, recordChange]);
+  }, [addDebugLog, generateId, recordChange]);
 
   // --- 타입 가드: Node/Edge 데이터 간단 검증 ---
   interface NodeData { id?: string; type?: string;[key: string]: any }
@@ -160,7 +170,7 @@ export const useWorkflowStreamProcessor = ({
 
       addNode?.(nodeData as any);
       recordChange('add_node', { id: nodeData.id, data: nodeData, source: 'ai' });
-      onMessage?.({ role: 'thought', content: `➕ Mapping node: ${nodeData.label || nodeData.id}` });
+      onMessageRef.current?.({ role: 'thought', content: `➕ Mapping node: ${nodeData.label || nodeData.id}` });
     } else if (op === 'update' && id) {
       const changes = message.changes || message.data || {};
       if (typeof changes !== 'object' || changes === null) return true;
@@ -172,7 +182,7 @@ export const useWorkflowStreamProcessor = ({
       recordChange('delete_node', { id, source: 'ai' });
     }
     return true;
-  }, [onMessage, addDebugLog, recordChange]);
+  }, [addDebugLog, recordChange]);
 
   // Edge operation handler with tracking
   const handleEdgeOperation = useCallback((op: string, message: WorkflowMessage) => {
@@ -205,10 +215,10 @@ export const useWorkflowStreamProcessor = ({
     addDebugLog(`status: ${statusData}`);
 
     if (statusData === 'done') {
-      onMessage?.({ role: 'assistant', content: '✅ Optimization complete. The workflow is ready for review.' });
+      onMessageRef.current?.({ role: 'assistant', content: '✅ Optimization complete. The workflow is ready for review.' });
     }
     return true;
-  }, [addDebugLog, onMessage]);
+  }, [addDebugLog]);
 
   // Main processing function
   const processStreamingChunk = useCallback((obj: unknown) => {
@@ -217,7 +227,7 @@ export const useWorkflowStreamProcessor = ({
 
     // 1. Thought Process logging (Always higher priority)
     if (message.thought) {
-      onMessage?.({ role: 'thought', content: message.thought });
+      onMessageRef.current?.({ role: 'thought', content: message.thought });
     }
 
     // 2. Structural updates
@@ -252,7 +262,7 @@ export const useWorkflowStreamProcessor = ({
       const mode = (message.data as any).mode;
       if (mode) {
         setRemoteMode(mode);
-        onLog?.(`mode synced: ${mode}`);
+        onLogRef.current?.(`mode synced: ${mode}`);
       }
       return true;
     }
@@ -260,12 +270,12 @@ export const useWorkflowStreamProcessor = ({
     if (message.type === 'status') return handleStatusMessage(message);
 
     if (message.type === 'text' && message.data) {
-      onMessage?.({ role: 'assistant', content: String(message.data) });
+      onMessageRef.current?.({ role: 'assistant', content: String(message.data) });
       return true;
     }
 
     if (message.response?.text) {
-      onMessage?.({ role: 'assistant', content: message.response.text });
+      onMessageRef.current?.({ role: 'assistant', content: message.response.text });
       return true;
     }
 
@@ -275,7 +285,7 @@ export const useWorkflowStreamProcessor = ({
     handleNodeOperation,
     handleEdgeOperation,
     handleStatusMessage,
-    onMessage
+    setRemoteMode,
   ]);
 
   return {

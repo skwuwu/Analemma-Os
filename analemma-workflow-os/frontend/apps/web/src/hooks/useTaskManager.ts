@@ -21,6 +21,7 @@ import {
   type TaskListOptions,
   type TaskDetailOptions,
 } from '@/lib/taskApi';
+import { makeAuthenticatedRequest } from '@/lib/api';
 import type { TaskSummary, TaskDetail, TaskStreamPayload } from '@/lib/types';
 
 // ============ Task List Hook ============
@@ -72,13 +73,12 @@ export function useTaskDetail(options: UseTaskDetailOptions = {}) {
   const detailQuery = useQuery({
     queryKey: ['task', taskId, { includeTechnicalLogs }],
     queryFn: async () => {
-      console.log('[useTaskDetail] ✅ queryFn executing for taskId:', taskId);
+      // console.log('[useTaskDetail] queryFn executing for taskId:', taskId);
       if (!taskId) throw new Error('Task ID is required');
 
       const failures: string[] = [];
       const API_BASE = import.meta.env.VITE_API_BASE_URL;
-      console.log('[useTaskDetail] API_BASE:', API_BASE);
-      console.log('[useTaskDetail] 📥 Fetching detail, outcomes, and metrics for:', taskId);
+      // console.log('[useTaskDetail] API_BASE:', API_BASE);
       const [detail, outcomesResponse, metricsResponse] = await Promise.all([
         getTaskDetail(taskId, { includeTechnicalLogs }),
         getTaskOutcomes(taskId).catch(err => {
@@ -92,14 +92,14 @@ export function useTaskDetail(options: UseTaskDetailOptions = {}) {
           return null;
         }),
       ]);
-      console.log('[useTaskDetail] Received detail:', detail?.task_id, 'status:', detail?.status);
+      // console.log('[useTaskDetail] Received detail:', detail?.task_id, 'status:', detail?.status);
 
       // [FIX] 완료된 작업의 경우 execution history를 추가로 가져옴
       let executionHistory = null;
       if (detail.status === 'completed' || detail.status === 'failed' || detail.status === 'cancelled') {
         try {
           const historyUrl = `${API_BASE}/executions/history?executionArn=${encodeURIComponent(taskId)}`;
-          const historyResp = await fetch(historyUrl, { credentials: 'include' });
+          const historyResp = await makeAuthenticatedRequest(historyUrl);
           if (historyResp.ok) {
             const historyData = await historyResp.json();
             executionHistory = historyData;
@@ -338,18 +338,13 @@ export function useTaskManager(options: UseTaskManagerOptions = {}) {
   });
 
   // 선택된 Task 상세 조회
-  console.log('[useTaskManager] Initializing taskDetail with selectedId:', selectedId);
+  // console.log('[useTaskManager] Initializing taskDetail with selectedId:', selectedId);
   const taskDetail = useTaskDetail({
     taskId: selectedId || undefined,
     includeTechnicalLogs: optionsRef.current.showTechnicalLogs,
     refetchInterval: optionsRef.current.autoRefresh && selectedId ? 5000 : false,
   });
-  console.log('[useTaskManager] taskDetail state:', {
-    task: taskDetail.task?.task_id,
-    isLoading: taskDetail.isLoading,
-    isError: taskDetail.isError,
-    error: taskDetail.error?.message
-  });
+  // console.log('[useTaskManager] taskDetail state:', taskDetail.task?.task_id);
 
   // 실시간 스트림
   const taskStream = useTaskStream({
@@ -363,11 +358,11 @@ export function useTaskManager(options: UseTaskManagerOptions = {}) {
 
   // Task 선택
   const selectTask = useCallback((taskId: string | null) => {
-    console.log('[useTaskManager] 🎯 selectTask called with:', taskId);
+    // console.log('[useTaskManager] selectTask called with:', taskId);
     setSelectedId(taskId);
     // Force refetch when task is selected
     if (taskId) {
-      console.log('[useTaskManager] 🔄 Invalidating cache for task:', taskId);
+      // console.log('[useTaskManager] Invalidating cache for task:', taskId);
       queryClient.invalidateQueries({ queryKey: ['task', taskId] });
     }
   }, [queryClient]); // ✅ queryClient 추가하여 캐시 무효화 가능

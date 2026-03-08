@@ -151,7 +151,6 @@ export function useCorrectionLogger() {
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/corrections`, {
         method: 'POST',
-        keepalive: true, // 페이지 이동 시에도 전송 보장
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,

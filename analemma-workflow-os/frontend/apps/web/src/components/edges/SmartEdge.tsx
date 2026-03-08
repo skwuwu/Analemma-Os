@@ -255,7 +255,7 @@ export const SmartEdge = ({
         >
           <div className="flex flex-col items-center gap-1">
             {/* A. 엣지 타입 선택 드롭다운 */}
-            <DropdownMenu>
+            <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
                 <button
                   className="flex items-center gap-1 px-2 py-1 rounded-md bg-background border shadow-sm hover:bg-muted transition-colors text-xs"
