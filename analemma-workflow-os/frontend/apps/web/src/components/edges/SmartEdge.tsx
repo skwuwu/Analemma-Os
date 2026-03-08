@@ -2,10 +2,9 @@ import { BaseEdge, EdgeLabelRenderer, getBezierPath, useReactFlow, EdgeProps } f
 import { Activity, ChevronDown, ArrowRight, RefreshCw, GitBranch, Hand, Pause } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator, DropdownMenuLabel } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 
 // 백엔드 엣지 타입 정의
 export type BackendEdgeType = 'edge' | 'if' | 'while' | 'for_each' | 'hitp' | 'conditional_edge' | 'pause';
@@ -98,9 +97,23 @@ export const SmartEdge = ({
   data,
 }: EdgeProps) => {
   const { setEdges, getEdges, getNodes } = useReactFlow();
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
   const [isEditing, setIsEditing] = useState(false);
   const [conditionInput, setConditionInput] = useState('');
   const [isEditingLoop, setIsEditingLoop] = useState(false);
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!isDropdownOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setIsDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [isDropdownOpen]);
   const [loopConfig, setLoopConfig] = useState<{
     items_path?: string;
     item_key?: string;
@@ -254,52 +267,53 @@ export const SmartEdge = ({
           className="nodrag nopan"
         >
           <div className="flex flex-col items-center gap-1">
-            {/* A. 엣지 타입 선택 드롭다운 */}
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  className="flex items-center gap-1 px-2 py-1 rounded-md bg-background border shadow-sm hover:bg-muted transition-colors text-xs"
-                  style={{ 
-                    borderColor: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color,
-                    backgroundColor: isBackEdge ? 'hsla(38 92% 50% / 0.1)' : undefined
-                  }}
-                >
-                  <IconComponent className="w-3 h-3" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }} />
-                  <span className="font-medium" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }}>
-                    {isBackEdge ? 'Loop Back' : typeConfig.label}
-                  </span>
-                  <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="center" className="w-48" disablePortal>
-                <DropdownMenuLabel className="text-xs text-muted-foreground">
-                  {isLoopEdge ? 'Loop Structure Edge (Fixed)' : 'Edge Type'}
-                </DropdownMenuLabel>
-                <DropdownMenuSeparator />
-                {isLoopEdge ? (
-                  <div className="px-2 py-2 text-xs text-muted-foreground">
-                    Loop structure edges (entry/exit/back) are fixed. Control flow should be handled in edges before the loop.
+            {/* A. Edge type selector (native dropdown — no Radix to avoid React #185 inside EdgeLabelRenderer) */}
+            <div className="relative" ref={dropdownRef}>
+              <button
+                onClick={() => setIsDropdownOpen(v => !v)}
+                className="flex items-center gap-1 px-2 py-1 rounded-md bg-background border shadow-sm hover:bg-muted transition-colors text-xs"
+                style={{
+                  borderColor: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color,
+                  backgroundColor: isBackEdge ? 'hsla(38 92% 50% / 0.1)' : undefined
+                }}
+              >
+                <IconComponent className="w-3 h-3" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }} />
+                <span className="font-medium" style={{ color: isBackEdge ? 'hsl(38 92% 50%)' : typeConfig.color }}>
+                  {isBackEdge ? 'Loop Back' : typeConfig.label}
+                </span>
+                <ChevronDown className="w-3 h-3 text-muted-foreground" />
+              </button>
+              {isDropdownOpen && (
+                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 w-48 z-50 rounded-md border bg-popover p-1 text-popover-foreground shadow-md">
+                  <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">
+                    {isLoopEdge ? 'Loop Structure Edge (Fixed)' : 'Edge Type'}
                   </div>
-                ) : (
-                  Object.entries(EDGE_TYPE_CONFIG).map(([type, config]) => {
-                    const Icon = config.icon;
-                    return (
-                      <DropdownMenuItem
-                        key={type}
-                        onClick={() => handleTypeChange(type as BackendEdgeType)}
-                        className="flex items-center gap-2 cursor-pointer"
-                      >
-                        <Icon className="w-4 h-4" style={{ color: config.color }} />
-                        <div className="flex flex-col">
-                          <span className="font-medium">{config.label}</span>
-                          <span className="text-[10px] text-muted-foreground">{config.description}</span>
-                        </div>
-                      </DropdownMenuItem>
-                    );
-                  })
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <div className="-mx-1 my-1 h-px bg-muted" />
+                  {isLoopEdge ? (
+                    <div className="px-2 py-2 text-xs text-muted-foreground">
+                      Loop structure edges (entry/exit/back) are fixed. Control flow should be handled in edges before the loop.
+                    </div>
+                  ) : (
+                    Object.entries(EDGE_TYPE_CONFIG).map(([type, config]) => {
+                      const Icon = config.icon;
+                      return (
+                        <button
+                          key={type}
+                          onClick={() => { handleTypeChange(type as BackendEdgeType); setIsDropdownOpen(false); }}
+                          className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors"
+                        >
+                          <Icon className="w-4 h-4" style={{ color: config.color }} />
+                          <div className="flex flex-col text-left">
+                            <span className="font-medium">{config.label}</span>
+                            <span className="text-[10px] text-muted-foreground">{config.description}</span>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              )}
+            </div>
 
             {/* B. 조건 입력 (if, while, conditional_edge 타입일 때) */}
             {typeConfig.needsCondition && (
