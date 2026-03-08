@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Loader2, ArrowLeft } from 'lucide-react';
+import { Loader2, ArrowLeft, Eye, EyeOff } from 'lucide-react';
 import { SignUpData } from '@/types/auth';
 import { resetPassword, confirmResetPassword } from 'aws-amplify/auth';
 import { toast } from 'sonner';
@@ -74,9 +74,11 @@ export const AuthDialog = ({
   onEmailSignIn,
   onSignUp,
 }: AuthDialogProps) => {
-  // 탭 상태와 뷰 모드를 분리하여 UX 개선
   const [activeTab, setActiveTab] = useState<string>('signin');
   const [isResetConfirmMode, setIsResetConfirmMode] = useState(false);
+  const [showSignInPassword, setShowSignInPassword] = useState(false);
+  const [showSignUpPassword, setShowSignUpPassword] = useState(false);
+  const [showResetPassword, setShowResetPassword] = useState(false);
 
   // 1. Sign In Hook
   const {
@@ -199,7 +201,12 @@ export const AuthDialog = ({
               </div>
               <div className="space-y-2">
                 <Label htmlFor="signin-password">Password</Label>
-                <Input id="signin-password" type="password" disabled={isLoading} {...registerSignIn('password')} />
+                <div className="relative">
+                  <Input id="signin-password" type={showSignInPassword ? 'text' : 'password'} disabled={isLoading} {...registerSignIn('password')} className="pr-10" />
+                  <button type="button" tabIndex={-1} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowSignInPassword(v => !v)}>
+                    {showSignInPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
                 {errorsSignIn.password && <p className="text-sm text-red-500">{errorsSignIn.password.message}</p>}
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
@@ -233,7 +240,12 @@ export const AuthDialog = ({
               </div>
               <div className="space-y-2">
                 <Label htmlFor="signup-password">Password</Label>
-                <Input id="signup-password" type="password" disabled={isLoading} {...registerSignUp('password')} />
+                <div className="relative">
+                  <Input id="signup-password" type={showSignUpPassword ? 'text' : 'password'} disabled={isLoading} {...registerSignUp('password')} className="pr-10" />
+                  <button type="button" tabIndex={-1} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowSignUpPassword(v => !v)}>
+                    {showSignUpPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  </button>
+                </div>
                 {errorsSignUp.password && <p className="text-xs text-red-500">{errorsSignUp.password.message}</p>}
               </div>
               <Button type="submit" className="w-full" disabled={isLoading}>
@@ -289,7 +301,12 @@ export const AuthDialog = ({
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="confirm-password">New Password</Label>
-                    <Input id="confirm-password" type="password" disabled={isLoading} {...registerConfirm('newPassword')} />
+                    <div className="relative">
+                      <Input id="confirm-password" type={showResetPassword ? 'text' : 'password'} disabled={isLoading} {...registerConfirm('newPassword')} className="pr-10" />
+                      <button type="button" tabIndex={-1} className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" onClick={() => setShowResetPassword(v => !v)}>
+                        {showResetPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                      </button>
+                    </div>
                     {errorsConfirm.newPassword && <p className="text-xs text-red-500">{errorsConfirm.newPassword.message}</p>}
                   </div>
                   <Button type="submit" className="w-full" disabled={isLoading}>

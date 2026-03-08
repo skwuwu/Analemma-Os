@@ -271,7 +271,7 @@ export const SmartEdge = ({
                   <ChevronDown className="w-3 h-3 text-muted-foreground" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="center" className="w-48">
+              <DropdownMenuContent align="center" className="w-48" disablePortal>
                 <DropdownMenuLabel className="text-xs text-muted-foreground">
                   {isLoopEdge ? 'Loop Structure Edge (Fixed)' : 'Edge Type'}
                 </DropdownMenuLabel>
