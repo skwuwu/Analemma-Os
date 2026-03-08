@@ -45,7 +45,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
-import { CanvasActionsContext } from '@/contexts/CanvasActionsContext';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
 import { useCanvasMode } from '@/hooks/useCanvasMode';
@@ -390,12 +389,6 @@ const WorkflowCanvasInner = () => {
     clearWorkflow();
   }, [clearWorkflow]);
 
-  // Canvas actions context value — stable reference for node components to access handlers
-  const canvasActionsValue = useMemo(
-    () => ({ deleteNode: handleNodeDelete }),
-    [handleNodeDelete]
-  );
-
   // Make edges non-editable (deletable, reconnectable, and selectable disabled)
   const edgesWithRestrictions = useMemo(
     () =>
@@ -537,7 +530,7 @@ const WorkflowCanvasInner = () => {
   }, [timeMachine]);
 
   return (
-    <CanvasActionsContext.Provider value={canvasActionsValue}>
+    <>
       <div className="h-full w-full relative flex overflow-hidden bg-[#121212]">
         {/* Main Canvas Area */}
         <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
@@ -740,7 +733,7 @@ const WorkflowCanvasInner = () => {
           </motion.div>
         )}
       </AnimatePresence>
-    </CanvasActionsContext.Provider>
+    </>
   );
 }
 

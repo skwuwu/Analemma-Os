@@ -3,7 +3,7 @@ import { Clock, Webhook, Zap, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useCanvasActions } from '@/contexts/CanvasActionsContext';
+import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
 import { TRIGGER_CONFIG, type TriggerType } from '@/lib/nodeConstants';
 
@@ -25,7 +25,7 @@ interface TriggerNodeProps {
 }
 
 const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
-  const { deleteNode } = useCanvasActions();
+  const removeNode = useWorkflowStore(state => state.removeNode);
   const config = TRIGGER_CONFIG[data.triggerType || 'default'] || TRIGGER_CONFIG.default;
   const Icon = ICON_MAP[config.iconName as keyof typeof ICON_MAP] || Zap;
 
@@ -49,7 +49,7 @@ const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
           className="h-6 w-6 rounded-full shadow-sm"
           onClick={(e) => {
             e.stopPropagation();
-            deleteNode(id);
+            removeNode(id);
           }}
         >
           <X className="w-3 h-3" />

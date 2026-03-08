@@ -3,7 +3,7 @@ import { Clock, X, GitBranch, Repeat, User, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useCanvasActions } from '@/contexts/CanvasActionsContext';
+import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
 
 const CONTROL_CONFIG = {
@@ -61,7 +61,7 @@ interface ControlNodeProps {
 }
 
 const ControlNodeInner = ({ data, id, selected }: ControlNodeProps) => {
-  const { deleteNode } = useCanvasActions();
+  const removeNode = useWorkflowStore(state => state.removeNode);
   const config = CONTROL_CONFIG[data?.controlType || 'default'] || CONTROL_CONFIG.default;
   const IconComponent = config.icon;
   const statusClass = STATUS_STYLES[data?.status || 'idle'] || '';
@@ -94,7 +94,7 @@ const ControlNodeInner = ({ data, id, selected }: ControlNodeProps) => {
         className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/90 shadow-sm transition-all z-10"
         onClick={(e) => {
           e.stopPropagation();
-          deleteNode(id);
+          removeNode(id);
         }}
       >
         <X className="w-3 h-3" />

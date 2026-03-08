@@ -14,7 +14,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useCanvasActions } from '@/contexts/CanvasActionsContext';
+import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo, useRef, useEffect, useMemo } from 'react';
 
 export interface ToolDefinition {
@@ -83,7 +83,7 @@ const StreamingArea = memo(({ streamContent }: { streamContent: string }) => {
 StreamingArea.displayName = 'StreamingArea';
 
 const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
-  const { deleteNode } = useCanvasActions();
+  const removeNode = useWorkflowStore(state => state.removeNode);
   const status = data.status || 'idle';
   const statusStyle = STATUS_CONFIG[status];
 
@@ -125,7 +125,7 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
         size="icon"
         variant="ghost"
         className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
-        onClick={(e) => { e.stopPropagation(); deleteNode(id); }}
+        onClick={(e) => { e.stopPropagation(); removeNode(id); }}
       >
         <X className="w-3 h-3" />
       </Button>

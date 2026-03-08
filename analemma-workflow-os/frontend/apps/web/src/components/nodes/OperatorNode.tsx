@@ -11,7 +11,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
-import { useCanvasActions } from '@/contexts/CanvasActionsContext';
+import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
 import { OPERATOR_CONFIG, type OperatorType } from '@/lib/nodeConstants';
 
@@ -46,7 +46,7 @@ interface OperatorNodeProps {
 }
 
 const OperatorNodeInner = ({ data, id, selected }: OperatorNodeProps) => {
-  const { deleteNode } = useCanvasActions();
+  const removeNode = useWorkflowStore(state => state.removeNode);
   const config = OPERATOR_CONFIG[data.operatorType as keyof typeof OPERATOR_CONFIG] || OPERATOR_CONFIG.default;
   const status = data.status || 'idle';
   const Icon = ICON_MAP[config.iconName as keyof typeof ICON_MAP] || Globe;
@@ -130,7 +130,7 @@ const OperatorNodeInner = ({ data, id, selected }: OperatorNodeProps) => {
         size="icon"
         variant="ghost"
         className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
-        onClick={(e) => { e.stopPropagation(); deleteNode(id); }}
+        onClick={(e) => { e.stopPropagation(); removeNode(id); }}
       >
         <X className="w-3 h-3" />
       </Button>
