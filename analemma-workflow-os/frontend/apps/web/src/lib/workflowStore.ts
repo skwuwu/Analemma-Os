@@ -160,15 +160,23 @@ export const useWorkflowStore = create<WorkflowState>()(
       removeEdge: (id) => set((state) => ({ edges: state.edges.filter((e) => e.id !== id) })),
 
       onNodesChange: (changes) => {
-        // Filter out dimension changes — ReactFlow manages these internally.
-        // Applying them back to our store creates a feedback loop:
-        // dimensions → store update → new array ref → ReactFlow syncs → re-measures → loop (React #185)
-        const meaningful = changes.filter(c => c.type !== 'dimensions');
-        if (meaningful.length === 0) return;
-        set((state) => ({ nodes: applyNodeChanges(meaningful, state.nodes) }));
+        // Whitelist: only persist changes that affect our data model.
+        // 'dimensions' and 'select' are managed by ReactFlow internally.
+        // Applying them back creates a feedback loop → React #185.
+        const storable = changes.filter(c =>
+          c.type === 'position' || c.type === 'remove' || c.type === 'add' || c.type === 'replace' || c.type === 'reset'
+        );
+        if (storable.length === 0) return;
+        set((state) => ({ nodes: applyNodeChanges(storable, state.nodes) }));
       },
 
-      onEdgesChange: (changes) => set((state) => ({ edges: applyEdgeChanges(changes, state.edges) })),
+      onEdgesChange: (changes) => {
+        const storable = changes.filter(c =>
+          c.type === 'remove' || c.type === 'add' || c.type === 'replace' || c.type === 'reset'
+        );
+        if (storable.length === 0) return;
+        set((state) => ({ edges: applyEdgeChanges(storable, state.edges) }));
+      },
 
       onConnect: (connection) => {
         const state = get();
@@ -769,14 +777,37 @@ export const useWorkflowStore = create<WorkflowState>()(
       name: 'workflow-storage',
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({
-        nodes: state.nodes,
-        edges: state.edges,
+        // Strip internal ReactFlow properties (measured, width, height, selected,
+        // dragging, resizing, internals) — persisting them causes stale values
+        // on hydration that trigger xyflow's internal reconciliation loop (React #185).
+        nodes: state.nodes.map(n => ({ id: n.id, type: n.type, position: n.position, data: n.data })),
+        edges: state.edges.map(e => ({
+          id: e.id, source: e.source, target: e.target,
+          sourceHandle: e.sourceHandle, targetHandle: e.targetHandle,
+          type: e.type, data: e.data, animated: e.animated, style: e.style,
+        })),
         currentWorkflowId: state.currentWorkflowId,
         currentWorkflowName: state.currentWorkflowName,
         currentWorkflowInputs: state.currentWorkflowInputs,
         subgraphs: state.subgraphs,
         navigationPath: state.navigationPath,
       }),
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<WorkflowState>;
+        return {
+          ...currentState,
+          ...persisted,
+          // Clean legacy persisted data that may contain stale ReactFlow internals
+          nodes: (persisted.nodes || []).map((n: any) => ({
+            id: n.id, type: n.type, position: n.position, data: n.data,
+          })) as Node[],
+          edges: (persisted.edges || []).map((e: any) => ({
+            id: e.id, source: e.source, target: e.target,
+            sourceHandle: e.sourceHandle, targetHandle: e.targetHandle,
+            type: e.type, data: e.data, animated: e.animated, style: e.style,
+          })) as Edge[],
+        };
+      },
     }
   )
 );
