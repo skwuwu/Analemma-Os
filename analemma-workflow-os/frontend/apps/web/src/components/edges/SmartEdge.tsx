@@ -1,7 +1,6 @@
 import { BaseEdge, EdgeLabelRenderer, getBezierPath, useReactFlow, EdgeProps } from '@xyflow/react';
 import { Activity, ChevronDown, ArrowRight, RefreshCw, GitBranch, Hand, Pause } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
@@ -456,23 +455,19 @@ export const SmartEdge = ({
               )
             )}
 
-            {/* C. 데이터 검사 버튼 (호버 시 데이터 표시) */}
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div
-                  className="flex items-center justify-center w-5 h-5 rounded-full bg-background border cursor-pointer hover:bg-muted transition-colors shadow-sm"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                   <Activity className={`w-3 h-3 ${edgeData?.stateDelta ? 'text-blue-500' : 'text-muted-foreground'}`} />
-                </div>
-              </TooltipTrigger>
-
-              {/* D. 전달 데이터 툴팁 */}
-              <TooltipContent className="max-w-[300px] p-2">
+            {/* C. Data inspection button with native CSS hover tooltip (no Radix) */}
+            <div className="group relative">
+              <div
+                className="flex items-center justify-center w-5 h-5 rounded-full bg-background border cursor-pointer hover:bg-muted transition-colors shadow-sm"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Activity className={`w-3 h-3 ${edgeData?.stateDelta ? 'text-blue-500' : 'text-muted-foreground'}`} />
+              </div>
+              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-50 max-w-[300px] rounded-md border bg-popover p-2 text-popover-foreground shadow-md">
                 <div className="space-y-1">
                   {isBackEdge && (
                     <div className="mb-2 p-2 bg-orange-500/10 border border-orange-500/30 rounded">
-                      <p className="text-xs font-bold text-orange-500">🔄 Circular Structure (Back-Edge)</p>
+                      <p className="text-xs font-bold text-orange-500">Circular Structure (Back-Edge)</p>
                       <p className="text-[10px] text-muted-foreground mt-1">
                         This edge is a feedback path for for_each iteration.
                       </p>
@@ -480,16 +475,16 @@ export const SmartEdge = ({
                   )}
                   <h4 className="font-medium leading-none text-xs text-muted-foreground mb-2">
                     {isBackEdge && 'Loop Feedback Edge'}
-                    {!isBackEdge && currentType === 'while' && 'While Loop 설정'}
-                    {!isBackEdge && currentType === 'if' && '조건부 분기'}
+                    {!isBackEdge && currentType === 'while' && 'While Loop Config'}
+                    {!isBackEdge && currentType === 'if' && 'Conditional Branch'}
                     {!isBackEdge && currentType === 'edge' && 'State Update'}
-                    {!isBackEdge && currentType === 'hitp' && '사람 승인 대기'}
+                    {!isBackEdge && currentType === 'hitp' && 'Human Approval'}
                   </h4>
                   {edgeData?.condition && (
-                    <p className="text-xs"><strong>조건:</strong> {edgeData.condition as string}</p>
+                    <p className="text-xs"><strong>Condition:</strong> {edgeData.condition as string}</p>
                   )}
                   {edgeData?.max_iterations && (
-                    <p className="text-xs"><strong>최대 반복:</strong> {edgeData.max_iterations as number}회</p>
+                    <p className="text-xs"><strong>Max iterations:</strong> {edgeData.max_iterations as number}</p>
                   )}
                   {edgeData?.stateDelta && (
                     <pre className="text-[10px] bg-muted p-2 rounded overflow-auto max-h-32 font-mono whitespace-pre-wrap">
@@ -497,8 +492,8 @@ export const SmartEdge = ({
                     </pre>
                   )}
                 </div>
-              </TooltipContent>
-            </Tooltip>
+              </div>
+            </div>
           </div>
         </div>
       </EdgeLabelRenderer>
