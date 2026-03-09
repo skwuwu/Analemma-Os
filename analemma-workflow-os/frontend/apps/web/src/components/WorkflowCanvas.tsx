@@ -1,4 +1,4 @@
-import { useCallback, useState, useMemo, useEffect, Fragment } from 'react';
+import { useCallback, useState, useMemo, useEffect, useRef, Fragment } from 'react';
 import {
   ReactFlow,
   Background,
@@ -227,15 +227,19 @@ const WorkflowCanvasInner = () => {
   // ==========================================
   // 4. HOOKS FOR TIME MACHINE
   // ==========================================
+  const handleTimeMachineSuccess = useCallback((result: any) => {
+    toast.success(`Rollback success: new branch ${result.branched_thread_id} created`);
+    setRollbackDialogOpen(false);
+  }, []);
+
+  const handleTimeMachineError = useCallback((error: Error) => {
+    toast.error(`Rollback failed: ${error.message}`);
+  }, []);
+
   const timeMachine = useTimeMachine({
     executionId: currentExecutionId || '',
-    onRollbackSuccess: (result) => {
-      toast.success(`롤백 성공: 새 브랜치 ${result.branched_thread_id} 생성됨`);
-      setRollbackDialogOpen(false);
-    },
-    onRollbackError: (error) => {
-      toast.error(`롤백 실패: ${error.message}`);
-    },
+    onRollbackSuccess: handleTimeMachineSuccess,
+    onRollbackError: handleTimeMachineError,
   });
 
   const handleGroupConfirm = useCallback((groupName: string) => {
@@ -403,19 +407,31 @@ const WorkflowCanvasInner = () => {
     };
   }, [recentChangesLength]);
 
-  // 키보드 단축키 핸들러
+  // Keyboard shortcuts — use refs for mutable state to keep a single stable listener
+  // instead of tearing down and re-attaching on every selection change.
+  const selectedNodeRef = useRef(selectedNode);
+  selectedNodeRef.current = selectedNode;
+  const selectedNodesRef = useRef(selectedNodes);
+  selectedNodesRef.current = selectedNodes;
+  const editorOpenRef = useRef(editorOpen);
+  editorOpenRef.current = editorOpen;
+
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
 
-      if ((event.key === 'Delete' || event.key === 'Backspace') && (selectedNodes.length > 0 || selectedNode)) {
+      const curSelectedNode = selectedNodeRef.current;
+      const curSelectedNodes = selectedNodesRef.current;
+      const curEditorOpen = editorOpenRef.current;
+
+      if ((event.key === 'Delete' || event.key === 'Backspace') && (curSelectedNodes.length > 0 || curSelectedNode)) {
         event.preventDefault();
-        if (selectedNodes.length > 1) {
-          selectedNodes.forEach(n => handleNodeDelete(n.id));
+        if (curSelectedNodes.length > 1) {
+          curSelectedNodes.forEach(n => handleNodeDelete(n.id));
           setSelectedNodes([]);
-        } else if (selectedNode) {
-          handleNodeDelete(selectedNode.id);
+        } else if (curSelectedNode) {
+          handleNodeDelete(curSelectedNode.id);
         }
         setSelectedNode(null);
         setEditorOpen(false);
@@ -426,7 +442,7 @@ const WorkflowCanvasInner = () => {
         setEditorOpen(false);
       }
 
-      if (event.key === 'Enter' && selectedNode && !editorOpen) {
+      if (event.key === 'Enter' && curSelectedNode && !curEditorOpen) {
         event.preventDefault();
         setEditorOpen(true);
       }
@@ -434,26 +450,42 @@ const WorkflowCanvasInner = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedNode, selectedNodes, editorOpen, handleNodeDelete]);
+  }, [handleNodeDelete]);
 
-  // 노드 선택 핸들러
+  // Node selection handler
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
   }, []);
 
-  // 롤백 핸들러
+  // Rollback handler
   const handleRollbackClick = useCallback((item: TimelineItem) => {
     setRollbackTarget(item);
     setRollbackDialogOpen(true);
   }, []);
 
+  // Extracted callbacks — avoid creating new function references on every render
+  const handleFocusNode = useCallback((nodeId: string) => {
+    const node = useWorkflowStore.getState().nodes.find(n => n.id === nodeId);
+    if (node && reactFlowInstance) {
+      reactFlowInstance.fitView({ nodes: [node], duration: 400, padding: 0.5 });
+      setSelectedNode(node);
+      setEditorOpen(true);
+    }
+  }, [reactFlowInstance]);
+
+  const handleOpenAuditPanel = useCallback(() => setAuditPanelOpen(true), []);
+  const handleCloseAuditPanel = useCallback(() => setAuditPanelOpen(false), []);
+  const handleCloseEditor = useCallback(() => setEditorOpen(false), []);
+  const handleCloseGroupDialog = useCallback(() => setGroupDialogOpen(false), []);
+  const handleRollbackDialogSuccess = useCallback(() => setRollbackDialogOpen(false), []);
+
   const handleRollbackPreview = useCallback(async (checkpointId: string) => {
     await timeMachine.loadPreview(checkpointId);
-  }, [timeMachine]);
+  }, [timeMachine.loadPreview]);
 
   const handleRollbackExecute = useCallback(async (request: Omit<RollbackRequest, 'preview_only'>) => {
     return await timeMachine.executeRollback(request);
-  }, [timeMachine]);
+  }, [timeMachine.executeRollback]);
 
   return (
     <>
@@ -502,19 +534,8 @@ const WorkflowCanvasInner = () => {
                 hasErrors={validation.hasErrors}
                 hasWarnings={validation.hasWarnings}
                 warnings={validation.warnings}
-                onNodeClick={(nodeId) => {
-                  const node = nodes.find(n => n.id === nodeId);
-                  if (node && reactFlowInstance) {
-                    reactFlowInstance.fitView({
-                      nodes: [node],
-                      duration: 400,
-                      padding: 0.5
-                    });
-                    setSelectedNode(node);
-                    setEditorOpen(true);
-                  }
-                }}
-                onClick={() => setAuditPanelOpen(true)}
+                onNodeClick={handleFocusNode}
+                onClick={handleOpenAuditPanel}
               />
             )}
           </div>
@@ -598,7 +619,7 @@ const WorkflowCanvasInner = () => {
       <NodeEditorDialog
         node={selectedNode as any}
         open={editorOpen}
-        onClose={() => setEditorOpen(false)}
+        onClose={handleCloseEditor}
         onSave={handleNodeUpdate}
         onDelete={handleNodeDelete}
         incomingConnections={dialogConnectionData?.incoming}
@@ -610,7 +631,7 @@ const WorkflowCanvasInner = () => {
 
       <GroupNameDialog
         open={groupDialogOpen}
-        onClose={() => setGroupDialogOpen(false)}
+        onClose={handleCloseGroupDialog}
         onConfirm={handleGroupConfirm}
         nodeCount={selectedNodes.length}
       />
@@ -623,10 +644,7 @@ const WorkflowCanvasInner = () => {
         loading={timeMachine.isPreviewLoading}
         onPreview={handleRollbackPreview}
         onExecute={handleRollbackExecute}
-        onSuccess={() => {
-          // 롤백 성공 시 자동으로 onRollbackSuccess 콜백이 호출됨
-          setRollbackDialogOpen(false);
-        }}
+        onSuccess={handleRollbackDialogSuccess}
       />
 
       {/* Audit Panel Sidebar */}
@@ -641,19 +659,8 @@ const WorkflowCanvasInner = () => {
           >
             <AuditPanel
               issues={validation.warnings}
-              onNodeClick={(nodeId) => {
-                const node = nodes.find(n => n.id === nodeId);
-                if (node && reactFlowInstance) {
-                  reactFlowInstance.fitView({
-                    nodes: [node],
-                    duration: 400,
-                    padding: 0.5
-                  });
-                  setSelectedNode(node);
-                  setEditorOpen(true);
-                }
-              }}
-              onClose={() => setAuditPanelOpen(false)}
+              onNodeClick={handleFocusNode}
+              onClose={handleCloseAuditPanel}
               standalone
               key="validation-panel"
             />

@@ -82,6 +82,9 @@ const getEdgeStyle = (
     };
 };
 
+// Module-level constants — avoid creating new objects on every render
+const MINIMAP_STYLE = { background: '#111', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' } as const;
+
 const STATUS_STYLES: Record<NodeStatus, string> = {
     running: "ring-2 ring-yellow-400 shadow-[0_0_20px_rgba(250,204,21,0.4)] animate-pulse",
     completed: "ring-2 ring-green-500 shadow-[0_0_15px_rgba(34,197,94,0.2)]",
@@ -167,6 +170,14 @@ const WorkflowGraphViewerInner = ({
         [onNodeClick]
     );
 
+    const miniMapNodeColor = useCallback((n: Node) => {
+        const s = resolveNodeStatus(n.id, activeNodeId, completedNodeIds, failedNodeIds);
+        if (s === 'running') return '#fbbf24';
+        if (s === 'completed') return '#22c55e';
+        if (s === 'failed') return '#ef4444';
+        return '#333';
+    }, [activeNodeId, completedNodeIds, failedNodeIds]);
+
     return (
         <div className={cn('h-full w-full relative bg-[#0a0a0a] overflow-hidden', className)}>
             <ReactFlow
@@ -196,15 +207,9 @@ const WorkflowGraphViewerInner = ({
                 <StatusLegend />
 
                 <MiniMap
-                    style={{ background: '#111', borderRadius: '12px', border: '1px solid rgba(255,255,255,0.05)' }}
+                    style={MINIMAP_STYLE}
                     maskColor="rgba(0,0,0,0.6)"
-                    nodeColor={(n) => {
-                        const s = resolveNodeStatus(n.id, activeNodeId, completedNodeIds, failedNodeIds);
-                        if (s === 'running') return '#fbbf24';
-                        if (s === 'completed') return '#22c55e';
-                        if (s === 'failed') return '#ef4444';
-                        return '#333';
-                    }}
+                    nodeColor={miniMapNodeColor}
                 />
                 <Controls showInteractive={false} className="bg-black/40 border border-white/5 rounded-xl overflow-hidden" />
             </ReactFlow>

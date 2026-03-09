@@ -26,6 +26,9 @@ import { useSmoothTaskUpdates } from '@/hooks/useSmoothTaskUpdates';
 import { ConfidenceGauge } from '@/components/ui/confidence-gauge';
 import { NodeDetailPanel } from '@/components/NodeDetailPanel';
 
+// Stable empty array references — avoid creating new [] on every render in useMemo fallbacks
+const EMPTY_TIMELINE: NotificationItem[] = [];
+
 interface WorkflowMonitorProps {
   signOut?: () => void;
 }
@@ -102,15 +105,15 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
   // Selected timeline: use `executionTimelines` as the single source of truth.
   // Note: Backend already sorts timeline with ScanIndexForward=True, no need to re-sort
   const selectedWorkflowTimeline = useMemo(() => {
-    if (!selectedExecutionId) return [] as NotificationItem[];
+    if (!selectedExecutionId) return EMPTY_TIMELINE;
 
     if (isNotificationSelection && selectedNotificationId) {
       const key = `notification:${selectedNotificationId}`;
-      return executionTimelines[key] || (selectedNotification ? [selectedNotification] : []);
+      return executionTimelines[key] || (selectedNotification ? [selectedNotification] : EMPTY_TIMELINE);
     }
 
     // Backend CheckpointService already returns sorted timeline, trust it
-    return executionTimelines[selectedExecutionId] || [];
+    return executionTimelines[selectedExecutionId] || EMPTY_TIMELINE;
   }, [executionTimelines, selectedExecutionId, isNotificationSelection, selectedNotificationId, selectedNotification]);
 
   const latestStatus = selectedWorkflowTimeline.length > 0 ? selectedWorkflowTimeline[selectedWorkflowTimeline.length - 1] : null;
@@ -301,13 +304,14 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
     return fetchExecutionTimeline(id, force);
   }, [fetchExecutionTimeline]);
 
-  // URL 파라미터에서 execution_id 또는 executionId 가져오기
+  // URL parameter navigation — runs once when data is available
   const executionIdFromUrl = searchParams.get('executionId') || searchParams.get('execution_id');
+  const urlNavigationDoneRef = useRef(false);
 
   useEffect(() => {
-    if (!executionIdFromUrl) return;
+    if (!executionIdFromUrl || urlNavigationDoneRef.current) return;
 
-    // 1. 활성 워크플로우에서 찾기
+    // 1. Find in active workflows
     const targetWorkflow = groupedActiveWorkflows.find(
       w => (w.payload?.execution_id || w.execution_id)?.includes(executionIdFromUrl) ||
         w.conversation_id?.includes(executionIdFromUrl)
@@ -318,10 +322,11 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
       if (execId) {
         setSelectedExecutionId(execId);
         setSelectedTab('active');
-        setShowGraphView(false); // 상세 뷰를 우선 보여줌
+        setShowGraphView(false);
+        urlNavigationDoneRef.current = true;
       }
     } else {
-      // 2. 히스토리에서 찾기 (이미 로드된 데이터가 있다면)
+      // 2. Find in history
       const targetHistory = executions.find(
         e => (e.executionArn || e.execution_id)?.includes(executionIdFromUrl)
       );
@@ -330,6 +335,7 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
         setSelectedExecutionId(execId);
         setSelectedTab('history');
         setExecutionSummary(targetHistory);
+        urlNavigationDoneRef.current = true;
       }
     }
   }, [groupedActiveWorkflows, executions, executionIdFromUrl]);
@@ -409,17 +415,18 @@ export const WorkflowMonitor: React.FC<WorkflowMonitorProps> = ({ signOut }) => 
     });
   }, [notifications]);
 
-  // History 탭 자동 갱신 (Legacy logic kept for safety, but main sync is above)
+  // History tab auto-refresh when workflows complete
   useEffect(() => {
-    const completedWorkflows = (Array.isArray(notifications) ? notifications : []).filter(n => n.status === 'COMPLETE');
+    if (!notifications || notifications.length === 0) return;
+    const completedWorkflows = notifications.filter(n => n.status === 'COMPLETE');
     const currentCompletedCount = completedWorkflows.length;
 
     if (currentCompletedCount > completedWorkflowsCountRef.current) {
-      console.log(`🔄 History 자동 갱신: ${currentCompletedCount - completedWorkflowsCountRef.current}개 워크플로우 완료됨`);
-      fetchExecutions(); // Re-fetch to get full history details
+      console.log(`[History] Auto-refresh: ${currentCompletedCount - completedWorkflowsCountRef.current} workflow(s) completed`);
+      fetchExecutions();
       completedWorkflowsCountRef.current = currentCompletedCount;
     }
-  }, [(notifications || []).length, fetchExecutions, notifications]);
+  }, [notifications, fetchExecutions]);
 
   const formatTimestamp = (timestamp: number) => {
     const date = new Date(timestamp);

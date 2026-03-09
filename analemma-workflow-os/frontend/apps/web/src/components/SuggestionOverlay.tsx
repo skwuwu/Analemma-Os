@@ -37,38 +37,42 @@ const actionLabels: Record<string, string> = {
 };
 
 export function SuggestionOverlay({ className }: SuggestionOverlayProps) {
-  const { 
-    pendingSuggestions,
-    activeSuggestionId, 
-    acceptSuggestion, 
-    rejectSuggestion, 
-    setActiveSuggestion 
-  } = useCodesignStore();
-  const { nodes } = useWorkflowStore();
-  
+  // Individual selectors — avoid full store subscription that re-renders on every unrelated change
+  const pendingSuggestions = useCodesignStore(state => state.pendingSuggestions);
+  const activeSuggestionId = useCodesignStore(state => state.activeSuggestionId);
+  const acceptSuggestion = useCodesignStore(state => state.acceptSuggestion);
+  const rejectSuggestion = useCodesignStore(state => state.rejectSuggestion);
+  const setActiveSuggestion = useCodesignStore(state => state.setActiveSuggestion);
+
   const activeSuggestion = pendingSuggestions.find(s => s.id === activeSuggestionId);
-  
-  // 영향받는 노드의 위치로 바운딩 박스 계산
+
+  // Only subscribe to nodes when there's an active suggestion to compute bounds.
+  // When no suggestion is active (99% of the time), this returns a stable null reference.
+  const nodes = useWorkflowStore(state =>
+    activeSuggestionId ? state.nodes : null
+  );
+
+  // Bounding box for affected node highlight
   const bounds = useMemo(() => {
-    if (!activeSuggestion || activeSuggestion.affectedNodes.length === 0) return null;
-    
+    if (!activeSuggestion || activeSuggestion.affectedNodes.length === 0 || !nodes) return null;
+
     const affectedPositions = activeSuggestion.affectedNodes
       .map(nodeId => nodes.find(n => n.id === nodeId))
       .filter((n): n is NonNullable<typeof n> => n !== undefined)
       .map(node => node.position);
-    
+
     if (affectedPositions.length === 0) return null;
-    
+
     const xs = affectedPositions.map(p => p.x);
     const ys = affectedPositions.map(p => p.y);
-    
+
     const padding = 30;
     const nodeWidth = 200;
     const nodeHeight = 80;
-    
+
     return {
       x: Math.min(...xs) - padding,
-      y: Math.min(...ys) - padding - 30, // 배지용 여유 공간
+      y: Math.min(...ys) - padding - 30,
       width: Math.max(...xs) - Math.min(...xs) + nodeWidth + padding * 2,
       height: Math.max(...ys) - Math.min(...ys) + nodeHeight + padding * 2 + 30
     };

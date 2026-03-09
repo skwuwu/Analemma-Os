@@ -5,7 +5,10 @@ import { Input } from '@/components/ui/input';
 import { toast } from 'sonner';
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 
-// 백엔드 엣지 타입 정의
+// Module-level constant — avoid creating new objects per render for every edge instance
+const HIT_AREA_STYLE = { strokeWidth: 20, stroke: 'transparent', cursor: 'pointer' } as const;
+
+// Backend edge type definitions
 export type BackendEdgeType = 'edge' | 'if' | 'while' | 'for_each' | 'hitp' | 'conditional_edge' | 'pause';
 
 // 엣지 타입별 설정
@@ -248,7 +251,7 @@ export const SmartEdge = ({
       {/* 인터랙션용 투명 엣지 (클릭 범위 확장용) */}
       <BaseEdge
         path={edgePath}
-        style={{ strokeWidth: 20, stroke: 'transparent', cursor: 'pointer' }}
+        style={HIT_AREA_STYLE}
       />
 
       {/* 실제 눈에 보이는 엣지 */}
