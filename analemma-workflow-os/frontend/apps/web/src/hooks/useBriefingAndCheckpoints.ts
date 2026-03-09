@@ -89,18 +89,24 @@ export function usePlanBriefing(options: UsePlanBriefingOptions = {}) {
     },
   });
   
+  // Use refs for mutation.mutateAsync — mutation objects change every render
+  const generateMutateRef = useRef(generateMutation.mutateAsync);
+  generateMutateRef.current = generateMutation.mutateAsync;
+  const draftMutateRef = useRef(draftDetailQuery.mutateAsync);
+  draftMutateRef.current = draftDetailQuery.mutateAsync;
+
   const generate = useCallback(
     (request: PreviewWorkflowRequest) => {
-      return generateMutation.mutateAsync(request);
+      return generateMutateRef.current(request);
     },
-    [generateMutation]
+    []
   );
-  
+
   const getDetailedDraftContent = useCallback(
     (request: DetailedDraftRequest) => {
-      return draftDetailQuery.mutateAsync(request);
+      return draftMutateRef.current(request);
     },
-    [draftDetailQuery]
+    []
   );
   
   const clear = useCallback(() => {
@@ -255,14 +261,18 @@ export function useTimeMachine({
     optionsRef.current = { onRollbackSuccess, onRollbackError };
   });
   
-  // executionId 유효성 검사
+  // Ref for executionId — avoids recreating all callbacks when executionId changes
+  const executionIdRef = useRef(executionId);
+  executionIdRef.current = executionId;
+
+  // executionId validation — stable callback
   const validateExecutionId = useCallback((id?: string) => {
-    const effectiveId = id || executionId;
+    const effectiveId = id || executionIdRef.current;
     if (!effectiveId || effectiveId.trim() === '') {
       throw new Error('executionId is required for time machine operations');
     }
     return effectiveId;
-  }, [executionId]);
+  }, []);
   
   // 롤백 미리보기 (executionId를 인자로 받아 클로저 문제 방지)
   const previewMutation = useMutation({
@@ -357,27 +367,35 @@ export function useTimeMachine({
     staleTime: 30 * 1000, // 30초 캐시
   });
   
+  // Refs for mutation.mutateAsync — mutation objects change every render
+  const previewMutateRef = useRef(previewMutation.mutateAsync);
+  previewMutateRef.current = previewMutation.mutateAsync;
+  const rollbackMutateRef = useRef(rollbackMutation.mutateAsync);
+  rollbackMutateRef.current = rollbackMutation.mutateAsync;
+  const compareMutateRef = useRef(compareMutation.mutateAsync);
+  compareMutateRef.current = compareMutation.mutateAsync;
+
   const loadPreview = useCallback(
     (checkpointId: string, execId?: string) => {
       setSelectedCheckpointId(checkpointId);
-      return previewMutation.mutateAsync({ checkpointId, execId });
+      return previewMutateRef.current({ checkpointId, execId });
     },
-    [previewMutation, validateExecutionId]
+    []
   );
-  
+
   const executeRollbackAction = useCallback(
     (request: Omit<RollbackRequest, 'preview_only'>, execId?: string) => {
-      return rollbackMutation.mutateAsync({ request, execId });
+      return rollbackMutateRef.current({ request, execId });
     },
-    [rollbackMutation, validateExecutionId]
+    []
   );
-  
+
   const compare = useCallback(
     (sourceId: string, targetId: string, execId?: string) => {
       setCompareCheckpointId(targetId);
-      return compareMutation.mutateAsync({ sourceId, targetId, execId });
+      return compareMutateRef.current({ sourceId, targetId, execId });
     },
-    [compareMutation, validateExecutionId]
+    []
   );
   
   const clearPreview = useCallback(() => {

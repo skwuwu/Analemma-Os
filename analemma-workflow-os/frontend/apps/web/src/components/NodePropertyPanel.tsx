@@ -1,5 +1,4 @@
 import { useWorkflowStore } from '@/lib/workflowStore';
-import { useShallow } from 'zustand/react/shallow';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
@@ -585,18 +584,15 @@ const ConnectionManager = ({
 // --- MAIN PANEL ---
 
 export const NodePropertyPanel = () => {
-  const { selectedNodeId, setSelectedNodeId, nodes, edges, updateNode, removeNode, addEdge, removeEdge } = useWorkflowStore(
-    useShallow((state) => ({
-      selectedNodeId: state.selectedNodeId,
-      setSelectedNodeId: state.setSelectedNodeId,
-      nodes: state.nodes,
-      edges: state.edges,
-      updateNode: state.updateNode,
-      removeNode: state.removeNode,
-      addEdge: state.addEdge,
-      removeEdge: state.removeEdge,
-    }))
-  );
+  // Individual selectors — avoid useShallow object selector which creates new references
+  const selectedNodeId = useWorkflowStore(state => state.selectedNodeId);
+  const setSelectedNodeId = useWorkflowStore(state => state.setSelectedNodeId);
+  const nodes = useWorkflowStore(state => state.nodes);
+  const edges = useWorkflowStore(state => state.edges);
+  const updateNode = useWorkflowStore(state => state.updateNode);
+  const removeNode = useWorkflowStore(state => state.removeNode);
+  const addEdge = useWorkflowStore(state => state.addEdge);
+  const removeEdge = useWorkflowStore(state => state.removeEdge);
 
   const selectedNode = useMemo(() => nodes.find((n) => n.id === selectedNodeId), [nodes, selectedNodeId]);
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
 // Lazy load heavy components to prevent them from being bundled in Index chunk
 // This avoids circular dependency initialization issues
@@ -42,12 +42,11 @@ interface WorkflowData {
 const Index = ({ signOut }: IndexProps) => {
   const navigate = useNavigate();
 
-  // Individual selectors — avoid useShallow object selector which creates new references
-  const nodes = useWorkflowStore(state => state.nodes);
-  const edges = useWorkflowStore(state => state.edges);
+  // Primitive selectors — avoid subscribing to nodes/edges arrays which change on every drag
   const currentWorkflowId = useWorkflowStore(state => state.currentWorkflowId);
   const currentWorkflowName = useWorkflowStore(state => state.currentWorkflowName);
   const currentWorkflowInputs = useWorkflowStore(state => state.currentWorkflowInputs);
+  const hasNodes = useWorkflowStore(state => state.nodes.length > 0);
   // Actions — stable function references
   const loadWorkflow = useWorkflowStore(state => state.loadWorkflow);
   const setCurrentWorkflow = useWorkflowStore(state => state.setCurrentWorkflow);
@@ -58,20 +57,22 @@ const Index = ({ signOut }: IndexProps) => {
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
+  // Lazy getters: nodes/edges are read on-demand (in event handlers / disabled checks),
+  // not during render — prevents re-render on every node drag.
   const currentWorkflow = useMemo(() => ({
     id: currentWorkflowId,
     name: currentWorkflowName,
-    nodes,
-    edges,
+    get nodes() { return useWorkflowStore.getState().nodes; },
+    get edges() { return useWorkflowStore.getState().edges; },
     inputs: currentWorkflowInputs,
-  }), [currentWorkflowId, currentWorkflowName, nodes, edges, currentWorkflowInputs]);
+  }), [currentWorkflowId, currentWorkflowName, currentWorkflowInputs, hasNodes]);
   // canvas ref removed — store manages workflow state
   const { notifications } = useNotifications({});
 
-  const handleLoadWorkflow = (workflow: WorkflowData) => {
+  const handleLoadWorkflow = useCallback((workflow: WorkflowData) => {
     setCurrentWorkflow(workflow.id, workflow.name, workflow.inputs);
     loadWorkflow({ nodes: workflow.nodes, edges: workflow.edges });
-  };
+  }, [setCurrentWorkflow, loadWorkflow]);
 
   const handleSignOut = async () => {
     try {
