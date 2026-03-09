@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useShallow } from 'zustand/react/shallow';
-
 // Lazy load heavy components to prevent them from being bundled in Index chunk
 // This avoids circular dependency initialization issues
 const WorkflowCanvas = lazy(() => import('@/components/WorkflowCanvas.tsx').then(m => ({ default: m.WorkflowCanvas })));
@@ -43,25 +41,16 @@ interface WorkflowData {
 
 const Index = ({ signOut }: IndexProps) => {
   const navigate = useNavigate();
-  const {
-    nodes,
-    edges,
-    loadWorkflow,
-    currentWorkflowId,
-    currentWorkflowName,
-    currentWorkflowInputs,
-    setCurrentWorkflow
-  } = useWorkflowStore(
-    useShallow((state) => ({
-      nodes: state.nodes,
-      edges: state.edges,
-      loadWorkflow: state.loadWorkflow,
-      currentWorkflowId: state.currentWorkflowId,
-      currentWorkflowName: state.currentWorkflowName,
-      currentWorkflowInputs: state.currentWorkflowInputs,
-      setCurrentWorkflow: state.setCurrentWorkflow,
-    }))
-  );
+
+  // Individual selectors — avoid useShallow object selector which creates new references
+  const nodes = useWorkflowStore(state => state.nodes);
+  const edges = useWorkflowStore(state => state.edges);
+  const currentWorkflowId = useWorkflowStore(state => state.currentWorkflowId);
+  const currentWorkflowName = useWorkflowStore(state => state.currentWorkflowName);
+  const currentWorkflowInputs = useWorkflowStore(state => state.currentWorkflowInputs);
+  // Actions — stable function references
+  const loadWorkflow = useWorkflowStore(state => state.loadWorkflow);
+  const setCurrentWorkflow = useWorkflowStore(state => state.setCurrentWorkflow);
 
   const [isPasswordDialogOpen, setIsPasswordDialogOpen] = useState(false);
 

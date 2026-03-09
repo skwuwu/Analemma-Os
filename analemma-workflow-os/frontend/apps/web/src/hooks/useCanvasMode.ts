@@ -15,7 +15,6 @@
 import { useMemo } from 'react';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore } from '@/lib/codesignStore';
-import { useShallow } from 'zustand/react/shallow';
 
 export type CanvasMode = 'agentic-designer' | 'co-design' | 'generating';
 
@@ -85,21 +84,13 @@ export const deriveMode = (
 };
 
 export function useCanvasMode(): CanvasModeInfo {
-  // Zustand 최적화: length만 추출하여 불필요한 리렌더링 방지
-  const { nodeCount, edgeCount } = useWorkflowStore(
-    useShallow((state) => ({
-      nodeCount: state.nodes.length,
-      edgeCount: state.edges.length,
-    }))
-  );
+  // Individual primitive selectors — Object.is comparison, no useShallow needed
+  const nodeCount = useWorkflowStore(state => state.nodes.length);
+  const edgeCount = useWorkflowStore(state => state.edges.length);
 
-  const { hasHistory, isGenerating, remoteMode } = useCodesignStore(
-    useShallow((state) => ({
-      hasHistory: state.recentChanges.length > 0 || state.messages.length > 0,
-      isGenerating: (state as any).isGenerating || false,
-      remoteMode: state.remoteMode,
-    }))
-  );
+  const hasHistory = useCodesignStore(state => state.recentChanges.length > 0 || state.messages.length > 0);
+  const isGenerating = useCodesignStore(state => (state as any).isGenerating || false);
+  const remoteMode = useCodesignStore(state => state.remoteMode);
 
   const modeInfo = useMemo(
     () => deriveMode(nodeCount, edgeCount, hasHistory, isGenerating),

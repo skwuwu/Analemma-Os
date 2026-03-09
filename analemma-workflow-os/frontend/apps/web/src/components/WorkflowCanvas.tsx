@@ -13,7 +13,6 @@ import {
   EdgeChange,
 } from '@xyflow/react';
 import { fetchAuthSession } from '@aws-amplify/auth';
-import { useShallow } from 'zustand/react/shallow';
 import '@xyflow/react/dist/style.css';
 
 import { AIModelNode } from './nodes/AIModelNode';
@@ -40,8 +39,7 @@ import {
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
 import { useWorkflowStore } from '@/lib/workflowStore';
-import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
-import { useCanvasMode } from '@/hooks/useCanvasMode';
+import { useCodesignStore } from '@/lib/codesignStore';
 import { WorkflowStatusIndicator } from './WorkflowStatusIndicator';
 import { useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { toast } from 'sonner';
@@ -132,36 +130,14 @@ const WorkflowCanvasInner = () => {
     onChange: handleSelectionChange,
   });
 
-  // Co-design store
-  const {
-    recordChange,
-    pendingSuggestions,
-    activeSuggestionId,
-    setActiveSuggestion,
-    acceptSuggestion,
-    rejectSuggestion,
-    requestSuggestions,
-    requestAudit,
-    recentChanges,
-  } = useCodesignStore(
-    useShallow((state) => ({
-      recordChange: state.recordChange,
-      pendingSuggestions: state.pendingSuggestions,
-      activeSuggestionId: state.activeSuggestionId,
-      setActiveSuggestion: state.setActiveSuggestion,
-      acceptSuggestion: state.acceptSuggestion,
-      rejectSuggestion: state.rejectSuggestion,
-      requestSuggestions: state.requestSuggestions,
-      requestAudit: state.requestAudit,
-      recentChanges: state.recentChanges,
-    }))
-  );
-
-  // Issue summary from centralized store selector
-  const issueSummary = useCodesignStore(selectIssueSummary);
-
-  // Canvas mode detection
-  const canvasMode = useCanvasMode();
+  // Co-design store — individual selectors only for what's actually used.
+  // Subscribing to unused fields (pendingSuggestions, activeSuggestionId, etc.)
+  // causes unnecessary re-renders that cascade into ReactFlow's internal store.
+  const recordChange = useCodesignStore(state => state.recordChange);
+  const requestSuggestions = useCodesignStore(state => state.requestSuggestions);
+  const requestAudit = useCodesignStore(state => state.requestAudit);
+  // Primitive selector — Object.is comparison, no useShallow needed
+  const recentChangesLength = useCodesignStore(state => state.recentChanges.length);
 
   // Stable structure keys — only change when graph topology changes (not on position/selection updates)
   const nodeStructureKey = useMemo(
@@ -393,34 +369,39 @@ const WorkflowCanvasInner = () => {
     addEdge(newEdge);
   }, [addEdge]);
 
-  // Co-design: 변경사항이 있을 때 AI 제안 요청
+  // Co-design: request AI suggestions after user changes settle.
+  // Deps: recentChangesLength only — requestSuggestions/requestAudit are stable store functions.
+  // Guard: skip when canvas is empty (no nodes to analyze).
   useEffect(() => {
-    if (recentChanges.length > 0) {
-      let isCancelled = false;
-      const timeoutId = setTimeout(async () => {
-        try {
-          const session = await fetchAuthSession();
-          if (isCancelled) return;
-          const idToken = session.tokens?.idToken?.toString();
+    if (recentChangesLength === 0) return;
 
-          const currentNodes = useWorkflowStore.getState().nodes;
-          const currentEdges = useWorkflowStore.getState().edges;
+    const currentNodes = useWorkflowStore.getState().nodes;
+    if (currentNodes.length === 0) return;
 
-          requestSuggestions({ nodes: currentNodes, edges: currentEdges }, idToken);
-          requestAudit({ nodes: currentNodes, edges: currentEdges }, idToken);
-        } catch (error) {
-          if (!isCancelled) {
-            console.error('Failed to get auth token for codesign:', error);
-          }
+    let isCancelled = false;
+    const timeoutId = setTimeout(async () => {
+      try {
+        const session = await fetchAuthSession();
+        if (isCancelled) return;
+        const idToken = session.tokens?.idToken?.toString();
+
+        const latestNodes = useWorkflowStore.getState().nodes;
+        const latestEdges = useWorkflowStore.getState().edges;
+
+        requestSuggestions({ nodes: latestNodes, edges: latestEdges }, idToken);
+        requestAudit({ nodes: latestNodes, edges: latestEdges }, idToken);
+      } catch (error) {
+        if (!isCancelled) {
+          console.error('Failed to get auth token for codesign:', error);
         }
-      }, 2000);
+      }
+    }, 2000);
 
-      return () => {
-        isCancelled = true;
-        clearTimeout(timeoutId);
-      };
-    }
-  }, [recentChanges.length, requestSuggestions, requestAudit]);
+    return () => {
+      isCancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [recentChangesLength]);
 
   // 키보드 단축키 핸들러
   useEffect(() => {
