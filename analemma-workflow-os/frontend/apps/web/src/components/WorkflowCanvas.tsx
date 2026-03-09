@@ -370,6 +370,12 @@ const WorkflowCanvasInner = () => {
     focusable: false,
   }), []);
 
+  // Memoize ReactFlow config objects — inline objects create new references every render,
+  // causing xyflow's internal store to re-process and setState in a loop (React #185).
+  const fitViewOpts = useMemo(() => ({ padding: 0.2 }), []);
+  const snapGridConfig: [number, number] = useMemo(() => [20, 20], []);
+  const bgStyle = useMemo(() => ({ opacity: 0.4 }), []);
+
   // 다이얼로그에 전달할 연결 데이터를 미리 계산
   const dialogConnectionData = useMemo(() => {
     if (!selectedNode || !editorOpen) return null;
@@ -595,20 +601,20 @@ const WorkflowCanvasInner = () => {
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
             fitView
-            fitViewOptions={{ padding: 0.2 }}
+            fitViewOptions={fitViewOpts}
             minZoom={0.1}
             maxZoom={2}
-            snapToGrid={true}
-            snapGrid={[20, 20]}
+            snapToGrid
+            snapGrid={snapGridConfig}
             className="bg-[#121212]"
             deleteKeyCode={null}
-            panOnDrag={true}
-            selectionOnDrag={true}
+            panOnDrag
+            selectionOnDrag
             selectionKeyCode="Shift"
-            zoomOnScroll={true}
+            zoomOnScroll
             panOnScroll={false}
           >
-            <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={{ opacity: 0.4 }} />
+            <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={bgStyle} />
           </ReactFlow>
 
           {/* Shortcuts Info — CSS hover instead of Radix Tooltip to avoid render conflicts */}

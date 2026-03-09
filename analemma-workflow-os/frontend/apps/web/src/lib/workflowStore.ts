@@ -161,11 +161,13 @@ export const useWorkflowStore = create<WorkflowState>()(
 
       onNodesChange: (changes) => {
         // Whitelist: only apply changes that affect our data model.
-        // 'dimensions' is managed by ReactFlow internally — applying it back
-        // creates a feedback loop (ResizeObserver → store → re-render → React #185).
-        // 'select' is safe (one-shot, no feedback loop) and needed for node selection UI.
+        // 'dimensions': managed by ReactFlow internally — applying it back creates
+        //   ResizeObserver → store → re-render → React #185 feedback loop.
+        // 'select': applyNodeChanges always returns new node objects even for no-op
+        //   select changes → new array ref → xyflow re-syncs → fires select again → loop.
+        //   Selection is tracked separately via useOnSelectionChange.
         const storable = changes.filter(c =>
-          c.type === 'position' || c.type === 'select' || c.type === 'remove' || c.type === 'add' || c.type === 'replace'
+          c.type === 'position' || c.type === 'remove' || c.type === 'add' || c.type === 'replace'
         );
         if (storable.length === 0) return;
         set((state) => ({ nodes: applyNodeChanges(storable, state.nodes) }));
