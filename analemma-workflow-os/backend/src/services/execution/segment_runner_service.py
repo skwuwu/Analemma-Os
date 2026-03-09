@@ -134,8 +134,8 @@ def _trace_none_access(
     key: str,
     source: str,
     actual_value: Any,
-    context: Dict[str, Any] = None,
-    caller: str = None
+    context: Optional[Dict[str, Any]] = None,
+    caller: Optional[str] = None
 ) -> None:
     """
     [v3.5] Trace None value access for debugging NoneType errors
@@ -258,10 +258,10 @@ LIST_MERGE_KEY_PATTERNS = [
 
 
 def _safe_get_from_bag(
-    event: Dict[str, Any], 
-    key: str, 
+    event: Dict[str, Any],
+    key: str,
     default: Any = None,
-    caller: str = None,
+    caller: Optional[str] = None,
     log_on_default: bool = False
 ) -> Any:
     """
@@ -446,7 +446,7 @@ def _normalize_segment_config(segment_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class SegmentRunnerService:
-    def __init__(self, s3_bucket: Optional[str] = None, deadline_ms: float = None):
+    def __init__(self, s3_bucket: Optional[str] = None, deadline_ms: Optional[float] = None) -> None:
         self._deadline_ms = deadline_ms
         self.state_manager = StateManager()
         self.healer = SelfHealingService()
@@ -503,7 +503,7 @@ class SegmentRunnerService:
         # [v3.20] StateViewContext: Proxy pattern (78% memory reduction)
         self._state_view_context = None
 
-    def _check_deadline(self, phase: str):
+    def _check_deadline(self, phase: str) -> None:
         """[v3.35] Graceful shutdown: raise TimeoutError before Lambda hard-kills."""
         if self._deadline_ms and time.time() * 1000 > self._deadline_ms:
             raise TimeoutError(
@@ -512,14 +512,14 @@ class SegmentRunnerService:
             )
 
     @property
-    def security_guard(self):
+    def security_guard(self) -> Optional['PromptSecurityGuard']:
         """Lazy Security Guard initialization"""
         if self._security_guard is None and RING_PROTECTION_AVAILABLE:
             self._security_guard = get_security_guard()
         return self._security_guard
     
     @property
-    def concurrency_controller(self):
+    def concurrency_controller(self) -> Optional['ConcurrencyControllerV2']:
         """Lazy Concurrency Controller initialization"""
         if self._concurrency_controller is None and CONCURRENCY_CONTROLLER_AVAILABLE:
             # Reserved Concurrency 200 (configured in template.yaml)
@@ -535,7 +535,7 @@ class SegmentRunnerService:
         return self._concurrency_controller
     
     @property
-    def routing_resolver(self):
+    def routing_resolver(self) -> Any:
         """
         Lazy RoutingResolver initialization
 
@@ -544,7 +544,7 @@ class SegmentRunnerService:
         return self._routing_resolver
     
     @property
-    def state_view_context(self):
+    def state_view_context(self) -> Any:
         """
         Lazy StateViewContext initialization
 
@@ -611,7 +611,7 @@ class SegmentRunnerService:
             return {}  # Return empty dict to prevent AttributeError cascade
     
     @property
-    def s3_client(self):
+    def s3_client(self) -> Any:
         """Lazy S3 client initialization"""
         if self._s3_client is None:
             import boto3
@@ -622,9 +622,7 @@ class SegmentRunnerService:
     #  [Utility] State Merge: Integrity-guaranteed state merging
     # ========================================================================
     def _should_merge_as_list(self, key: str) -> bool:
-        """
-        Check if this key is a list merge target
-        """
+        """Check if this key is a list merge target."""
         for pattern in LIST_MERGE_KEY_PATTERNS:
             if pattern in key or key.startswith(pattern):
                 return True
@@ -1150,12 +1148,12 @@ class SegmentRunnerService:
         return segment_config.get('status', SEGMENT_STATUS_PENDING)
 
     def _mark_segments_for_skip(
-        self, 
-        manifest_s3_path: str, 
-        segment_ids_to_skip: List[int], 
+        self,
+        manifest_s3_path: str,
+        segment_ids_to_skip: List[int],
         reason: str,
-        bag: 'SmartStateBag' = None,
-        workflow_config: dict = None
+        bag: Optional['SmartStateBag'] = None,
+        workflow_config: Optional[dict] = None
     ) -> bool:
         """
         [Phase 8.3] Mark specific segments as SKIP + regenerate manifest
@@ -1238,7 +1236,7 @@ class SegmentRunnerService:
         parent_manifest_id: str,
         parent_manifest_hash: str,
         reason: str
-    ) -> tuple:
+    ) -> Tuple[str, str, str]:
         """
         [Phase 8.2 & 8.3] Regenerate manifest on mutation detection
 
@@ -1349,8 +1347,8 @@ class SegmentRunnerService:
         after_segment_id: int,
         recovery_segments: List[Dict[str, Any]],
         reason: str,
-        bag: 'SmartStateBag' = None,
-        workflow_config: dict = None
+        bag: Optional['SmartStateBag'] = None,
+        workflow_config: Optional[dict] = None
     ) -> bool:
         """
         [Phase 8.3] Insert recovery segments + regenerate manifest
@@ -1534,7 +1532,7 @@ class SegmentRunnerService:
         recovery_segments: List[Dict[str, Any]],
         reason: str,
         workflow_config: dict,
-        task_token: str = None
+        task_token: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Invoke ManifestRegenerator Lambda (sync or async)
@@ -1907,8 +1905,8 @@ class SegmentRunnerService:
         segment_config: Dict[str, Any],
         state: Dict[str, Any],
         segment_id: int,
-        owner_id: str = None,
-        workflow_id: str = None
+        owner_id: Optional[str] = None,
+        workflow_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         [Parallel] Parallel group scheduling: determine execution batches based on resource_policy
@@ -5030,8 +5028,8 @@ class SegmentRunnerService:
         manifest_s3_path: str,
         segment_index: int,
         cache_ttl: int = 300,  # 5-minute cache
-        owner_id: str = None   # [FIX] For tenant isolation
-    ) -> dict:
+        owner_id: Optional[str] = None   # [FIX] For tenant isolation
+    ) -> Dict[str, Any]:
         """
         [Phase 0.1] Load segment_manifest from S3 and extract a specific segment_config
 
