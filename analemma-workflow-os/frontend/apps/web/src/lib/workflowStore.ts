@@ -802,6 +802,11 @@ export const useWorkflowStore = create<WorkflowState>()(
         return {
           ...currentState,
           ...persisted,
+          // Guarantee non-undefined — old persisted data may not include these fields.
+          // If ...persisted spreads undefined values, they override currentState defaults,
+          // causing selectors with fallback values (|| {}) to create new refs every call.
+          subgraphs: persisted.subgraphs ?? currentState.subgraphs,
+          navigationPath: persisted.navigationPath ?? currentState.navigationPath,
           // Clean legacy persisted data that may contain stale ReactFlow internals
           nodes: (persisted.nodes || []).map((n: any) => ({
             id: n.id, type: n.type, position: n.position, data: n.data,

@@ -8,9 +8,7 @@ import {
   ReactFlowProvider,
   ReactFlowInstance,
   BackgroundVariant,
-  useReactFlow,
   useOnSelectionChange,
-  SelectionMode,
   NodeChange,
   EdgeChange,
 } from '@xyflow/react';
@@ -38,22 +36,17 @@ import {
   Keyboard,
   Layers,
   ChevronRight,
-  Play,
-  History,
-  PanelRightClose,
   Trash2,
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore, selectIssueSummary } from '@/lib/codesignStore';
 import { useCanvasMode } from '@/hooks/useCanvasMode';
-import { useAutoValidation } from '@/hooks/useAutoValidation';
 import { WorkflowStatusIndicator } from './WorkflowStatusIndicator';
 import { useTimeMachine } from '@/hooks/useBriefingAndCheckpoints';
 import { toast } from 'sonner';
 import type { TimelineItem, RollbackRequest } from '@/lib/types';
 import { createWorkflowNode, generateNodeId } from '@/lib/nodeFactory';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -92,53 +85,31 @@ const WorkflowCanvasInner = () => {
   }), []);
 
   // ==========================================
-  // 3. STORE SUBSCRIPTIONS
+  // 3. STORE SUBSCRIPTIONS — individual selectors for granular re-render control.
+  // useShallow with object selectors + fallback values (|| {}) creates new references
+  // on every selector evaluation, causing unnecessary re-renders → React #185.
   // ==========================================
-  // 1. Store optimization: Subscribe to nodes/edges with shallow comparison
-  const { nodes, edges, subgraphs, navigationPath } = useWorkflowStore(
-    useShallow((state) => ({
-      nodes: state.nodes,
-      edges: state.edges,
-      subgraphs: state.subgraphs || {},
-      navigationPath: state.navigationPath || ['root'],
-    }))
-  );
-  // Actions (stable references — useShallow prevents re-renders from unrelated state changes)
-  const {
-    addNode,
-    updateNode,
-    removeNode,
-    removeEdge,
-    addEdge,
-    clearWorkflow,
-    loadWorkflow,
-    onNodesChange,
-    onEdgesChange,
-    onConnect,
-    groupNodes,
-    ungroupNode,
-    navigateToSubgraph,
-    navigateUp,
-    setSelectedNodeId,
-  } = useWorkflowStore(
-    useShallow((state) => ({
-      addNode: state.addNode,
-      updateNode: state.updateNode,
-      removeNode: state.removeNode,
-      removeEdge: state.removeEdge,
-      addEdge: state.addEdge,
-      clearWorkflow: state.clearWorkflow,
-      loadWorkflow: state.loadWorkflow,
-      onNodesChange: state.onNodesChange,
-      onEdgesChange: state.onEdgesChange,
-      onConnect: state.onConnect,
-      groupNodes: state.groupNodes,
-      ungroupNode: state.ungroupNode,
-      navigateToSubgraph: state.navigateToSubgraph,
-      navigateUp: state.navigateUp,
-      setSelectedNodeId: state.setSelectedNodeId,
-    }))
-  );
+  const nodes = useWorkflowStore(state => state.nodes);
+  const edges = useWorkflowStore(state => state.edges);
+  const subgraphs = useWorkflowStore(state => state.subgraphs);
+  const navigationPath = useWorkflowStore(state => state.navigationPath);
+
+  // Actions — stable function references (created once in store closure, never change)
+  const addNode = useWorkflowStore(state => state.addNode);
+  const updateNode = useWorkflowStore(state => state.updateNode);
+  const removeNode = useWorkflowStore(state => state.removeNode);
+  const removeEdge = useWorkflowStore(state => state.removeEdge);
+  const addEdge = useWorkflowStore(state => state.addEdge);
+  const clearWorkflow = useWorkflowStore(state => state.clearWorkflow);
+  const loadWorkflow = useWorkflowStore(state => state.loadWorkflow);
+  const onNodesChange = useWorkflowStore(state => state.onNodesChange);
+  const onEdgesChange = useWorkflowStore(state => state.onEdgesChange);
+  const onConnect = useWorkflowStore(state => state.onConnect);
+  const groupNodes = useWorkflowStore(state => state.groupNodes);
+  const ungroupNode = useWorkflowStore(state => state.ungroupNode);
+  const navigateToSubgraph = useWorkflowStore(state => state.navigateToSubgraph);
+  const navigateUp = useWorkflowStore(state => state.navigateUp);
+  const setSelectedNodeId = useWorkflowStore(state => state.setSelectedNodeId);
 
   // Handle selection changes for both single and multi-node selection
   const handleSelectionChange = useCallback(({ nodes }: { nodes: Node[] }) => {
