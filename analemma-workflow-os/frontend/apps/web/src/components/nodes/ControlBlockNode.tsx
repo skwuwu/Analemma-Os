@@ -1,11 +1,12 @@
 import { Handle, Position, useReactFlow } from '@xyflow/react';
-import { GitBranch, Repeat, Plus, Trash2, Settings } from 'lucide-react';
+import { GitBranch, Repeat, Plus, Trash2, Settings, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 // Native select used instead of Radix Select to prevent React #185 inside ReactFlow
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
+import { useWorkflowStore } from '@/lib/workflowStore';
 import { useState } from 'react';
 
 // Control Block 타입 정의
@@ -39,25 +40,25 @@ interface ControlBlockNodeProps {
 const BLOCK_TYPE_CONFIG = {
   conditional: {
     icon: GitBranch,
-    color: '142 76% 36%', // 초록색
+    color: '48 96% 53%',
     label: 'Conditional Branch',
     description: 'Route based on conditions',
   },
   parallel: {
     icon: GitBranch,
-    color: '217 91% 60%', // 파란색
+    color: '48 96% 53%',
     label: 'Parallel Execution',
     description: 'Execute branches simultaneously',
   },
   for_each: {
     icon: Repeat,
-    color: '280 65% 60%', // 보라색
+    color: '48 96% 53%',
     label: 'For Each Loop',
     description: 'Iterate over items',
   },
   while: {
     icon: Repeat,
-    color: '48 96% 53%', // 노란색
+    color: '48 96% 53%',
     label: 'While Loop',
     description: 'Loop until condition met',
   },
@@ -65,6 +66,7 @@ const BLOCK_TYPE_CONFIG = {
 
 export const ControlBlockNode = ({ data, id, selected }: ControlBlockNodeProps) => {
   const { updateNodeData } = useReactFlow();
+  const removeNode = useWorkflowStore(state => state.removeNode);
   const [expanded, setExpanded] = useState(false);
 
   const config = BLOCK_TYPE_CONFIG[data.blockType];
@@ -144,7 +146,16 @@ export const ControlBlockNode = ({ data, id, selected }: ControlBlockNodeProps) 
         style={{ backgroundColor: `hsl(${config.color})` }}
       />
 
-      {/* 헤더 */}
+      <Button
+        size="icon"
+        variant="ghost"
+        className="absolute top-1 right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
+        onClick={(e) => { e.stopPropagation(); removeNode(id); }}
+      >
+        <X className="w-3 h-3" />
+      </Button>
+
+      {/* Header */}
       <div className="flex items-start gap-2 mb-3">
         <div
           className="p-2 rounded-md"
@@ -157,7 +168,7 @@ export const ControlBlockNode = ({ data, id, selected }: ControlBlockNodeProps) 
             <Input
               value={data.label}
               onChange={(e) => updateNodeData(id, { ...data, label: e.target.value })}
-              className="text-sm font-semibold h-7 px-2 border-0 bg-transparent focus-visible:ring-1"
+              className="text-sm font-semibold h-7 px-2 border-0 bg-transparent text-white focus-visible:ring-1"
               placeholder="Block name"
             />
           </div>

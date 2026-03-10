@@ -9,11 +9,11 @@
 // Operator Node Config
 export const OPERATOR_CONFIG = {
   custom: { iconName: 'Globe', color: '25 95% 60%', label: 'Custom' },
-  api_call: { iconName: 'Globe', color: '200 100% 50%', label: 'API Call' },
-  database: { iconName: 'Database', color: '190 100% 28%', label: 'Database' },
-  db_query: { iconName: 'Database', color: '190 100% 28%', label: 'Database' },
-  safe_operator: { iconName: 'CheckCircle2', color: '142 76% 36%', label: 'Safe Transform' },
-  operator_official: { iconName: 'CheckCircle2', color: '142 76% 36%', label: 'Safe Transform' },
+  api_call: { iconName: 'Globe', color: '25 95% 60%', label: 'API Call' },
+  database: { iconName: 'Database', color: '25 95% 60%', label: 'Database' },
+  db_query: { iconName: 'Database', color: '25 95% 60%', label: 'Database' },
+  safe_operator: { iconName: 'CheckCircle2', color: '25 95% 60%', label: 'Safe Transform' },
+  operator_official: { iconName: 'CheckCircle2', color: '25 95% 60%', label: 'Safe Transform' },
   default: { iconName: 'Globe', color: '25 95% 60%', label: 'Operator' }
 } as const;
 
@@ -27,12 +27,12 @@ export const TRIGGER_CONFIG = {
   request: {
     iconName: 'Webhook',
     label: 'Webhook',
-    color: '217 91% 60%'
+    color: '142 76% 36%'
   },
   event: {
     iconName: 'Zap',
     label: 'Event',
-    color: '45 93% 47%'
+    color: '142 76% 36%'
   },
   default: {
     iconName: 'Zap',
@@ -43,9 +43,9 @@ export const TRIGGER_CONFIG = {
 
 // Control Node Config
 export const CONTROL_CONFIG = {
-  conditional: { iconName: 'GitBranch', color: '280 100% 70%', label: 'Conditional' },
-  parallel: { iconName: 'GitBranch', color: '280 100% 70%', label: 'Parallel' },
-  default: { iconName: 'GitBranch', color: '280 100% 70%', label: 'Control' }
+  conditional: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Conditional' },
+  parallel: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Parallel' },
+  default: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Control' }
 } as const;
 
 // Type exports for type safety (pure types, no runtime impact)

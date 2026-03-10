@@ -9,7 +9,7 @@ import { memo } from 'react';
 const CONTROL_CONFIG = {
   branch: {
     icon: GitBranch,
-    color: '142 76% 36%',
+    color: '48 96% 53%',
     label: 'Branch'
   },
   loop: {
@@ -19,22 +19,22 @@ const CONTROL_CONFIG = {
   },
   wait: {
     icon: Clock,
-    color: '25 95% 60%',
+    color: '48 96% 53%',
     label: 'Wait'
   },
   human: {
     icon: User,
-    color: '263 70% 60%',
+    color: '48 96% 53%',
     label: 'Human'
   },
   conditional: {
     icon: AlertTriangle,
-    color: '0 84% 60%',
+    color: '48 96% 53%',
     label: 'Conditional'
   },
   default: {
     icon: Clock,
-    color: '280 65% 60%',
+    color: '48 96% 53%',
     label: 'Control'
   }
 } as const;
@@ -91,11 +91,8 @@ const ControlNodeInner = ({ data, id, selected }: ControlNodeProps) => {
       <Button
         size="icon"
         variant="ghost"
-        className="absolute -top-2 -right-2 h-5 w-5 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/90 shadow-sm transition-all z-10"
-        onClick={(e) => {
-          e.stopPropagation();
-          removeNode(id);
-        }}
+        className="absolute top-1 right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
+        onClick={(e) => { e.stopPropagation(); removeNode(id); }}
       >
         <X className="w-3 h-3" />
       </Button>
@@ -111,7 +108,7 @@ const ControlNodeInner = ({ data, id, selected }: ControlNodeProps) => {
           <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
             {config.label}
           </span>
-          <span className="text-sm font-bold truncate text-foreground">
+          <span className="text-sm font-bold truncate text-white">
             {data?.label || 'Untitled'}
           </span>
         </div>

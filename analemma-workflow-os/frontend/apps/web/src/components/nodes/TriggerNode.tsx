@@ -41,20 +41,14 @@ const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
         boxShadow: `0 0 20px hsl(${config.color} / 0.15)`
       }}
     >
-      {/* Action buttons */}
-      <div className="absolute -top-3 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity z-10">
-        <Button
-          size="icon"
-          variant="destructive"
-          className="h-6 w-6 rounded-full shadow-sm"
-          onClick={(e) => {
-            e.stopPropagation();
-            removeNode(id);
-          }}
-        >
-          <X className="w-3 h-3" />
-        </Button>
-      </div>
+      <Button
+        size="icon"
+        variant="ghost"
+        className="absolute top-1 right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
+        onClick={(e) => { e.stopPropagation(); removeNode(id); }}
+      >
+        <X className="w-3 h-3" />
+      </Button>
 
       <div className="flex items-start gap-3">
         <div
@@ -71,7 +65,7 @@ const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
           <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">
             {config.label}
           </span>
-          <span className="text-sm font-bold truncate text-foreground leading-tight">
+          <span className="text-sm font-bold truncate text-white leading-tight">
             {data.label}
           </span>
 

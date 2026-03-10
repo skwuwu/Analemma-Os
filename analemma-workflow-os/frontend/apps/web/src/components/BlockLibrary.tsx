@@ -81,10 +81,10 @@ const STYLE_CONFIG: Record<BlockType, { bg: string; border: string; iconBg: stri
     iconColor: 'text-[hsl(25_95%_60%)]'
   },
   control: {
-    bg: 'from-[hsl(280_65%_60%)]/10 to-[hsl(280_65%_60%)]/5',
-    border: 'border-[hsl(280_65%_60%)]/50',
-    iconBg: 'bg-[hsl(280_65%_60%)]/20',
-    iconColor: 'text-[hsl(280_65%_60%)]'
+    bg: 'from-[hsl(48_96%_53%)]/10 to-[hsl(48_96%_53%)]/5',
+    border: 'border-[hsl(48_96%_53%)]/50',
+    iconBg: 'bg-[hsl(48_96%_53%)]/20',
+    iconColor: 'text-[hsl(48_96%_53%)]'
   }
 };
 

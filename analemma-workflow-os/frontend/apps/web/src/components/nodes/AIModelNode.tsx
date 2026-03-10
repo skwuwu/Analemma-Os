@@ -103,10 +103,14 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
 
   return (
     <div className={cn(
-      "px-3 py-3 rounded-xl border bg-card/80 backdrop-blur-md min-w-[220px] transition-all duration-300 relative group overflow-hidden",
+      "px-3 py-3 rounded-xl border backdrop-blur-md min-w-[220px] transition-all duration-300 relative group",
       statusStyle.border,
       selected && "ring-2 ring-primary ring-offset-2"
-    )}>
+    )}
+    style={{
+      background: 'linear-gradient(to bottom right, hsl(217 91% 60% / 0.15), hsl(217 91% 60% / 0.05))',
+      boxShadow: '0 0 20px hsl(217 91% 60% / 0.15)'
+    }}>
       {/* Status icon — CSS transition instead of AnimatePresence */}
       {status !== 'idle' && (
         <div className={cn(
@@ -124,7 +128,7 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
       <Button
         size="icon"
         variant="ghost"
-        className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
+        className="absolute top-1 right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
         onClick={(e) => { e.stopPropagation(); removeNode(id); }}
       >
         <X className="w-3 h-3" />
@@ -137,7 +141,7 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
         </div>
         <div className="flex flex-col min-w-0">
           <span className="text-[10px] text-muted-foreground font-bold uppercase tracking-tighter">AI Agent Step</span>
-          <span className="text-sm font-black truncate text-foreground">{data.label}</span>
+          <span className="text-sm font-black truncate text-white">{data.label}</span>
         </div>
       </div>
 

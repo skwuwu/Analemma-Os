@@ -94,7 +94,7 @@ const OperatorNodeInner = ({ data, id, selected }: OperatorNodeProps) => {
           <div className="text-[10px] text-muted-foreground/60 font-black uppercase tracking-tighter flex items-center justify-between">
             {config.label}
           </div>
-          <div className="text-sm font-black text-foreground truncate leading-tight">
+          <div className="text-sm font-black text-white truncate leading-tight">
             {data.label}
           </div>
 
@@ -129,7 +129,7 @@ const OperatorNodeInner = ({ data, id, selected }: OperatorNodeProps) => {
       <Button
         size="icon"
         variant="ghost"
-        className="absolute -top-2 -right-2 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
+        className="absolute top-1 right-1 h-6 w-6 rounded-full bg-destructive text-destructive-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive shadow-lg transition-all z-20"
         onClick={(e) => { e.stopPropagation(); removeNode(id); }}
       >
         <X className="w-3 h-3" />
