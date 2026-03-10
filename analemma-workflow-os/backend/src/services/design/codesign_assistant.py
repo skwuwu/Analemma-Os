@@ -1180,8 +1180,18 @@ async def _stream_gemini_codesign(
             
             try:
                 obj = json.loads(chunk)
+
+                # json.loads may return a non-dict (string, list, number).
+                # Skip internal metadata and non-object chunks.
+                if not isinstance(obj, dict):
+                    continue
+
+                # Skip internal metadata from GeminiService
+                if obj.get("type") == "_metadata":
+                    continue
+
                 received_any_response = True
-                
+
                 # ────────────────────────────────────────────────
                 # Thinking Mode 처리: AI의 사고 과정을 UI에 전달
                 # ────────────────────────────────────────────────

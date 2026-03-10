@@ -1442,7 +1442,7 @@ class GeminiService:
             token_usage.estimated_cost_usd = calculate_cost(self.config.model.value, token_usage)
             self._last_token_usage = token_usage
             
-            # Cost logging
+            # Cost logging (do NOT yield in finally — causes RuntimeError on GeneratorExit)
             node_label = f" (node: {node_id})" if node_id else ""
             logger.info(
                 f"Gemini stream complete{node_label}: "
@@ -1450,17 +1450,6 @@ class GeminiService:
                 f"cached={token_usage.cached_tokens}, cost=${token_usage.estimated_cost_usd:.6f}, "
                 f"latency={elapsed_ms:.0f}ms"
             )
-            
-            # Yield metadata (used by client for cost tracking)
-            metadata_msg = {
-                "type": "_metadata",
-                "data": {
-                    "token_usage": token_usage.to_dict(),
-                    "latency_ms": elapsed_ms,
-                    "model": self.config.model.value
-                }
-            }
-            yield json.dumps(metadata_msg) + "\n"
     
     def invoke_with_full_context(
         self,
