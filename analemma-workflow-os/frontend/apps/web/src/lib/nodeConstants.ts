@@ -45,6 +45,11 @@ export const TRIGGER_CONFIG = {
 export const CONTROL_CONFIG = {
   conditional: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Conditional' },
   parallel: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Parallel' },
+  for_each: { iconName: 'Repeat', color: '48 96% 53%', label: 'For Each' },
+  loop: { iconName: 'Repeat', color: '48 96% 53%', label: 'Loop' },
+  aggregator: { iconName: 'Merge', color: '48 96% 53%', label: 'Aggregator' },
+  human: { iconName: 'User', color: '48 96% 53%', label: 'Human Review' },
+  branch: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Branch' },
   default: { iconName: 'GitBranch', color: '48 96% 53%', label: 'Control' }
 } as const;
 

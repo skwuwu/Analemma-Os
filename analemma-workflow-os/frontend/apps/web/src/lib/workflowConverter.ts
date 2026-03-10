@@ -38,23 +38,35 @@ export interface BackendWorkflow {
 
 export interface BackendNode {
   id: string;
-  type: 
-    // 사용자가 프론트엔드에서 생성하는 타입들 (코드가 자동 변환)
-    | 'operator'       // operator, trigger, control(human) → operator
-    | 'llm'            // LLM 평가 노드 (자동 생성)
-    | 'llm_chat'       // aiModel → llm_chat
-    | 'loop'           // cycle (back-edge) → loop
-    | 'for_each'       // control(loop/for_each) → for_each
-    | 'parallel_group' // control(parallel) → parallel_group
-    | 'parallel'       // parallel (alias for parallel_group)
-    | 'aggregator'     // control(aggregator) → aggregator (token aggregation)
-    | 'subgraph'       // group → subgraph
-    | 'api_call'       // operator(api_call) → api_call
-    | 'db_query'       // operator(db_query) → db_query
-    | 'safe_operator'  // operator(safe_operator) → safe_operator
-    | 'operator_official' // operator_official flag setter
-    | 'route_condition' // control(conditional) → route_condition
-    | 'trigger';       // trigger → trigger (백엔드에서 정규화됨)
+  type:
+    // Core execution
+    | 'operator'           // custom Python code execution
+    | 'operator_custom'    // alias for operator
+    | 'operator_official'  // built-in transformation strategies
+    | 'safe_operator'      // alias for operator_official
+    | 'llm_chat'           // LLM chat / AI model invocation
+    // Flow control
+    | 'loop'               // conditional loop / while
+    | 'for_each'           // parallel list processing
+    | 'nested_for_each'    // nested loop (map-in-map)
+    | 'parallel_group'     // parallel branch execution
+    | 'parallel'           // alias for parallel_group
+    | 'aggregator'         // result aggregation
+    | 'route_condition'    // conditional branching
+    | 'dynamic_router'     // LLM-based dynamic routing
+    // Subgraph
+    | 'subgraph'           // subgraph / group
+    // Infrastructure & Data
+    | 'api_call'           // HTTP API call
+    | 'db_query'           // database query
+    // Multimodal & Skills
+    | 'vision'             // image/video analysis
+    | 'video_chunker'      // video segmentation
+    | 'skill_executor'     // skill execution
+    // Governance
+    | 'governor'           // agent output validation
+    // UI marker (backend normalizes to operator)
+    | 'trigger';           // trigger node
   label?: string;
   action?: string;
   hitp?: boolean;  // Human-in-the-loop flag
@@ -69,9 +81,9 @@ export interface BackendNode {
 }
 
 export interface BackendEdge {
-  // 백엔드 실제 지원 타입 (builder.py 참조)
-  // ❌ REMOVED: conditional_edge (라우팅 주권 일원화 - route_condition 노드 사용)
-  type: 'edge' | 'normal' | 'flow' | 'hitp' | 'human_in_the_loop' | 'pause' | 'start' | 'end';
+  // Backend supported edge types (builder.py reference)
+  // conditional_edge is deprecated (use route_condition node) but kept for legacy workflow compat
+  type: 'edge' | 'normal' | 'flow' | 'hitp' | 'human_in_the_loop' | 'pause' | 'start' | 'end' | 'conditional_edge' | 'if';
   source: string;
   target: string;
 }
@@ -401,11 +413,11 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
     if (evalMode === 'natural_language' && naturalCondition) {
       loopNodes.push({
         id: `__loop_condition_evaluator_${cycle.id}`,
-        type: 'llm',
+        type: 'llm_chat',
         label: 'Loop Condition Evaluator',
         config: {
           model: 'gemini-2.0-flash-exp',
-          system_message: `You are a condition evaluator. Evaluate the following condition based on the current workflow state and return ONLY a JSON object.\n\nCondition to evaluate: "${naturalCondition}"\n\nAnalyze the current state and determine if this condition is satisfied.\n\nReturn format: {"should_exit": true/false, "reason": "brief explanation"}`,
+          prompt_content: `Evaluate the following condition based on the current workflow state and return ONLY a JSON object.\n\nCondition to evaluate: "${naturalCondition}"\n\nAnalyze the current state and determine if this condition is satisfied.\n\nReturn format: {"should_exit": true/false, "reason": "brief explanation"}`,
           output_key: '__loop_condition_result',
           response_format: 'json',
           temperature: 0.1,
@@ -546,11 +558,11 @@ const convertConditionalBranchToRouteNode = (
     
     llmNode = {
       id: `__llm_evaluator_${sourceNodeId}`,
-      type: 'llm',
+      type: 'llm_chat',
       label: 'Condition Evaluator',
       config: {
         model: 'gemini-2.0-flash-exp',
-        system_message: `You are a condition evaluator. Evaluate the following conditions based on the current workflow state.
+        prompt_content: `You are a condition evaluator. Evaluate the following conditions based on the current workflow state.
 
 Conditions:
 ${conditionsText}
@@ -566,7 +578,7 @@ Set exactly ONE branch to true based on which condition matches.`,
       },
     };
   }
-  
+
   // route_condition 노드 생성
   const routeNode: BackendNode = {
     id: `__route_${sourceNodeId}`,
@@ -678,11 +690,11 @@ function convertControlBlockToBackend(
       
       resultNodes.push({
         id: `__llm_evaluator_${blockId}`,
-        type: 'llm',
+        type: 'llm_chat',
         label: 'Condition Evaluator',
         config: {
           model: 'gemini-2.0-flash-exp',
-          system_message: `You are a condition evaluator. Evaluate the following conditions based on the current workflow state.
+          prompt_content: `You are a condition evaluator. Evaluate the following conditions based on the current workflow state.
 
 Conditions:
 ${conditionsText}
@@ -791,11 +803,11 @@ Set exactly ONE branch flag to true based on which condition matches.`,
       // LLM evaluator 노드 추가
       resultNodes.push({
         id: `__loop_condition_evaluator_${blockId}`,
-        type: 'llm',
+        type: 'llm_chat',
         label: 'Loop Condition Evaluator',
         config: {
           model: 'gemini-2.0-flash-exp',
-          system_message: `Evaluate the following loop exit condition based on the current workflow state:
+          prompt_content: `Evaluate the following loop exit condition based on the current workflow state:
 
 Exit Condition: "${naturalCondition}"
 
@@ -1392,15 +1404,83 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           connection_string: dbConfig.connection_string,
         };
         break;
+      case 'safe_operator':
+      case 'operator_official':
+        // safe_operator / operator_official → operator(safe_operator)
+        frontendType = 'operator';
+        label = 'Safe Transform';
+        const safeConfig = node.config || {};
+        nodeData = {
+          label,
+          operatorType: 'safe_operator',
+          strategy: safeConfig.strategy || 'list_filter',
+          input_key: safeConfig.input_key,
+          output_key: safeConfig.output_key,
+          params: safeConfig.params || {},
+        };
+        break;
+      case 'operator_custom':
+        // operator_custom → operator(custom)
+        frontendType = 'operator';
+        label = 'Custom Operator';
+        nodeData = {
+          label,
+          operatorType: 'custom',
+          sets: node.config?.sets || {},
+          code: node.config?.code,
+        };
+        break;
+      case 'dynamic_router':
+        // dynamic_router → control(conditional) with dynamic routing metadata
+        frontendType = 'control';
+        label = 'Dynamic Router';
+        const dynConfig = node.config || {};
+        nodeData = {
+          label,
+          controlType: 'conditional',
+          conditions: dynConfig.routes || dynConfig.conditions || [],
+          rawBackendType: 'dynamic_router',
+          prompt_content: dynConfig.prompt_content,
+        };
+        break;
+      case 'nested_for_each':
+        // nested_for_each → control(for_each) with nested metadata
+        frontendType = 'control';
+        label = 'Nested For Each';
+        const nestedConfig = node.config || {};
+        nodeData = {
+          label,
+          controlType: 'for_each',
+          items_path: nestedConfig.input_list_key || '',
+          rawBackendType: 'nested_for_each',
+          nested_config: nestedConfig.nested_config,
+        };
+        break;
+      case 'vision':
+      case 'video_chunker':
+      case 'skill_executor':
+      case 'governor':
+        // Runtime-only types: display as operator with backend type preserved
+        frontendType = 'operator';
+        label = node.type === 'vision' ? 'Vision Analysis'
+          : node.type === 'video_chunker' ? 'Video Chunker'
+          : node.type === 'skill_executor' ? 'Skill Executor'
+          : 'Governor';
+        nodeData = {
+          label,
+          rawBackendType: node.type,
+          ...(node.config || {}),
+        };
+        break;
       default:
-        // 기타 런타임 전용 타입(vision, skill_executor 등)은 일반 operator로 표시
+        // Unknown runtime type — preserve as operator with rawBackendType
         console.warn(`[WorkflowConverter] Unknown node type '${node.type}' for node ${node.id}, treating as operator`);
         frontendType = 'operator';
         label = node.type || 'Block';
-        nodeData = { 
-          label, 
+        nodeData = {
+          label,
           rawBackendType: node.type,
-          ...(node.config || {}) 
+          ...(node.config || {})
         };
     }
 

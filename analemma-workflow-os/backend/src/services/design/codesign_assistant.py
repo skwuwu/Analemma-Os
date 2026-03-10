@@ -134,71 +134,115 @@ logger.setLevel(os.getenv("LOG_LEVEL", "INFO"))
 # ──────────────────────────────────────────────────────────────
 
 NODE_TYPE_SPECS = """
-[사용 가능한 노드 타입 (Backend Primitives)]
-1. "operator": Python 코드 실행 노드
-   - config.code: 실행할 Python 코드 (문자열)
-   - config.sets: 간단한 키-값 설정 (객체, 선택사항)
+[Available Node Types (Backend Primitives)]
 
-2. "llm_chat": LLM 채팅 노드
-   - config.prompt_content: 프롬프트 템플릿 (문자열, 필수)
-   - config.model: 모델 ID (문자열, 선택사항, 기본값: "gpt-4o")
-   - config.system_prompt: 시스템 프롬프트 (문자열, 선택사항)
+--- Core Execution ---
 
-3. "api_call": HTTP API 호출 노드
-   - config.url: API 엔드포인트 URL (문자열, 필수)
-   - config.method: HTTP 메소드 (문자열, 기본값: "GET")
-   - config.headers: HTTP 헤더 (객체, 선택사항)
-   - config.json: JSON 바디 (객체, 선택사항)
+1. "operator": Custom Python code execution node
+   - config.code: Python code to execute (string)
+   - config.sets: Simple key-value settings (object, optional)
 
-4. "db_query": 데이터베이스 쿼리 노드
-   - config.query: SQL 쿼리 (문자열, 필수)
-   - config.connection_string: DB 연결 문자열 (문자열, 필수)
+2. "operator_official" (alias: "safe_operator"): Built-in transformation strategies
+   - config.strategy: Transformation strategy name (string, required)
+     Supported: list_filter, json_parse, string_template, deep_get, deep_set,
+                regex_extract, math_eval, date_format, merge_dicts, flatten, etc.
+   - config.input_key: State key to read from (string, optional)
+   - config.output_key: State key to write result (string, optional)
+   - config.params: Strategy-specific parameters (object, optional)
 
-5. "for_each": 병렬 리스트 처리 (Control Block: For Each)
-   - config.items_path: 반복할 리스트 경로 (문자열, 필수, 예: "state.users")
-   - config.item_key: 각 아이템을 저장할 상태 키 (문자열, 선택사항)
-   - config.output_key: 결과 배열 저장 키 (문자열, 선택사항)
-   - config.items: (대안) 고정 리스트 입력
-   - config.sub_workflow.nodes: 각 아이템에 대해 실행할 노드 배열 (배열, 필수)
-   - config.max_iterations: 최대 반복 횟수 (숫자, 선택사항, 기본값: 20)
+3. "llm_chat": LLM chat / AI model invocation node
+   - config.prompt_content: Prompt template (string, required)
+   - config.model: Model ID (string, optional, default: "gpt-4o")
+   - config.system_prompt: System prompt (string, optional)
+   - config.temperature: Sampling temperature (number, optional)
+   - config.max_tokens: Max output tokens (number, optional)
+   - config.tool_definitions: Tool/function calling definitions (array, optional)
+   - config.writes_state_key: State key to write output (string, optional)
 
-6. "loop": 조건부 반복/While 루프 (Control Block: While)
-   - config.condition: 루프 지속 조건 (문자열/JS 표현식, 예: "state.count < 5", 필수)
-   - config.nodes: 루프 내부에서 실행할 노드 배열 (배열, 필수)
-   - config.max_iterations: 최대 반복 횟수 (숫자, 선택사항, 기본값: 20)
-   - config.loop_var: 루프 인덱스 변수명 (문자열, 선택사항)
+4. "api_call": HTTP API call node
+   - config.url: API endpoint URL (string, required)
+   - config.method: HTTP method (string, default: "GET")
+   - config.headers: HTTP headers (object, optional)
+   - config.json: JSON body (object, optional)
+   - config.timeout: Request timeout in seconds (number, optional)
 
-7. "parallel_group": 병렬 브랜치 실행 (Control Block: Parallel)
-   - config.branches: 브랜치 정의 배열 (배열, 필수)
-   - 각 브랜치: {"branch_id": "브랜치명", "nodes": [노드들...]}
+5. "db_query": Database query node
+   - config.query: SQL query (string, required)
+   - config.connection_string: DB connection string (string, required)
 
-8. "route_condition": 조건부 분기 (Control Block: Conditional)
-   - config.conditions: 조건 정의 배열 (배열, 필수)
-   - 각 조건: {"expression": "JS 조건식", "target": "대상_노드_id"}
-   - config.default_node: 기본값 노드 ID (조건 불일치 시)
+--- Flow Control ---
 
-9. "subgraph": 서브그래프/그룹
-   - config.subgraph_id: 서브그래프 ID (문자열)
-   - config.subgraph_inline: 인라인 정의 ({"nodes": [], "edges": []})
+6. "for_each": Parallel list processing (Control Block: For Each)
+   - config.items_path: Path to iterable list in state (string, required, e.g. "state.users")
+   - config.item_key: State key for current item (string, optional)
+   - config.output_key: State key for result array (string, optional)
+   - config.sub_workflow.nodes: Nodes to execute per item (array, required)
+   - config.max_iterations: Max iteration count (number, optional, default: 20)
 
-10. "vision": 이미지/비디오 분석
-    - config.image_inputs: 이미지 소스 리스트
-    - config.prompt_content: 분석 프롬프트
+7. "loop": Conditional loop / While loop (Control Block: While)
+   - config.condition: Loop continuation condition (string/expression, required)
+   - config.nodes: Nodes to execute each iteration (array, required)
+   - config.max_iterations: Max iteration count (number, optional, default: 20)
+   - config.loop_var: Loop index variable name (string, optional)
 
-11. "video_chunker": 비디오 분할
-    - config.video_uri: 비디오 URI
-    - config.segment_length_min: 분할 길이(분)
+8. "parallel_group" (alias: "parallel"): Parallel branch execution (Control Block: Parallel)
+   - config.branches: Branch definition array (array, required)
+   - Each branch: {"branch_id": "branch_name", "nodes": [nodes...]}
 
-12. "skill_executor": 스킬 실행
-    - config.skill_ref: 스킬 ID
-    - config.tool_call: 실행할 툴 이름
+9. "route_condition": Conditional branching (Control Block: Conditional)
+   - config.conditions: Condition definition array (array, required)
+   - Each condition: {"expression": "condition_expr", "target": "target_node_id"}
+   - config.default_node: Fallback node ID when no condition matches (string, optional)
 
-13. "nested_for_each": 중첩 루프 처리
-    - config.input_list_key: 외부 리스트 키
-    - config.nested_config: 내부 루프 설정
+10. "dynamic_router": LLM-based dynamic routing
+    - config.prompt_content: Routing decision prompt (string, required)
+    - config.routes: Available route definitions (array, required)
+    - config.model: LLM model for routing decision (string, optional)
 
-14. "route_draft_quality": 품질 라우팅
-    - config.threshold: 임계값
+11. "aggregator": Result aggregation node
+    - Merges results from parallel branches or iterations
+    - No config required — auto-aggregates from state
+
+12. "nested_for_each": Nested loop processing (map-in-map)
+    - config.input_list_key: Outer list key (string, required)
+    - config.nested_config: Inner loop configuration (object, required)
+
+--- Subgraph ---
+
+13. "subgraph" (alias: "group"): Subgraph / group node
+    - config.subgraph_id: Subgraph ID reference (string, optional)
+    - config.subgraph_inline: Inline definition ({"nodes": [], "edges": []}, optional)
+
+--- Multimodal & Skills ---
+
+14. "vision" (alias: "image_analysis"): Image/video analysis
+    - config.image_inputs: Image source list (array)
+    - config.prompt_content: Analysis prompt (string)
+
+15. "video_chunker": Video segmentation
+    - config.video_uri: Video URI (string)
+    - config.segment_length_min: Segment length in minutes (number)
+
+16. "skill_executor": Skill execution
+    - config.skill_ref: Skill ID (string)
+    - config.tool_call: Tool name to execute (string)
+
+--- Governance ---
+
+17. "governor": Agent output validation and kernel command generation
+    - config.validation_rules: Validation rule definitions (array, optional)
+    - config.action_on_fail: Action when validation fails (string, optional)
+
+--- Type Aliases (auto-normalized by backend) ---
+"code"/"function"/"lambda"/"task" → "operator"
+"aimodel"/"llm"/"chat"/"genai"/"gpt"/"claude"/"gemini" → "llm_chat"
+"safe_operator" → "operator_official"
+"map"/"foreach" → "for_each"
+"map_in_map" → "nested_for_each"
+"chunker" → "video_chunker"
+"group" → "subgraph"
+"parallel" → "parallel_group"
+"image_analysis" → "vision"
 """
 
 CODESIGN_SYSTEM_PROMPT = """
@@ -658,7 +702,12 @@ def _incremental_audit(
         "llm_chat": ["prompt_content"],
         "api_call": ["url"],
         "db_query": ["query", "connection_string"],
-        "for_each": ["items"],
+        "for_each": ["items_path"],
+        "loop": ["condition"],
+        "parallel_group": ["branches"],
+        "route_condition": ["conditions"],
+        "operator_official": ["strategy"],
+        "dynamic_router": ["prompt_content", "routes"],
     }
     
     for node_id in nodes_to_check:
@@ -1309,10 +1358,10 @@ def _validate_node_basics(node_data: Dict[str, Any]) -> List[str]:
     config = node_data.get("config", {}) or {}
     
     required_configs = {
-        "llm_chat": [],  # prompt_content는 선택사항
-        "aiModel": [],
+        "llm_chat": [],  # prompt_content optional for lightweight validation
         "api_call": ["url"],
         "db_query": ["query"],
+        "operator_official": ["strategy"],
     }
     
     if node_type in required_configs:

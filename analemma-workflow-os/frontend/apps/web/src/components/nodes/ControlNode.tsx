@@ -12,10 +12,30 @@ const CONTROL_CONFIG = {
     color: '48 96% 53%',
     label: 'Branch'
   },
+  conditional: {
+    icon: AlertTriangle,
+    color: '48 96% 53%',
+    label: 'Conditional'
+  },
+  parallel: {
+    icon: GitBranch,
+    color: '48 96% 53%',
+    label: 'Parallel'
+  },
   loop: {
     icon: Repeat,
     color: '48 96% 53%',
     label: 'Loop'
+  },
+  for_each: {
+    icon: Repeat,
+    color: '48 96% 53%',
+    label: 'For Each'
+  },
+  aggregator: {
+    icon: GitBranch,
+    color: '48 96% 53%',
+    label: 'Aggregator'
   },
   wait: {
     icon: Clock,
@@ -26,11 +46,6 @@ const CONTROL_CONFIG = {
     icon: User,
     color: '48 96% 53%',
     label: 'Human'
-  },
-  conditional: {
-    icon: AlertTriangle,
-    color: '48 96% 53%',
-    label: 'Conditional'
   },
   default: {
     icon: Clock,
