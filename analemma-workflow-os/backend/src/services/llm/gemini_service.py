@@ -1297,23 +1297,49 @@ class GeminiService:
                     received_chunks = True
                     output_text_buffer += chunk.text
                     buffer += chunk.text
-                    # JSONL parsing: yield in complete line units
-                    while "\n" in buffer:
-                        line, buffer = buffer.split("\n", 1)
-                        if line.strip():
+
+                    # Extract complete JSON objects from buffer.
+                    # Gemini may output pretty-printed multi-line JSON wrapped in
+                    # markdown code fences (```json ... ```), not strict JSONL.
+                    # Use json.JSONDecoder.raw_decode() for robust extraction.
+                    clean = buffer.replace("```json", "").replace("```", "")
+                    pos = 0
+                    decoder = json.JSONDecoder()
+
+                    while pos < len(clean):
+                        # Skip whitespace
+                        while pos < len(clean) and clean[pos] in ' \t\n\r':
+                            pos += 1
+                        if pos >= len(clean):
+                            break
+
+                        if clean[pos] == '{':
                             try:
-                                json.loads(line)  # Validation
-                                yield line + "\n"
+                                obj, end_pos = decoder.raw_decode(clean, pos)
+                                yield json.dumps(obj) + "\n"
+                                pos = end_pos
                             except json.JSONDecodeError:
-                                logger.warning(f"Skipping non-JSON line from model: {line[:100]}")
-            
-            # Process remaining buffer
+                                # Incomplete JSON object — keep remainder for next chunk
+                                break
+                        else:
+                            # Skip non-JSON content until next '{'
+                            next_brace = clean.find('{', pos)
+                            if next_brace == -1:
+                                pos = len(clean)
+                            else:
+                                pos = next_brace
+
+                    buffer = clean[pos:] if pos < len(clean) else ""
+
+            # Process remaining buffer (final incomplete object)
             if buffer.strip():
-                try:
-                    json.loads(buffer)
-                    yield buffer + "\n"
-                except json.JSONDecodeError:
-                    logger.warning(f"Skipping final non-JSON buffer: {buffer[:100]}")
+                clean = buffer.replace("```json", "").replace("```", "").strip()
+                if clean:
+                    try:
+                        obj = json.loads(clean)
+                        yield json.dumps(obj) + "\n"
+                    except json.JSONDecodeError:
+                        logger.warning(f"Skipping final non-JSON buffer: {clean[:100]}")
             
             # Detect empty response (complete blocking possible due to Safety Filter)
             if not received_chunks:

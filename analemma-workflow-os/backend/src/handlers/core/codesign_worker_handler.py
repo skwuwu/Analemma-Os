@@ -59,7 +59,7 @@ def lambda_handler(event, context):
         executions_table = dynamodb.Table(executions_table_name)
         
         # 상태를 RUNNING으로 업데이트
-        _update_task_status(executions_table, owner_id, task_id, 'RUNNING', 'CoDesign 처리 중...')
+        _update_task_status(executions_table, owner_id, task_id, 'RUNNING', 'CoDesign processing...')
         
         # 실제 CoDesign 처리 (동기 실행)
         try:
@@ -71,7 +71,7 @@ def lambda_handler(event, context):
                 owner_id, 
                 task_id, 
                 'SUCCEEDED',
-                'CoDesign 완료',
+                'CoDesign completed',
                 result
             )
             
@@ -90,7 +90,7 @@ def lambda_handler(event, context):
                 owner_id,
                 task_id,
                 'FAILED',
-                f'CoDesign 실패: {str(e)}'
+                f'CoDesign failed: {str(e)}'
             )
             
             # WebSocket으로 에러 전송

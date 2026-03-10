@@ -236,7 +236,7 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
               break;
               
             case 'error':
-              addMessage('system', `오류: ${obj.data}`);
+              addMessage('system', `Error: ${obj.data}`);
               break;
           }
         },
@@ -247,13 +247,13 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
         },
         onError: (error) => {
           setSyncStatus('error');
-          addMessage('system', `연결 오류: ${error.message}`);
+          addMessage('system', `Connection error: ${error.message}`);
         }
       });
     } catch (error) {
       if ((error as Error).name !== 'AbortError') {
         setSyncStatus('error');
-        addMessage('system', `요청 실패: ${(error as Error).message}`);
+        addMessage('system', `Request failed: ${(error as Error).message}`);
       }
     }
   }, [

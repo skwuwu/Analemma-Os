@@ -679,9 +679,9 @@ def _incremental_audit(
                 issues.append({
                     "type": "orphan_node",
                     "level": "warning",
-                    "message": f"노드 '{node_id}'가 다른 노드와 연결되지 않았습니다.",
+                    "message": f"Node '{node_id}' is not connected to any other node.",
                     "affected_nodes": [node_id],
-                    "suggestion": "이 노드를 워크플로우에 연결하거나 삭제하세요."
+                    "suggestion": "Connect this node to the workflow or remove it."
                 })
     
     # 2. 순환 참조 검사 (영향받은 노드 관련만)
@@ -692,9 +692,9 @@ def _incremental_audit(
                 issues.append({
                     "type": "self_loop",
                     "level": "error",
-                    "message": f"노드 '{node_id}'가 자기 자신을 참조합니다.",
+                    "message": f"Node '{node_id}' references itself.",
                     "affected_nodes": [node_id],
-                    "suggestion": "자기 참조 엣지를 제거하세요."
+                    "suggestion": "Remove the self-referencing edge."
                 })
     
     # 3. 필수 설정 누락 검사
@@ -723,9 +723,9 @@ def _incremental_audit(
                     issues.append({
                         "type": "missing_config",
                         "level": "warning",
-                        "message": f"노드 '{node_id}'에 필수 설정 '{required_field}'가 없습니다.",
+                        "message": f"Node '{node_id}' is missing required config '{required_field}'.",
                         "affected_nodes": [node_id],
-                        "suggestion": f"'{required_field}' 설정을 추가하세요."
+                        "suggestion": f"Add the '{required_field}' configuration."
                     })
     
     # 4. 중복 엣지 검사
@@ -739,9 +739,9 @@ def _incremental_audit(
                 issues.append({
                     "type": "duplicate_edge",
                     "level": "info",
-                    "message": f"'{source}'에서 '{target}'로의 중복 연결이 있습니다.",
+                    "message": f"Duplicate edge from '{source}' to '{target}'.",
                     "affected_nodes": [source, target],
-                    "suggestion": "중복 엣지를 제거하세요."
+                    "suggestion": "Remove the duplicate edge."
                 })
             edge_pairs.add(pair)
     
@@ -927,7 +927,7 @@ async def stream_codesign_response(
                     "type": "audit",
                     "data": {
                         "level": "warning",
-                        "message": "Gemini 서비스 일시적 장애로 인해 Claude(Bedrock) 모델로 전환합니다.",
+                        "message": "Gemini service temporarily unavailable. Switching to Claude (Bedrock).",
                         "error_code": "GEMINI_FALLBACK",
                         "details": str(gemini_e)[:200]
                     }
@@ -1211,7 +1211,7 @@ async def _stream_gemini_codesign(
                         "type": "audit",
                         "data": {
                             "level": "error",
-                            "message": "콘텐츠 안전 정책으로 인해 설계 제안이 중단되었습니다. 요청을 다시 표현해 주세요.",
+                            "message": "Design suggestion was blocked by content safety policy. Please rephrase your request.",
                             "affected_nodes": [],
                             "error_code": "SAFETY_FILTER"
                         }
@@ -1249,7 +1249,7 @@ async def _stream_gemini_codesign(
                             "type": "audit",
                             "data": {
                                 "level": "warning",
-                                "message": f"생성된 노드 '{node_data.get('id', 'unknown')}'에 검증 오류가 있습니다: {'; '.join(validation_errors)}",
+                                "message": f"Generated node '{node_data.get('id', 'unknown')}' has validation errors: {'; '.join(validation_errors)}",
                                 "affected_nodes": [node_data.get("id")],
                                 "error_code": "VALIDATION_FAILED",
                                 "will_attempt_correction": len(pending_corrections) <= max_self_correction_attempts

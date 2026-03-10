@@ -172,8 +172,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     if any(kw in error_str for kw in ["safety", "blocked", "harm", "dangerous"]):
         return {
             "error_code": APIErrorCode.SAFETY_FILTER_BLOCKED,
-            "message": "요청 내용이 안전 정책에 의해 필터링되었습니다.",
-            "user_action": "다른 표현으로 다시 시도해주세요.",
+            "message": "Request was filtered by safety policy.",
+            "user_action": "Please try rephrasing your request.",
             "retryable": True,
             "status_code": 422
         }
@@ -182,8 +182,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     if any(kw in error_str for kw in ["quota", "rate limit", "too many requests", "429"]):
         return {
             "error_code": APIErrorCode.QUOTA_EXCEEDED,
-            "message": "현재 요청이 많아 잠시 후 다시 시도해주세요.",
-            "user_action": "30초 후 다시 시도해주세요.",
+            "message": "Too many requests. Please try again shortly.",
+            "user_action": "Please retry after 30 seconds.",
             "retryable": True,
             "retry_after_seconds": 30,
             "status_code": 429
@@ -193,8 +193,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     if any(kw in error_str for kw in ["overloaded", "capacity", "503", "service unavailable"]):
         return {
             "error_code": APIErrorCode.MODEL_OVERLOADED,
-            "message": "AI 모델이 현재 바쁩니다. 잠시 후 다시 시도해주세요.",
-            "user_action": "1분 후 다시 시도해주세요.",
+            "message": "AI model is currently busy. Please try again shortly.",
+            "user_action": "Please retry after 1 minute.",
             "retryable": True,
             "retry_after_seconds": 60,
             "status_code": 503
@@ -204,8 +204,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     if any(kw in error_str for kw in ["context length", "token limit", "too long", "max tokens"]):
         return {
             "error_code": APIErrorCode.CONTEXT_TOO_LONG,
-            "message": "워크플로우가 너무 복잡합니다. 일부 노드를 정리해주세요.",
-            "user_action": "워크플로우를 단순화하거나 분할해주세요.",
+            "message": "Workflow is too complex. Please simplify some nodes.",
+            "user_action": "Please simplify or split the workflow.",
             "retryable": False,
             "status_code": 413
         }
@@ -214,8 +214,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     if any(kw in error_str for kw in ["invalid", "malformed", "bad request", "400"]):
         return {
             "error_code": APIErrorCode.INVALID_REQUEST,
-            "message": "요청 형식이 올바르지 않습니다.",
-            "user_action": "입력 내용을 확인해주세요.",
+            "message": "Invalid request format.",
+            "user_action": "Please verify your input.",
             "retryable": False,
             "status_code": 400
         }
@@ -223,8 +223,8 @@ def classify_and_format_error(error: Exception) -> Dict[str, Any]:
     # 기타 내부 오류
     return {
         "error_code": APIErrorCode.INTERNAL_ERROR,
-        "message": "일시적인 오류가 발생했습니다.",
-        "user_action": "문제가 지속되면 관리자에게 문의해주세요.",
+        "message": "A temporary error occurred.",
+        "user_action": "Please contact support if the problem persists.",
         "retryable": True,
         "status_code": 500,
         "debug_info": error_type if os.getenv("DEBUG_MODE") else None
@@ -976,7 +976,7 @@ def lambda_handler_sync(event, context):
         return _response(202, {
             'task_id': task_id,
             'status': 'processing',
-            'message': '워크플로우 생성 중입니다. WebSocket으로 결과를 전달받습니다.',
+            'message': 'Generating workflow. Results will be delivered via WebSocket.',
             'websocket_subscribe': {
                 'action': 'subscribe',
                 'execution_id': task_id

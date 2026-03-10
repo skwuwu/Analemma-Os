@@ -205,7 +205,7 @@ export const useCodesignStore = create<CodesignState>((set, get) => ({
     // 시스템 메시지 추가
     const suggestion = get().pendingSuggestions.find(s => s.id === id);
     if (suggestion) {
-      get().addMessage('system', `제안 "${suggestion.action}"이(가) 적용되었습니다.`);
+      get().addMessage('system', `Suggestion "${suggestion.action}" has been applied.`);
     }
   },
 
