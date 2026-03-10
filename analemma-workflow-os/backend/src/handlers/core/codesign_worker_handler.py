@@ -122,24 +122,55 @@ def _process_codesign(workflow_data: Dict[str, Any], user_message: str, owner_id
             logger.debug(f"Generated chunk type: {type(chunk)}")
         return chunks
 
-    chunks = asyncio.run(_run_async())
+    raw_chunks = asyncio.run(_run_async())
 
-    # Extract final workflow from chunks
-    workflow_result = None
-    for chunk in reversed(chunks):
-        if isinstance(chunk, dict) and chunk.get('type') == 'workflow':
-            workflow_result = chunk.get('data')
-            break
+    # Parse JSONL strings into dicts and assemble workflow from node/edge chunks.
+    # stream_codesign_response yields JSONL strings, not dicts.
+    nodes = []
+    edges = []
+    parsed_chunks = []
 
-    if not workflow_result:
+    for raw in raw_chunks:
+        if isinstance(raw, str):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+        elif isinstance(raw, dict):
+            obj = raw
+        else:
+            continue
+
+        if not isinstance(obj, dict):
+            continue
+
+        parsed_chunks.append(obj)
+        chunk_type = obj.get('type')
+
+        if chunk_type == 'node':
+            nodes.append(obj.get('data', {}))
+        elif chunk_type == 'edge':
+            edges.append(obj.get('data', {}))
+        elif chunk_type == 'workflow':
+            # If the model ever emits a complete workflow chunk, use it directly
+            wf = obj.get('data', {})
+            nodes.extend(wf.get('nodes', []))
+            edges.extend(wf.get('edges', []))
+
+    logger.info(f"Parsed {len(parsed_chunks)} chunks: {len(nodes)} nodes, {len(edges)} edges")
+
+    if not nodes:
         raise ValueError("No workflow generated from CoDesign service")
 
-    logger.info(f"CoDesign processing completed, workflow nodes: {len(workflow_result.get('nodes', []))}")
+    workflow_result = {'nodes': nodes, 'edges': edges}
 
     return {
         'workflow': workflow_result,
-        'chunks': chunks,
-        'total_chunks': len(chunks)
+        'chunks': parsed_chunks,
+        'total_chunks': len(parsed_chunks)
     }
 
 

@@ -1295,6 +1295,7 @@ class GeminiService:
                 
                 if chunk.text:
                     received_chunks = True
+                    output_text_buffer += chunk.text
                     buffer += chunk.text
                     # JSONL parsing: yield in complete line units
                     while "\n" in buffer:
@@ -1304,7 +1305,7 @@ class GeminiService:
                                 json.loads(line)  # Validation
                                 yield line + "\n"
                             except json.JSONDecodeError:
-                                logger.debug(f"Skipping invalid JSON line: {line[:50]}...")
+                                logger.warning(f"Skipping non-JSON line from model: {line[:100]}")
             
             # Process remaining buffer
             if buffer.strip():
@@ -1312,7 +1313,7 @@ class GeminiService:
                     json.loads(buffer)
                     yield buffer + "\n"
                 except json.JSONDecodeError:
-                    logger.debug(f"Skipping final invalid JSON: {buffer[:50]}...")
+                    logger.warning(f"Skipping final non-JSON buffer: {buffer[:100]}")
             
             # Detect empty response (complete blocking possible due to Safety Filter)
             if not received_chunks:
