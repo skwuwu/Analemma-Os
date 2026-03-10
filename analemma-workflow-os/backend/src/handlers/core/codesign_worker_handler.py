@@ -21,10 +21,7 @@ from src.common.aws_clients import get_dynamodb_resource
 
 # Optional service imports
 try:
-    from src.services.design.codesign_assistant import (
-        stream_codesign_response,
-        get_or_create_context
-    )
+    from src.services.design.codesign_assistant import stream_codesign_response
     from src.common.websocket_utils import (
         get_connections_for_owner,
         send_to_connection,
@@ -108,42 +105,40 @@ def lambda_handler(event, context):
 
 def _process_codesign(workflow_data: Dict[str, Any], user_message: str, owner_id: str) -> Dict[str, Any]:
     """
-    실제 CoDesign 처리
-    
+    Process CoDesign request by invoking the async streaming generator.
+
     Returns:
-        완성된 워크플로우 데이터
+        Completed workflow data with all chunks.
     """
     logger.info("Starting CoDesign processing...")
-    
-    # 컨텍스트 생성
-    context = get_or_create_context(owner_id)
-    
-    # 워크플로우 생성 (제너레이터를 리스트로 수집)
-    chunks = []
-    for chunk in stream_codesign_response(
-        workflow_data=workflow_data,
-        user_message=user_message,
-        context=context,
-        owner_id=owner_id
-    ):
-        chunks.append(chunk)
-        logger.debug(f"Generated chunk: {chunk.get('type')}")
-    
-    # 최종 워크플로우 추출
+
+    async def _run_async():
+        chunks = []
+        async for chunk in stream_codesign_response(
+            user_request=user_message,
+            current_workflow=workflow_data,
+        ):
+            chunks.append(chunk)
+            logger.debug(f"Generated chunk type: {type(chunk)}")
+        return chunks
+
+    chunks = asyncio.run(_run_async())
+
+    # Extract final workflow from chunks
     workflow_result = None
     for chunk in reversed(chunks):
-        if chunk.get('type') == 'workflow':
+        if isinstance(chunk, dict) and chunk.get('type') == 'workflow':
             workflow_result = chunk.get('data')
             break
-    
+
     if not workflow_result:
         raise ValueError("No workflow generated from CoDesign service")
-    
+
     logger.info(f"CoDesign processing completed, workflow nodes: {len(workflow_result.get('nodes', []))}")
-    
+
     return {
         'workflow': workflow_result,
-        'chunks': chunks,  # 전체 청크 포함 (프론트엔드가 재생 가능)
+        'chunks': chunks,
         'total_chunks': len(chunks)
     }
 
@@ -222,7 +217,7 @@ def _send_result_via_websocket(
         # 모든 활성 연결에 전송
         for conn_id in connections:
             try:
-                send_to_connection(endpoint, conn_id, payload)
+                send_to_connection(conn_id, payload, endpoint)
                 logger.info(f"Sent codesign result to connection {conn_id}")
             except Exception as e:
                 logger.warning(f"Failed to send to connection {conn_id}: {e}")

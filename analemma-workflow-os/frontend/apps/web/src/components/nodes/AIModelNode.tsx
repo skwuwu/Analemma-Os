@@ -147,8 +147,8 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
 
       {/* Model Context */}
       <div className="grid grid-cols-2 gap-1.5 mb-3">
-        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-muted/40 text-[10px] text-muted-foreground border border-white/5 truncate">
-          <Settings2 className="w-3 h-3 opacity-60" />
+        <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white/10 text-[10px] text-white/70 border border-white/10 truncate">
+          <Settings2 className="w-3 h-3 opacity-70" />
           {data.modelName || data.model || 'GPT-4o'}
         </div>
         {formattedCost && (
