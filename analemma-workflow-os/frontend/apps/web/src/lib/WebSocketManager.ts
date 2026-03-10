@@ -120,11 +120,14 @@ export class WebSocketManager {
           this.config.onMessage(notification);
         } else if (data.type === 'workflow_component_stream') {
           if (this.config.onComponentStream) {
-            const componentData = typeof data.payload === 'string' 
-              ? JSON.parse(data.payload) 
+            const componentData = typeof data.payload === 'string'
+              ? JSON.parse(data.payload)
               : data.payload;
             this.config.onComponentStream(componentData);
           }
+        } else if (data.type === 'codesign_result') {
+          // Dispatch DOM event for streamCoDesignAssistant to pick up
+          window.dispatchEvent(new CustomEvent('codesign_result', { detail: data }));
         }
       } catch (e) {
         console.error('Failed to parse WS message:', e);

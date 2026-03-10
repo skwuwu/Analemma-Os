@@ -1405,7 +1405,15 @@ class GeminiService:
                         "error_type": error_type
                     }
                 }) + "\n"
-                
+
+            elif "404" in error_message or "not found" in error_message.lower() or "not_found" in error_message.lower():
+                # Model not found — re-raise so callers (e.g., codesign) can fall back to Bedrock
+                logger.error(
+                    f"🚨 [Gemini Model Not Found] Model: {self.config.model.value}, "
+                    f"Error: {error_message}"
+                )
+                raise
+
             else:
                 logger.exception(
                     f"🚨 [Gemini Streaming Unknown Error] Model: {self.config.model.value}, "
@@ -2310,7 +2318,7 @@ def get_gemini_codesign_service() -> GeminiService:
     - Real-time streaming: Low latency for interactive design
     """
     return GeminiService(GeminiConfig(
-        model=GeminiModel.GEMINI_3_FLASH,  # Codesign uses Gemini 3 Flash (latest generation)
+        model=GeminiModel.GEMINI_2_5_FLASH,  # gemini-3-flash-preview not available on Vertex AI; use 2.5 Flash
         max_output_tokens=4096,
         temperature=0.8,
         enable_thinking=True,

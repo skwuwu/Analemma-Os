@@ -145,6 +145,35 @@ function createTimeoutController(
   return { signal: controller.signal, cleanup };
 }
 
+/**
+ * Waits for a CoDesign worker result delivered via WebSocket.
+ * The WebSocketManager dispatches a 'codesign_result' CustomEvent on window.
+ */
+function waitForCoDesignResult(taskId: string | null, timeoutMs: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      // If no taskId filter, accept any result; otherwise match task_id
+      if (!taskId || detail.task_id === taskId) {
+        cleanup();
+        resolve(detail);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`CoDesign result timeout after ${Math.round(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+
+    function cleanup() {
+      window.removeEventListener('codesign_result', handler);
+      clearTimeout(timer);
+    }
+
+    window.addEventListener('codesign_result', handler);
+  });
+}
+
 const getEnv = (k: string) => (import.meta.env ? (import.meta.env[k] as string | undefined) : undefined);
 export const resolveDesignAssistantEndpoint = (): { url: string; requiresAuth: boolean } => {
   const useFunctionUrl = String(getEnv('VITE_LFU_USE_FUNCTION_URL') ?? 'false').toLowerCase() === 'true';
@@ -277,7 +306,50 @@ export async function streamCoDesignAssistant(endpoint: string, body: unknown, o
     throw e;
   }
 
-  // 공통 스트리밍 처리 로직 사용
+  // Handle 202 Accepted (async worker pattern):
+  // Backend spawns a worker Lambda and sends result via WebSocket.
+  if (res.status === 202) {
+    let taskId: string | null = null;
+    try {
+      const body = await res.json();
+      taskId = body.task_id;
+      console.log('[CoDesign] Async mode — task_id:', taskId);
+    } catch { /* body may not be JSON */ }
+
+    // Show processing indicator in chat
+    onMessage?.({ type: 'text', data: 'Generating workflow... (this may take a moment)' });
+
+    // Wait for WebSocket codesign_result event
+    const asyncTimeout = timeout || DEFAULT_TIMEOUT_MS;
+    try {
+      const result = await waitForCoDesignResult(taskId, asyncTimeout);
+      console.log('[CoDesign] Received async result:', result.result_type);
+
+      if (result.result_type === 'error') {
+        const errMsg = result.data?.error || 'CoDesign processing failed';
+        onError?.(new Error(errMsg));
+      } else {
+        // Replay chunks through onMessage if available
+        const chunks = result.data?.chunks;
+        if (Array.isArray(chunks) && chunks.length > 0) {
+          for (const chunk of chunks) {
+            onMessage?.(chunk);
+          }
+        } else if (result.data?.workflow) {
+          // Fallback: send complete workflow directly (has nodes + edges)
+          onMessage?.(result.data.workflow);
+        }
+        onDone?.();
+      }
+    } catch (e) {
+      onError?.(e instanceof Error ? e : new Error(String(e)));
+    } finally {
+      cleanup();
+    }
+    return;
+  }
+
+  // Standard streaming response
   await processStreamingResponse(res, onMessage, onDone, onError, cleanup);
 }
 

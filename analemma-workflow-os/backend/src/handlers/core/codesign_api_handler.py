@@ -936,8 +936,8 @@ def lambda_handler_sync(event, context):
     try:
         # 요청 파싱
         body = json.loads(event.get('body', '{}'))
-        workflow_data = body.get('workflow', {})
-        user_message = body.get('message', '')
+        workflow_data = body.get('current_workflow', body.get('workflow', {}))
+        user_message = body.get('user_request', body.get('message', ''))
         
         # Owner ID 추출
         try:
