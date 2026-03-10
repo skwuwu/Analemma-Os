@@ -16,7 +16,10 @@ from datetime import datetime
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# 서비스 임포트
+# Critical imports (must succeed for handler to work)
+from src.common.aws_clients import get_dynamodb_resource
+
+# Optional service imports
 try:
     from src.services.design.codesign_assistant import (
         stream_codesign_response,
@@ -27,9 +30,8 @@ try:
         send_to_connection,
         get_websocket_endpoint
     )
-    from src.common.aws_clients import get_dynamodb_resource
 except ImportError as e:
-    logger.error(f"Failed to import dependencies: {e}")
+    logger.error(f"Failed to import optional dependencies: {e}")
 
 
 def lambda_handler(event, context):

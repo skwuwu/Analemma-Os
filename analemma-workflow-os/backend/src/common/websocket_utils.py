@@ -32,6 +32,11 @@ MAX_WEBSOCKET_PAYLOAD_BYTES = 32 * 1024  # 32KB (API Gateway limit: 128KB)
 # NOTE: DecimalEncoder는 common.json_utils에서 import됨 (중복 제거됨)
 
 
+def get_websocket_endpoint() -> Optional[str]:
+    """Return the WebSocket endpoint URL from environment variable."""
+    return os.environ.get('WEBSOCKET_ENDPOINT_URL')
+
+
 def get_connections_table():
     """WebSocket 연결 테이블 싱글톤"""
     global _connections_table
