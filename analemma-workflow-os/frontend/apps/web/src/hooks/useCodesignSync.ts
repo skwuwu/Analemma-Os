@@ -39,6 +39,127 @@ interface CodesignStreamMessage {
   data: any;
 }
 
+/**
+ * Maps backend node types (CoDesign primitives) to frontend ReactFlow node types.
+ * Backend types come from Gemini CoDesign output; frontend only registers:
+ * aiModel, operator, trigger, control, control_block, group
+ */
+function mapBackendNodeType(backendType: string, data: Record<string, any> = {}): {
+  type: string;
+  extraData: Record<string, any>;
+} {
+  const extra: Record<string, any> = {};
+
+  switch (backendType) {
+    // AI / LLM types → aiModel
+    case 'llm_chat':
+    case 'aimodel':
+    case 'llm':
+    case 'chat':
+    case 'genai':
+    case 'gpt':
+    case 'claude':
+    case 'gemini':
+    case 'vision':
+    case 'image_analysis':
+      extra.provider = data.provider
+        || (data.model?.includes('claude') ? 'anthropic'
+          : data.model?.includes('gemini') ? 'google' : 'openai');
+      return { type: 'aiModel', extraData: extra };
+
+    // Operator types → operator (with operatorType)
+    case 'operator':
+    case 'code':
+    case 'function':
+    case 'lambda':
+    case 'task':
+      extra.operatorType = data.operatorType || 'custom';
+      return { type: 'operator', extraData: extra };
+
+    case 'operator_official':
+    case 'safe_operator':
+      extra.operatorType = 'safe_operator';
+      return { type: 'operator', extraData: extra };
+
+    case 'api_call':
+      extra.operatorType = 'api_call';
+      return { type: 'operator', extraData: extra };
+
+    case 'db_query':
+    case 'database':
+      extra.operatorType = 'database';
+      return { type: 'operator', extraData: extra };
+
+    case 'video_chunker':
+    case 'skill_executor':
+    case 'governor':
+    case 'validator':
+    case 'verifier':
+    case 'retry_wrapper':
+    case 'error_handler':
+      extra.operatorType = 'custom';
+      return { type: 'operator', extraData: extra };
+
+    // Control block types → control_block (with blockType)
+    case 'for_each':
+    case 'map':
+    case 'foreach':
+    case 'nested_for_each':
+      extra.blockType = 'for_each';
+      return { type: 'control_block', extraData: extra };
+
+    case 'loop':
+    case 'while':
+      extra.blockType = 'while';
+      return { type: 'control_block', extraData: extra };
+
+    case 'parallel_group':
+    case 'parallel':
+      extra.blockType = 'parallel';
+      return { type: 'control_block', extraData: extra };
+
+    // Control types → control (with controlType)
+    case 'route_condition':
+    case 'conditional':
+    case 'branch':
+    case 'dynamic_router':
+      extra.controlType = 'conditional';
+      return { type: 'control', extraData: extra };
+
+    case 'aggregator':
+      extra.controlType = 'aggregator';
+      return { type: 'control', extraData: extra };
+
+    case 'human_in_the_loop':
+    case 'human':
+      extra.controlType = 'human';
+      return { type: 'control', extraData: extra };
+
+    // Trigger / start
+    case 'trigger':
+    case 'start':
+      extra.triggerType = data.triggerType || 'request';
+      return { type: 'trigger', extraData: extra };
+
+    // Subgraph / group
+    case 'subgraph':
+    case 'group':
+      return { type: 'group', extraData: extra };
+
+    // Already a valid frontend type — pass through
+    case 'aiModel':
+    case 'control_block':
+    case 'control':
+      return { type: backendType, extraData: extra };
+
+    // Unknown — fallback to operator
+    default:
+      console.warn(`Unknown CoDesign node type "${backendType}", falling back to operator`);
+      extra.operatorType = 'custom';
+      return { type: 'operator', extraData: extra };
+  }
+}
+
 export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
   const { authToken, autoAudit = true, auditDebounceMs = 2000 } = options;
   const optionsRef = useRef(options);
@@ -115,28 +236,33 @@ export function useCodesignSync(options: UseCodesignSyncOptions = {}) {
             case 'node':
               if (obj.data) {
                 try {
-                  const { id, type, position, label, config, data: extraData } = obj.data;
-                  
-                  // 필수 필드 검증
-                  if (!id || !type) {
+                  const { id, type: rawType, position, label, config, data: extraData } = obj.data;
+
+                  if (!id || !rawType) {
                     console.warn('Invalid node data: missing id or type', obj.data);
                     return;
                   }
 
+                  // Map backend node type to valid frontend ReactFlow type
+                  const { type: mappedType, extraData: typeData } = mapBackendNodeType(
+                    rawType, { ...config, ...extraData }
+                  );
+
                   const newNode = {
                     id,
-                    type,
-                    position: position || { 
-                      x: Math.random() * 200 + 50, 
-                      y: Math.random() * 200 + 50 
+                    type: mappedType,
+                    position: position || {
+                      x: Math.random() * 200 + 50,
+                      y: Math.random() * 200 + 50
                     },
                     data: {
                       label: label || config?.label || id,
                       ...config,
-                      ...extraData
+                      ...extraData,
+                      ...typeData,
                     }
                   };
-                  
+
                   addNode(newNode);
                   optionsRef.current.onNodeReceived?.(newNode);
                 } catch (e) {

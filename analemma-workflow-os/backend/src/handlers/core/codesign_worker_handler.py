@@ -187,26 +187,28 @@ def _update_task_status(
         execution_arn = f'arn:aws:states:us-east-1:000000000000:execution:codesign:{task_id}'
         
         update_expr = 'SET #status = :status, #msg = :msg, stopDate = :stop_date'
+        expr_names = {
+            '#status': 'status',
+            '#msg': 'message'
+        }
         expr_values = {
             ':status': status,
             ':msg': message,
             ':stop_date': datetime.now().isoformat()
         }
-        
+
         if result_data:
-            update_expr += ', output = :output'
+            update_expr += ', #output = :output'
+            expr_names['#output'] = 'output'
             expr_values[':output'] = json.dumps(result_data)
-        
+
         table.update_item(
             Key={
                 'ownerId': owner_id,
                 'executionArn': execution_arn
             },
             UpdateExpression=update_expr,
-            ExpressionAttributeNames={
-                '#status': 'status',
-                '#msg': 'message'
-            },
+            ExpressionAttributeNames=expr_names,
             ExpressionAttributeValues=expr_values
         )
         
