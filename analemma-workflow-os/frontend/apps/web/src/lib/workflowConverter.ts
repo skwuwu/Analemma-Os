@@ -1175,11 +1175,16 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
   }
 
   // Check if data is already in frontend format (has nodes with frontend types)
+  // Frontend nodes: {id, type, position, data: {label, ...}} — NO config at top level
+  // Backend nodes:  {id, type, label, config: {...}} — HAVE config at top level
   const hasNodes = backendWorkflow.nodes && Array.isArray(backendWorkflow.nodes);
   if (hasNodes && backendWorkflow.nodes.length > 0) {
     const firstNode = backendWorkflow.nodes[0];
-    // If the node has frontend-specific properties, assume it's already converted
-    if (firstNode.type && ['aiModel', 'operator', 'trigger', 'control'].includes(firstNode.type) && firstNode.data) {
+    const isFrontendFormat = firstNode.type
+      && ['aiModel', 'operator', 'trigger', 'control', 'control_block', 'group'].includes(firstNode.type)
+      && firstNode.data
+      && !firstNode.config;  // Backend nodes have config; frontend nodes don't
+    if (isFrontendFormat) {
       console.log('Data appears to be in frontend format, returning as-is');
       return {
         name: backendWorkflow.name || 'Generated Workflow',
