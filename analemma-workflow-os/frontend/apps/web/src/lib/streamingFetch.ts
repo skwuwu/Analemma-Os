@@ -329,15 +329,24 @@ export async function streamCoDesignAssistant(endpoint: string, body: unknown, o
         const errMsg = result.data?.error || 'CoDesign processing failed';
         onError?.(new Error(errMsg));
       } else {
-        // Replay chunks through onMessage if available
-        const chunks = result.data?.chunks;
-        if (Array.isArray(chunks) && chunks.length > 0) {
-          for (const chunk of chunks) {
-            onMessage?.(chunk);
-          }
-        } else if (result.data?.workflow) {
-          // Fallback: send complete workflow directly (has nodes + edges)
+        // Send the assembled workflow object first.
+        // processStreamingChunk expects {nodes: [], edges: []} for loadWorkflowToCanvas,
+        // which routes through convertWorkflowFromBackendFormat for proper type mapping.
+        // Individual chunks ({type: "node", data: ...}) lack the "op" field that
+        // processStreamingChunk requires for incremental updates, so they would be dropped.
+        if (result.data?.workflow) {
           onMessage?.(result.data.workflow);
+        }
+
+        // Replay non-node/edge chunks (suggestions, text, status, audit) for chat display
+        const chunks = result.data?.chunks;
+        if (Array.isArray(chunks)) {
+          for (const chunk of chunks) {
+            const ct = (chunk as any)?.type;
+            if (ct && ct !== 'node' && ct !== 'edge' && ct !== 'workflow') {
+              onMessage?.(chunk);
+            }
+          }
         }
         onDone?.();
       }

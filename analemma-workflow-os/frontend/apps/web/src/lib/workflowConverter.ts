@@ -1484,12 +1484,17 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         };
     }
 
+    // Use backend node's label if available (LLM generates meaningful labels)
+    if (node.label) {
+      nodeData.label = node.label;
+    }
+
     // Position fallback: 백엔드 규칙과 일치 (x=150 고정, y=50+index*100)
     const position = node.position || {
       x: 150,
       y: 50 + index * 100
     };
-    
+
     return {
       id: node.id,
       type: frontendType,
