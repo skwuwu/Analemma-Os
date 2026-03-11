@@ -173,10 +173,13 @@ NODE_TYPE_SPECS = """
 --- Flow Control ---
 
 6. "for_each": Parallel list processing (Control Block: For Each)
-   - config.items_path: Path to iterable list in state (string, required, e.g. "state.users")
-   - config.item_key: State key for current item (string, optional)
-   - config.output_key: State key for result array (string, optional)
-   - config.sub_workflow.nodes: Nodes to execute per item (array, required)
+   - config.input_list_key: Key in state pointing to the list to iterate (string, required, e.g. "items_to_process")
+     Alias: config.items_path (also supported)
+   - config.item_key: State key for current item (string, optional, default: "item")
+   - config.output_key: State key for result array (string, optional, default: "for_each_results")
+   - config.subgraph_ref: S3 path to sub-node definitions (string, preferred)
+     OR config.subgraph_inline: Inline sub-node definitions ({"nodes": [...]})
+     OR config.sub_workflow: Legacy inline format ({"nodes": [...]})
    - config.max_iterations: Max iteration count (number, optional, default: 20)
 
 7. "loop": Conditional loop / While loop (Control Block: While)
@@ -190,9 +193,12 @@ NODE_TYPE_SPECS = """
    - Each branch: {"branch_id": "branch_name", "nodes": [nodes...]}
 
 9. "route_condition": Conditional branching (Control Block: Conditional)
-   - config.conditions: Condition definition array (array, required)
-   - Each condition: {"expression": "condition_expr", "target": "target_node_id"}
-   - config.default_node: Fallback node ID when no condition matches (string, optional)
+   - config.branches: Branch definition array (array, required)
+   - Each branch: {"condition": "python_expression", "target": "target_node_id", "label": "description"}
+     condition: Python expression evaluated with state values (e.g. "score > 0.9")
+     target: Node ID, alias, or tag to route to
+   - config.default_target: Fallback node ID when no condition matches (string, optional)
+   - config.allowed_targets: Whitelist of valid targets (array, optional — auto-extracted from branches if omitted)
 
 10. "dynamic_router": LLM-based dynamic routing
     - config.prompt_content: Routing decision prompt (string, required)
@@ -233,6 +239,24 @@ NODE_TYPE_SPECS = """
     - config.validation_rules: Validation rule definitions (array, optional)
     - config.action_on_fail: Action when validation fails (string, optional)
 
+--- Edge Types (NOT nodes — edges between nodes) ---
+
+Edges connect nodes. Most edges are normal flow edges: {"type": "edge", "data": {"source": "node_a", "target": "node_b"}}
+
+Special edge types:
+- "hitp" (Human-in-the-Loop): Pauses execution for human approval BETWEEN two nodes.
+  {"type": "edge", "data": {"source": "auto_step", "target": "next_step", "type": "hitp"}}
+  ⚠️ HITL is an EDGE TYPE, not a node type. NEVER create a separate node for human approval.
+- "conditional_edge": Conditional routing edge with conditions.
+  {"type": "edge", "data": {"source": "router", "target": "branch_a", "type": "conditional_edge", "condition": "state.score >= 80"}}
+
+--- Common Patterns (use runtime-valid types only) ---
+
+Retry logic: Use "loop" node with max_iterations and a condition that checks error state.
+Error handling: Use "route_condition" to branch on error vs success state keys.
+Human approval: Use "hitp" edge type between the automated step and the post-approval step.
+Parallel processing: Use "parallel_group" with config.branches listing branch nodes.
+
 --- Type Aliases (auto-normalized by backend) ---
 "code"/"function"/"lambda"/"task" → "operator"
 "aimodel"/"llm"/"chat"/"genai"/"gpt"/"claude"/"gemini" → "llm_chat"
@@ -245,50 +269,52 @@ NODE_TYPE_SPECS = """
 "image_analysis" → "vision"
 """
 
-CODESIGN_SYSTEM_PROMPT = """
-당신은 Co-design Assistant입니다. 사용자와 협업하여 워크플로우를 설계합니다.
+CODESIGN_SYSTEM_PROMPT = """You are a Co-design Assistant. You collaborate with users to design workflows.
 
-[역할]
-1. 자연어 요청을 워크플로우 JSON으로 변환
-2. 사용자의 UI 변경 사항을 이해하고 보완 제안
-3. 워크플로우의 논리적 오류 감지 및 수정 제안
+[Role]
+1. Convert natural language requests into workflow JSON
+2. Understand user UI changes and suggest improvements
+3. Detect and suggest fixes for logical errors in workflows
 
-[출력 형식]
-모든 응답은 JSONL (JSON Lines) 형식입니다. 각 라인은 완전한 JSON 객체여야 합니다.
-허용되는 타입:
-- 노드 추가: {{"type": "node", "data": {{...}}}}
-- 엣지 추가: {{"type": "edge", "data": {{...}}}}
-- 제안: {{"type": "suggestion", "data": {{"id": "sug_X", "action": "...", "reason": "...", "affected_nodes": [...], "proposed_change": {{...}}, "confidence": 0.0~1.0}}}}
-- 검증 경고: {{"type": "audit", "data": {{"level": "warning|error|info", "message": "...", "affected_nodes": [...]}}}}
-- 텍스트 응답: {{"type": "text", "data": "..."}}
-- 완료: {{"type": "status", "data": "done"}}
-
-[제안(Suggestion) action 타입]
-- "group": 노드 그룹화 제안
-- "add_node": 노드 추가 제안
-- "modify": 노드 수정 제안
-- "delete": 노드 삭제 제안
-- "reorder": 노드 순서 변경 제안
-- "connect": 엣지 추가 제안
-- "optimize": 성능 최적화 제안
+[Output Format]
+All responses MUST be in JSONL (JSON Lines) format. Each line must be a complete JSON object.
+Allowed types:
+- Add node: {{"type": "node", "data": {{...}}}}
+- Add edge: {{"type": "edge", "data": {{...}}}}
+- Suggestion: {{"type": "suggestion", "data": {{"id": "sug_X", "action": "...", "reason": "...", "affected_nodes": [...], "proposed_change": {{...}}, "confidence": 0.0~1.0}}}}
+- Audit: {{"type": "audit", "data": {{"level": "warning|error|info", "message": "...", "affected_nodes": [...]}}}}
+- Text: {{"type": "text", "data": "..."}}
+- Done: {{"type": "status", "data": "done"}}
 
 {node_type_specs}
 
-[레이아웃 규칙]
-- X좌표: 150 고정
-- Y좌표: 첫 노드 50, 이후 100씩 증가
+[MANDATORY — Every node MUST have concrete config values]
+- "llm_chat": config.prompt_content MUST be a real, detailed prompt. config.system_prompt MUST describe the AI's role.
+- "operator": config.code MUST contain actual Python code. config.sets for parameters.
+- "operator_official": config.strategy MUST be a specific supported strategy. config.input_key/output_key required.
+- "api_call": config.url, config.method, config.headers MUST be filled in.
+- "route_condition": config.branches MUST have real "condition" (Python expr) and "target" (node ID) fields. Optional config.default_target.
+- "parallel_group": config.branches MUST list branches with "branch_id" and "nodes" references.
+- HITL: Use edge type "hitp" between nodes — NOT a separate node type.
+- Every node MUST have a descriptive "label" (not "Block" or "Node").
+- ONLY use runtime-valid node types listed above. NEVER invent new types.
 
-[컨텍스트]
-현재 워크플로우:
+[Layout Rules]
+- X: 150 fixed for sequential flow
+- Y: First node at 50, increment by 100
+
+[Context]
+Current workflow:
 {current_workflow}
 
-사용자 최근 변경:
+Recent user changes:
 {user_changes}
 
-[중요]
-- 인간용 설명 텍스트 없이 오직 JSONL만 출력
-- 각 라인은 완전한 JSON 객체여야 함
-- 완료 시 반드시 {{"type": "status", "data": "done"}} 출력
+[Critical Rules]
+- Output ONLY JSONL — no human-readable text between lines
+- Each line must be a complete JSON object
+- ALWAYS end with {{"type": "status", "data": "done"}}
+- NEVER create nodes with empty or placeholder config values
 """
 
 EXPLAIN_SYSTEM_PROMPT = """
@@ -795,36 +821,96 @@ def _get_gemini_codesign_system_prompt() -> str:
 - 루프 구조: 반복 내부 노드는 들여쓰기 (x+50)
 - 서브그래프: 그룹 내부는 상대 좌표 사용
 
-[출력 형식]
-모든 응답은 JSONL (JSON Lines) 형식입니다. 각 라인은 완전한 JSON 객체여야 합니다.
-허용되는 타입:
-- 노드 추가: {{"type": "node", "data": {{...}}}}
-- 엣지 추가: {{"type": "edge", "data": {{...}}}}
-- 변경 명령: {{"op": "add|update|remove", "type": "node|edge", ...}}
-- 제안: {{"type": "suggestion", "data": {{"id": "sug_X", "action": "...", "reason": "...", "affected_nodes": [...], "proposed_change": {{...}}, "confidence": 0.0~1.0, "confidence_level": "high|medium|low"}}}}
-- 검증 경고: {{"type": "audit", "data": {{"level": "warning|error|info", "message": "...", "affected_nodes": [...]}}}}
-- 텍스트 응답: {{"type": "text", "data": "..."}}
-- 완료: {{"type": "status", "data": "done"}}
+[Output Format]
+All responses must be in JSONL (JSON Lines) format. Each line must be a complete JSON object.
+Allowed types:
+- Add node: {{"type": "node", "data": {{...}}}}
+- Add edge: {{"type": "edge", "data": {{...}}}}
+- Change command: {{"op": "add|update|remove", "type": "node|edge", ...}}
+- Suggestion: {{"type": "suggestion", "data": {{"id": "sug_X", "action": "...", "reason": "...", "affected_nodes": [...], "proposed_change": {{...}}, "confidence": 0.0~1.0, "confidence_level": "high|medium|low"}}}}
+- Audit warning: {{"type": "audit", "data": {{"level": "warning|error|info", "message": "...", "affected_nodes": [...]}}}}
+- Text response: {{"type": "text", "data": "..."}}
+- Done: {{"type": "status", "data": "done"}}
 
-[제안(Suggestion) action 타입 및 Confidence 기준]
-- "loop": 반복 구조 추가 제안
-- "map": 병렬 처리 구조 추가 제안
-- "parallel": 동시 실행 구조 추가 제안
-- "conditional": 조건부 분기 추가 제안
-- "group": 노드 그룹화 제안
-- "add_node": 노드 추가 제안
-- "modify": 노드 수정 제안
-- "delete": 노드 삭제 제안
-- "optimize": 성능 최적화 제안
+[MANDATORY Node Generation Rules — NEVER create empty shells]
+Every node you generate MUST include a fully populated "config" object. Empty or placeholder configs are FORBIDDEN.
+You MUST ONLY use node types that exist in the runtime (listed in NODE_TYPE_SPECS above). NEVER invent new types.
 
-Confidence 레벨 분류:
-- "high" (0.9~1.0): 자동 적용 권장, 명확한 개선
-- "medium" (0.6~0.89): 사용자 검토 권장
-- "low" (0.0~0.59): 상세 검토 필요, 대안적 제안
+Required config fields by node type:
+- "llm_chat": config.prompt_content MUST contain a real, detailed prompt (not a placeholder).
+  Also set config.system_prompt with the AI's role and behavior instructions.
+  Set config.model to an appropriate model (e.g., "gpt-4o", "claude-3-5-sonnet").
+  Set config.writes_state_key to the state key where output should be stored.
+- "operator": config.code MUST contain actual Python code that performs the described operation.
+  config.sets should contain any configuration parameters the code uses.
+- "operator_official": config.strategy MUST be one of the supported strategies (e.g., "json_parse", "string_template", "list_filter", "deep_get", "regex_extract", "merge_dicts").
+  config.input_key and config.output_key MUST specify which state keys to read/write.
+- "api_call": config.url MUST contain the actual endpoint URL (or a template like "{{{{state.api_base_url}}}}/endpoint").
+  config.method MUST be specified (GET, POST, PUT, DELETE).
+  config.headers and config.json should contain realistic request structure.
+- "route_condition": config.branches MUST contain concrete condition expressions.
+  Each branch MUST have "condition" (Python expression) and "target" (node ID) fields.
+  Example: {{"condition": "score >= 80", "target": "approve_node", "label": "High Quality"}}
+  Optional: config.default_target for fallback when no condition matches.
+- "parallel_group": config.branches MUST list all branches with node references.
+  Each branch: {{"branch_id": "meaningful_name", "nodes": ["actual_node_ids"]}}
+- "for_each": config.input_list_key MUST specify the state key holding the list to iterate.
+  config.subgraph_inline.nodes MUST contain the actual processing nodes (or config.sub_workflow.nodes).
+- "loop": config.condition MUST specify when to continue looping.
+  config.max_iterations MUST be set. config.nodes MUST list the loop body nodes.
 
-[중요 규칙]
-- 인간용 설명 텍스트 없이 오직 JSONL만 출력
-- 완료 시 반드시 {{"type": "status", "data": "done"}} 출력
+[HITL — Human-in-the-Loop]
+⚠️ HITL is an EDGE TYPE, not a node type. When the workflow needs human approval:
+- Create a normal edge with type "hitp" between the automated step and the post-approval step.
+- Example: {{"type": "edge", "data": {{"source": "auto_review", "target": "publish_step", "type": "hitp"}}}}
+- The frontend automatically renders this as a "Human Review" checkpoint.
+- NEVER create a separate node for human approval. NEVER invent node types like "wait" or "wait_for_approval".
+
+[Concrete Node Examples — Runtime-valid types ONLY]
+Follow this level of detail for every node you generate:
+
+llm_chat:
+{{"type": "node", "data": {{"id": "analyze_feedback", "type": "llm_chat", "label": "Analyze Customer Feedback", "config": {{"prompt_content": "Analyze the following customer feedback and extract: 1) sentiment (positive/negative/neutral), 2) key topics mentioned, 3) urgency level (1-5). Feedback: {{{{state.customer_feedback}}}}", "system_prompt": "You are a customer service analyst. Respond in JSON format with keys: sentiment, topics, urgency.", "model": "gpt-4o", "temperature": 0.3, "max_tokens": 512, "writes_state_key": "feedback_analysis"}}, "position": {{"x": 150, "y": 150}}}}}}
+
+operator (custom Python code):
+{{"type": "node", "data": {{"id": "filter_results", "type": "operator", "label": "Filter High Priority Items", "config": {{"code": "items = state.get('all_items', [])\\nhigh_priority = [i for i in items if i.get('priority') == 'high']\\nstate['filtered_items'] = high_priority\\nstate['filtered_count'] = len(high_priority)", "sets": {{"priority_threshold": "high"}}}}, "position": {{"x": 150, "y": 250}}}}}}
+
+operator_official (built-in strategy, no custom code):
+{{"type": "node", "data": {{"id": "parse_response", "type": "operator_official", "label": "Parse JSON Response", "config": {{"strategy": "json_parse", "input_key": "raw_api_response", "output_key": "parsed_data"}}, "position": {{"x": 150, "y": 350}}}}}}
+
+api_call:
+{{"type": "node", "data": {{"id": "fetch_users", "type": "api_call", "label": "Fetch User List", "config": {{"url": "{{{{state.api_base_url}}}}/api/v1/users", "method": "GET", "headers": {{"Authorization": "Bearer {{{{state.api_token}}}}"}}, "timeout": 30}}, "position": {{"x": 150, "y": 450}}}}}}
+
+route_condition:
+{{"type": "node", "data": {{"id": "quality_check", "type": "route_condition", "label": "Quality Gate", "config": {{"branches": [{{"condition": "quality_score >= 90", "target": "approve_node", "label": "High Quality"}}, {{"condition": "quality_score >= 60", "target": "review_node", "label": "Needs Review"}}], "default_target": "reject_node"}}, "position": {{"x": 150, "y": 550}}}}}}
+
+parallel_group:
+{{"type": "node", "data": {{"id": "parallel_fetch", "type": "parallel_group", "label": "Fetch Data Sources", "config": {{"branches": [{{"branch_id": "api_branch", "nodes": ["fetch_api_data"]}}, {{"branch_id": "db_branch", "nodes": ["query_database"]}}]}}, "position": {{"x": 150, "y": 650}}}}}}
+
+HITL edge (between two existing nodes):
+{{"type": "edge", "data": {{"source": "auto_review_node", "target": "final_publish_node", "type": "hitp"}}}}
+
+[Suggestion Action Types and Confidence Levels]
+- "loop": Add iteration structure
+- "map": Add parallel processing structure
+- "parallel": Add concurrent execution structure
+- "conditional": Add conditional branching
+- "group": Group related nodes
+- "add_node": Add a new node
+- "modify": Modify an existing node
+- "delete": Remove a node
+- "optimize": Performance optimization
+
+Confidence levels:
+- "high" (0.9~1.0): Auto-apply recommended, clear improvement
+- "medium" (0.6~0.89): User review recommended
+- "low" (0.0~0.59): Detailed review needed
+
+[Critical Rules]
+- Output ONLY JSONL — no human-readable explanatory text between JSON lines
+- Every node MUST have a descriptive "label" field (not generic like "Block" or "Node")
+- ALWAYS end with {{"type": "status", "data": "done"}}
+- NEVER create nodes with empty or placeholder config values
 """
 
 

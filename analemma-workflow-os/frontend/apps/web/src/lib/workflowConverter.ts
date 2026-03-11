@@ -1195,21 +1195,37 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
     }
   }
 
+  // Track branching nodes (parallel, conditional) for synthetic edge generation
+  // Maps: nodeId -> [{branchId, targetNodeId}]
+  const branchEdgeMap = new Map<string, Array<{branchId: string, targetNodeId: string}>>();
+
+  // Normalize Gemini type aliases to canonical backend types (defined once)
+  const typeAliasMap: Record<string, string> = {
+    code: 'operator', function: 'operator', lambda: 'operator', task: 'operator',
+    aimodel: 'llm_chat', llm: 'llm_chat', chat: 'llm_chat', genai: 'llm_chat',
+    gpt: 'llm_chat', claude: 'llm_chat', gemini: 'llm_chat',
+    map: 'for_each', foreach: 'for_each',
+    map_in_map: 'nested_for_each',
+    chunker: 'video_chunker',
+    group: 'subgraph',
+    image_analysis: 'vision',
+  };
+
   const frontendNodes = backendWorkflow.nodes?.filter((node: BackendNode) => {
-    // __auto_end 노드는 UI에 표시하지 않음 (백엔드 전용)
+    // __auto_end nodes are backend-only, not displayed in UI
     return node.id !== '__auto_end';
   }).map((node: BackendNode, index: number) => {
-    // 백엔드 타입을 프론트엔드 타입으로 매핑
     let frontendType = 'operator';
     let label = 'Block';
     let nodeData: any = {};
-    
-    // 타입 검증 및 로깅
+
     if (!node.type) {
       console.warn(`[WorkflowConverter] Node ${node.id} has no type, defaulting to 'operator'`);
     }
 
-    switch (node.type) {
+    const normalizedType = typeAliasMap[node.type?.toLowerCase()] || node.type;
+
+    switch (normalizedType) {
       case 'llm_chat':
         frontendType = 'aiModel';
         label = 'AI Model';
@@ -1299,40 +1315,63 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'control';
         label = 'For Each';
         const forEachConfig = node.config || {};
-        const itemsPath = forEachConfig.items_path || '';
-        const subWorkflow = forEachConfig.sub_workflow;
-        
+        // Runtime primary: input_list_key, fallback: items_path
+        const itemsPath = forEachConfig.input_list_key || forEachConfig.items_path || '';
+        // Runtime priority: subgraph_ref > subgraph_inline > sub_workflow
+        const subWorkflow = forEachConfig.subgraph_inline || forEachConfig.sub_workflow;
+
         if (!itemsPath) {
-          console.warn(`[WorkflowConverter] for_each node ${node.id} missing items_path`);
+          console.warn(`[WorkflowConverter] for_each node ${node.id} missing input_list_key/items_path`);
         }
-        if (!subWorkflow) {
-          console.warn(`[WorkflowConverter] for_each node ${node.id} missing sub_workflow`);
+        if (!subWorkflow && !forEachConfig.subgraph_ref) {
+          console.warn(`[WorkflowConverter] for_each node ${node.id} missing sub-node definitions`);
         }
-        
+
         nodeData = {
           label,
           controlType: 'for_each',
+          input_list_key: itemsPath,
           items_path: itemsPath,
           itemsPath: itemsPath,
           item_key: forEachConfig.item_key || 'item',
           output_key: forEachConfig.output_key || 'for_each_results',
           max_iterations: forEachConfig.max_iterations || 20,
+          subgraph_ref: forEachConfig.subgraph_ref,
           sub_workflow: subWorkflow,
         };
         break;
       case 'parallel_group':
       case 'parallel':
-        // parallel_group → control(parallel)
-        frontendType = 'control';
+        // parallel_group → control_block(parallel) for proper multi-branch handles
+        frontendType = 'control_block';
         label = 'Parallel';
         const parallelConfig = node.config || {};
-        // branches는 config.branches 또는 최상위 branches 필드에서 (최상위는 백엔드가 허용함)
-        const branches = parallelConfig.branches || node.branches || [];
-        
+        const rawBranches = parallelConfig.branches || node.branches || [];
+
+        // Convert backend branches to control_block format: {id, label}
+        const cbBranches = rawBranches.map((b: any, i: number) => ({
+          id: b.branch_id || b.id || `branch_${i}`,
+          label: b.name || b.label || `Branch ${i + 1}`,
+        }));
+
+        // Collect branch → first target node mappings for edge generation
+        const parallelBranchTargets = rawBranches.map((b: any, i: number) => {
+          const branchId = b.branch_id || b.id || `branch_${i}`;
+          const firstNode = Array.isArray(b.nodes) ? b.nodes[0] : null;
+          return firstNode ? { branchId, targetNodeId: String(firstNode) } : null;
+        }).filter(Boolean) as Array<{branchId: string, targetNodeId: string}>;
+
+        if (parallelBranchTargets.length > 0) {
+          branchEdgeMap.set(node.id, parallelBranchTargets);
+        }
+
         nodeData = {
           label,
-          controlType: 'parallel',
-          branches: branches,
+          blockType: 'parallel',
+          branches: cbBranches.length > 0 ? cbBranches : [
+            { id: 'branch_0', label: 'Branch 1' },
+            { id: 'branch_1', label: 'Branch 2' },
+          ],
         };
         break;
       case 'aggregator':
@@ -1356,16 +1395,56 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         };
         break;
       case 'route_condition':
-        // route_condition → control(conditional)
-        frontendType = 'control';
+        // route_condition → control_block(conditional) for proper multi-branch handles
+        frontendType = 'control_block';
         label = 'Route Condition';
         const routeConfig = node.config || {};
+        // Runtime schema: config.branches[].condition/target
+        // Legacy/fallback: config.conditions[].expression/target
+        const routeBranches = routeConfig.branches || routeConfig.conditions || [];
+
+        // Convert to control_block format, supporting both runtime and legacy schemas
+        const condBranches = routeBranches.map((c: any, i: number) => ({
+          id: c.id || `branch_${i}`,
+          label: c.label || c.name || c.condition || c.expression || `Condition ${i + 1}`,
+          natural_condition: c.condition || c.expression || '',
+        }));
+
+        // Add default branch if default_target/default_node exists
+        const defaultTarget = routeConfig.default_target || routeConfig.default_node;
+        if (defaultTarget) {
+          condBranches.push({
+            id: `branch_${routeBranches.length}`,
+            label: 'Default',
+            natural_condition: 'default',
+          });
+        }
+
+        // Collect condition → target node mappings for edge generation
+        const condTargets = routeBranches.map((c: any, i: number) => {
+          const branchId = c.id || `branch_${i}`;
+          const target = c.target || c.target_node;
+          return target ? { branchId, targetNodeId: String(target) } : null;
+        }).filter(Boolean) as Array<{branchId: string, targetNodeId: string}>;
+
+        if (defaultTarget) {
+          condTargets.push({
+            branchId: `branch_${routeBranches.length}`,
+            targetNodeId: String(defaultTarget),
+          });
+        }
+
+        if (condTargets.length > 0) {
+          branchEdgeMap.set(node.id, condTargets);
+        }
+
         nodeData = {
           label,
-          controlType: 'conditional',
-          conditions: routeConfig.conditions || [],
-          default_node: routeConfig.default_node,
-          defaultNode: routeConfig.default_node,
+          blockType: 'conditional',
+          branches: condBranches.length > 0 ? condBranches : [
+            { id: 'branch_0', label: 'Branch 1' },
+            { id: 'branch_1', label: 'Branch 2' },
+          ],
           evaluation_mode: routeConfig.evaluation_mode || 'first_match',
         };
         break;
@@ -1436,14 +1515,37 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         };
         break;
       case 'dynamic_router':
-        // dynamic_router → control(conditional) with dynamic routing metadata
-        frontendType = 'control';
+        // dynamic_router → control_block(conditional) with dynamic routing metadata
+        frontendType = 'control_block';
         label = 'Dynamic Router';
         const dynConfig = node.config || {};
+        const dynRoutes = dynConfig.routes || dynConfig.conditions || [];
+
+        // Convert routes to branches
+        const dynBranches = dynRoutes.map((r: any, i: number) => ({
+          id: r.id || `branch_${i}`,
+          label: r.name || r.expression || `Route ${i + 1}`,
+          natural_condition: r.expression || '',
+        }));
+
+        // Collect route → target mappings for edge generation
+        const dynTargets = dynRoutes.map((r: any, i: number) => {
+          const branchId = r.id || `branch_${i}`;
+          const target = r.target || r.target_node;
+          return target ? { branchId, targetNodeId: String(target) } : null;
+        }).filter(Boolean) as Array<{branchId: string, targetNodeId: string}>;
+
+        if (dynTargets.length > 0) {
+          branchEdgeMap.set(node.id, dynTargets);
+        }
+
         nodeData = {
           label,
-          controlType: 'conditional',
-          conditions: dynConfig.routes || dynConfig.conditions || [],
+          blockType: 'conditional',
+          branches: dynBranches.length > 0 ? dynBranches : [
+            { id: 'branch_0', label: 'Route 1' },
+            { id: 'branch_1', label: 'Route 2' },
+          ],
           rawBackendType: 'dynamic_router',
           prompt_content: dynConfig.prompt_content,
         };
@@ -1467,13 +1569,13 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       case 'governor':
         // Runtime-only types: display as operator with backend type preserved
         frontendType = 'operator';
-        label = node.type === 'vision' ? 'Vision Analysis'
-          : node.type === 'video_chunker' ? 'Video Chunker'
-          : node.type === 'skill_executor' ? 'Skill Executor'
+        label = normalizedType === 'vision' ? 'Vision Analysis'
+          : normalizedType === 'video_chunker' ? 'Video Chunker'
+          : normalizedType === 'skill_executor' ? 'Skill Executor'
           : 'Governor';
         nodeData = {
           label,
-          rawBackendType: node.type,
+          rawBackendType: normalizedType,
           ...(node.config || {}),
         };
         break;
@@ -1481,10 +1583,10 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         // Unknown runtime type — preserve as operator with rawBackendType
         console.warn(`[WorkflowConverter] Unknown node type '${node.type}' for node ${node.id}, treating as operator`);
         frontendType = 'operator';
-        label = node.type || 'Block';
+        label = normalizedType || 'Block';
         nodeData = {
           label,
-          rawBackendType: node.type,
+          rawBackendType: normalizedType,
           ...(node.config || {})
         };
     }
@@ -1494,7 +1596,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       nodeData.label = node.label;
     }
 
-    // Position fallback: 백엔드 규칙과 일치 (x=150 고정, y=50+index*100)
+    // Position fallback: matches backend rule (x=150 fixed, y=50+index*100)
     const position = node.position || {
       x: 150,
       y: 50 + index * 100
@@ -1674,13 +1776,50 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
     };
   }) || [];
 
+  // Augment edges for branching nodes (parallel, conditional):
+  // 1. Set sourceHandle on existing edges from branching nodes
+  // 2. Generate synthetic fan-out edges for branches that have no explicit edge
+  const syntheticEdges: any[] = [];
+
+  branchEdgeMap.forEach((branchTargets, sourceNodeId) => {
+    for (const { branchId, targetNodeId } of branchTargets) {
+      // Check if an edge from this source to this target already exists
+      const existingEdge = frontendEdges.find(
+        (e: any) => e.source === sourceNodeId && e.target === targetNodeId
+      );
+
+      if (existingEdge) {
+        // Set sourceHandle on existing edge to connect to the correct branch handle
+        existingEdge.sourceHandle = branchId;
+      } else {
+        // Generate synthetic fan-out edge from branch handle to target node
+        syntheticEdges.push({
+          id: `branch-edge-${sourceNodeId}-${branchId}`,
+          source: sourceNodeId,
+          sourceHandle: branchId,
+          target: targetNodeId,
+          type: 'smoothstep',
+          animated: true,
+          style: {
+            stroke: 'hsl(263 70% 60%)',
+            strokeWidth: 2,
+          },
+          data: {
+            edgeType: 'branch',
+          },
+        });
+      }
+    }
+  });
+
+  const allEdges = [...frontendEdges, ...syntheticEdges];
+
   const result: any = {
     name: backendWorkflow.name,
     nodes: allFrontendNodes,
-    edges: frontendEdges,
+    edges: allEdges,
   };
 
-  // secrets가 있는 경우 복원
   if (backendWorkflow.secrets && backendWorkflow.secrets.length > 0) {
     result.secrets = backendWorkflow.secrets;
   }
