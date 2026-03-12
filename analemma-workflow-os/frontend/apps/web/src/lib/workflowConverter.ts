@@ -1,7 +1,24 @@
 // 프론트엔드 워크플로우 데이터를 백엔드 형식으로 변환하는 유틸리티 함수들
 
 import { analyzeWorkflowGraph, type GraphAnalysisResult, type CycleInfo, type ParallelGroup } from './graphAnalysis';
+import { computeAutoLayout } from './autoLayout';
 import { toast } from 'sonner';
+
+/**
+ * Wrapper for auto-layout used during backend→frontend conversion.
+ * Falls back gracefully if dagre is unavailable.
+ */
+function computeAutoLayoutForConverter(nodes: any[], edges: any[]): any[] {
+  try {
+    return computeAutoLayout(nodes, edges, {
+      direction: 'TB',
+      nodeSpacingX: 80,
+      nodeSpacingY: 100,
+    });
+  } catch {
+    return nodes;
+  }
+}
 
 // Subgraph 관련 타입
 export interface SubgraphMetadata {
@@ -86,6 +103,10 @@ export interface BackendEdge {
   type: 'edge' | 'normal' | 'flow' | 'hitp' | 'human_in_the_loop' | 'pause' | 'start' | 'end' | 'conditional_edge' | 'if';
   source: string;
   target: string;
+  condition?: string;
+  mapping?: Record<string, string> | string;
+  router_func?: string;
+  data?: Record<string, unknown>;
 }
 
 export interface BackendSecret {
@@ -116,9 +137,17 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
         system_prompt: node.data.system_prompt,
         temperature: node.data.temperature || 0.7,
         max_tokens: node.data.max_tokens || node.data.maxTokens || 256,
+        // output_key is the primary runtime field; writes_state_key kept as fallback
+        output_key: node.data.output_key || node.data.writes_state_key,
         writes_state_key: node.data.writes_state_key,
         enable_thinking: node.data.enable_thinking || false,
         thinking_budget_tokens: node.data.thinking_budget_tokens || 4096,
+        // Retry/media config (optional, passed through if present)
+        ...(node.data.retry_config ? { retry_config: node.data.retry_config } : {}),
+        ...(node.data.image_inputs ? { image_inputs: node.data.image_inputs } : {}),
+        ...(node.data.video_inputs ? { video_inputs: node.data.video_inputs } : {}),
+        ...(node.data.vision_enabled ? { vision_enabled: true } : {}),
+        ...(node.data.async_mode ? { async_mode: node.data.async_mode } : {}),
       };
       // Tool definitions for function calling
       if (node.data.tools && Array.isArray(node.data.tools) && node.data.tools.length > 0) {
@@ -186,49 +215,64 @@ export const convertNodeToBackendFormat = (node: any): BackendNode => {
       const controlType = node.data.controlType || 'loop';
       
       if (controlType === 'for_each') {
-        // for_each: 리스트 병렬 반복 (ThreadPoolExecutor)
+        // for_each: parallel list iteration (ThreadPoolExecutor)
+        // Runtime priority: input_list_key > items_path (fallback)
         backendNode.type = 'for_each';
         backendNode.label = node.data?.label || 'For Each';
+        const feItemsPath = node.data.input_list_key || node.data.items_path || node.data.itemsPath || 'state.items';
         backendNode.config = {
-          items_path: node.data.items_path || node.data.itemsPath || 'state.items',
+          input_list_key: feItemsPath,
+          items_path: feItemsPath, // backward-compat fallback
           item_key: node.data.item_key || node.data.itemKey || 'item',
           output_key: node.data.output_key || node.data.outputKey || 'for_each_results',
           max_iterations: node.data.max_iterations || node.data.maxIterations || 20,
+          // Runtime priority: subgraph_ref > subgraph_inline > sub_workflow
+          ...(node.data.subgraph_ref ? { subgraph_ref: node.data.subgraph_ref } : {}),
+          ...(node.data.subgraph_inline ? { subgraph_inline: node.data.subgraph_inline } : {}),
           sub_workflow: node.data.sub_workflow || { nodes: [] },
         };
       } else if (controlType === 'loop') {
-        // loop: 조건 기반 순차 반복 (convergence 지원)
+        // loop: conditional sequential iteration (convergence support)
+        // Runtime priority: subgraph_ref > subgraph_inline > nodes
         backendNode.type = 'loop';
         backendNode.label = node.data?.label || 'Loop';
         backendNode.config = {
-          nodes: node.data.sub_workflow?.nodes || [],
           condition: node.data.condition || node.data.whileCondition || 'false',
           max_iterations: node.data.max_iterations || node.data.maxIterations || 5,
           loop_var: node.data.loop_var || 'loop_index',
           convergence_key: node.data.convergence_key,
           target_score: node.data.target_score || 0.9,
+          ...(node.data.subgraph_ref ? { subgraph_ref: node.data.subgraph_ref } : {}),
+          ...(node.data.subgraph_inline ? { subgraph_inline: node.data.subgraph_inline } : {}),
+          nodes: node.data.sub_workflow?.nodes || [],
         };
       } else if (controlType === 'parallel') {
-        // parallel: 병렬 브랜치 실행
+        // parallel: parallel branch execution
         backendNode.type = 'parallel_group';
         backendNode.label = node.data?.label || 'Parallel';
         backendNode.config = {
           branches: node.data.branches || [],
         };
       } else if (controlType === 'aggregator') {
-        // aggregator: 병렬/반복 결과 집계 (토큰 사용량 포함)
-        // aggregator_runner는 state에서 자동으로 병합 (설정 불필요)
+        // aggregator: merge results from parallel branches/iterations
         backendNode.type = 'aggregator';
         backendNode.label = node.data?.label || 'Aggregator';
-        backendNode.config = {};
+        backendNode.config = {
+          ...(node.data.merge_policy ? { merge_policy: node.data.merge_policy } : {}),
+        };
       } else if (controlType === 'conditional') {
-        // conditional: route_condition 노드로 변환
+        // conditional: route_condition node
+        // Runtime fields: branches[].condition/target, default_target, allowed_targets
         backendNode.type = 'route_condition';
         backendNode.label = node.data?.label || 'Route Condition';
+        const rcBranches = node.data.branches || node.data.conditions || [];
+        const rcDefaultTarget = node.data.default_target || node.data.default_node || node.data.defaultNode;
         backendNode.config = {
-          conditions: node.data.conditions || [],
-          default_node: node.data.default_node || node.data.defaultNode,
-          evaluation_mode: node.data.evaluation_mode || 'first_match',
+          branches: rcBranches,
+          default_target: rcDefaultTarget,
+          // Auto-extract allowed_targets from branches if not provided
+          allowed_targets: node.data.allowed_targets ||
+            rcBranches.map((b: any) => b.target).filter(Boolean).concat(rcDefaultTarget ? [rcDefaultTarget] : []),
         };
       } else if (controlType === 'human' || controlType === 'branch') {
         // human: HITL (Human-in-the-Loop) 엣지로만 표현
@@ -358,10 +402,11 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
   
   if (isForEach) {
     // For Each 노드 생성 (병렬 처리)
-    const itemsPath = backEdge.data?.items_path || 'state.items';
+    // Runtime primary: input_list_key, fallback: items_path
+    const cycleItemsPath = backEdge.data?.input_list_key || backEdge.data?.items_path || 'state.items';
     const itemKey = backEdge.data?.item_key || 'item';
     const maxIterations = backEdge.data?.max_iterations || 100;
-    
+
     // 사이클 내부의 노드들을 서브 노드로 변환
     const loopNodeIds = cycle.loopNodes || cycle.path;
     const subNodes = nodes
@@ -373,7 +418,8 @@ const convertCycleToLoopNode = (cycle: CycleInfo, nodes: any[], edges: any[]): B
       id: `for_each_${cycle.id}`,
       type: 'for_each',
       config: {
-        items_path: itemsPath,
+        input_list_key: cycleItemsPath,
+        items_path: cycleItemsPath, // backward-compat fallback
         item_key: itemKey,
         max_iterations: maxIterations,
         sub_workflow: {
@@ -515,10 +561,10 @@ const convertConditionalBranchToRouteNode = (
     const targetNodeId = branchNodeIds[0];
     const branchEdge = parallelGroup.branchEdges[index];
     const naturalCondition = branchEdge?.data?.natural_condition as string | undefined;
-    const label = branchEdge?.data?.label || `Branch ${index + 1}`;
-    
+    const label = (branchEdge?.data?.label as string) || `Branch ${index + 1}`;
+
     if (naturalCondition) {
-      // 자연어 조건: LLM 평가 필요
+      // Natural language condition: needs LLM evaluation
       naturalConditions.push({
         condition: naturalCondition,
         branch_index: index
@@ -526,15 +572,15 @@ const convertConditionalBranchToRouteNode = (
       branches.push({
         condition: naturalCondition,
         target: targetNodeId,
-        label: label
+        label,
       });
     } else {
-      // Python 표현식 조건
-      const pythonCondition = branchEdge?.data?.condition || `branch_${index} == True`;
+      // Python expression condition
+      const pythonCondition = (branchEdge?.data?.condition as string) || `branch_${index} == True`;
       branches.push({
         condition: pythonCondition,
         target: targetNodeId,
-        label: label
+        label,
       });
     }
   });
@@ -771,22 +817,28 @@ Set exactly ONE branch flag to true based on which condition matches.`,
   
   if (blockType === 'for_each') {
     // For Each Loop → for_each node
+    // Runtime priority: input_list_key > items_path
     const branch = controlBlockNode.data.branches[0];
     const targetEdge = outgoingEdges[0];
     const targetNode = targetEdge ? nodes.find((n: any) => n.id === targetEdge.target) : null;
-    
+    const feListKey = branch?.input_list_key || branch?.items_path || 'state.items';
+
     const forEachNode: BackendNode = {
       id: `for_each_${blockId}`,
       type: 'for_each',
       config: {
-        items_path: branch?.items_path || 'state.items',
-        item_key: 'item',
-        output_key: 'for_each_results',
-        max_iterations: 20,
+        input_list_key: feListKey,
+        items_path: feListKey, // backward-compat fallback
+        item_key: controlBlockNode.data.item_key || 'item',
+        output_key: controlBlockNode.data.output_key || 'for_each_results',
+        max_iterations: controlBlockNode.data.max_iterations || 20,
+        // Runtime priority: subgraph_ref > subgraph_inline > sub_workflow
+        ...(controlBlockNode.data.subgraph_ref ? { subgraph_ref: controlBlockNode.data.subgraph_ref } : {}),
+        ...(controlBlockNode.data.subgraph_inline ? { subgraph_inline: controlBlockNode.data.subgraph_inline } : {}),
         sub_workflow: targetNode ? { nodes: [convertNodeToBackendFormat(targetNode)!] } : { nodes: [] }
       }
     };
-    
+
     return { nodes: [forEachNode], edges: [] };
   }
   
@@ -1246,10 +1298,20 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           maxTokens: maxTokens,
           model: llmConfig.model || 'gpt-3.5-turbo',
           provider: llmConfig.provider || 'openai',
-          writes_state_key: llmConfig.writes_state_key,
+          // output_key is runtime primary; writes_state_key kept for backward compat
+          output_key: llmConfig.output_key || llmConfig.writes_state_key,
+          writes_state_key: llmConfig.writes_state_key || llmConfig.output_key,
+          enable_thinking: llmConfig.enable_thinking || false,
+          thinking_budget_tokens: llmConfig.thinking_budget_tokens || 4096,
           // Restore tool definitions
           tools: llmConfig.tool_definitions || [],
           toolsCount: (llmConfig.tool_definitions || []).length,
+          // Optional: retry, media, async (pass through if present)
+          ...(llmConfig.retry_config ? { retry_config: llmConfig.retry_config } : {}),
+          ...(llmConfig.image_inputs ? { image_inputs: llmConfig.image_inputs } : {}),
+          ...(llmConfig.video_inputs ? { video_inputs: llmConfig.video_inputs } : {}),
+          ...(llmConfig.vision_enabled ? { vision_enabled: true } : {}),
+          ...(llmConfig.async_mode ? { async_mode: llmConfig.async_mode } : {}),
         };
         break;
       case 'operator':
@@ -1307,6 +1369,12 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           condition: loopConfig.condition,
           whileCondition: loopConfig.condition,
           max_iterations: loopConfig.max_iterations || 5,
+          loop_var: loopConfig.loop_var || 'loop_index',
+          convergence_key: loopConfig.convergence_key,
+          target_score: loopConfig.target_score,
+          // Runtime priority: subgraph_ref > subgraph_inline > nodes
+          subgraph_ref: loopConfig.subgraph_ref,
+          subgraph_inline: loopConfig.subgraph_inline,
           sub_workflow: { nodes: loopConfig.nodes || [] },
         };
         break;
@@ -1355,9 +1423,13 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         }));
 
         // Collect branch → first target node mappings for edge generation
+        // Backend stores sub-nodes in b.nodes, b.sub_workflow.nodes, or b.sub_workflow as array
         const parallelBranchTargets = rawBranches.map((b: any, i: number) => {
           const branchId = b.branch_id || b.id || `branch_${i}`;
-          const firstNode = Array.isArray(b.nodes) ? b.nodes[0] : null;
+          const subNodes = b.nodes || b.sub_workflow?.nodes || [];
+          const firstNode = Array.isArray(subNodes) && subNodes.length > 0
+            ? (typeof subNodes[0] === 'object' ? subNodes[0].id : subNodes[0])
+            : null;
           return firstNode ? { branchId, targetNodeId: String(firstNode) } : null;
         }).filter(Boolean) as Array<{branchId: string, targetNodeId: string}>;
 
@@ -1378,9 +1450,11 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         // aggregator → control(aggregator)
         frontendType = 'control';
         label = 'Aggregator';
+        const aggConfig = node.config || {};
         nodeData = {
           label,
           controlType: 'aggregator',
+          ...(aggConfig.merge_policy ? { merge_policy: aggConfig.merge_policy } : {}),
         };
         break;
       case 'subgraph':
@@ -1555,10 +1629,12 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
         frontendType = 'control';
         label = 'Nested For Each';
         const nestedConfig = node.config || {};
+        const nestedListKey = nestedConfig.input_list_key || nestedConfig.items_path || '';
         nodeData = {
           label,
           controlType: 'for_each',
-          items_path: nestedConfig.input_list_key || '',
+          input_list_key: nestedListKey,
+          items_path: nestedListKey,
           rawBackendType: 'nested_for_each',
           nested_config: nestedConfig.nested_config,
         };
@@ -1691,7 +1767,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           id: `edge-${index}-in`,
           source: edge.source,
           target: hitlNodeId,
-          type: 'smoothstep',
+          type: 'smart',
           animated: true,
           style: {
             stroke: 'hsl(38 92% 50%)', // HITL orange
@@ -1706,7 +1782,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           id: `edge-${index}-out`,
           source: hitlNodeId,
           target: edge.target,
-          type: 'smoothstep',
+          type: 'smart',
           animated: true,
           style: {
             stroke: 'hsl(38 92% 50%)', // HITL orange
@@ -1728,7 +1804,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           id: `edge-${index}-in`,
           source: edge.source,
           target: branchNodeId,
-          type: 'smoothstep',
+          type: 'smart',
           animated: true,
           style: {
             stroke: 'hsl(142 76% 36%)', // Conditional green
@@ -1743,7 +1819,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           id: `edge-${index}-out`,
           source: branchNodeId,
           target: edge.target,
-          type: 'smoothstep',
+          type: 'smart',
           animated: true,
           style: {
             stroke: 'hsl(142 76% 36%)', // Conditional green
@@ -1763,7 +1839,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       id: `edge-${index}`,
       source: edge.source,
       target: edge.target,
-      type: 'smoothstep',
+      type: 'smart',
       animated: true,
       style: {
         stroke: edge.type === 'if' ? 'hsl(142 76% 36%)' : 'hsl(263 70% 60%)',
@@ -1798,7 +1874,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
           source: sourceNodeId,
           sourceHandle: branchId,
           target: targetNodeId,
-          type: 'smoothstep',
+          type: 'smart',
           animated: true,
           style: {
             stroke: 'hsl(263 70% 60%)',
@@ -1814,9 +1890,20 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
 
   const allEdges = [...frontendEdges, ...syntheticEdges];
 
+  // Auto-layout nodes if all positions are stacked (default fallback layout)
+  // This happens when the backend/CoDesign does not provide meaningful positions
+  const needsAutoLayout = allFrontendNodes.length > 1 && allFrontendNodes.every(
+    (n: any, i: number) => n.position.x === 150 && n.position.y === 50 + i * 100
+  );
+
+  let finalNodes = allFrontendNodes;
+  if (needsAutoLayout) {
+    finalNodes = computeAutoLayoutForConverter(allFrontendNodes, allEdges);
+  }
+
   const result: any = {
     name: backendWorkflow.name,
-    nodes: allFrontendNodes,
+    nodes: finalNodes,
     edges: allEdges,
   };
 

@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo, useRef, useEffect, useMemo } from 'react';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 export interface ToolDefinition {
   name: string;
@@ -42,6 +43,7 @@ interface AIModelNodeProps {
     cost?: number;
     systemPrompt?: string;
     streamContent?: string;
+    _executionOrder?: number;
   };
   id: string;
   selected?: boolean;
@@ -111,6 +113,7 @@ const AIModelNodeInner = ({ data, id, selected }: AIModelNodeProps) => {
       background: 'linear-gradient(to bottom right, hsl(217 91% 60% / 0.15), hsl(217 91% 60% / 0.05))',
       boxShadow: '0 0 20px hsl(217 91% 60% / 0.15)'
     }}>
+      <ExecutionOrderBadge order={data._executionOrder} />
       {/* Status icon — CSS transition instead of AnimatePresence */}
       {status !== 'idle' && (
         <div className={cn(

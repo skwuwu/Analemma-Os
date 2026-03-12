@@ -6,6 +6,7 @@ import { cn } from '@/lib/utils';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
 import { TRIGGER_CONFIG, type TriggerType } from '@/lib/nodeConstants';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 const ICON_MAP = {
   Clock,
@@ -19,6 +20,7 @@ interface TriggerNodeProps {
     triggerType?: keyof typeof TRIGGER_CONFIG;
     configValue?: string;
     triggerId?: string;
+    _executionOrder?: number;
   };
   id: string;
   selected?: boolean;
@@ -41,6 +43,7 @@ const TriggerNodeInner = ({ data, id, selected }: TriggerNodeProps) => {
         boxShadow: `0 0 20px hsl(${config.color} / 0.15)`
       }}
     >
+      <ExecutionOrderBadge order={data._executionOrder} />
       <Button
         size="icon"
         variant="ghost"

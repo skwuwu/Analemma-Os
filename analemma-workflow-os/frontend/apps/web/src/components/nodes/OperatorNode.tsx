@@ -14,6 +14,7 @@ import { cn } from '@/lib/utils';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
 import { OPERATOR_CONFIG, type OperatorType } from '@/lib/nodeConstants';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 const ICON_MAP = {
   Globe,
@@ -40,6 +41,7 @@ interface OperatorNodeProps {
     status?: 'idle' | 'running' | 'failed' | 'completed';
     authStatus?: 'connected' | 'disconnected' | 'unknown';
     authMessage?: string;
+    _executionOrder?: number;
   };
   id: string;
   selected?: boolean;
@@ -64,6 +66,7 @@ const OperatorNodeInner = ({ data, id, selected }: OperatorNodeProps) => {
         background: `linear-gradient(to bottom right, hsl(${config.color} / 0.1), hsl(${config.color} / 0.02))`
       }}
     >
+      <ExecutionOrderBadge order={data._executionOrder} />
       <Handle
         type="target"
         position={Position.Left}

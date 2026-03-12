@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label';
 import { cn } from '@/lib/utils';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useState } from 'react';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 // Control Block 타입 정의
 export type ControlBlockType = 'conditional' | 'parallel' | 'for_each' | 'while';
@@ -138,7 +139,8 @@ export const ControlBlockNode = ({ data, id, selected }: ControlBlockNodeProps) 
         boxShadow: `0 4px 20px hsl(${config.color} / 0.2)`,
       }}
     >
-      {/* 입력 핸들 */}
+      <ExecutionOrderBadge order={(data as any)._executionOrder} />
+      {/* Input handle */}
       <Handle
         type="target"
         position={Position.Left}

@@ -16,6 +16,7 @@
     "dependencies": {
         "@aws-amplify/auth": "^6.16.0",
         "@aws-amplify/ui-react": "^6.13.0",
+        "@dagrejs/dagre": "^2.0.4",
         "@hookform/resolvers": "^3.10.0",
         "@radix-ui/react-accordion": "^1.2.11",
         "@radix-ui/react-alert-dialog": "^1.1.14",
@@ -46,6 +47,7 @@
         "@radix-ui/react-tooltip": "^1.2.7",
         "@supabase/supabase-js": "^2.75.0",
         "@tanstack/react-query": "^5.83.0",
+        "@types/dagre": "^0.7.54",
         "@uiw/react-json-view": "^2.0.0-alpha.39",
         "@xyflow/react": "^12.8.6",
         "aws-amplify": "^6.15.7",

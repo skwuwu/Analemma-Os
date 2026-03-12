@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils';
 import { Button } from '../ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { useWorkflowStore } from '@/lib/workflowStore';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 interface GroupNodeData {
   label: string;
@@ -33,7 +34,8 @@ export const GroupNode = memo(({ id, data, selected }: NodeProps) => {
           : 'border-purple-500/50'
       )}
     >
-      {/* 입력 핸들 */}
+      <ExecutionOrderBadge order={(data as any)._executionOrder} />
+      {/* Input handle */}
       <Handle
         type="target"
         position={Position.Left}

@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge';
 import { cn } from '@/lib/utils';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { memo } from 'react';
+import { ExecutionOrderBadge } from './ExecutionOrderBadge';
 
 const CONTROL_CONFIG = {
   branch: {
@@ -70,6 +71,7 @@ interface ControlNodeProps {
     status?: 'idle' | 'waiting' | 'active' | 'completed';
     loopCount?: number;
     maxIterations?: number;
+    _executionOrder?: number;
   };
   id: string;
   selected?: boolean;
@@ -96,6 +98,7 @@ const ControlNodeInner = ({ data, id, selected }: ControlNodeProps) => {
         boxShadow: `0 0 15px hsl(${color} / 0.3)`
       }}
     >
+      <ExecutionOrderBadge order={data._executionOrder} />
       <Handle
         type="target"
         position={Position.Left}

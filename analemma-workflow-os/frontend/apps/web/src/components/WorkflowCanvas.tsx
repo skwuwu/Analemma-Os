@@ -2,6 +2,7 @@ import { useCallback, useState, useMemo, useEffect, useRef, Fragment } from 'rea
 import {
   ReactFlow,
   Background,
+  MiniMap,
   Edge,
   Node,
   NodeTypes,
@@ -11,6 +12,7 @@ import {
   useOnSelectionChange,
   NodeChange,
   EdgeChange,
+  MarkerType,
 } from '@xyflow/react';
 import { fetchAuthSession } from '@aws-amplify/auth';
 import '@xyflow/react/dist/style.css';
@@ -21,7 +23,7 @@ import { TriggerNode } from './nodes/TriggerNode';
 import { ControlNode } from './nodes/ControlNode';
 import { ControlBlockNode } from './nodes/ControlBlockNode';
 import { GroupNode } from './nodes/GroupNode';
-import { SmartEdge } from './edges/SmartEdge';
+import { OrthogonalEdge } from './edges/OrthogonalEdge';
 
 // Dialog/Modal/Panel components - static imports to avoid runtime initialization issues
 import { NodeEditorDialog } from './NodeEditorDialog';
@@ -36,8 +38,10 @@ import {
   Layers,
   ChevronRight,
   Trash2,
+  LayoutGrid,
 } from 'lucide-react';
 import { analyzeWorkflowGraph } from '@/lib/graphAnalysis';
+import { computeAutoLayout } from '@/lib/autoLayout';
 import { useWorkflowStore } from '@/lib/workflowStore';
 import { useCodesignStore } from '@/lib/codesignStore';
 import { WorkflowStatusIndicator } from './WorkflowStatusIndicator';
@@ -48,6 +52,19 @@ import { createWorkflowNode, generateNodeId } from '@/lib/nodeFactory';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
+// MiniMap node color mapping
+const MINIMAP_NODE_COLOR = (node: Node) => {
+  switch (node.type) {
+    case 'aiModel': return '#8b5cf6';
+    case 'trigger': return '#22c55e';
+    case 'operator': return '#3b82f6';
+    case 'control': return '#eab308';
+    case 'control_block': return '#eab308';
+    case 'group': return '#a855f7';
+    default: return '#64748b';
+  }
+};
+
 const WorkflowCanvasInner = () => {
   // ==========================================
   // 1. ALL STATE DECLARATIONS FIRST (CRITICAL: Must be before any useEffect)
@@ -57,14 +74,18 @@ const WorkflowCanvasInner = () => {
   const [editorOpen, setEditorOpen] = useState(false);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance<any, any> | null>(null);
-  
+
   // Time Machine state (for rollback)
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [rollbackTarget, setRollbackTarget] = useState<TimelineItem | null>(null);
   const [currentExecutionId, setCurrentExecutionId] = useState<string | null>(null);
-  
+
   // Audit Panel state (Local validation only)
   const [auditPanelOpen, setAuditPanelOpen] = useState(false);
+
+  // Flow highlight state — click a node to highlight its upstream/downstream path
+  const [highlightedNodeIds, setHighlightedNodeIds] = useState<Set<string>>(new Set());
+  const [highlightedEdgeIds, setHighlightedEdgeIds] = useState<Set<string>>(new Set());
 
   // ==========================================
   // 2. NODE/EDGE TYPES (useMemo)
@@ -79,13 +100,11 @@ const WorkflowCanvasInner = () => {
   }), []);
 
   const edgeTypes = useMemo(() => ({
-    smart: SmartEdge,
+    smart: OrthogonalEdge,
   }), []);
 
   // ==========================================
   // 3. STORE SUBSCRIPTIONS — individual selectors for granular re-render control.
-  // useShallow with object selectors + fallback values (|| {}) creates new references
-  // on every selector evaluation, causing unnecessary re-renders → React #185.
   // ==========================================
   const nodes = useWorkflowStore(state => state.nodes);
   const edges = useWorkflowStore(state => state.edges);
@@ -111,17 +130,12 @@ const WorkflowCanvasInner = () => {
 
   // Handle selection changes for both single and multi-node selection
   const handleSelectionChange = useCallback(({ nodes }: { nodes: Node[] }) => {
-    // Update selectedNodes state for grouping functionality
     setSelectedNodes(nodes);
-
-    // Update store for single node selection (property panel)
     if (nodes.length === 1) {
       setSelectedNodeId(nodes[0].id);
     } else if (nodes.length === 0) {
       setSelectedNodeId(null);
-    }
-    // For multi-selection, keep the first node as active in property panel
-    else if (nodes.length > 1) {
+    } else if (nodes.length > 1) {
       setSelectedNodeId(nodes[0].id);
     }
   }, [setSelectedNodeId]);
@@ -131,15 +145,12 @@ const WorkflowCanvasInner = () => {
   });
 
   // Co-design store — individual selectors only for what's actually used.
-  // Subscribing to unused fields (pendingSuggestions, activeSuggestionId, etc.)
-  // causes unnecessary re-renders that cascade into ReactFlow's internal store.
   const recordChange = useCodesignStore(state => state.recordChange);
   const requestSuggestions = useCodesignStore(state => state.requestSuggestions);
   const requestAudit = useCodesignStore(state => state.requestAudit);
-  // Primitive selector — Object.is comparison, no useShallow needed
   const recentChangesLength = useCodesignStore(state => state.recentChanges.length);
 
-  // Stable structure keys — only change when graph topology changes (not on position/selection updates)
+  // Stable structure keys — only change when graph topology changes
   const nodeStructureKey = useMemo(
     () => nodes.map(n => n.id).sort().join(','),
     [nodes]
@@ -150,21 +161,134 @@ const WorkflowCanvasInner = () => {
   );
 
   // Auto-validation using graphAnalysis (recalculates only when topology changes)
+  const analysisResult = useMemo(() => {
+    if (nodes.length === 0) return null;
+    return analyzeWorkflowGraph(nodes, edges);
+  }, [nodeStructureKey, edgeStructureKey]);
+
   const validation = useMemo(() => {
-    if (nodes.length === 0) {
+    if (!analysisResult) {
       return { issueCount: 0, hasErrors: false, hasWarnings: false, warnings: [] };
     }
-
-    const analysisResult = analyzeWorkflowGraph(nodes, edges);
     const warnings = analysisResult.warnings || [];
-
     return {
       issueCount: warnings.length,
       hasErrors: warnings.some(w => w.type === 'unreachable_node'),
       hasWarnings: warnings.length > 0,
       warnings,
     };
-  }, [nodeStructureKey, edgeStructureKey]);
+  }, [analysisResult]);
+
+  // ==========================================
+  // Execution order numbering (from topological sort)
+  // ==========================================
+  const nodeOrderMap = useMemo(() => {
+    if (!analysisResult) return new Map<string, number>();
+    const map = new Map<string, number>();
+    analysisResult.topologicalOrder.forEach((nodeId, idx) => {
+      map.set(nodeId, idx + 1);
+    });
+    return map;
+  }, [analysisResult]);
+
+  // Inject execution order numbers into node data for rendering
+  const nodesWithOrder = useMemo(() => {
+    if (nodeOrderMap.size === 0) return nodes;
+    return nodes.map(n => {
+      const order = nodeOrderMap.get(n.id);
+      if (order !== undefined && n.data?._executionOrder !== order) {
+        return { ...n, data: { ...n.data, _executionOrder: order } };
+      }
+      if (order === undefined && n.data?._executionOrder !== undefined) {
+        const { _executionOrder, ...rest } = n.data as any;
+        return { ...n, data: rest };
+      }
+      return n;
+    });
+  }, [nodes, nodeOrderMap]);
+
+  // ==========================================
+  // Flow highlight — compute connected path on click
+  // ==========================================
+  const computeHighlightPath = useCallback((nodeId: string) => {
+    const nodeSet = new Set<string>();
+    const edgeSet = new Set<string>();
+
+    // BFS upstream
+    const upQueue = [nodeId];
+    const upVisited = new Set<string>([nodeId]);
+    while (upQueue.length > 0) {
+      const cur = upQueue.shift()!;
+      nodeSet.add(cur);
+      for (const e of edges) {
+        if (e.target === cur && !upVisited.has(e.source)) {
+          upVisited.add(e.source);
+          upQueue.push(e.source);
+          edgeSet.add(e.id);
+        }
+      }
+    }
+
+    // BFS downstream
+    const downQueue = [nodeId];
+    const downVisited = new Set<string>([nodeId]);
+    while (downQueue.length > 0) {
+      const cur = downQueue.shift()!;
+      nodeSet.add(cur);
+      for (const e of edges) {
+        if (e.source === cur && !downVisited.has(e.target)) {
+          downVisited.add(e.target);
+          downQueue.push(e.target);
+          edgeSet.add(e.id);
+        }
+      }
+    }
+
+    return { nodeSet, edgeSet };
+  }, [edges]);
+
+  // Apply highlight dimming to edges
+  const edgesWithHighlight = useMemo(() => {
+    if (highlightedEdgeIds.size === 0) return edges;
+    return edges.map(e => {
+      const highlighted = highlightedEdgeIds.has(e.id);
+      return {
+        ...e,
+        style: {
+          ...e.style,
+          opacity: highlighted ? 1 : 0.15,
+        },
+      };
+    });
+  }, [edges, highlightedEdgeIds]);
+
+  // Apply highlight dimming to nodes
+  const nodesWithHighlight = useMemo(() => {
+    if (highlightedNodeIds.size === 0) return nodesWithOrder;
+    return nodesWithOrder.map(n => ({
+      ...n,
+      style: {
+        ...n.style,
+        opacity: highlightedNodeIds.has(n.id) ? 1 : 0.2,
+        transition: 'opacity 0.2s ease',
+      },
+    }));
+  }, [nodesWithOrder, highlightedNodeIds]);
+
+  // Default edge options: orthogonal with arrowhead
+  const defaultEdgeOptions = useMemo(() => ({
+    type: 'smart',
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      width: 16,
+      height: 16,
+      color: 'hsl(263 70% 60%)',
+    },
+    deletable: false,
+    reconnectable: false,
+    selectable: false,
+    focusable: false,
+  }), []);
 
   // Wrap workflow actions to record changes for Co-design
   const addNodeWithTracking = useCallback((node: Node) => {
@@ -198,11 +322,8 @@ const WorkflowCanvasInner = () => {
     });
   }, [addEdge, recordChange]);
 
-  // Wrap change handlers to record position/drag changes
   const onNodesChangeWithTracking = useCallback((changes: NodeChange[]) => {
     onNodesChange(changes);
-
-    // Record position changes (when dragging stops)
     const positionChanges = changes.filter(c => c.type === 'position' && c.dragging === false);
     positionChanges.forEach(change => {
       recordChange('move_node', {
@@ -214,16 +335,12 @@ const WorkflowCanvasInner = () => {
 
   const onEdgesChangeWithTracking = useCallback((changes: EdgeChange[]) => {
     onEdgesChange(changes);
-
-    // Record edge removals
     const removeChanges = changes.filter(c => c.type === 'remove');
     removeChanges.forEach(change => {
       recordChange('delete_edge', { id: (change as any).id });
     });
   }, [onEdgesChange, recordChange]);
 
-  // ==========================================
-  // 4. HOOKS FOR BRIEFING AND CHECKPOINTS
   // ==========================================
   // 4. HOOKS FOR TIME MACHINE
   // ==========================================
@@ -247,7 +364,6 @@ const WorkflowCanvasInner = () => {
     groupNodes(nodeIds, groupName);
     setGroupDialogOpen(false);
     setSelectedNodes([]);
-    // toast.success는 이제 groupNodes 내부에서 처리됨
   }, [selectedNodes, groupNodes]);
 
   const onDrop = useCallback(
@@ -266,7 +382,6 @@ const WorkflowCanvasInner = () => {
         y: event.clientY,
       });
 
-      // 💡 Node Factory 활용
       let data = { label };
       try {
         if (dataString) {
@@ -292,7 +407,6 @@ const WorkflowCanvasInner = () => {
   }, []);
 
   const onNodeDoubleClick = useCallback((_event: React.MouseEvent, node: Node) => {
-    // 그룹 노드(서브그래프)인 경우 내부로 진입
     if (node.type === 'group' && node.data?.subgraphId) {
       navigateToSubgraph(node.data.subgraphId as string);
       return;
@@ -313,21 +427,42 @@ const WorkflowCanvasInner = () => {
     clearWorkflow();
   }, [clearWorkflow]);
 
-  // Edge restrictions via defaultEdgeOptions — avoids creating new edge objects per render
-  const defaultEdgeOptions = useMemo(() => ({
-    deletable: false,
-    reconnectable: false,
-    selectable: false,
-    focusable: false,
-  }), []);
+  // ==========================================
+  // Auto-Layout handler (Sugiyama / dagre)
+  // ==========================================
+  const handleAutoLayout = useCallback(() => {
+    const currentNodes = useWorkflowStore.getState().nodes;
+    const currentEdges = useWorkflowStore.getState().edges;
+    if (currentNodes.length === 0) return;
 
-  // Memoize ReactFlow config objects — inline objects create new references every render,
-  // causing xyflow's internal store to re-process and setState in a loop (React #185).
+    const layoutedNodes = computeAutoLayout(currentNodes, currentEdges, {
+      direction: 'TB',
+      nodeSpacingX: 80,
+      nodeSpacingY: 100,
+    });
+
+    // Apply new positions via node changes
+    const changes: NodeChange[] = layoutedNodes.map(n => ({
+      type: 'position' as const,
+      id: n.id,
+      position: n.position,
+      dragging: false,
+    }));
+    onNodesChange(changes);
+
+    // Fit view after layout
+    setTimeout(() => {
+      reactFlowInstance?.fitView({ padding: 0.2, duration: 400 });
+    }, 50);
+
+    toast.success('Auto-layout applied');
+  }, [onNodesChange, reactFlowInstance]);
+
+  // Memoize ReactFlow config objects
   const fitViewOpts = useMemo(() => ({ padding: 0.2 }), []);
   const snapGridConfig: [number, number] = useMemo(() => [20, 20], []);
   const bgStyle = useMemo(() => ({ opacity: 0.4 }), []);
 
-  // 다이얼로그에 전달할 연결 데이터를 미리 계산
   const dialogConnectionData = useMemo(() => {
     if (!selectedNode || !editorOpen) return null;
 
@@ -374,8 +509,6 @@ const WorkflowCanvasInner = () => {
   }, [addEdge]);
 
   // Co-design: request AI suggestions after user changes settle.
-  // Deps: recentChangesLength only — requestSuggestions/requestAudit are stable store functions.
-  // Guard: skip when canvas is empty (no nodes to analyze).
   useEffect(() => {
     if (recentChangesLength === 0) return;
 
@@ -407,8 +540,7 @@ const WorkflowCanvasInner = () => {
     };
   }, [recentChangesLength]);
 
-  // Keyboard shortcuts — use refs for mutable state to keep a single stable listener
-  // instead of tearing down and re-attaching on every selection change.
+  // Keyboard shortcuts
   const selectedNodeRef = useRef(selectedNode);
   selectedNodeRef.current = selectedNode;
   const selectedNodesRef = useRef(selectedNodes);
@@ -438,6 +570,12 @@ const WorkflowCanvasInner = () => {
       }
 
       if (event.key === 'Escape') {
+        // Clear highlight first, then clear selection
+        if (highlightedNodeIds.size > 0) {
+          setHighlightedNodeIds(new Set());
+          setHighlightedEdgeIds(new Set());
+          return;
+        }
         setSelectedNode(null);
         setEditorOpen(false);
       }
@@ -450,11 +588,23 @@ const WorkflowCanvasInner = () => {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleNodeDelete]);
+  }, [handleNodeDelete, highlightedNodeIds.size]);
 
-  // Node selection handler
+  // Node click handler — single click highlights path, double click opens editor
   const onNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
     setSelectedNode(node);
+
+    // Compute and set highlight path
+    const { nodeSet, edgeSet } = computeHighlightPath(node.id);
+    setHighlightedNodeIds(nodeSet);
+    setHighlightedEdgeIds(edgeSet);
+  }, [computeHighlightPath]);
+
+  // Clear highlight on pane click
+  const onPaneClick = useCallback(() => {
+    setHighlightedNodeIds(new Set());
+    setHighlightedEdgeIds(new Set());
+    setSelectedNode(null);
   }, []);
 
   // Rollback handler
@@ -463,7 +613,6 @@ const WorkflowCanvasInner = () => {
     setRollbackDialogOpen(true);
   }, []);
 
-  // Extracted callbacks — avoid creating new function references on every render
   const handleFocusNode = useCallback((nodeId: string) => {
     const node = useWorkflowStore.getState().nodes.find(n => n.id === nodeId);
     if (node && reactFlowInstance) {
@@ -494,6 +643,24 @@ const WorkflowCanvasInner = () => {
         <div className="flex-1 relative" onDrop={onDrop} onDragOver={onDragOver}>
           {/* Contextual Toolbar */}
           <div className="absolute top-4 right-4 z-10 flex gap-2">
+            {/* Auto-Layout Button */}
+            {nodes.length > 1 && (
+              <div className="group/layout relative">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleAutoLayout}
+                  className="gap-2 h-8 px-3 bg-slate-800/80 border-slate-700 hover:bg-blue-500/20 hover:border-blue-500/50 transition-colors"
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  Auto-Layout
+                </Button>
+                <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1 hidden group-hover/layout:block z-50 whitespace-nowrap rounded-md border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md">
+                  Arrange nodes in hierarchical layout
+                </div>
+              </div>
+            )}
+
             {/* Clear Canvas Button */}
             {nodes.length > 0 && (
               <div className="group/clear relative">
@@ -515,7 +682,7 @@ const WorkflowCanvasInner = () => {
                 </div>
               </div>
             )}
-            
+
             <AnimatePresence>
               {selectedNodes.length >= 2 && (
                 <motion.div initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.8, opacity: 0 }}>
@@ -562,14 +729,15 @@ const WorkflowCanvasInner = () => {
           )}
 
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
+            nodes={nodesWithHighlight}
+            edges={edgesWithHighlight}
             defaultEdgeOptions={defaultEdgeOptions}
             onNodesChange={onNodesChangeWithTracking}
             onEdgesChange={onEdgesChangeWithTracking}
             onConnect={onConnect}
             onNodeClick={onNodeClick}
             onNodeDoubleClick={onNodeDoubleClick}
+            onPaneClick={onPaneClick}
             onInit={setReactFlowInstance}
             nodeTypes={nodeTypes}
             edgeTypes={edgeTypes}
@@ -587,10 +755,25 @@ const WorkflowCanvasInner = () => {
             zoomOnScroll
             panOnScroll={false}
           >
-            <Background color="#222" gap={20} size={1} variant={BackgroundVariant.Dots} style={bgStyle} />
+            {/* Background grid with cross pattern for directional hint */}
+            <Background color="#333" gap={20} size={1} variant={BackgroundVariant.Cross} style={bgStyle} />
+
+            {/* MiniMap for canvas overview */}
+            <MiniMap
+              nodeColor={MINIMAP_NODE_COLOR}
+              nodeStrokeWidth={2}
+              maskColor="rgba(0, 0, 0, 0.7)"
+              style={{
+                backgroundColor: '#1a1a2e',
+                borderRadius: 12,
+                border: '1px solid #333',
+              }}
+              pannable
+              zoomable
+            />
           </ReactFlow>
 
-          {/* Shortcuts Info — CSS hover instead of Radix Tooltip to avoid render conflicts */}
+          {/* Shortcuts Info */}
           <div className="absolute bottom-4 left-4 z-10 flex items-center gap-3">
             <div className="group/shortcuts relative">
               <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-900/80 backdrop-blur-sm px-3 py-1.5 rounded-xl border border-slate-800 cursor-help hover:text-slate-300 transition-colors">
@@ -604,11 +787,12 @@ const WorkflowCanvasInner = () => {
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">ESC</kbd> Clear Selection</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">⇧+DRAG</kbd> Multi-Select</div>
                   <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">DBL-CLICK</kbd> Enter Group</div>
+                  <div className="flex items-center gap-2 text-xs font-medium text-slate-400"><kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700 text-[10px]">CLICK</kbd> Highlight Path</div>
                 </div>
               </div>
             </div>
             <span className="text-[10px] text-slate-600">
-              <kbd className="px-1 py-0.5 bg-slate-800/50 rounded text-slate-500">⇧</kbd>+Drag to select · Double-click group to enter
+              Click node to highlight path · <kbd className="px-1 py-0.5 bg-slate-800/50 rounded text-slate-500">ESC</kbd> to clear
             </span>
           </div>
         </div>
