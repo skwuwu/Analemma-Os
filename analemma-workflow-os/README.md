@@ -260,16 +260,20 @@ aws stepfunctions describe-execution --execution-arn <ARN> --query "output" --ou
 
 ## Technical Documentation
 
+> Full index: [docs/README.md](docs/README.md)
+
 | Document | Description |
 |---|---|
-| [Architecture Deep-Dive](docs/architecture.md) | Ring protection model, Great Seal protocol, Merkle DAG, 2PC, governance |
-| [Features Guide](docs/features.md) | Co-design Assistant, Time Machine, Mission Simulator, Model Router, REACT Agent |
-| [Installation Guide](docs/installation.md) | Deployment, environment configuration, database setup, troubleshooting |
-| [API Reference](docs/api-reference.md) | REST API, WebSocket protocol, Task Manager API |
-| [State Management v3.3](docs/STATE_MANAGEMENT_V3.3.md) | Delta-based persistence, 2-Phase Commit, temperature batching |
-| [Kernel Layer Report](docs/KERNEL_LAYER_TECHNICAL_REPORT.md) | Ring protection, Great Seal, USC pipeline, Merkle DAG |
-| [2PC Implementation](docs/2PC_IMPLEMENTATION_GUIDE.md) | Two-phase commit protocol details |
-| [Local Agent Runner](docs/LOCAL_AGENT_RUNNER_GUIDE.md) | Bridge SDK, Virtual Segment Manager, local agent integration |
+| [Architecture Deep-Dive](docs/architecture-deep-dive.md) | Ring protection model, Great Seal protocol, Merkle DAG, 2PC, governance |
+| [Features Guide](docs/guides/features.md) | Co-design Assistant, Time Machine, Mission Simulator, Model Router, REACT Agent |
+| [Installation Guide](docs/guides/installation.md) | Deployment, environment configuration, database setup, troubleshooting |
+| [API Reference](docs/guides/api-reference.md) | REST API, WebSocket protocol, Task Manager API |
+| [Ring Protection](docs/internals/ring-protection.md) | 4-Ring privilege isolation, Great Seal Protocol, security guards |
+| [Merkle DAG & Audit](docs/internals/merkle-dag-audit.md) | Content-addressable state versioning, hash pipeline, integrity verification |
+| [2PC Implementation](docs/internals/two-phase-commit.md) | Two-phase commit protocol for S3/DynamoDB atomicity |
+| [State Management v3.3](docs/internals/state-management-v3.3.md) | Delta-based persistence, 2-Phase Commit, temperature batching |
+| [Kernel Layer Report](docs/internals/kernel-layer-report.md) | Ring protection, Great Seal, USC pipeline, Merkle DAG |
+| [Local Agent Runner](docs/guides/local-agent-runner.md) | Bridge SDK, Virtual Segment Manager, local agent integration |
 
 ---
 

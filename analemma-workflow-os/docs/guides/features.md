@@ -1,6 +1,6 @@
 # Features Guide
 
-> [Back to Main README](../README.md)
+> [Back to Main README](../../README.md)
 
 This document covers Analemma OS features: the Co-design Assistant, workflow execution controls, observability tools, and operational utilities.
 
@@ -868,4 +868,4 @@ Speculation is FORBIDDEN when:
 
 ---
 
-> [Back to Main README](../README.md)
+> [Back to Main README](../../README.md)

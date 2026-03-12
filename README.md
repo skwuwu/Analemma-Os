@@ -406,19 +406,21 @@ sam deploy --guided \
     GoogleApiKey=<your-google-key>
 ```
 
-See the [Installation Guide](analemma-workflow-os/docs/installation.md) for the complete deployment walkthrough, IAM permissions, and optional parameters (Fargate async worker, VPC configuration, Kinesis streaming).
+See the [Installation Guide](analemma-workflow-os/docs/guides/installation.md) for the complete deployment walkthrough, IAM permissions, and optional parameters (Fargate async worker, VPC configuration, Kinesis streaming).
 
 ---
 
 ## Documentation
 
+> Full index: [docs/README.md](analemma-workflow-os/docs/README.md)
+
 | Document | Description |
 |---|---|
-| [Architecture Deep-Dive](analemma-workflow-os/docs/architecture.md) | Kernel design, state management, Gemini integration patterns |
-| [Kernel Layer Technical Report](analemma-workflow-os/docs/KERNEL_LAYER_TECHNICAL_REPORT.md) | Ring protection, Great Seal protocol, USC pipeline, Merkle DAG, 2PC |
-| [API Reference](analemma-workflow-os/docs/api-reference.md) | REST API, WebSocket protocol |
-| [Features Guide](analemma-workflow-os/docs/features.md) | Co-design assistant, Time Machine, Mission Simulator |
-| [Installation Guide](analemma-workflow-os/docs/installation.md) | Deployment, configuration, environment setup |
+| [Architecture Deep-Dive](analemma-workflow-os/docs/architecture-deep-dive.md) | Kernel design, state management, Gemini integration patterns |
+| [Kernel Layer Report](analemma-workflow-os/docs/internals/kernel-layer-report.md) | Ring protection, Great Seal protocol, USC pipeline, Merkle DAG, 2PC |
+| [API Reference](analemma-workflow-os/docs/guides/api-reference.md) | REST API, WebSocket protocol |
+| [Features Guide](analemma-workflow-os/docs/guides/features.md) | Co-design assistant, Time Machine, Mission Simulator |
+| [Installation Guide](analemma-workflow-os/docs/guides/installation.md) | Deployment, configuration, environment setup |
 
 ---
 

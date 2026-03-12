@@ -1,6 +1,6 @@
 # 🚀 Installation Guide
 
-> [← Back to Main README](../README.md)
+> [← Back to Main README](../../README.md)
 
 This document provides step-by-step instructions for deploying Analemma OS to AWS, including local development setup, environment configuration, and production deployment.
 
@@ -550,4 +550,4 @@ curl https://api.analemma.io/health
 
 ---
 
-> [← Back to Main README](../README.md)
+> [← Back to Main README](../../README.md)

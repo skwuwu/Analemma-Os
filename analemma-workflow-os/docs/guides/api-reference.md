@@ -1,6 +1,6 @@
 # 📡 API Reference
 
-> [← Back to Main README](../README.md)
+> [← Back to Main README](../../README.md)
 
 This document provides comprehensive API documentation for Analemma OS, including REST endpoints, WebSocket protocol, and SDK integration patterns.
 
@@ -1047,4 +1047,4 @@ while (true) {
 
 ---
 
-> [<- Back to Main README](../README.md)
+> [← Back to Main README](../../README.md)

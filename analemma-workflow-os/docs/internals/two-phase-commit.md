@@ -675,4 +675,4 @@ def test_network_partition_recovery():
 **Document Version:** 1.0.0  
 **Last Updated:** February 19, 2026  
 **Authors:** Analemma OS Core Team  
-**Related:** [State Management v3.3](STATE_MANAGEMENT_V3.3.md)
+**Related:** [State Management v3.3](state-management-v3.3.md)

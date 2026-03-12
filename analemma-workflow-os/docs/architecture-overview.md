@@ -155,4 +155,4 @@ Trust Chain verification and LLM execution run in parallel. The LLM result is he
 
 ---
 
-> [Back to Architecture Deep-Dive](architecture.md) | [Back to Main README](../README.md)
+> [Back to Architecture Deep-Dive](architecture-deep-dive.md) | [Back to Main README](../README.md)
