@@ -221,23 +221,40 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
     # ────────────────────────────────────────────────────────────────────
     if governance_mode == GovernanceMode.OPTIMISTIC and decision.violations:
         logger.warning(f"🚨 [Optimistic Rollback] Violations detected: {decision.violations}")
-        
+
         # Determine rollback type based on violation severity
         rollback_type = _determine_rollback_type(decision.violations)
-        
+
+        # [v3.35] Rollback budget enforcement — prevent infinite SOFT_ROLLBACK loops
+        max_rollbacks = int(os.environ.get('MAX_ROLLBACKS_PER_EXECUTION', '5'))
+        current_rollback_count = state.get('__rollback_count', 0)
+
+        if rollback_type in ("SOFT_ROLLBACK", "HARD_ROLLBACK") and current_rollback_count >= max_rollbacks:
+            logger.error(
+                f"🚨 [Rollback Budget Exhausted] {current_rollback_count}/{max_rollbacks} rollbacks used. "
+                f"Escalating {rollback_type} → TERMINAL_HALT to prevent resource exhaustion."
+            )
+            rollback_type = "TERMINAL_HALT"
+
         if rollback_type == "TERMINAL_HALT":
-            # Security forgery detected → Immediate SIGKILL
+            # Security forgery detected or rollback budget exhausted → Immediate SIGKILL
             decision.kernel_commands["_kernel_terminate_workflow"] = {
                 "reason": f"SECURITY_VIOLATION: {decision.violations[0]}",
-                "severity": "CRITICAL"
+                "severity": "CRITICAL",
+                "rollback_count": current_rollback_count,
             }
             decision.decision = "REJECTED"
             logger.error(f"🚨 [TERMINAL_HALT] Workflow terminated due to security violation")
-            
+
         elif rollback_type == "SOFT_ROLLBACK":
+            # [v3.35] Increment rollback counter (protected by RESERVED_STATE_KEYS)
+            state['__rollback_count'] = current_rollback_count + 1
+
             # Minor violation → Feedback + current segment retry
             decision.kernel_commands["_kernel_retry_current_segment"] = {
                 "reason": f"Minor violation: {decision.violations[0]}",
+                "rollback_attempt": current_rollback_count + 1,
+                "max_rollbacks": max_rollbacks,
                 "feedback_to_agent": _generate_agent_feedback(
                     violations=decision.violations,
                     agent_id=analysis.agent_id,
@@ -245,24 +262,33 @@ def governor_node_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
                 )
             }
             decision.decision = "SOFT_ROLLBACK"
-            logger.info(f"🔄 [SOFT_ROLLBACK] Retrying current segment with feedback")
+            logger.info(
+                f"🔄 [SOFT_ROLLBACK] Retrying current segment with feedback "
+                f"(attempt {current_rollback_count + 1}/{max_rollbacks})"
+            )
             
         elif rollback_type == "HARD_ROLLBACK":
+            # [v3.35] Increment rollback counter
+            state['__rollback_count'] = current_rollback_count + 1
+
             # Critical violation → Get last safe manifest from DynamoDB
             last_safe_manifest = _get_last_safe_manifest(state)
-            
+
             if last_safe_manifest:
                 current_manifest_id = state.get("manifest_id", state.get("current_manifest_id"))
-                
+
                 decision.kernel_commands["_kernel_rollback_to_manifest"] = last_safe_manifest["manifest_id"]
                 decision.kernel_commands["_kernel_rollback_reason"] = (
                     f"Critical violation detected: {decision.violations[0]}"
                 )
                 decision.kernel_commands["_kernel_rollback_type"] = "HARD_ROLLBACK"
                 decision.decision = "ROLLBACK"
-                
-                logger.info(f"⏪ [HARD_ROLLBACK] Rolling back to manifest: "
-                           f"{last_safe_manifest['manifest_id']}")
+
+                logger.info(
+                    f"⏪ [HARD_ROLLBACK] Rolling back to manifest: "
+                    f"{last_safe_manifest['manifest_id']} "
+                    f"(rollback {current_rollback_count + 1}/{max_rollbacks})"
+                )
                 
                 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
                 # [v2.1] S3 GC Integration: Mark Rollback Orphans (HARD_ROLLBACK only)

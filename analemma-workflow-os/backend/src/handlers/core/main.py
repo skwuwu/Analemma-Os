@@ -385,7 +385,14 @@ RESERVED_STATE_KEYS = {
     "user_api_keys", "aws_credentials",
     
     # Response Envelope (Step Functions JSONPath integrity)
-    "status", "error_info"
+    "status", "error_info",
+
+    # [v3.35] Great Seal Protocol Envelope (Prevent Ring 3 privilege escalation)
+    # An agent outputting these keys is attempting to forge the kernel communication envelope.
+    "state_data", "next_action", "bag",
+
+    # [v3.35] Rollback Budget (Prevent counter reset by Ring 3)
+    "__rollback_count",
 }
 
 # 🛡️ [v3.5] Kernel-Managed Keys: Legitimately set by kernel code AFTER _validate_output_keys
@@ -808,45 +815,68 @@ def _enforce_ring_protection(
     original_state = state["__hidden_context"].get("original_state", {})
     
     violations = []
-    
+    is_privilege_escalation = False
+
+    # [v3.35] Great Seal Protocol envelope forgery detection
+    # An agent outputting state_data/next_action/bag is attempting to hijack
+    # the kernel communication envelope — this is privilege escalation, not a typo.
+    ENVELOPE_KEYS = {"state_data", "next_action", "bag"}
+    envelope_forgery = [k for k in output.keys() if k in ENVELOPE_KEYS]
+    if envelope_forgery:
+        is_privilege_escalation = True
+        violations.append({
+            "type": "ENVELOPE_FORGERY",
+            "severity": "CRITICAL",
+            "keys": envelope_forgery,
+            "detail": "Ring 3 attempted to forge Great Seal Protocol envelope — privilege escalation",
+        })
+
     # Check for protected key modifications
     for key in RESERVED_STATE_KEYS:
-        if key in output:
-            # Ring 3 cannot output protected keys
+        if key in output and key not in ENVELOPE_KEYS:  # envelope keys already reported above
             violations.append({
                 "type": "PROTECTED_KEY_OUTPUT",
                 "key": key,
-                "value": str(output[key])[:100],  # Truncate for logging
+                "value": str(output[key])[:100],
             })
-    
+
     # Check for hidden context access
     if "__hidden_context" in output or "__original_state" in output:
+        is_privilege_escalation = True
         violations.append({
             "type": "HIDDEN_CONTEXT_ACCESS",
+            "severity": "CRITICAL",
             "keys": [k for k in output.keys() if k.startswith("__")]
         })
-    
+
     # Check for kernel command forgery
     kernel_commands = [k for k in output.keys() if k.startswith("_kernel_")]
     if kernel_commands:
+        is_privilege_escalation = True
         violations.append({
             "type": "KERNEL_COMMAND_FORGERY",
+            "severity": "CRITICAL",
             "commands": kernel_commands
         })
-    
-    # Log violations
+
+    # Log and record violations
     if violations:
+        # [v3.35] Privilege escalation attempts get anomaly_score=1.0 (instant SIGKILL candidate)
+        anomaly_score = 1.0 if is_privilege_escalation else 0.7
+
         logger.error(
             f"🚨 [Ring Protection] Node '{node_id}' (Ring {ring_level}) "
-            f"violated protection: {violations}"
+            f"violated protection (anomaly={anomaly_score}): {violations}"
         )
         state["__hidden_context"]["ring_violations"].append({
             "node_id": node_id,
             "ring_level": ring_level,
             "violations": violations,
+            "anomaly_score": anomaly_score,
+            "is_privilege_escalation": is_privilege_escalation,
             "timestamp": time.time()
         })
-        
+
         # Filter out forbidden keys
         safe_output = {
             k: v for k, v in output.items()
@@ -854,12 +884,12 @@ def _enforce_ring_protection(
             and not k.startswith("__")
             and not k.startswith("_kernel_")
         }
-        
+
         logger.warning(
             f"⚠️ [Ring Protection] Filtered {len(output) - len(safe_output)} "
             f"forbidden keys from Ring 3 node '{node_id}'"
         )
-        
+
         return safe_output
     
     return output
@@ -4052,20 +4082,12 @@ def route_condition(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
         return {}
     
     logger.info(f"🔀 [{node_id}] Evaluating {len(branches)} branches")
-    
-    # Safe eval context: only allow state keys and safe operations
-    safe_context = {
-        "state": state,
-        # Allow direct state key access
-        **{k: v for k, v in state.items() if not k.startswith("_")},
-        # Safe comparison functions
-        "len": len,
-        "str": str,
-        "int": int,
-        "float": float,
-        "bool": bool,
-    }
-    
+
+    # [v3.35] Replace eval() with SafeExpressionEvaluator to eliminate sandbox escape risk.
+    # SafeExpressionEvaluator uses whitelist-only regex parsing — no code execution.
+    from src.services.operators.operator_strategies import SafeExpressionEvaluator
+    evaluator = SafeExpressionEvaluator(state)
+
     # ✅ [v3.28] Get workflow nodes for alias/tag resolution
     workflow_nodes = state.get("__workflow_nodes", [])
     node_lookup_map = None
@@ -4085,9 +4107,9 @@ def route_condition(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             continue
         
         try:
-            # Evaluate condition (Python expression)
-            # 🛡️ Security: eval with restricted globals/locals
-            result = eval(condition, {"__builtins__": {}}, safe_context)
+            # [v3.35] Safe condition evaluation — no eval(), no exec()
+            # Supports: $.field == 'value', $.field > 10, $.field in ['a','b'], and/or/not
+            result = evaluator.evaluate(condition)
             
             if result:
                 # ✅ [v3.28] Resolve target (ID, alias, or tag)
