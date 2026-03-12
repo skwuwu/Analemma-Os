@@ -98,9 +98,18 @@ export interface BackendNode {
 }
 
 export interface BackendEdge {
-  // Backend supported edge types (builder.py reference)
-  // conditional_edge is deprecated (use route_condition node) but kept for legacy workflow compat
-  type: 'edge' | 'normal' | 'flow' | 'hitp' | 'human_in_the_loop' | 'pause' | 'start' | 'end' | 'conditional_edge' | 'if';
+  // Runtime edge types (EdgeModel.type default = "edge"):
+  //   "edge"              — normal connection (default, always proceeds)
+  //   "if"                — conditional (proceeds when condition is true)
+  //   "hitp"              — human-in-the-loop approval required
+  //   "human_in_the_loop" — alias for hitp
+  //   "pause"             — pause & resume (treated as hitp by runtime)
+  //   "while"             — loop back-edge (exit when condition is true)
+  //   "for_each"          — for-each loop back-edge
+  //   "conditional_edge"  — deprecated (use route_condition node), kept for legacy compat
+  // Non-runtime / frontend-only values like "normal", "flow", "start", "end" should be
+  // normalized to "edge" before sending to backend.
+  type: 'edge' | 'if' | 'hitp' | 'human_in_the_loop' | 'pause' | 'while' | 'for_each' | 'conditional_edge';
   source: string;
   target: string;
   condition?: string;
@@ -374,10 +383,12 @@ export const convertEdgeToBackendFormat = (edge: any, nodes: any[]): BackendEdge
     target: edge.target,
   };
 
-  // 1. 엣지의 edgeType 데이터 우선 사용 (SmartEdge에서 설정한 값)
+  // 1. 엣지의 edgeType 데이터 우선 사용 (OrthogonalEdge에서 설정한 값)
+  // Runtime-valid edge types only; normalize non-runtime values to 'edge'
+  const RUNTIME_EDGE_TYPES = new Set(['edge', 'if', 'hitp', 'human_in_the_loop', 'pause', 'while', 'for_each', 'conditional_edge']);
   const edgeType = edge.data?.edgeType;
-  if (edgeType && ['edge', 'normal', 'flow', 'hitp', 'human_in_the_loop', 'pause', 'start', 'end'].includes(edgeType)) {
-    backendEdge.type = edgeType;
+  if (edgeType) {
+    backendEdge.type = RUNTIME_EDGE_TYPES.has(edgeType) ? edgeType : 'edge';
     return backendEdge;
   }
 
@@ -1774,7 +1785,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
             strokeWidth: 2
           },
           data: {
-            edgeType: 'normal',
+            edgeType: 'edge',
           },
         },
         // HITL 노드 → target
@@ -1811,7 +1822,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
             strokeWidth: 2
           },
           data: {
-            edgeType: 'normal',
+            edgeType: 'edge',
           },
         },
         // Branch 노드 → target
@@ -1834,7 +1845,10 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       ];
     }
 
-    // 3. 일반 엣지
+    // 3. 일반 엣지 — normalize backend edge.type to EDGE_TYPE_CONFIG-valid values
+    const VALID_FRONTEND_EDGE_TYPES = new Set(['edge', 'if', 'while', 'for_each', 'hitp', 'conditional_edge', 'pause']);
+    const normalizedEdgeType = VALID_FRONTEND_EDGE_TYPES.has(edge.type) ? edge.type : 'edge';
+
     return {
       id: `edge-${index}`,
       source: edge.source,
@@ -1842,12 +1856,12 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
       type: 'smart',
       animated: true,
       style: {
-        stroke: edge.type === 'if' ? 'hsl(142 76% 36%)' : 'hsl(263 70% 60%)',
+        stroke: normalizedEdgeType === 'if' ? 'hsl(142 76% 36%)' : 'hsl(263 70% 60%)',
         strokeWidth: 2
       },
       data: {
         condition: edge.condition,
-        edgeType: edge.type,
+        edgeType: normalizedEdgeType,
       },
     };
   }) || [];
@@ -1881,7 +1895,7 @@ export const convertWorkflowFromBackendFormat = (backendWorkflow: any): any => {
             strokeWidth: 2,
           },
           data: {
-            edgeType: 'branch',
+            edgeType: 'edge',
           },
         });
       }
