@@ -174,7 +174,7 @@ export const OrthogonalEdge = ({
   const edgeData = data as OrthogonalEdgeData | undefined;
   const currentType: BackendEdgeType =
     (edgeData?.edgeType as BackendEdgeType) || 'edge';
-  const typeConfig = EDGE_TYPE_CONFIG[currentType];
+  const typeConfig = EDGE_TYPE_CONFIG[currentType] || EDGE_TYPE_CONFIG.edge;
 
   const isLoopEdge = useMemo(() => {
     if (edgeData?.isBackEdge) return true;
