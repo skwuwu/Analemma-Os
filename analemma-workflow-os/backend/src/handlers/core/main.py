@@ -400,6 +400,9 @@ RESERVED_STATE_KEYS = {
 
     # [v3.35] Rollback Budget (Prevent counter reset by Ring 3)
     "__rollback_count",
+
+    # [v3.37] Speculative execution internals (Prevent Ring 3 leakage)
+    "__speculative_handle_active",
 }
 
 # 🛡️ [v3.5] Kernel-Managed Keys: Legitimately set by kernel code AFTER _validate_output_keys
@@ -1093,7 +1096,7 @@ def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int 
 _MAX_NESTED_FILTER_DEPTH = 10
 
 # Prefixes that must be stripped from nested output at Ring 2+
-_NESTED_FORBIDDEN_PREFIXES = ("__hidden_", "_kernel_", "__s3_")
+_NESTED_FORBIDDEN_PREFIXES = ("__hidden_", "_kernel_", "__s3_", "__speculative_")
 
 
 def _deep_filter_reserved_keys(data: Any, ring_level: int, _depth: int = 0) -> Any:
@@ -1444,16 +1447,22 @@ def _render_template(template: Any, state: Dict[str, Any]) -> Any:
                 filter_name = None
 
             if key == "__state_json":
-                try: return json.dumps(state, ensure_ascii=False)
+                try:
+                    serializable = state.to_dict() if hasattr(state, 'to_dict') else state
+                    return json.dumps(serializable, ensure_ascii=False)
                 except Exception: return str(state)
-            
+
             val = _get_nested_value(state, key, "")
-            
+
+            # [v3.37] Materialize proxy objects before JSON serialization
+            if hasattr(val, 'to_dict'):
+                val = val.to_dict()
+
             # Simple handling for | tojson
             if filter_name == "tojson":
                 if isinstance(val, (dict, list)):
                     return json.dumps(val, ensure_ascii=False)
-            
+
             if isinstance(val, (dict, list)):
                 try: return json.dumps(val, ensure_ascii=False)
                 except Exception: return str(val)
@@ -1958,10 +1967,13 @@ def _hydrate_s3_value(value: Any) -> Any:
         logger.warning(f"Failed to hydrate S3 value {value}: {e}")
         return value
 
-def _hydrate_state_for_config(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-    """Hydrate keys referenced in input_variables if present. Supports nested paths."""
-    # Create a deep copy to avoid modifying original state if needed, 
-    # but _set_nested_value mutates, so we copy once at the start.
+def _hydrate_state_for_config(state: Dict[str, Any], config: Dict[str, Any],
+                              ring_level: Optional[int] = None) -> Dict[str, Any]:
+    """Hydrate keys referenced in input_variables if present. Supports nested paths.
+
+    When ring_level is provided, wraps the result in a StateViewProxy for
+    Ring-level isolation. Falls back to plain dict on import/wrap failure.
+    """
     hydrated_state = state.copy()
     input_vars = config.get("input_variables", [])
     if isinstance(input_vars, list):
@@ -1969,8 +1981,18 @@ def _hydrate_state_for_config(state: Dict[str, Any], config: Dict[str, Any]) -> 
             val = _get_nested_value(hydrated_state, key)
             hydrated_val = _hydrate_s3_value(val)
             if hydrated_val != val:
-                logger.info(f"💧 [Hydration] Hydrated nested key: {key}")
+                logger.info(f"[Hydration] Hydrated nested key: {key}")
                 _set_nested_value(hydrated_state, key, hydrated_val)
+
+    # [v3.37] Wrap in StateViewProxy for Ring isolation
+    if ring_level is not None:
+        try:
+            from src.common.state_view_context import create_state_view_context
+            ctx = create_state_view_context(hydrated_state)
+            return ctx.create_view(ring_level=ring_level)
+        except Exception as e:
+            logger.warning(f"[Hydration] StateViewProxy wrap failed, using plain dict: {e}")
+
     return hydrated_state
 
 # -----------------------------------------------------------------------------
@@ -1993,8 +2015,9 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     
     # 0. Hydrate Data (Pre-execution)
     # Ensure S3 pointers defined in input_variables are downloaded
-    exec_state = _hydrate_state_for_config(state, actual_config)
-    
+    # [v3.37] Ring 3 proxy isolation for LLM runner
+    exec_state = _hydrate_state_for_config(state, actual_config, ring_level=3)
+
     # [v2.6] Auto-upload inline image data to S3
     # Supports: image_data (base64), image_bytes, image_base64
     # Converts to image_uri (s3://...) for Vision API
@@ -3013,8 +3036,9 @@ def api_call_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
     # [Fix] Support both flattened and nested config structures
     inner_config = config.get("config") or config
     # Hydrate potential S3 inputs first
-    exec_state = _hydrate_state_for_config(state, inner_config)
-    
+    # [v3.37] Ring 1 proxy isolation for API call runner
+    exec_state = _hydrate_state_for_config(state, inner_config, ring_level=1)
+
     url_template = inner_config.get("url")
     if not url_template: raise ValueError("api_call requires 'url'")
 
@@ -3193,8 +3217,9 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
     error_handling = inner_config.get("error_handling", "fail")
     
     # Hydrate potential inputs
-    exec_state = _hydrate_state_for_config(state, inner_config)
-    
+    # [v3.37] Ring 1 proxy isolation for skill executor
+    exec_state = _hydrate_state_for_config(state, inner_config, ring_level=1)
+
     # Validate required config
     if not skill_ref:
         raise ValueError(f"skill_executor node '{node_id}' requires 'skill_ref'")
@@ -3357,7 +3382,17 @@ def _execute_node_sequence(
             logger.error(f"[{caller_tag}] Unknown node type '{node_type}' — skipping")
             continue
         try:
-            current_view: Dict[str, Any] = {**base_state, **updates}
+            merged_state: Dict[str, Any] = {**base_state, **updates}
+            ring_level = node_def.get("ring_level") or _NODE_TYPE_RING_LEVELS.get(node_type, 3)
+
+            # [v3.37] Wrap merged state in Ring-level proxy for isolation
+            try:
+                from src.common.state_view_context import create_state_view_context
+                ctx = create_state_view_context(merged_state)
+                current_view = ctx.create_view(ring_level=ring_level)
+            except Exception:
+                current_view = merged_state
+
             rendered_node = _render_template(node_def, current_view)
             if node_id_prefix:
                 rendered_node["id"] = f"{node_id_prefix}{node_def.get('id', 'sub')}"
@@ -3366,9 +3401,8 @@ def _execute_node_sequence(
 
             # [v3.36] Common Ring enforcement interceptor
             if isinstance(res, dict):
-                ring_level = node_def.get("ring_level") or _NODE_TYPE_RING_LEVELS.get(node_type, 3)
                 res = _validate_output_keys(res, node_id, ring_level=ring_level)
-                res = _enforce_ring_protection(current_view, res, node_id, ring_level)
+                res = _enforce_ring_protection(merged_state, res, node_id, ring_level)
 
                 for k, v in res.items():
                     if k in updates and isinstance(updates[k], dict) and isinstance(v, dict):
@@ -4497,7 +4531,8 @@ def vision_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, An
     vision_config = config.get("config", config) if isinstance(config.get("config"), dict) else config
     
     # 2. Hydrate state
-    exec_state = _hydrate_state_for_config(state, vision_config)
+    # [v3.37] Ring 3 proxy isolation for vision runner
+    exec_state = _hydrate_state_for_config(state, vision_config, ring_level=3)
     media_inputs = []
     
     # process image_inputs
@@ -4638,8 +4673,9 @@ def video_chunker_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[
     node_id = config.get("id", "chunker")
     # [Fix] Support both flattened and nested config structures
     inner_config = config.get("config") or config
-    exec_state = _hydrate_state_for_config(state, inner_config)
-    
+    # [v3.37] Ring 3 proxy isolation for video chunker
+    exec_state = _hydrate_state_for_config(state, inner_config, ring_level=3)
+
     video_uri = _render_template(inner_config.get("video_uri", ""), exec_state)
     segment_min = inner_config.get("segment_length_min", 5)
     output_key = inner_config.get("output_key", "video_chunks")

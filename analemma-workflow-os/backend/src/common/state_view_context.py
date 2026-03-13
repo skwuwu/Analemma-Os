@@ -123,6 +123,19 @@ def _recursive_wrap(value: Any, ring_level: int, policies: dict, depth: int,
     return value
 
 
+def _materialize_list(protected: '_ProtectedList') -> list:
+    """Recursively convert a _ProtectedList into a plain list for serialization."""
+    result = []
+    for item in protected:
+        if isinstance(item, StateViewProxy):
+            result.append(item.to_dict())
+        elif isinstance(item, _ProtectedList):
+            result.append(_materialize_list(item))
+        else:
+            result.append(item)
+    return result
+
+
 class StateViewProxy(MutableMapping):
     """
     State View Proxy (Lazy Projection)
@@ -280,6 +293,27 @@ class StateViewProxy(MutableMapping):
             return True
 
         return key in RESERVED_KEYS
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Materialize proxy into a plain dict for JSON serialization.
+
+        Merges write_cache over visible core state keys, applying ring policies.
+        Nested proxies are recursively materialized so the result is
+        json.dumps()-safe without a custom encoder.
+        """
+        result: Dict[str, Any] = {}
+        for key in self:
+            try:
+                val = self[key]
+                if isinstance(val, StateViewProxy):
+                    result[key] = val.to_dict()
+                elif isinstance(val, _ProtectedList):
+                    result[key] = _materialize_list(val)
+                else:
+                    result[key] = val
+            except KeyError:
+                continue
+        return result
 
     def get_write_cache(self) -> Dict[str, Any]:
         """Return write cache (for Core State merge)."""
