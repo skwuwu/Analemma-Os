@@ -2840,11 +2840,18 @@ class SegmentRunnerService:
                                 logger.info(f"[Ring Protection] [Guard] Sanitized {prompt_type} in node {node_id}")
             
             # Validate dangerous tool access
+            # [v3.36] Use node's actual ring_level instead of hardcoded Ring 3
             if node_type in ('tool', 'api_call', 'operator'):
                 tool_name = config.get('tool') or config.get('method') or node_type
+                _int_to_ring = {0: RingLevel.RING_0_KERNEL, 1: RingLevel.RING_1_DRIVER,
+                                2: RingLevel.RING_2_TRUSTED if hasattr(RingLevel, 'RING_2_TRUSTED')
+                                else getattr(RingLevel, 'RING_2_SERVICE', RingLevel.RING_3_USER),
+                                3: RingLevel.RING_3_USER}
+                raw_ring = config.get('ring_level')
+                node_ring = _int_to_ring.get(raw_ring, RingLevel.RING_3_USER) if isinstance(raw_ring, int) else RingLevel.RING_3_USER
                 allowed, violation = self.security_guard.check_tool_permission(
                     tool_name=tool_name,
-                    ring_level=RingLevel.RING_3_USER,
+                    ring_level=node_ring,
                     context={**context, 'node_id': node_id}
                 )
                 

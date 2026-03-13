@@ -1,203 +1,272 @@
 """
 State View Context Service
 
-Ring 레벨 기반 상태 뷰 생성
-- 불변 Core State 보호
+Ring-level based state view creation with recursive nested isolation.
+- Immutable Core State protection
 - Proxy Pattern (Lazy Projection)
-- 메모리 오버헤드 90% 절감
+- 90% memory overhead reduction vs deepcopy
+- [v3.36] Recursive proxy wrapping for nested dict/list isolation
 """
 
 import logging
 import hashlib
 from typing import Dict, Any, Callable, Optional, Set
-from collections.abc import MutableMapping
+from collections.abc import MutableMapping, Sequence
 
 logger = logging.getLogger(__name__)
+
+# Maximum recursion depth for nested proxy wrapping (DoS prevention)
+MAX_PROXY_DEPTH = 10
+
+# Keys that must be hidden from Ring 2+ in nested structures
+NESTED_HIDDEN_PREFIXES = ("__hidden_", "_kernel_", "__s3_")
+
+
+class _ProtectedList(Sequence):
+    """
+    [v3.36] Read-only list proxy with recursive nested isolation.
+
+    Intercepts all access to ensure nested dicts/lists are wrapped in proxies.
+    All mutation methods are blocked — this is a read-only view.
+    """
+
+    __slots__ = ('_data', '_ring_level', '_policies', '_depth', '_seen')
+
+    def __init__(self, data: list, ring_level: int, policies: dict, depth: int = 0,
+                 _seen: Optional[Set[int]] = None):
+        self._data = data
+        self._ring_level = ring_level
+        self._policies = policies
+        self._depth = depth
+        self._seen = _seen
+
+    def __getitem__(self, index):
+        value = self._data[index]
+        if isinstance(index, slice):
+            return _ProtectedList(value, self._ring_level, self._policies, self._depth, _seen=self._seen)
+        return _recursive_wrap(value, self._ring_level, self._policies, self._depth + 1, _seen=self._seen)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __iter__(self):
+        for item in self._data:
+            yield _recursive_wrap(item, self._ring_level, self._policies, self._depth + 1, _seen=self._seen)
+
+    def __contains__(self, item) -> bool:
+        return item in self._data
+
+    def count(self, value) -> int:
+        """Count via wrapped iteration to prevent raw reference leaks."""
+        return sum(1 for item in self if item == value)
+
+    def index(self, value, start: int = 0, stop: int = None) -> int:
+        """Index via wrapped iteration to prevent raw reference leaks."""
+        if stop is None:
+            stop = len(self._data)
+        for i in range(start, min(stop, len(self._data))):
+            wrapped = _recursive_wrap(self._data[i], self._ring_level, self._policies,
+                                      self._depth + 1, _seen=self._seen)
+            if wrapped == value:
+                return i
+        raise ValueError(f"{value!r} is not in list")
+
+    def __repr__(self) -> str:
+        return f"_ProtectedList({self._data!r})"
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _ProtectedList):
+            return self._data == other._data
+        if isinstance(other, list):
+            return self._data == other
+        return NotImplemented
+
+    def __bool__(self) -> bool:
+        return bool(self._data)
+
+
+def _recursive_wrap(value: Any, ring_level: int, policies: dict, depth: int,
+                    _seen: Optional[Set[int]] = None) -> Any:
+    """
+    [v3.36] Lazy recursive wrapping — wrap only at the point of access.
+
+    Complexity: O(accessed_path_depth) not O(total_state_size).
+    Dicts become StateViewProxy, lists become _ProtectedList.
+    Stops at MAX_PROXY_DEPTH to prevent DoS via deeply nested payloads.
+    Circular references (a['b'] = a) are detected via object id() tracking
+    and returned unwrapped to prevent infinite recursion.
+    """
+    if depth > MAX_PROXY_DEPTH:
+        return value
+
+    # Circular reference detection: if we've already seen this object, stop.
+    if isinstance(value, (dict, list)) and not isinstance(value, (StateViewProxy, _ProtectedList)):
+        obj_id = id(value)
+        if _seen is None:
+            _seen = set()
+        if obj_id in _seen:
+            logger.debug("[STATE_VIEW] Circular reference detected (id=%d), returning raw value", obj_id)
+            return value
+        _seen = _seen | {obj_id}  # copy-on-branch to avoid cross-sibling pollution
+
+    if isinstance(value, dict) and not isinstance(value, StateViewProxy):
+        return StateViewProxy(
+            core_state=value,
+            ring_level=ring_level,
+            field_policies=policies,
+            _depth=depth,
+            _seen=_seen
+        )
+    elif isinstance(value, list) and not isinstance(value, _ProtectedList):
+        return _ProtectedList(value, ring_level, policies, depth, _seen=_seen)
+
+    return value
 
 
 class StateViewProxy(MutableMapping):
     """
-    상태 뷰 프록시 (Lazy Projection)
-    
-    deepcopy 대신 프록시 패턴 사용:
-    - 원본 상태는 그대로 유지
-    - 접근 시점에 Ring 정책 적용
-    - 메모리 오버헤드 90% 절감
+    State View Proxy (Lazy Projection)
+
+    Uses proxy pattern instead of deepcopy:
+    - Original state remains untouched
+    - Ring policies applied at access time
+    - [v3.36] Nested dicts/lists recursively wrapped for isolation
     """
-    
+
     def __init__(
         self,
         core_state: Dict[str, Any],
         ring_level: int,
-        field_policies: Dict[str, Dict[int, Optional[Callable]]]
+        field_policies: Dict[str, Dict[int, Optional[Callable]]],
+        _depth: int = 0,
+        _seen: Optional[Set[int]] = None
     ):
-        """
-        Args:
-            core_state: 원본 상태 (읽기 전용 참조)
-            ring_level: Ring 레벨 (0-3)
-            field_policies: 필드별 Ring 정책
-        """
         self._core_state = core_state
         self._ring_level = ring_level
         self._policies = field_policies
-        
-        # 쓰기 캐시 (노드가 새로 쓴 데이터)
-        self._write_cache: Dict[str, Any] = {}
-        
-        # 접근 로그 (디버깅용)
-        self._access_log: Set[str] = set()
-    
+        self._depth = _depth
+        self._seen = _seen
+
+        # Write cache and access log only at root level (not nested proxies)
+        self._write_cache: Dict[str, Any] = {} if _depth == 0 else {}
+        self._access_log: Set[str] = set() if _depth == 0 else set()
+
     def __getitem__(self, key: str) -> Any:
-        """
-        필드 읽기 (Lazy Projection)
-        
-        Args:
-            key: 필드명
-        
-        Returns:
-            Ring 정책 적용된 값
-        """
-        # 1. 쓰기 캐시 우선 확인 (노드가 방금 쓴 값)
+        # 1. Write cache first (node's recent writes)
         if key in self._write_cache:
             return self._write_cache[key]
-        
-        # 2. Core State에서 읽기
+
+        # 2. Read from Core State
         if key not in self._core_state:
             raise KeyError(f"Key '{key}' not found in state")
-        
+
         value = self._core_state[key]
-        
-        # 3. Ring 정책 적용 (Lazy Evaluation)
+
+        # 3. Apply Ring policy (Lazy Evaluation)
         transformed_value = self._apply_policy(key, value)
-        
-        # 4. 접근 로그 기록
+
+        # 4. [v3.36] Recursively wrap nested structures for isolation
+        transformed_value = _recursive_wrap(
+            transformed_value, self._ring_level, self._policies, self._depth + 1,
+            _seen=self._seen
+        )
+
+        # 5. Record access
         self._access_log.add(key)
-        
+
         return transformed_value
-    
+
     def __setitem__(self, key: str, value: Any) -> None:
-        """
-        필드 쓰기 (쓰기 캐시에 저장)
-        
-        Args:
-            key: 필드명
-            value: 값
-        """
-        # Reserved Key 차단
+        # Reserved Key blocking
         if self._is_reserved_key(key):
             logger.warning(
                 f"[STATE_VIEW] Ring {self._ring_level} attempted to write "
                 f"reserved key: {key} (blocked)"
             )
             return
-        
-        # 쓰기 캐시에 저장 (원본은 보호)
+
+        # Store in write cache (original is protected)
         self._write_cache[key] = value
-        
-        logger.debug(
-            f"[STATE_VIEW] Ring {self._ring_level} wrote {key} = {value}"
-        )
-    
+
     def __delitem__(self, key: str) -> None:
-        """필드 삭제 (쓰기 캐시에서만)"""
         if key in self._write_cache:
             del self._write_cache[key]
         elif key in self._core_state:
-            # 원본 삭제 시도 → 경고
             logger.warning(
                 f"[STATE_VIEW] Ring {self._ring_level} attempted to delete "
                 f"core state key: {key} (blocked)"
             )
-    
+
     def __iter__(self):
-        """반복자 (Core State + Write Cache 병합)"""
-        # Hidden 필드 제외
+        # Exclude hidden fields
         visible_keys = {
             key for key in self._core_state
             if not self._is_hidden(key)
         }
         return iter(visible_keys | set(self._write_cache.keys()))
-    
+
     def __len__(self) -> int:
-        """길이 (Visible 필드 수)"""
         visible_keys = {
             key for key in self._core_state
             if not self._is_hidden(key)
         }
         return len(visible_keys | set(self._write_cache.keys()))
-    
+
     def _apply_policy(self, key: str, value: Any) -> Any:
-        """
-        Ring 정책 적용 (Lazy Evaluation)
-        
-        Args:
-            key: 필드명
-            value: 원본 값
-        
-        Returns:
-            변환된 값
-        """
+        """Apply Ring policy (Lazy Evaluation)."""
         policy = self._get_policy_for_field(key)
-        
+
         if policy is None:
-            # Hidden 필드 → KeyError 발생
             raise KeyError(f"Key '{key}' is hidden for Ring {self._ring_level}")
-        
+
         if self._ring_level in policy:
             transformer = policy[self._ring_level]
-            
+
             if transformer is None:
-                # Hidden
                 raise KeyError(f"Key '{key}' is hidden for Ring {self._ring_level}")
-            
+
             if callable(transformer):
-                # 변환 함수 적용
                 return transformer(value)
             else:
-                # 그대로 반환
                 return value
         else:
-            # 정책 없음 → 기본 허용
             return value
     
     def _get_policy_for_field(self, key: str) -> Optional[Dict[int, Optional[Callable]]]:
-        """
-        필드에 매칭되는 정책 검색
-        
-        Args:
-            key: 필드명
-        
-        Returns:
-            Ring별 정책 Dict (None이면 Hidden)
-        """
-        # 1. 정확한 매칭
+        """Look up matching policy for a field (exact match, then wildcard)."""
+        # 1. Exact match
         if key in self._policies:
             return self._policies[key]
-        
-        # 2. 와일드카드 매칭 (예: _kernel_*)
+
+        # 2. Wildcard match (e.g., _kernel_*)
         for pattern, policy in self._policies.items():
             if '*' in pattern:
                 prefix = pattern.rstrip('*')
                 if key.startswith(prefix):
                     return policy
-        
-        # 3. 정책 없음 → 기본 허용
+
+        # 3. [v3.36] Nested proxy: enforce hidden prefixes for Ring 2+
+        if self._depth > 0 and self._ring_level >= 2:
+            for prefix in NESTED_HIDDEN_PREFIXES:
+                if key.startswith(prefix):
+                    return None  # Hidden — raises KeyError in _apply_policy
+
+        # 4. No policy → default allow
         return {0: lambda v: v, 1: lambda v: v, 2: lambda v: v, 3: lambda v: v}
-    
+
     def _is_hidden(self, key: str) -> bool:
-        """필드가 현재 Ring에서 숨겨져 있는지 확인"""
+        """Check if a field is hidden at the current Ring level."""
         try:
             policy = self._get_policy_for_field(key)
             if policy is None:
                 return True
             transformer = policy.get(self._ring_level)
             return transformer is None
-        except Exception as e:
-            logger.debug("Failed to check field visibility for key '%s': %s", key, e)
+        except Exception:
             return True
-    
+
     def _is_reserved_key(self, key: str) -> bool:
-        """Reserved Key 여부 확인"""
+        """Check if a key is reserved (write-blocked)."""
         RESERVED_KEYS = {
             "workflowId", "owner_id", "execution_id",
             "loop_counter", "max_loop_iterations", "segment_id",
@@ -205,39 +274,39 @@ class StateViewProxy(MutableMapping):
             "step_history", "execution_logs",
             "scheduling_metadata", "__scheduling_metadata"
         }
-        
-        # Kernel 명령 (_kernel_*) 체크
+
+        # Kernel commands (_kernel_*) blocked for Ring 3+
         if key.startswith("_kernel_") and self._ring_level >= 3:
             return True
-        
+
         return key in RESERVED_KEYS
-    
+
     def get_write_cache(self) -> Dict[str, Any]:
-        """쓰기 캐시 반환 (Core State 병합용)"""
+        """Return write cache (for Core State merge)."""
         return self._write_cache.copy()
-    
+
     def get_access_log(self) -> Set[str]:
-        """접근 로그 반환 (디버깅용)"""
+        """Return access log (for debugging)."""
         return self._access_log.copy()
 
 
 class StateViewContext:
     """
-    상태 뷰 컨텍스트 관리
-    
-    책임:
-    1. Immutable Core State 관리
-    2. Ring 레벨별 뷰 생성 (Proxy Pattern)
-    3. 필드 정책 관리
+    State View Context Manager
+
+    Responsibilities:
+    1. Immutable Core State management
+    2. Ring-level view creation (Proxy Pattern)
+    3. Field policy management
     """
-    
-    # 기본 필드 정책
+
+    # Default field policies
     DEFAULT_FIELD_POLICIES = {
         "email": {
-            0: lambda v: v,  # Ring 0: 원본
-            1: lambda v: v,  # Ring 1: 원본
-            2: lambda v: v,  # Ring 2: 원본
-            3: lambda v: hashlib.sha256(str(v).encode()).hexdigest()[:16]  # Ring 3: 해시
+            0: lambda v: v,  # Ring 0: original
+            1: lambda v: v,  # Ring 1: original
+            2: lambda v: v,  # Ring 2: original
+            3: lambda v: hashlib.sha256(str(v).encode()).hexdigest()[:16]  # Ring 3: hashed
         },
         "ssn": {
             0: lambda v: v,
@@ -258,7 +327,7 @@ class StateViewContext:
             3: None   # Hidden
         },
         "__next_node": {
-            # 모든 Ring 허용 (라우팅 결정)
+            # All rings allowed (routing decision)
             0: lambda v: v,
             1: lambda v: v,
             2: lambda v: v,
@@ -267,77 +336,47 @@ class StateViewContext:
     }
     
     def __init__(self, core_state: Dict[str, Any], custom_policies: Optional[Dict] = None):
-        """
-        Args:
-            core_state: 원본 상태 (불변 유지)
-            custom_policies: 사용자 정의 필드 정책 (Optional)
-        """
         self._core_state = core_state
-        
-        # 필드 정책 병합
+
+        # Merge field policies
         self._policies = self.DEFAULT_FIELD_POLICIES.copy()
         if custom_policies:
             self._policies.update(custom_policies)
-        
+
         logger.info(
             f"[STATE_VIEW_CONTEXT] Initialized with "
             f"{len(core_state)} fields, {len(self._policies)} policies"
         )
     
     def create_view(self, ring_level: int) -> StateViewProxy:
-        """
-        Ring 레벨에 맞는 상태 뷰 생성 (Proxy Pattern)
-        
-        Args:
-            ring_level: Ring 레벨 (0-3)
-        
-        Returns:
-            StateViewProxy 인스턴스 (MutableMapping)
-        """
-        logger.debug(
-            f"[STATE_VIEW_CONTEXT] Creating view for Ring {ring_level}"
-        )
-        
+        """Create a Ring-level state view (Proxy Pattern)."""
+        logger.debug(f"[STATE_VIEW_CONTEXT] Creating view for Ring {ring_level}")
+
         return StateViewProxy(
             core_state=self._core_state,
             ring_level=ring_level,
             field_policies=self._policies
         )
-    
+
     def merge_write_cache(self, write_cache: Dict[str, Any]) -> None:
-        """
-        노드 실행 결과를 Core State에 병합
-        
-        Args:
-            write_cache: 노드가 쓴 데이터
-        """
-        # Reserved Key 필터링
+        """Merge node execution results into Core State."""
         filtered_cache = {
             k: v for k, v in write_cache.items()
             if k not in self._get_reserved_keys()
         }
-        
-        # Core State 업데이트
+
         self._core_state.update(filtered_cache)
-        
+
         logger.info(
             f"[STATE_VIEW_CONTEXT] Merged {len(filtered_cache)} fields to core state "
             f"(filtered {len(write_cache) - len(filtered_cache)} reserved keys)"
         )
-    
+
     def get_core_state(self) -> Dict[str, Any]:
-        """
-        Core State 반환 (읽기 전용)
-        
-        주의: 직접 수정 금지!
-        
-        Returns:
-            Core State Dict
-        """
+        """Return Core State (read-only reference — do not modify directly)."""
         return self._core_state
-    
+
     def _get_reserved_keys(self) -> Set[str]:
-        """Reserved Key Set 반환"""
         return {
             "workflowId", "owner_id", "execution_id",
             "loop_counter", "max_loop_iterations", "segment_id",
@@ -351,18 +390,7 @@ class StateViewContext:
         field_name: str,
         ring_policies: Dict[int, Optional[Callable]]
     ) -> None:
-        """
-        특정 필드의 Ring 정책 설정
-        
-        Args:
-            field_name: 필드명 (예: "user_email")
-            ring_policies: {
-                0: lambda v: v,           # 원본
-                1: lambda v: v,           # 원본
-                2: lambda v: hash(v),     # 해시
-                3: None                   # Hidden
-            }
-        """
+        """Set Ring policy for a specific field."""
         self._policies[field_name] = ring_policies
         
         logger.info(
@@ -372,18 +400,16 @@ class StateViewContext:
 
 
 class FieldPolicyBuilder:
-    """
-    필드 정책 빌더 (편의 클래스)
-    """
-    
+    """Field policy builder (convenience class)."""
+
     @staticmethod
     def original() -> Dict[int, Callable]:
-        """모든 Ring에서 원본 반환"""
+        """Return original value at all Ring levels."""
         return {0: lambda v: v, 1: lambda v: v, 2: lambda v: v, 3: lambda v: v}
     
     @staticmethod
     def hash_at_ring3() -> Dict[int, Callable]:
-        """Ring 3에서만 해시 처리"""
+        """Hash at Ring 3 only."""
         return {
             0: lambda v: v,
             1: lambda v: v,
@@ -393,7 +419,7 @@ class FieldPolicyBuilder:
     
     @staticmethod
     def redact_at_ring2_3() -> Dict[int, Callable]:
-        """Ring 2-3에서 REDACTED"""
+        """REDACTED at Ring 2-3."""
         return {
             0: lambda v: v,
             1: lambda v: v,
@@ -403,7 +429,7 @@ class FieldPolicyBuilder:
     
     @staticmethod
     def hidden_above_ring1() -> Dict[int, Optional[Callable]]:
-        """Ring 2-3에서 숨김"""
+        """Hidden from Ring 2-3."""
         return {
             0: lambda v: v,
             1: lambda v: v,
@@ -418,7 +444,7 @@ class FieldPolicyBuilder:
         ring2: Optional[Callable] = None,
         ring3: Optional[Callable] = None
     ) -> Dict[int, Optional[Callable]]:
-        """사용자 정의 정책"""
+        """Custom per-ring policy."""
         return {
             0: ring0 or (lambda v: v),
             1: ring1 or (lambda v: v),
@@ -427,19 +453,10 @@ class FieldPolicyBuilder:
         }
 
 
-# 팩토리 함수
+# Factory function
 def create_state_view_context(
     core_state: Dict[str, Any],
     custom_policies: Optional[Dict] = None
 ) -> StateViewContext:
-    """
-    StateViewContext 인스턴스 생성
-    
-    Args:
-        core_state: 원본 상태
-        custom_policies: 사용자 정의 필드 정책
-    
-    Returns:
-        StateViewContext 인스턴스
-    """
+    """Create a StateViewContext instance."""
     return StateViewContext(core_state, custom_policies)

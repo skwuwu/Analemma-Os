@@ -84,6 +84,13 @@ except ImportError as e:
     QUALITY_KERNEL_AVAILABLE = False
     logger.warning(f"Quality Kernel not available, slop detection disabled: {e}")
 
+# Global kill switch — evaluated once at Lambda cold start.
+# Set DISABLE_QUALITY_KERNEL=true in Lambda env vars to bypass all quality
+# kernel overhead (including exec_state.copy()) without any code change.
+QUALITY_KERNEL_DISABLED = os.environ.get("DISABLE_QUALITY_KERNEL", "").lower() == "true"
+if QUALITY_KERNEL_DISABLED:
+    logger.info("Quality Kernel globally disabled via DISABLE_QUALITY_KERNEL env var")
+
 # ============================================================================
 # [Configuration] Model Mapping and Timeouts
 # ============================================================================
@@ -806,11 +813,11 @@ def _enforce_ring_protection(
     Raises:
         PermissionError: If Ring 3 node violates protection
     """
-    if ring_level < 3:
-        # Ring 0-2: Trusted, allow all operations
+    if ring_level <= 1:
+        # Ring 0-1: Kernel/Governor — allow all operations
         return output
-    
-    # Ring 3: Untrusted (LLM), enforce strict protection
+
+    # [v3.36] Ring 2-3: Enforce protection (Ring 2 = partial, Ring 3 = strict)
     _initialize_hidden_context(state)
     original_state = state["__hidden_context"].get("original_state", {})
     
@@ -1062,26 +1069,61 @@ def _validate_output_keys(output: Dict[str, Any], node_id: str, ring_level: int 
         
     # 🛡️ [Guard] Kernel domain intrusion check (existing logic)
     forbidden_attempts = [k for k in output.keys() if k in RESERVED_STATE_KEYS]
-    
+
     if forbidden_attempts:
         logger.warning(
             f"🚨 [Pollution Blocked] Node '{node_id}' tried to overwrite system keys: {forbidden_attempts}. "
             f"These keys are in the kernel domain and access by user code is prohibited."
         )
-        
+
         # Force data diet: Filter only safe data excluding system keys
         safe_output = {k: v for k, v in output.items() if k not in RESERVED_STATE_KEYS}
-        
-        # [Telemetry] Record violation attempts (optional)
-        # safe_output["__safeguard_violations"] = {
-        #     "node_id": node_id,
-        #     "blocked_keys": forbidden_attempts,
-        #     "timestamp": time.time()
-        # }
-        
-        return safe_output
-            
-    return output
+    else:
+        safe_output = output
+
+    # 🛡️ [v3.36] Deep nested forgery filtering
+    # Prevents Ring 3 from hiding reserved/hidden keys inside nested structures
+    # e.g., output["user_data"]["__hidden_context"] = {...}
+    safe_output = _deep_filter_reserved_keys(safe_output, ring_level)
+
+    return safe_output
+
+
+# Maximum depth for recursive nested key filtering (DoS prevention)
+_MAX_NESTED_FILTER_DEPTH = 10
+
+# Prefixes that must be stripped from nested output at Ring 2+
+_NESTED_FORBIDDEN_PREFIXES = ("__hidden_", "_kernel_", "__s3_")
+
+
+def _deep_filter_reserved_keys(data: Any, ring_level: int, _depth: int = 0) -> Any:
+    """
+    🛡️ [v3.36] Recursively filter reserved and hidden keys from nested structures.
+
+    Prevents nested forgery attacks where Ring 3 nodes embed forbidden keys
+    inside nested dicts (e.g., output["result"]["__hidden_context"] = {...}).
+
+    Depth-limited to _MAX_NESTED_FILTER_DEPTH to prevent DoS via deeply nested payloads.
+    """
+    if _depth > _MAX_NESTED_FILTER_DEPTH:
+        return data
+
+    if isinstance(data, dict):
+        filtered = {}
+        for k, v in data.items():
+            # Top-level RESERVED_STATE_KEYS are already handled by the caller
+            # Here we focus on nested forbidden prefixes
+            if _depth > 0:
+                if k in RESERVED_STATE_KEYS:
+                    continue
+                if ring_level >= 2 and any(k.startswith(p) for p in _NESTED_FORBIDDEN_PREFIXES):
+                    continue
+            filtered[k] = _deep_filter_reserved_keys(v, ring_level, _depth + 1)
+        return filtered
+    elif isinstance(data, list):
+        return [_deep_filter_reserved_keys(item, ring_level, _depth + 1) for item in data]
+
+    return data
 
 
 
@@ -2448,18 +2490,19 @@ def llm_chat_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, 
             # Disable: set disable_kernel_quality_check=true
             # ================================================================
             kernel_quality_result = None
-            
-            # Check disable conditions (explicitly turned off)
-            disable_quality_check = (
+
+            # Global kill switch — skip everything including exec_state.copy()
+            if QUALITY_KERNEL_DISABLED:
+                pass  # zero overhead path
+            elif not QUALITY_KERNEL_AVAILABLE:
+                pass  # import failed at cold start
+            elif (
                 actual_config.get("disable_kernel_quality_check", False) or
                 actual_config.get("quality_gate", {}).get("enabled") == False or
                 exec_state.get("disable_kernel_quality_check", False)
-            )
-            
-            # Enabled by default (Quality Kernel available + not disabled)
-            enable_quality_check = QUALITY_KERNEL_AVAILABLE and not disable_quality_check
-            
-            if enable_quality_check and isinstance(text, str) and len(text) > 20:
+            ):
+                pass  # per-node/per-workflow disable
+            elif isinstance(text, str) and len(text) > 20:
                 try:
                     # Infer domain (quality_domain alias supported)
                     domain_hint = (
@@ -3273,6 +3316,18 @@ def skill_executor_runner(state: Dict[str, Any], config: Dict[str, Any]) -> Dict
 # Used by for_each_runner (per-item), parallel_group_runner (per-branch), and
 # loop_runner (per-iteration). Eliminates three near-identical copy-paste blocks.
 # =============================================================================
+
+# [v3.36] Default Ring levels for common node types (mirrors orchestrator_service.DEFAULT_RING_LEVELS)
+_NODE_TYPE_RING_LEVELS = {
+    "llm_chat": 3, "llm": 3, "vision": 3, "dynamic_router": 3, "video_chunker": 3,
+    "operator": 2, "operator_custom": 2, "operator_official": 2, "safe_operator": 2,
+    "for_each": 2, "nested_for_each": 2, "parallel": 2,
+    "db_query": 1, "api_call": 1, "tool": 1, "http_request": 1, "skill_executor": 1,
+    "governor": 1, "route_condition": 1,
+    "aggregator": 0, "trigger": 0,
+}
+
+
 def _execute_node_sequence(
     nodes: List[Dict[str, Any]],
     base_state: Dict[str, Any],
@@ -3286,6 +3341,10 @@ def _execute_node_sequence(
     Merge strategy is data-type-driven (no user config needed):
       - dict values  → shallow merge (preserves sibling keys)
       - other values → overwrite
+
+    [v3.36] Common Ring enforcement interceptor:
+    After each handler returns, output is validated and filtered based on
+    the node's Ring level — no individual runner modification needed.
 
     Returns:
         (accumulated_updates, had_error)
@@ -3302,8 +3361,15 @@ def _execute_node_sequence(
             rendered_node = _render_template(node_def, current_view)
             if node_id_prefix:
                 rendered_node["id"] = f"{node_id_prefix}{node_def.get('id', 'sub')}"
+            node_id = rendered_node.get("id", node_type)
             res = handler(current_view, rendered_node)
+
+            # [v3.36] Common Ring enforcement interceptor
             if isinstance(res, dict):
+                ring_level = node_def.get("ring_level") or _NODE_TYPE_RING_LEVELS.get(node_type, 3)
+                res = _validate_output_keys(res, node_id, ring_level=ring_level)
+                res = _enforce_ring_protection(current_view, res, node_id, ring_level)
+
                 for k, v in res.items():
                     if k in updates and isinstance(updates[k], dict) and isinstance(v, dict):
                         updates[k] = {**updates[k], **v}   # shallow deep-merge for dicts
