@@ -801,14 +801,60 @@ class SegmentRunnerService:
                 except Exception as e:
                     logger.warning(f"[Aggregator] Cleanup future failed: {e}")
         
-        # Log results
+        # Log results and send failures to DLQ for deferred GC
         if failed_paths:
             logger.warning(
                 f"[Aggregator] Cleanup incomplete: {deleted_count}/{len(s3_paths_to_delete)} deleted, "
-                f"{len(failed_paths)} failed. Ghost data paths: {failed_paths[:3]}{'...' if len(failed_paths) > 3 else ''}"
+                f"{len(failed_paths)} failed. Routing to GC DLQ."
             )
+            self._send_ghost_data_to_dlq(failed_paths, workflow_id, segment_id)
         else:
             logger.info(f"[Aggregator] Cleanup complete: {deleted_count}/{len(s3_paths_to_delete)} files deleted")
+
+    def _send_ghost_data_to_dlq(
+        self,
+        failed_paths: List[str],
+        workflow_id: str,
+        segment_id: int
+    ) -> None:
+        """[v3.37] Send failed S3 cleanup paths to GC DLQ via send_message_batch.
+
+        Batches in groups of 10 (SQS limit). Messages include workflow context
+        for downstream GC Lambda to log and retry deletion.
+        """
+        gc_dlq_url = os.environ.get('GC_DLQ_URL')
+        if not gc_dlq_url:
+            logger.warning("[Aggregator] GC_DLQ_URL not configured — ghost data paths logged only")
+            return
+
+        try:
+            import boto3
+            sqs = boto3.client('sqs')
+            # SQS send_message_batch limit: 10 entries per call
+            for batch_start in range(0, len(failed_paths), 10):
+                batch = failed_paths[batch_start:batch_start + 10]
+                entries = [
+                    {
+                        'Id': f"ghost-{batch_start + idx}",
+                        'MessageBody': json.dumps({
+                            'action': 'delete_ghost_data',
+                            's3_path': path,
+                            'workflow_id': workflow_id,
+                            'segment_id': segment_id,
+                            'source': 'cleanup_branch_intermediate_s3',
+                        }),
+                        'DelaySeconds': 300  # 5 min delay for eventual consistency
+                    }
+                    for idx, path in enumerate(batch)
+                ]
+                sqs.send_message_batch(QueueUrl=gc_dlq_url, Entries=entries)
+
+            logger.info(
+                f"[Aggregator] Sent {len(failed_paths)} ghost data paths to GC DLQ "
+                f"(workflow={workflow_id}, segment={segment_id})"
+            )
+        except Exception as e:
+            logger.error(f"[Aggregator] Failed to send ghost data to DLQ: {e}")
 
     # ========================================================================
     # [Pattern 1] Segment-Level Self-Healing: Segment Auto-Splitting
